@@ -1,6 +1,18 @@
 use super::helpers::*;
 use crate::bench_api::HostIo;
 use crate::nlmeans::*;
+use crate::noise::NoiseSnapshot;
+use crate::noise::tests::fold_reference::relative_gap;
+use crate::noise::tests::frames::MAX_RELATIVE;
+
+fn snapshot(denoiser: &NlmDenoiser) -> NoiseSnapshot {
+    denoiser.noise_snapshot().expect("the noise state reads back")
+}
+
+/// The first channel of a chain, `None` before the chain's first update.
+fn first_channel(chain: Option<[f32; 3]>) -> Option<f32> {
+    chain.map(|sigmas| sigmas[0])
+}
 
 /// HQ auto-estimation params at k=0.
 ///
@@ -54,15 +66,14 @@ fn uniform_noise_low_chain_matches_median_chain() {
     let frame = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma]);
 
     let params = auto_params_k0();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.denoise().unwrap();
 
-    let median = denoiser.noise_estimator.current().expect("seeded on first push")[0];
-    let low = denoiser
-        .noise_estimator_low
-        .current()
-        .expect("seeded on first push")[0];
+    let folded = snapshot(&denoiser);
+    let median = first_channel(folded.median).expect("seeded on first push");
+    let low = first_channel(folded.low).expect("seeded on first push");
+    let noise_offset = folded.derived.noise_offset;
 
     let relative_error = (low - median).abs() / median;
     assert!(
@@ -71,12 +82,11 @@ fn uniform_noise_low_chain_matches_median_chain() {
     );
 
     let expected_offset = denoiser.params.noise_offset_with(Some(&[median]));
-    let offset_relative_error = (denoiser.noise_offset - expected_offset).abs() / expected_offset;
+    let offset_relative_error = (noise_offset - expected_offset).abs() / expected_offset;
     assert!(
         offset_relative_error <= 0.3,
-        "uniform noise: noise_offset {} should stay close to the pre-split median-based offset \
-         {expected_offset} (rel err {offset_relative_error:.3})",
-        denoiser.noise_offset
+        "uniform noise: noise_offset {noise_offset} should stay close to the pre-split median-based offset \
+         {expected_offset} (rel err {offset_relative_error:.3})"
     );
 }
 
@@ -92,15 +102,15 @@ fn split_noise_offset_tracks_low_chain_strength_tracks_median() {
     let frame = block_heterogeneous_frame(width, height, 0.5, sigma_a, sigma_b);
 
     let params = auto_params_k0();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.denoise().unwrap();
 
-    let median = denoiser.noise_estimator.current().expect("seeded on first push")[0];
-    let low = denoiser
-        .noise_estimator_low
-        .current()
-        .expect("seeded on first push")[0];
+    let folded = snapshot(&denoiser);
+    let median = first_channel(folded.median).expect("seeded on first push");
+    let low = first_channel(folded.low).expect("seeded on first push");
+    let noise_offset = folded.derived.noise_offset;
+    let h2_inv_norm = folded.derived.h2_inv_norm;
 
     assert!(
         low < median,
@@ -109,15 +119,17 @@ fn split_noise_offset_tracks_low_chain_strength_tracks_median() {
 
     let expected_median_offset = denoiser.params.noise_offset_with(Some(&[median]));
     assert!(
-        denoiser.noise_offset < expected_median_offset,
-        "noise_offset {} should track the low chain strictly below the median-based offset {expected_median_offset}",
-        denoiser.noise_offset
+        noise_offset < expected_median_offset,
+        "noise_offset {noise_offset} should track the low chain strictly below the median-based offset {expected_median_offset}"
     );
 
+    // The fold scales a host coefficient by the smoothed sigma, so it matches the host formula to
+    // within rounding rather than bit for bit.
     let expected_h2 = denoiser.params.h2_inv_norm_with(Some(median));
-    assert_eq!(
-        denoiser.h2_inv_norm, expected_h2,
-        "h2_inv_norm must keep tracking the median chain exactly"
+    let h2_gap = relative_gap(h2_inv_norm, expected_h2);
+    assert!(
+        h2_gap <= MAX_RELATIVE,
+        "h2_inv_norm {h2_inv_norm} must keep tracking the median chain's {expected_h2}, {h2_gap:e} apart"
     );
 }
 
@@ -139,7 +151,7 @@ fn partials_ring_isolates_slots_between_push_and_fold() {
         temporal_radius: 2,
         ..auto_params_k0()
     };
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     let frame_low = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma_low]);
     let frame_high_1 = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma_high]);
@@ -156,7 +168,8 @@ fn partials_ring_isolates_slots_between_push_and_fold() {
         "window should be full after the third push"
     );
 
-    let low1 = denoiser.noise_estimator_low.current().expect("folded by now")[0];
+    let first = snapshot(&denoiser);
+    let low1 = first_channel(first.low).expect("folded by now");
     assert!(
         low1 < sigma_high * 0.15,
         "the first centred slot duplicates the low-sigma frame and its own partials \
@@ -166,7 +179,8 @@ fn partials_ring_isolates_slots_between_push_and_fold() {
     denoiser.push_frame(&frame_high_3);
     assert!(denoiser.denoise().unwrap().is_some());
 
-    let low2 = denoiser.noise_estimator_low.current().expect("folded by now")[0];
+    let second = snapshot(&denoiser);
+    let low2 = first_channel(second.low).expect("folded by now");
     assert!(
         low2 > low1 * 1.5,
         "the centre should now be the first high-sigma push, so the low chain must rise \
@@ -208,7 +222,7 @@ fn temporal_only_chain_reads_the_median_block_sigma() {
         temporal_radius: 2,
         ..auto_params_k0()
     };
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     for seed in 0..8 {
         let frame = row_split_noisy_frame(width, height, 48, sigma_low, sigma_high, 300 + seed);
@@ -216,10 +230,9 @@ fn temporal_only_chain_reads_the_median_block_sigma() {
         let _ = denoiser.denoise().unwrap();
     }
 
-    let temporal_only = denoiser
-        .noise_estimator_temporal_only
-        .current()
-        .expect("a temporal sample should have folded by now")[0];
+    let folded = snapshot(&denoiser);
+    let temporal_only =
+        first_channel(folded.temporal_only).expect("a temporal sample should have folded by now");
 
     let relative_error = (temporal_only - sigma_high).abs() / sigma_high;
     assert!(

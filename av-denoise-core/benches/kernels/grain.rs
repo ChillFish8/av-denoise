@@ -56,8 +56,8 @@ pub const GRAIN_SIZES: &[GrainSize] = &[
 ];
 
 /// Saves one neighbour's motion field into the grain export's vector ring.
-pub struct GrainSaveVectorsBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct GrainSaveVectorsBench {
+    pub client: Client,
     pub size: GrainSize,
 }
 
@@ -69,7 +69,7 @@ pub struct GrainSaveVectorsInput {
     pub saved_conf: Handle,
 }
 
-impl<R: Runtime> Benchmark for GrainSaveVectorsBench<R> {
+impl Benchmark for GrainSaveVectorsBench {
     type Input = GrainSaveVectorsInput;
     type Output = ();
 
@@ -97,14 +97,14 @@ impl<R: Runtime> Benchmark for GrainSaveVectorsBench<R> {
         let grid = blocks.div_ceil(SAVE_THREADS);
 
         unsafe {
-            grain_save_vectors::launch_unchecked::<R>(
+            grain_save_vectors::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(SAVE_THREADS),
-                ArrayArg::from_raw_parts(args.mv, (NEIGHBOURS * blocks * 2) as usize),
-                ArrayArg::from_raw_parts(args.conf, (NEIGHBOURS * blocks) as usize),
-                ArrayArg::from_raw_parts(args.saved_mv, (RING * blocks * 2) as usize),
-                ArrayArg::from_raw_parts(args.saved_conf, (RING * blocks) as usize),
+                BufferArg::from_raw_parts(args.mv, (NEIGHBOURS * blocks * 2) as usize),
+                BufferArg::from_raw_parts(args.conf, (NEIGHBOURS * blocks) as usize),
+                BufferArg::from_raw_parts(args.saved_mv, (RING * blocks * 2) as usize),
+                BufferArg::from_raw_parts(args.saved_conf, (RING * blocks) as usize),
                 2 * blocks * 2,
                 2 * blocks,
                 1u32,
@@ -126,8 +126,8 @@ impl<R: Runtime> Benchmark for GrainSaveVectorsBench<R> {
 }
 
 /// Measures the source and kept grain of one luma frame.
-pub struct GrainMeasureBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct GrainMeasureBench {
+    pub client: Client,
     pub size: GrainSize,
 }
 
@@ -143,7 +143,7 @@ pub struct GrainMeasureInput {
     pub partials: Handle,
 }
 
-impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
+impl Benchmark for GrainMeasureBench {
     type Input = GrainMeasureInput;
     type Output = ();
 
@@ -206,19 +206,19 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
         let blocks_y = height.div_ceil(STEP);
 
         unsafe {
-            grain_measure::launch_unchecked::<R>(
+            grain_measure::launch_unchecked(
                 &self.client,
                 CubeCount::new_2d(width / CELL, height / CELL),
                 CubeDim::new_2d(CELL, CELL),
                 1usize,
-                ArrayArg::from_raw_parts(args.input, 2 * pixels),
-                ArrayArg::from_raw_parts(args.out_t, pixels),
-                ArrayArg::from_raw_parts(args.out_prev, pixels),
-                ArrayArg::from_raw_parts(args.saved_mv, 2 * blocks * 2),
-                ArrayArg::from_raw_parts(args.saved_conf, 2 * blocks),
-                ArrayArg::from_raw_parts(args.edges, EDGE_COUNT),
-                ArrayArg::from_raw_parts(args.hist, HIST_TOTAL),
-                ArrayArg::from_raw_parts(args.partials, cells * PARTIAL_LANES),
+                BufferArg::from_raw_parts(args.input, 2 * pixels),
+                BufferArg::from_raw_parts(args.out_t, pixels),
+                BufferArg::from_raw_parts(args.out_prev, pixels),
+                BufferArg::from_raw_parts(args.saved_mv, 2 * blocks * 2),
+                BufferArg::from_raw_parts(args.saved_conf, 2 * blocks),
+                BufferArg::from_raw_parts(args.edges, EDGE_COUNT),
+                BufferArg::from_raw_parts(args.hist, HIST_TOTAL),
+                BufferArg::from_raw_parts(args.partials, cells * PARTIAL_LANES),
                 0u32,
                 1u32,
                 0u32,
@@ -247,8 +247,8 @@ impl<R: Runtime> Benchmark for GrainMeasureBench<R> {
 }
 
 /// Adds every cell's partials of one frame into its strength group's chunk record.
-pub struct GrainReducePartialsBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct GrainReducePartialsBench {
+    pub client: Client,
     pub size: GrainSize,
 }
 
@@ -258,7 +258,7 @@ pub struct GrainReducePartialsInput {
     pub chunk: Handle,
 }
 
-impl<R: Runtime> Benchmark for GrainReducePartialsBench<R> {
+impl Benchmark for GrainReducePartialsBench {
     type Input = GrainReducePartialsInput;
     type Output = ();
 
@@ -285,12 +285,12 @@ impl<R: Runtime> Benchmark for GrainReducePartialsBench<R> {
         let cells = self.size.cells();
 
         unsafe {
-            grain_reduce_partials::launch_unchecked::<R>(
+            grain_reduce_partials::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(RECORD_LANES as u32),
                 CubeDim::new_1d(REDUCE_THREADS),
-                ArrayArg::from_raw_parts(args.partials, cells * PARTIAL_LANES),
-                ArrayArg::from_raw_parts(args.chunk, STRENGTH_GROUPS * RECORD_LANES),
+                BufferArg::from_raw_parts(args.partials, cells * PARTIAL_LANES),
+                BufferArg::from_raw_parts(args.chunk, STRENGTH_GROUPS * RECORD_LANES),
                 cells as u32,
             );
         }

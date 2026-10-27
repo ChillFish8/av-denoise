@@ -1,8 +1,7 @@
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::sync::Mutex;
 
-use cubecl::client::ComputeClient;
-use cubecl::prelude::*;
+use cubecl::prelude::Client;
 
 use super::accelerate::Accelerator;
 
@@ -22,14 +21,11 @@ static PROBED: Mutex<Vec<Accelerator>> = Mutex::new(Vec::new());
 /// its own worker thread and panics there, which reaches the caller as a second panic when cubecl
 /// unwraps the dead worker's channel. Catching that lets one binary with several backends enabled
 /// run on a machine that has only one of them.
-pub(crate) fn open_client<R: Runtime>(
-    accelerator: Accelerator,
-    device: &R::Device,
-) -> Option<ComputeClient<R>> {
+pub(crate) fn open_client(accelerator: Accelerator, device: &cubecl::Device) -> Option<Client> {
     let mut probed = PROBED.lock().unwrap_or_else(|err| err.into_inner());
 
     let opened = quiet_panics(|| {
-        let client = R::client(device);
+        let client = device.client();
         let synced = client.sync();
         cubecl::future::block_on(synced).map(|()| client)
     });

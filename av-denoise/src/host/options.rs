@@ -10,6 +10,7 @@ use av_denoise_core::{
 
 use super::Depth;
 use crate::backend::EngineSpec;
+use crate::tune::TuningMode;
 
 /// How a [HostDenoiser](crate::HostDenoiser) should be set up.
 ///
@@ -31,6 +32,14 @@ pub struct DenoiserOptions {
     /// The bit depth of the wire bytes going in and coming out.
     #[builder(default = Depth::Eight)]
     pub depth: Depth,
+    /// Whether the engines use tuned kernels.
+    ///
+    /// [TuningMode::Cached] and [TuningMode::Auto] both build from stored results.
+    #[builder(default = TuningMode::Cached)]
+    pub tuning: TuningMode,
+    /// Picks only bit-identical candidates and the baseline profile.
+    #[builder(default)]
+    pub deterministic: bool,
 }
 
 impl DenoiserOptions {

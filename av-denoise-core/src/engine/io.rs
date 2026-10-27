@@ -2,8 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::kernels::{egress_f32, egress_words, ingest_f32, ingest_words};
-use super::{DevicePlane, SampleFormat};
-use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
+use super::{BLOCK_1D, DevicePlane, MAX_GRID_1D, SampleFormat};
 
 /// Where an ingest writes, as a slot of an interleaved ring.
 pub(crate) struct IngestTarget<'a> {
@@ -32,8 +31,8 @@ fn grid(pixels: u32) -> (CubeCount, u32) {
 /// Queues the ingest of `planes` into one ring slot.
 ///
 /// The caller has validated `planes` against the engine's geometry.
-pub(crate) fn ingest<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn ingest(
+    client: &Client,
     planes: &[DevicePlane<'_>],
     format: SampleFormat,
     placeholder: &Handle,
@@ -43,20 +42,20 @@ pub(crate) fn ingest<R: Runtime>(
     let plane_0 = plane_or(planes, 0, placeholder);
     let plane_1 = plane_or(planes, 1, placeholder);
     let plane_2 = plane_or(planes, 2, placeholder);
-    let ring = unsafe { ArrayArg::from_raw_parts(target.ring.clone(), target.ring_len) };
+    let ring = unsafe { BufferArg::from_raw_parts(target.ring.clone(), target.ring_len) };
 
     match format {
         SampleFormat::F32 => {
             let plane_len = target.pixels as usize;
 
             unsafe {
-                ingest_f32::launch_unchecked::<R>(
+                ingest_f32::launch_unchecked(
                     client,
                     count,
                     CubeDim::new_1d(BLOCK_1D),
-                    ArrayArg::from_raw_parts(plane_0.clone(), plane_len),
-                    ArrayArg::from_raw_parts(plane_1.clone(), plane_len),
-                    ArrayArg::from_raw_parts(plane_2.clone(), plane_len),
+                    BufferArg::from_raw_parts(plane_0.clone(), plane_len),
+                    BufferArg::from_raw_parts(plane_1.clone(), plane_len),
+                    BufferArg::from_raw_parts(plane_2.clone(), plane_len),
                     ring,
                     target.offset,
                     target.pixels,
@@ -72,13 +71,13 @@ pub(crate) fn ingest<R: Runtime>(
             let max = format.max_value();
 
             unsafe {
-                ingest_words::launch_unchecked::<R>(
+                ingest_words::launch_unchecked(
                     client,
                     count,
                     CubeDim::new_1d(BLOCK_1D),
-                    ArrayArg::from_raw_parts(plane_0.clone(), words),
-                    ArrayArg::from_raw_parts(plane_1.clone(), words),
-                    ArrayArg::from_raw_parts(plane_2.clone(), words),
+                    BufferArg::from_raw_parts(plane_0.clone(), words),
+                    BufferArg::from_raw_parts(plane_1.clone(), words),
+                    BufferArg::from_raw_parts(plane_2.clone(), words),
                     ring,
                     max,
                     target.offset,
@@ -104,15 +103,15 @@ pub(crate) struct EgressSource<'a> {
 /// Queues the write of `source` into `planes`.
 ///
 /// The caller has validated `planes` against the engine's geometry.
-pub(crate) fn egress<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(crate) fn egress(
+    client: &Client,
     source: EgressSource<'_>,
     planes: &[DevicePlane<'_>],
     format: SampleFormat,
     placeholder: &Handle,
 ) {
     let frame_len = (source.pixels * source.stored_ch) as usize;
-    let frame = unsafe { ArrayArg::from_raw_parts(source.frame.clone(), frame_len) };
+    let frame = unsafe { BufferArg::from_raw_parts(source.frame.clone(), frame_len) };
     let plane_0 = plane_or(planes, 0, placeholder);
     let plane_1 = plane_or(planes, 1, placeholder);
     let plane_2 = plane_or(planes, 2, placeholder);
@@ -123,14 +122,14 @@ pub(crate) fn egress<R: Runtime>(
             let plane_len = source.pixels as usize;
 
             unsafe {
-                egress_f32::launch_unchecked::<R>(
+                egress_f32::launch_unchecked(
                     client,
                     count,
                     CubeDim::new_1d(BLOCK_1D),
                     frame,
-                    ArrayArg::from_raw_parts(plane_0.clone(), plane_len),
-                    ArrayArg::from_raw_parts(plane_1.clone(), plane_len),
-                    ArrayArg::from_raw_parts(plane_2.clone(), plane_len),
+                    BufferArg::from_raw_parts(plane_0.clone(), plane_len),
+                    BufferArg::from_raw_parts(plane_1.clone(), plane_len),
+                    BufferArg::from_raw_parts(plane_2.clone(), plane_len),
                     source.pixels,
                     source.channels,
                     source.stored_ch,
@@ -146,14 +145,14 @@ pub(crate) fn egress<R: Runtime>(
             let word_len = words as usize;
 
             unsafe {
-                egress_words::launch_unchecked::<R>(
+                egress_words::launch_unchecked(
                     client,
                     count,
                     CubeDim::new_1d(BLOCK_1D),
                     frame,
-                    ArrayArg::from_raw_parts(plane_0.clone(), word_len),
-                    ArrayArg::from_raw_parts(plane_1.clone(), word_len),
-                    ArrayArg::from_raw_parts(plane_2.clone(), word_len),
+                    BufferArg::from_raw_parts(plane_0.clone(), word_len),
+                    BufferArg::from_raw_parts(plane_1.clone(), word_len),
+                    BufferArg::from_raw_parts(plane_2.clone(), word_len),
                     max,
                     source.pixels,
                     source.channels,

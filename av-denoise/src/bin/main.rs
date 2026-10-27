@@ -10,7 +10,7 @@ mod y4m_format;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use self::cli::{Args, Command, InputSource, RunOptions, run_list_devices};
+use self::cli::{Args, Command, InputSource, RunOptions, run_list_devices, run_tune};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -42,12 +42,19 @@ fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
+    if let Command::Tune(tune) = &args.command
+        && let Err(error) = tune.check_conflicts()
+    {
+        error.exit();
+    }
+
     if std::env::var("RUST_LOG").is_err() {
-        // `list-devices` prints only a table, and the backends log at info level while they
-        // start, so it runs quieter than a denoising run.
+        // `list-devices` prints only a table, so it runs quieter than a denoising run. The GPU
+        // libraries log their own start-up at info level, so a denoising run keeps them to
+        // warnings. A target matches by prefix, so `wgpu` also covers `wgpu_core` and `wgpu_hal`.
         let default_filter = match args.command {
             Command::ListDevices => "warn",
-            _ => "info",
+            _ => "info,cubecl=warn,wgpu=warn,naga=warn,pliron=warn",
         };
 
         // SAFETY: still single-threaded, no other thread can race the env mutation.
@@ -82,21 +89,34 @@ fn main() -> anyhow::Result<()> {
         },
     }
 
+    let outcome = run_command(&args);
+    av_denoise::finish_compilation_cache();
+    outcome
+}
+
+/// Runs a command that denoises or tunes, once the kernel cache is installed.
+fn run_command(args: &Args) -> anyhow::Result<()> {
+    if let Command::Tune(tune) = &args.command {
+        return run_tune(tune, args);
+    }
+
     let (opts, input, workers, frame_budget) = match &args.command {
         Command::Nlmeans(nlm) => (
-            nlm.build_options(&args)?,
+            nlm.build_options(args)?,
             &nlm.common.input,
             nlm.common.workers,
             nlm.common.frame_budget,
         ),
         Command::Nl4d(nl4d) => (
-            nl4d.build_options(&args)?,
+            nl4d.build_options(args)?,
             &nl4d.common.input,
             nl4d.common.workers,
             nl4d.common.frame_budget,
         ),
         // Handled above, before any denoising options are built.
         Command::ListDevices => unreachable!(),
+        // Handled above, before any denoising options are built.
+        Command::Tune(_) => unreachable!(),
     };
 
     run_input(&opts, input, workers, frame_budget)

@@ -1,9 +1,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use cubecl::Runtime;
 use cubecl::bytes::Bytes;
-use cubecl::prelude::ComputeClient;
+use cubecl::prelude::Client;
 use cubecl::server::{Handle, ServerError};
 
 /// A readback in flight, resolving to one buffer per handle read.
@@ -21,17 +20,17 @@ pub(crate) trait PlaneIo: Send {
     fn read(&self, handles: Vec<Handle>) -> ReadFuture;
 }
 
-pub(crate) struct ClientIo<R: Runtime> {
-    client: ComputeClient<R>,
+pub(crate) struct ClientIo {
+    client: Client,
 }
 
-impl<R: Runtime> ClientIo<R> {
-    pub(crate) fn new(client: ComputeClient<R>) -> Self {
+impl ClientIo {
+    pub(crate) fn new(client: Client) -> Self {
         Self { client }
     }
 }
 
-impl<R: Runtime> PlaneIo for ClientIo<R> {
+impl PlaneIo for ClientIo {
     fn upload(&self, bytes: &[u8]) -> Handle {
         self.client.create_from_slice(bytes)
     }

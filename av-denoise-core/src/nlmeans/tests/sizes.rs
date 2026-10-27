@@ -1,8 +1,9 @@
 use cubecl::server::Handle;
 
-use super::helpers::{R, make_client};
+use super::helpers::make_client;
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::*;
+use crate::noise::{StrengthMapKind, StrengthMapParams};
 
 // Odd dimensions leave ragged block grids and unaligned slots, so every padding rule is exercised.
 const WIDTH: u32 = 101;
@@ -24,11 +25,24 @@ fn computed(buffers: &[BufferSize], name: &str) -> Option<u64> {
 fn assert_sizes_match_allocations(params: NlmParams) {
     let client = make_client();
     let sizes = front_buffer_sizes(&client, &params, WIDTH, HEIGHT);
-    let denoiser = NlmDenoiser::<R>::new(&client, params, WIDTH, HEIGHT);
+    let mut denoiser = NlmDenoiser::new(&client, params, WIDTH, HEIGHT);
 
-    let pairs = [
-        ("noise partials ring", denoiser.noise_partials.as_ref()),
-        ("temporal stats ring", denoiser.temporal_stats_buf.as_ref()),
+    // The sizes count the curve batch and the class scratch, which only these settings allocate.
+    let map = StrengthMapParams {
+        flat_boost: 1.5,
+        shadow_soften: 0.65,
+    };
+    denoiser.set_luma_noise_fields(true);
+    denoiser.set_strength_map(StrengthMapKind::Luma(map));
+
+    let noise = denoiser.measured_noise();
+    let partials = noise.map(|noise| noise.partials());
+    let stats = noise.and_then(|noise| noise.stats());
+    let reading_buffers = noise.map(|noise| noise.buffers_for_test()).unwrap_or_default();
+
+    let front_pairs = [
+        ("noise partials ring", partials),
+        ("temporal stats ring", stats),
         ("motion field", denoiser.mv_field_buf.as_ref()),
         ("motion pyramid ring", denoiser.pyramid_input.as_ref()),
         ("motion pair ring", denoiser.pair_ring_buf.as_ref()),
@@ -39,7 +53,10 @@ fn assert_sizes_match_allocations(params: NlmParams) {
             denoiser.confidence_mv_scratch.as_ref(),
         ),
     ];
-    for (name, handle) in pairs {
+    let mut pairs = front_pairs.to_vec();
+    pairs.extend(reading_buffers);
+
+    for &(name, handle) in &pairs {
         let allocated = allocated_elements(handle);
         let expected = computed(&sizes.buffers, name);
         assert_eq!(expected, allocated, "{name}");
@@ -85,6 +102,13 @@ fn direct_motion_sizes_match_the_allocations() {
 #[test]
 fn confidence_only_sizes_match_the_allocations() {
     let params = hq_params(2, MotionCompensationMode::None);
+
+    assert_sizes_match_allocations(params);
+}
+
+#[test]
+fn spatial_sizes_match_the_allocations() {
+    let params = hq_params(0, MotionCompensationMode::None);
 
     assert_sizes_match_allocations(params);
 }

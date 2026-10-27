@@ -1,8 +1,8 @@
 use cubecl::prelude::*;
 
-use super::{frame_shifted_by, shift_clamped};
 use crate::bench_api::HostIo;
-use crate::nlmeans::motion::{
+use crate::motion::tests::{frame_shifted_by, shift_clamped};
+use crate::motion::{
     DEFAULT_BLKSIZE,
     DEFAULT_OVERLAP,
     DEFAULT_SEARCH_RADIUS,
@@ -65,7 +65,7 @@ fn direct_mv_field_for_forward_neighbour(
     };
 
     let client = make_client();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(base);
     denoiser.push_frame(base);
     denoiser.push_frame(neighbour);

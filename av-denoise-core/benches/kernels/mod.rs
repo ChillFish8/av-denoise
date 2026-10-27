@@ -3,6 +3,8 @@ pub mod bilateral;
 pub mod cast_f16;
 pub mod collab_aggregate;
 pub mod collab_fused;
+pub mod collab_split;
+pub mod compilation_cache;
 pub mod copy;
 pub mod dist_2d_weight;
 pub mod dist_2d_weight_ref;
@@ -25,17 +27,23 @@ pub mod mc_downscale;
 pub mod mc_warp;
 pub mod mv_regularise;
 pub mod nl4d_geometry;
+pub mod noise_gpu;
 pub mod noise_partial;
 pub mod temporal_noise_stats;
 pub mod vertical_weight;
 pub mod vweight_pair_accumulate;
 pub mod zero;
 
-use av_denoise_core::bench_api::NlmParams;
+use std::sync::OnceLock;
+
 pub use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y};
+use av_denoise_core::bench_api::{DerivedValues, NlmParams};
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
+
+/// Only benches whose name contains this text run, when it is set.
+pub static FILTER: OnceLock<String> = OnceLock::new();
 
 pub const WIDTH: u32 = 1920;
 pub const HEIGHT: u32 = 1080;
@@ -109,6 +117,18 @@ pub fn h2_inv_norm() -> f32 {
     params.h2_inv_norm()
 }
 
+/// A derived buffer holding the bench strength and a noise offset of 0.
+pub fn window_noise(client: &Client) -> Handle {
+    let values = DerivedValues {
+        h2_inv_norm: h2_inv_norm(),
+        ..DerivedValues::default()
+    };
+    let words = values.to_words();
+    let bytes = f32::as_bytes(&words);
+
+    client.create_from_slice(bytes)
+}
+
 pub fn cube_count_2d() -> CubeCount {
     let cubes_x = WIDTH.div_ceil(BLOCK_X);
     let cubes_y = HEIGHT.div_ceil(BLOCK_Y);
@@ -120,13 +140,25 @@ pub fn cube_dim_2d() -> CubeDim {
     CubeDim::new_2d(BLOCK_X, BLOCK_Y)
 }
 
-pub fn block_sync<R: Runtime>(client: &ComputeClient<R>) {
+pub fn block_sync(client: &Client) {
     let sync = client.sync();
     cubecl::future::block_on(sync).unwrap();
 }
 
 pub fn shapes_with_channels(channels: u32) -> Vec<Vec<usize>> {
     vec![vec![WIDTH as usize, HEIGHT as usize, channels as usize]]
+}
+
+/// The neighbour counts each block-match bench launches with.
+pub const BENCH_NEIGHBOURS: &[u32] = &[1, 4];
+
+/// A block-match row name, with a `_4n` style suffix when the launch covers more than one neighbour.
+pub fn neighbour_bench_name(base: &str, neighbours: u32) -> String {
+    if neighbours == 1 {
+        return base.to_string();
+    }
+
+    format!("{base}_{neighbours}n")
 }
 
 /// Buffers for a kernel that reads one frame and writes one output.
@@ -137,7 +169,7 @@ pub struct InputOutput {
     pub frame_len: usize,
 }
 
-const NAME_WIDTH: usize = 44;
+const NAME_WIDTH: usize = 56;
 
 pub fn print_header() {
     println!(
@@ -151,6 +183,13 @@ pub fn print_header() {
 
 pub fn run<B: Benchmark>(bench: B) {
     let name = bench.name();
+
+    if let Some(filter) = FILTER.get()
+        && !name.contains(filter.as_str())
+    {
+        return;
+    }
+
     match bench.run(TimingMethod::Device) {
         Ok(durations) => {
             let computations = BenchmarkComputations::new(&durations);

@@ -330,7 +330,7 @@ impl NlmParams {
             && (!sigma.is_finite() || sigma <= 0.0 || sigma > 1.0)
         {
             anyhow::bail!(
-                "hq sigma_override must be finite and in (0, 1] in normalised units, got {}",
+                "hq sigma_override must be finite, above 0 and at most 1 in normalised units, got {}",
                 sigma,
             );
         }
@@ -350,7 +350,7 @@ impl NlmParams {
             && !(hq.sigma_scale.is_finite() && (0.1..=10.0).contains(&hq.sigma_scale))
         {
             anyhow::bail!(
-                "hq sigma_scale must be finite and in [0.1, 10.0], got {}",
+                "hq sigma_scale must be finite and in 0.1..=10.0, got {}",
                 hq.sigma_scale,
             );
         }
@@ -449,6 +449,7 @@ pub(super) fn channel_scale(channels: ChannelMode) -> f32 {
 ///
 /// The scale is the same for every channel in a mode, so this is a plain RMS. Entries past the
 /// mode's channel count are ignored.
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(super) fn sigma_eff(sigmas: &[f32], channels: ChannelMode) -> f32 {
     let count = channels.count() as usize;
     let sum_sq: f32 = sigmas.iter().take(count).map(|&sigma| sigma * sigma).sum();

@@ -26,7 +26,7 @@ fn ring_params(channels: ChannelMode) -> NlmParams {
 }
 
 /// Reads both rings back and checks every slot of the search ring is the f16 of the input ring.
-fn assert_search_ring_mirrors_input(front: &NlmDenoiser<R>, client: &ComputeClient<R>) {
+fn assert_search_ring_mirrors_input(front: &NlmDenoiser, client: &Client) {
     let input_handle = front.input_ring().clone();
     let search_handle = front.search_ring().expect("search ring enabled").clone();
     let input_bytes = client.read_one(input_handle).expect("input readback failed");
@@ -51,12 +51,12 @@ fn launch_cast_over_middle_slot(cubes: u32, threads: u32, total_threads: u32) {
     let target_buf = client.create_from_slice(sentinel_bytes);
 
     unsafe {
-        gpu_cast_f16::launch_unchecked::<R>(
+        gpu_cast_f16::launch_unchecked(
             &client,
             CubeCount::new_1d(cubes),
             CubeDim::new_1d(threads),
-            ArrayArg::from_raw_parts(source_buf, slot_len * 3),
-            ArrayArg::from_raw_parts(target_buf.clone(), slot_len * 3),
+            BufferArg::from_raw_parts(source_buf, slot_len * 3),
+            BufferArg::from_raw_parts(target_buf.clone(), slot_len * 3),
             slot_len as u32,
             slot_len as u32,
             total_threads,
@@ -92,7 +92,7 @@ fn the_search_ring_mirrors_every_pushed_and_duplicated_slot() {
 
     for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
         let params = ring_params(channels);
-        let mut front = NlmDenoiser::<R>::new(&client, params, WIDTH_PX, HEIGHT_PX);
+        let mut front = NlmDenoiser::new(&client, params, WIDTH_PX, HEIGHT_PX);
         front.enable_search_ring();
 
         let frame_len = (WIDTH_PX * HEIGHT_PX * channels.count()) as usize;

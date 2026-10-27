@@ -186,7 +186,8 @@ fn texture_of(stats: &GrainChunk, edges: &[f32]) -> Option<Texture> {
 
     let corrected = undo_mean_removal(&record);
     let weights = yule_walker(&corrected)?;
-    Some(quantise_ar(&weights))
+    let quantised = quantise_ar(&weights);
+    Some(quantised)
 }
 
 /// Fits every scene's segments, borrowing missing strength or texture, and drops what has no donor.

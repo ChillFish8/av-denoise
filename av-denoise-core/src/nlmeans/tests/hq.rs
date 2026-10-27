@@ -21,7 +21,7 @@ fn base_params() -> NlmParams {
 /// Asserts every output is finite and in range, and that each pushed frame produces one output.
 fn run_temporal_smoke(params: NlmParams, width: u32, height: u32) {
     let client = make_client();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     let frames: Vec<Vec<f32>> = (0..5)
         .map(|i| make_frame_with_noisy_region(width, height, 1, 0.5, 6 + i, 8, 2, 0.8))
@@ -65,7 +65,7 @@ fn hq_disabled_features_match_fast_mode() {
     let frame = make_frame_with_noisy_region(width, height, 1, 0.5, 8, 8, 3, 0.9);
 
     let fast_params = base_params();
-    let mut fast = NlmDenoiser::<R>::new(&client, fast_params, width, height);
+    let mut fast = NlmDenoiser::new(&client, fast_params, width, height);
     fast.push_frame(&frame);
     let fast_out = fast.denoise().unwrap().unwrap();
 
@@ -80,7 +80,7 @@ fn hq_disabled_features_match_fast_mode() {
         }),
         ..base_params()
     };
-    let mut hq = NlmDenoiser::<R>::new(&client, hq_params, width, height);
+    let mut hq = NlmDenoiser::new(&client, hq_params, width, height);
     hq.push_frame(&frame);
     let hq_out = hq.denoise().unwrap().unwrap();
 
@@ -103,7 +103,7 @@ fn hq_noise_floor_changes_output() {
     let frame = make_frame_with_noisy_region(width, height, 1, 0.5, 8, 8, 3, 0.9);
 
     let fast_params = base_params();
-    let mut fast = NlmDenoiser::<R>::new(&client, fast_params, width, height);
+    let mut fast = NlmDenoiser::new(&client, fast_params, width, height);
     fast.push_frame(&frame);
     let fast_out = fast.denoise().unwrap().unwrap();
 
@@ -118,7 +118,7 @@ fn hq_noise_floor_changes_output() {
         }),
         ..base_params()
     };
-    let mut hq = NlmDenoiser::<R>::new(&client, hq_params, width, height);
+    let mut hq = NlmDenoiser::new(&client, hq_params, width, height);
     hq.push_frame(&frame);
     let hq_out = hq.denoise().unwrap().unwrap();
 
@@ -150,7 +150,7 @@ fn hq_uniform_input_passthrough() {
         ..base_params()
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     let result = denoiser.denoise().unwrap().unwrap();
 
@@ -191,7 +191,7 @@ fn hq_auto_sigma_denoises() {
         ..base_params()
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     let result = denoiser.denoise().unwrap().unwrap();
 
@@ -240,15 +240,11 @@ fn hq_override_skips_estimation() {
         ..base_params()
     };
 
-    let denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let denoiser = NlmDenoiser::new(&client, params, width, height);
 
     assert!(
-        denoiser.noise_partials.is_none(),
-        "sigma_override must skip allocating the partials scratch buffer"
-    );
-    assert!(
-        denoiser.noise_results.is_none(),
-        "sigma_override must skip allocating the results buffer"
+        !denoiser.noise.is_measured(),
+        "sigma_override must skip allocating the noise buffers"
     );
 }
 
@@ -272,7 +268,7 @@ fn hq_reset_clears_noise_state() {
         ..base_params()
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params.clone(), width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params.clone(), width, height);
     denoiser.push_frame(&noisy);
     denoiser.denoise().unwrap();
 
@@ -280,16 +276,19 @@ fn hq_reset_clears_noise_state() {
     denoiser.push_frame(&low);
     denoiser.denoise().unwrap();
 
-    let mut fresh = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut fresh = NlmDenoiser::new(&client, params, width, height);
     fresh.push_frame(&low);
     fresh.denoise().unwrap();
 
+    let reset = denoiser.noise_snapshot().expect("the noise state reads back");
+    let started = fresh.noise_snapshot().expect("the noise state reads back");
+
     assert_eq!(
-        denoiser.h2_inv_norm, fresh.h2_inv_norm,
+        reset.derived.h2_inv_norm, started.derived.h2_inv_norm,
         "reset should clear the EMA so the next estimate starts fresh, not blended with stale state"
     );
     assert_eq!(
-        denoiser.noise_offset, fresh.noise_offset,
+        reset.derived.noise_offset, started.derived.noise_offset,
         "reset should clear the EMA so the next estimate starts fresh, not blended with stale state"
     );
 }
@@ -336,12 +335,12 @@ fn hq_pilot_differs_from_unguided() {
     };
 
     let unguided_params = hq_params(PrefilterMode::None);
-    let mut unguided = NlmDenoiser::<R>::new(&client, unguided_params, width, height);
+    let mut unguided = NlmDenoiser::new(&client, unguided_params, width, height);
     unguided.push_frame(&frame);
     let unguided_out = unguided.denoise().unwrap().unwrap();
 
     let piloted_params = hq_params(PrefilterMode::NlmSpatial { strength_scale: 1.0 });
-    let mut piloted = NlmDenoiser::<R>::new(&client, piloted_params, width, height);
+    let mut piloted = NlmDenoiser::new(&client, piloted_params, width, height);
     piloted.push_frame(&frame);
     let piloted_out = piloted.denoise().unwrap().unwrap();
 
@@ -407,7 +406,7 @@ fn hq_temporal_confidence_suppresses_mismatched_neighbour() {
 
     let run = |temporal_confidence: bool| {
         let params = temporal_conf_params(temporal_confidence);
-        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+        let mut denoiser = NlmDenoiser::new(&client, params, width, height);
         denoiser.push_frame(&previous);
         denoiser.push_frame(&centre);
         denoiser.push_frame(&next);
@@ -463,7 +462,7 @@ fn hq_temporal_confidence_disabled_ignores_thsad_scale() {
             }),
         };
 
-        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+        let mut denoiser = NlmDenoiser::new(&client, params, width, height);
         for frame in &frames {
             denoiser.push_frame(frame);
         }
@@ -522,15 +521,15 @@ fn hq_sigma_scale_multiplies_the_folded_estimate() {
             ..base_params()
         };
 
-        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+        let mut denoiser = NlmDenoiser::new(&client, params, width, height);
         denoiser.push_frame(&frame);
         denoiser.denoise().unwrap();
 
-        let folded = denoiser
-            .noise_estimator
-            .current()
-            .expect("estimator should hold a value after one push")[0];
-        (folded, denoiser.noise_offset)
+        let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+        let median = snapshot
+            .median
+            .expect("estimator should hold a value after one push");
+        (median[0], snapshot.derived.noise_offset)
     };
 
     let (folded_1x, offset_1x) = run(1.0);

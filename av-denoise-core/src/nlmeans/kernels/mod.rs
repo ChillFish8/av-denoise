@@ -1,14 +1,16 @@
 mod accumulate;
 mod bilateral;
+pub(crate) mod fill;
 mod fused;
 pub(crate) mod helpers;
 mod memory;
-pub mod motion;
-mod noise;
 mod separable;
+#[cfg(test)]
+mod tests;
 
 pub use self::accumulate::{nlm_accumulate, nlm_finish};
 pub use self::bilateral::nlm_bilateral;
+pub(crate) use self::fused::hsum_elements;
 pub use self::fused::{
     nlm_dist_2d_weight,
     nlm_dist_2d_weight_ref,
@@ -18,12 +20,6 @@ pub use self::fused::{
     nlm_fused_single_window_ref,
 };
 pub use self::memory::{gpu_cast_f16, gpu_copy, gpu_zero_buffers};
-pub use self::noise::{
-    nlm_noise_partial,
-    nlm_noise_reduce,
-    nlm_temporal_noise_stats,
-    nlm_temporal_stats_zero,
-};
 pub use self::separable::{
     nlm_distance,
     nlm_distance_pair,

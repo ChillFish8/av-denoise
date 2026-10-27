@@ -1,11 +1,8 @@
 use cubecl::prelude::*;
-use cubecl::wgpu::WgpuRuntime;
 
-pub(super) type R = WgpuRuntime;
-
-pub(super) fn make_client() -> ComputeClient<R> {
-    let device = <R as Runtime>::Device::default();
-    R::client(&device)
+pub(super) fn make_client() -> Client {
+    crate::tests::compilation_cache::install_test_compilation_cache();
+    crate::testing::test_client()
 }
 
 /// Adds independent pseudo-Gaussian noise to a flat `base` field.
@@ -77,4 +74,44 @@ pub(super) fn deterministic_texture(seed: u32) -> [f32; 64] {
     }
 
     texture
+}
+
+/// A frame where every pixel holds `value`.
+pub(super) fn constant_frame(width: u32, height: u32, value: f32) -> Vec<f32> {
+    vec![value; (width * height) as usize]
+}
+
+/// [make_unique_frame] content, rescaled to between 0 and 1, between black bars of `bar_rows` rows at
+/// the top and bottom.
+///
+/// Every candidate inside a bar ties at distance zero, which is where search order decides members.
+pub(super) fn letterboxed_frame(width: u32, height: u32, bar_rows: u32) -> Vec<f32> {
+    let raw = make_unique_frame(width, height);
+    let peak = raw.iter().copied().fold(0.0f32, f32::max);
+    let mut frame = vec![0.0f32; (width * height) as usize];
+
+    for y in bar_rows..height - bar_rows {
+        for x in 0..width {
+            let index = (y * width + x) as usize;
+            frame[index] = raw[index] / peak;
+        }
+    }
+
+    frame
+}
+
+/// Flat cells of `cell` pixels in four grey levels, like flat-shaded animation.
+pub(super) fn cel_frame(width: u32, height: u32, cell: u32) -> Vec<f32> {
+    let levels = [0.2f32, 0.45, 0.7, 0.9];
+    let mut frame = vec![0.0f32; (width * height) as usize];
+
+    for y in 0..height {
+        for x in 0..width {
+            let cell_index = (y / cell) * 7 + (x / cell) * 3;
+            let level = levels[(cell_index % 4) as usize];
+            frame[(y * width + x) as usize] = level;
+        }
+    }
+
+    frame
 }

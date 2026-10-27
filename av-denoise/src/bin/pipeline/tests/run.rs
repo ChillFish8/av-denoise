@@ -2,12 +2,17 @@
 
 use std::io::{Cursor, Read};
 
-use super::{SCENE_CLIP_SIZE, SharedBuffer, multi_scene_clip, temporal_opts};
-use crate::pipeline::run_with;
+use super::{SCENE_CLIP_SIZE, SharedBuffer, frame_count, multi_scene_clip, temporal_opts};
 use crate::pipeline::source::open_y4m;
 use crate::pipeline::stage::frame_permits;
+use crate::pipeline::{RunSettings, run_with};
 
-fn run_over(bytes: Vec<u8>, workers: usize, budget: u64) -> Result<Vec<u8>, anyhow::Error> {
+fn run_over(
+    bytes: Vec<u8>,
+    workers: usize,
+    budget: u64,
+    shared_device: bool,
+) -> Result<Vec<u8>, anyhow::Error> {
     let output = SharedBuffer::default();
     let writer = output.clone();
     let options = temporal_opts();
@@ -16,8 +21,17 @@ fn run_over(bytes: Vec<u8>, workers: usize, budget: u64) -> Result<Vec<u8>, anyh
         let reader: Box<dyn Read> = Box::new(cursor);
         open_y4m(reader)
     };
+    let settings = RunSettings {
+        workers,
+        frame_budget_bytes: budget,
+        visible: false,
+        grain_table: None,
+        tune_budget: None,
+        timing_report: false,
+        shared_device,
+    };
 
-    run_with(&options, opener, workers, budget, false, writer, None)?;
+    run_with(&options, opener, settings, writer)?;
 
     let written = output.0.lock().expect("buffer lock").clone();
 
@@ -36,21 +50,10 @@ impl std::io::Write for ClosedPipe {
     }
 }
 
-fn frame_count(y4m_bytes: &[u8]) -> usize {
-    let mut decoder = y4m::Decoder::new(y4m_bytes).expect("the output is y4m");
-    let mut count = 0;
-
-    while decoder.read_frame().is_ok() {
-        count += 1;
-    }
-
-    count
-}
-
 #[test]
 fn a_pipe_round_trips_every_frame_and_its_colour_range() {
     let clip = multi_scene_clip(30);
-    let output = run_over(clip, 2, 1 << 30).expect("the run succeeds");
+    let output = run_over(clip, 2, 1 << 30, false).expect("the run succeeds");
     let frames = frame_count(&output);
 
     assert_eq!(frames, 30);
@@ -58,9 +61,25 @@ fn a_pipe_round_trips_every_frame_and_its_colour_range() {
 }
 
 #[test]
+fn own_devices_write_the_same_frames_as_one_worker_and_a_shared_device() {
+    let clip = multi_scene_clip(40);
+    let one_worker_clip = clip.clone();
+    let own_devices_clip = clip.clone();
+
+    let one_worker = run_over(one_worker_clip, 1, 1 << 30, false).expect("the one-worker run succeeds");
+    let own_devices = run_over(own_devices_clip, 2, 1 << 30, false).expect("the own-device run succeeds");
+    let shared_device = run_over(clip, 2, 1 << 30, true).expect("the shared-device run succeeds");
+    let frames = frame_count(&one_worker);
+
+    assert_eq!(frames, 40);
+    assert!(own_devices == one_worker, "own devices changed the output");
+    assert!(shared_device == one_worker, "a shared device changed the output");
+}
+
+#[test]
 fn a_one_frame_pipe_round_trips() {
     let clip = multi_scene_clip(1);
-    let output = run_over(clip, 2, 1 << 30).expect("the run succeeds");
+    let output = run_over(clip, 2, 1 << 30, false).expect("the run succeeds");
     let frames = frame_count(&output);
 
     assert_eq!(frames, 1);
@@ -69,7 +88,7 @@ fn a_one_frame_pipe_round_trips() {
 #[test]
 fn an_empty_pipe_is_rejected() {
     let clip = multi_scene_clip(0);
-    let err = run_over(clip, 1, 1 << 30).expect_err("no frames is an error");
+    let err = run_over(clip, 1, 1 << 30, false).expect_err("no frames is an error");
 
     assert!(err.to_string().contains("no decodable frames"), "got {err}");
 }
@@ -82,7 +101,7 @@ fn a_run_at_the_permit_floor_finishes() {
     let budget = floor as u64 * frame_bytes as u64;
 
     let clip = multi_scene_clip(40);
-    let output = run_over(clip, 2, budget).expect("the floor must not deadlock");
+    let output = run_over(clip, 2, budget, false).expect("the floor must not deadlock");
     let frames = frame_count(&output);
 
     assert_eq!(frames, 40);
@@ -97,8 +116,17 @@ fn a_failed_write_is_reported_over_the_worker_disconnect() {
         let reader: Box<dyn Read> = Box::new(cursor);
         open_y4m(reader)
     };
+    let settings = RunSettings {
+        workers: 2,
+        frame_budget_bytes: 1 << 30,
+        visible: false,
+        grain_table: None,
+        tune_budget: None,
+        timing_report: false,
+        shared_device: false,
+    };
 
-    let err = run_with(&options, opener, 2, 1 << 30, false, ClosedPipe, None).expect_err("the write fails");
+    let err = run_with(&options, opener, settings, ClosedPipe).expect_err("the write fails");
 
     assert!(err.to_string().contains("broken pipe"), "got {err}");
 }

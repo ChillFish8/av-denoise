@@ -1,24 +1,84 @@
+#[path = "src/kernel_hash.rs"]
+mod kernel_hash;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+use self::kernel_hash::{FNV_OFFSET_BASIS, fnv1a};
 
-/// Hashes every source file so the kernel cache is keyed by the exact
-/// kernel sources a build contains.
+/// The workspace lockfile, which pins the CubeCL version a build links.
+const LOCKFILE: &str = "../Cargo.lock";
+/// Stands in for the CubeCL version when the crate builds outside its workspace.
+const UNLOCKED_VERSION: &str = "unlocked";
+
+/// Hashes every source file and the CubeCL version.
+///
+/// The hash names the directory a build keeps its compiled kernels and tuning results in.
+///
+/// The bench hash also covers `benches`, which defines kernels of its own.
 fn main() {
     let source_root = Path::new("src");
+    let source_hash = hash_tree(source_root, FNV_OFFSET_BASIS);
+    let cubecl_version = locked_cubecl_version();
+    let kernel_hash = kernel_hash::kernel_hash(source_hash, &cubecl_version);
+    println!("cargo:rustc-env=AV_DENOISE_KERNEL_HASH={kernel_hash:016x}");
+    println!("cargo:rerun-if-changed=src");
+    if Path::new(LOCKFILE).is_file() {
+        println!("cargo:rerun-if-changed={LOCKFILE}");
+    }
 
+    let bench_root = Path::new("benches");
+    if bench_root.is_dir() {
+        let bench_hash = hash_tree(bench_root, kernel_hash);
+        println!("cargo:rustc-env=AV_DENOISE_BENCH_KERNEL_HASH={bench_hash:016x}");
+        println!("cargo:rerun-if-changed=benches");
+    }
+}
+
+/// Every `cubecl` version the workspace lockfile pins, joined with `,`.
+///
+/// A packaged build has no workspace lockfile, so it falls back to [UNLOCKED_VERSION], as does a
+/// lockfile with no `cubecl` entry.
+fn locked_cubecl_version() -> String {
+    let Ok(lockfile) = fs::read_to_string(LOCKFILE) else {
+        return UNLOCKED_VERSION.to_string();
+    };
+
+    let mut versions = Vec::new();
+    let mut lines = lockfile.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != "name = \"cubecl\"" {
+            continue;
+        }
+
+        let version_line = lines.next().unwrap_or_default();
+        let version = version_line
+            .trim()
+            .strip_prefix("version = \"")
+            .and_then(|rest| rest.strip_suffix('"'));
+        if let Some(version) = version {
+            versions.push(version);
+        }
+    }
+
+    if versions.is_empty() {
+        return UNLOCKED_VERSION.to_string();
+    }
+
+    versions.join(",")
+}
+
+/// Folds every file below `root` into `hash`, in path order.
+fn hash_tree(root: &Path, mut hash: u64) -> u64 {
     let mut files = Vec::new();
-    collect_files(source_root, &mut files);
+    collect_files(root, &mut files);
 
     let mut relative_paths: Vec<(String, PathBuf)> = files
         .into_iter()
-        .map(|path| (relative_path(source_root, &path), path))
+        .map(|path| (relative_path(root, &path), path))
         .collect();
     relative_paths.sort();
 
-    let mut hash = FNV_OFFSET_BASIS;
     for (relative, path) in relative_paths {
         let contents = fs::read(&path).expect("source file is readable");
         let length = contents.len() as u64;
@@ -29,8 +89,7 @@ fn main() {
         hash = fnv1a(hash, &contents);
     }
 
-    println!("cargo:rustc-env=AV_DENOISE_KERNEL_HASH={hash:016x}");
-    println!("cargo:rerun-if-changed=src");
+    hash
 }
 
 fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -53,12 +112,4 @@ fn relative_path(root: &Path, path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect();
     components.join("/")
-}
-
-fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
 }

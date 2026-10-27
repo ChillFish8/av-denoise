@@ -3,11 +3,12 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NlmDenoiser;
+use crate::engine::timing::timed;
+use crate::engine::{BLOCK_1D, MAX_GRID_1D};
 use crate::nlmeans::kernels::{gpu_cast_f16, gpu_copy};
 use crate::nlmeans::prefilter::PrefilterMode;
-use crate::nlmeans::{BLOCK_1D, MAX_GRID_1D};
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     pub(super) fn advance_ring(&mut self) {
         let total_frames = self.params.total_frames() as usize;
         self.ring_head += 1;
@@ -39,12 +40,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         let total_threads = grid * BLOCK_1D;
 
         unsafe {
-            gpu_copy::launch_unchecked::<R>(
+            gpu_copy::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(src.clone(), src_slots * frame_size as usize),
-                ArrayArg::from_raw_parts(dst.clone(), dst_slots * frame_size as usize),
+                BufferArg::from_raw_parts(src.clone(), src_slots * frame_size as usize),
+                BufferArg::from_raw_parts(dst.clone(), dst_slots * frame_size as usize),
                 src_slot as u32 * frame_size,
                 slot as u32 * frame_size,
                 frame_size,
@@ -86,12 +87,12 @@ impl<R: Runtime> NlmDenoiser<R> {
         let offset = slot as u32 * frame_len;
 
         unsafe {
-            gpu_cast_f16::launch_unchecked::<R>(
+            gpu_cast_f16::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(self.input_buf.clone(), ring_len),
-                ArrayArg::from_raw_parts(search_buf.clone(), ring_len),
+                BufferArg::from_raw_parts(self.input_buf.clone(), ring_len),
+                BufferArg::from_raw_parts(search_buf.clone(), ring_len),
                 offset,
                 frame_len,
                 total_threads,
@@ -122,43 +123,64 @@ impl<R: Runtime> NlmDenoiser<R> {
     }
 
     /// Copies the last pushed frame into the next ring slot and refreshes that slot's state.
+    ///
+    /// The copy and the refresh run in separate device spans.
     pub(in crate::nlmeans) fn duplicate_last_frame(&mut self) -> Result<(), anyhow::Error> {
         let total_frames = self.params.total_frames() as usize;
         let last_slot = (self.ring_head - 1) % total_frames;
         let next_slot = self.ring_head % total_frames;
+        let client = self.client.clone();
 
-        // Slots never overlap, so copying within the same buffer is safe.
-        let input_buf = self.input_buf.clone();
-        self.copy_frame_into_slot(&input_buf, next_slot, &input_buf, last_slot, total_frames);
-        self.mirror_search_slot(next_slot);
+        timed(&client, self, move |front| {
+            front.copy_last_frame(last_slot, next_slot)
+        });
 
-        // `NlmSpatial` rebuilds this slot's reference with the pilot below.
-        if !matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. })
-            && let Some(reference_buf) = self.reference_buf.clone()
-        {
-            self.copy_frame_into_slot(&reference_buf, next_slot, &reference_buf, last_slot, total_frames);
-        }
-
-        // Every per-slot buffer is refreshed so a later pass never reads an older frame's state here.
-        if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
-            self.run_nlm_spatial_pilot(next_slot as u32, strength_scale)
-                .context("nlm spatial pilot dispatch failed")?;
-        }
-
-        self.build_pyramids_for_slot(next_slot as u32)?;
-        self.build_confidence_pyramid_for_slot(next_slot as u32)?;
-        self.run_noise_estimate_for_slot(next_slot as u32)?;
-        self.zero_temporal_stats_for_slot(next_slot as u32);
-        // This runs before `ring_head` advances so `pair_slot(0)` matches the push-time slot.
-        self.zero_pair_slot_for_duplicate();
+        timed(&client, self, move |front| {
+            front.refresh_duplicated_slot(next_slot)
+        })?;
 
         self.ring_head += 1;
 
         Ok(())
     }
 
+    /// Copies ring slot `last_slot` into `next_slot` on the input, search and reference rings.
+    fn copy_last_frame(&self, last_slot: usize, next_slot: usize) {
+        let total_frames = self.params.total_frames() as usize;
+
+        // Slots never overlap, so copying within the same buffer is safe.
+        let input_buf = self.input_buf.clone();
+        self.copy_frame_into_slot(&input_buf, next_slot, &input_buf, last_slot, total_frames);
+        self.mirror_search_slot(next_slot);
+
+        // `NlmSpatial` rebuilds this slot's reference with the pilot instead.
+        if !matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. })
+            && let Some(reference_buf) = self.reference_buf.clone()
+        {
+            self.copy_frame_into_slot(&reference_buf, next_slot, &reference_buf, last_slot, total_frames);
+        }
+    }
+
+    /// Refreshes every per-slot buffer of the duplicated `slot`.
+    ///
+    /// A later pass then never reads an older frame's state there.
+    fn refresh_duplicated_slot(&mut self, slot: usize) -> Result<(), anyhow::Error> {
+        if let PrefilterMode::NlmSpatial { .. } = self.params.prefilter {
+            self.run_nlm_spatial_pilot(slot as u32)
+                .context("nlm spatial pilot dispatch failed")?;
+        }
+
+        self.build_pyramids_for_slot(slot as u32)?;
+        self.build_confidence_pyramid_for_slot(slot as u32)?;
+        self.queue_duplicate_noise_stats(slot as u32)?;
+        // This runs before `ring_head` advances so `pair_slot(0)` matches the push-time slot.
+        self.zero_pair_slot_for_duplicate();
+
+        Ok(())
+    }
+
     /// The physical slot holding the oldest frame in the window.
-    fn ring_start(&self) -> u32 {
+    pub(super) fn ring_start(&self) -> u32 {
         let total_frames = self.params.total_frames() as usize;
         (self.ring_head % total_frames) as u32
     }

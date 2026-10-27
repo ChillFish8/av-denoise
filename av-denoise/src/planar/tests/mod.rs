@@ -7,7 +7,13 @@ mod lockstep;
 // Gated on `vulkan` because `chroma_only_options` names the `Vulkan` accelerator variant.
 #[cfg(feature = "vulkan")]
 mod passthrough_retry;
+// Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
+mod profile_keys;
 mod push_retry;
+// Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
+mod timing;
 
 use super::*;
 
@@ -16,7 +22,6 @@ use super::*;
 mod reseed {
     use super::*;
     use crate::HqParams;
-    use crate::accelerate::Accelerator;
 
     fn layout() -> FrameLayout {
         FrameLayout {
@@ -30,8 +35,8 @@ mod reseed {
     /// Temporal nlmeans at `radius`, denoising both planes independently.
     fn test_plane_options(radius: u32) -> PlaneOptions {
         PlaneOptions {
-            accelerators: vec![Accelerator::Vulkan],
-            device: Device::Default,
+            accelerators: vec![crate::testing::test_accelerator()],
+            device: crate::testing::test_device(),
             intent: ChannelIntent::LumaChroma,
             mode: DenoisingMode::Temporal { radius },
             algorithm: Algorithm::default(),
@@ -39,6 +44,8 @@ mod reseed {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            tuning: TuningMode::Off,
+            deterministic: false,
         }
     }
 

@@ -1,9 +1,9 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
-use cubecl::wgpu::WgpuRuntime;
 
+pub(super) use crate::engine::align::StorageAlign;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
-pub(super) use crate::nlmeans::align::StorageAlign;
+#[cfg(feature = "vulkan")]
 use crate::nlmeans::{
     ChannelMode,
     DenoisingMode,
@@ -12,12 +12,11 @@ use crate::nlmeans::{
     NlmeansOptions,
     resolve_params,
 };
+pub(crate) use crate::tune::tests::fixtures::{noisy_copy, noisy_field_over, seeded_unit_gaussian};
 
-pub(crate) type R = WgpuRuntime;
-
-pub(crate) fn make_client() -> ComputeClient<R> {
-    let device = <R as Runtime>::Device::default();
-    R::client(&device)
+pub(crate) fn make_client() -> Client {
+    crate::tests::compilation_cache::install_test_compilation_cache();
+    crate::testing::test_client()
 }
 
 /// Buffer-binding alignment the test runtime reports, which `NlmDenoiser` lays its slots out against.
@@ -95,46 +94,6 @@ pub(super) fn make_noisy_gaussian_frame(
     }
 
     frame
-}
-
-/// A unit-variance pseudo-Gaussian sample at `idx`, decorrelated across `seed` values.
-///
-/// It sums four hash-derived uniforms between -0.5 and 0.5 (Irwin-Hall), whose variance is 1/3.
-pub(crate) fn seeded_unit_gaussian(idx: u32, seed: u32) -> f32 {
-    let unit_std = (1.0f32 / 3.0f32).sqrt();
-
-    let mut sum = 0.0f32;
-    for k in 0..4u32 {
-        let mut hash = (idx * 4 + k)
-            .wrapping_mul(2654435761)
-            .wrapping_add(seed.wrapping_mul(0x9E37_79B9).wrapping_add(k));
-        hash ^= hash >> 15;
-        hash = hash.wrapping_mul(0x85EB_CA6B);
-        hash ^= hash >> 13;
-        sum += (hash as f32 / u32::MAX as f32) - 0.5;
-    }
-
-    sum / unit_std
-}
-
-/// Adds independent pseudo-Gaussian noise to a `width * height` clean field, clamping once after.
-///
-/// Two calls with different `seed`s over the same `clean` field produce two independently noisy
-/// copies of it.
-pub(crate) fn noisy_field_over(clean: &[f32], width: u32, height: u32, sigma: f32, seed: u32) -> Vec<f32> {
-    let mut frame = vec![0.0f32; (width * height) as usize];
-    for idx in 0..(width * height) {
-        let sample = seeded_unit_gaussian(idx, seed);
-        frame[idx as usize] = (clean[idx as usize] + sample * sigma).clamp(0.0, 1.0);
-    }
-
-    frame
-}
-
-/// A `size * size` flat `base` field with [noisy_field_over] noise added.
-pub(super) fn noisy_copy(size: u32, base: f32, sigma: f32, seed: u32) -> Vec<f32> {
-    let clean = vec![base; (size * size) as usize];
-    noisy_field_over(&clean, size, size, sigma, seed)
 }
 
 /// Builds a frame of grain correlated between horizontal neighbours by a `[0.25, 0.5, 0.25]` blur.
@@ -224,7 +183,8 @@ pub(super) fn make_gradient_frame(width: u32, height: u32, low: f32, high: f32) 
 }
 
 /// Builds a Luma [NlmDenoiser] at the given temporal radius with default options.
-pub(super) fn test_denoiser(radius: u32, width: u32, height: u32) -> NlmDenoiser<R> {
+#[cfg(feature = "vulkan")]
+pub(super) fn test_denoiser(radius: u32, width: u32, height: u32) -> NlmDenoiser {
     let options = NlmeansOptions {
         mode: DenoisingMode::Temporal { radius },
         ..NlmeansOptions::default()
@@ -239,6 +199,7 @@ pub(super) fn test_denoiser(radius: u32, width: u32, height: u32) -> NlmDenoiser
 /// A frame that ramps from `0.2` to `0.8` and shifts a little with `frame_index`.
 ///
 /// Each `frame_index` gives distinct content.
+#[cfg(feature = "vulkan")]
 pub(super) fn ramp_frame(width: u32, height: u32, frame_index: usize) -> Vec<f32> {
     let mut frame = vec![0.0f32; (width * height) as usize];
     for y in 0..height {
@@ -272,7 +233,7 @@ pub(super) fn pad_channels(dense: &[f32], pixels: usize, channels: u32, stored_c
 }
 
 /// Splits an interleaved host frame into one uploaded plane per channel.
-pub(crate) fn upload_planes(client: &ComputeClient<R>, frame: &[f32], channels: usize) -> Vec<Handle> {
+pub(crate) fn upload_planes(client: &Client, frame: &[f32], channels: usize) -> Vec<Handle> {
     (0..channels)
         .map(|channel| {
             let plane: Vec<f32> = frame.iter().skip(channel).step_by(channels).copied().collect();
@@ -282,7 +243,7 @@ pub(crate) fn upload_planes(client: &ComputeClient<R>, frame: &[f32], channels: 
         .collect()
 }
 
-pub(crate) fn read_interleaved(client: &ComputeClient<R>, planes: &[Handle]) -> Vec<f32> {
+pub(crate) fn read_interleaved(client: &Client, planes: &[Handle]) -> Vec<f32> {
     let channels: Vec<Vec<f32>> = planes
         .iter()
         .map(|handle| {
@@ -303,12 +264,7 @@ pub(crate) fn read_interleaved(client: &ComputeClient<R>, planes: &[Handle]) -> 
 }
 
 /// The f32 samples the real ingest kernel produces for one plane of `u8` codes.
-pub(crate) fn normalise_with_ingest(
-    client: &ComputeClient<R>,
-    codes: &[u8],
-    width: u32,
-    height: u32,
-) -> Vec<f32> {
+pub(crate) fn normalise_with_ingest(client: &Client, codes: &[u8], width: u32, height: u32) -> Vec<f32> {
     let pixels = width * height;
     let input = client.create_from_slice(codes);
     let planes = [DevicePlane::new(&input, width, height)];

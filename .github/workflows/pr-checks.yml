@@ -63,6 +63,40 @@ jobs:
           cargo clippy -p av-denoise --features vulkan,binary --all-targets -- -D warnings
           cargo clippy -p av-denoise-vs --features vulkan --all-targets -- -D warnings
 
+  rust-macos:
+    name: build and clippy (macos metal)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # nasm builds av-scenechange's assembly and Homebrew's ffms2 backs ffms2-sys,
+      # found through pkg-config. bindgen uses the libclang from the Xcode tools.
+      - name: Install build dependencies
+        run: brew install nasm pkg-config ffms2
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cargo build -p av-denoise-core --no-default-features --features metal
+          cargo build -p av-denoise --no-default-features --features metal,binary
+          cargo build -p av-denoise-vs --no-default-features --features metal
+
+      - name: Clippy
+        run: |
+          set -euo pipefail
+          cargo clippy -p av-denoise-core --no-default-features --features metal --all-targets -- -D warnings
+          cargo clippy -p av-denoise --no-default-features --features metal,binary --all-targets -- -D warnings
+          cargo clippy -p av-denoise-vs --no-default-features --features metal --all-targets -- -D warnings
+
   rust-check-windows:
     name: check (windows target)
     runs-on: ubuntu-latest

@@ -282,7 +282,10 @@ impl NlmeansArgs {
                 if let Some(sigma) = self.hq_sigma
                     && (!sigma.is_finite() || sigma <= 0.0 || sigma > 255.0)
                 {
-                    anyhow::bail!("--hq-sigma must be a finite value in (0, 255] 8-bit units (got {sigma})");
+                    anyhow::bail!(
+                        "--hq-sigma must be a finite value above 0 and at most 255 in 8-bit units \
+                         (got {sigma})"
+                    );
                 }
 
                 if self.hq_sigma.is_some() && sigma_scale_is_set {
@@ -368,12 +371,17 @@ impl NlmeansArgs {
             // `nlmeans` has no grouping stage for a threshold to apply to.
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            tuning: self.common.tuning_mode(),
+            deterministic: self.common.deterministic,
         };
 
         Ok(RunOptions {
             planes,
             progress: globals.progress,
             grain_table: None,
+            tune_budget: self.common.checked_tune_budget()?,
+            timing_report: self.common.timing_report,
+            shared_device: self.common.shared_device,
         })
     }
 }

@@ -49,7 +49,7 @@ pub(crate) fn dct8_basis(row: u32, col: u32) -> f64 {
 /// odd ones from their differences. The basis entries are compile-time constants, so the
 /// transform reads no shared or global memory.
 #[cube]
-pub(crate) fn dct8_reg_fwd(line: &mut Array<f32>) {
+pub(crate) fn dct8_reg_fwd(line: &mut [f32]) {
     let mut pair_sums = Array::<f32>::new(4usize);
     let mut pair_diffs = Array::<f32>::new(4usize);
     #[unroll]
@@ -84,7 +84,7 @@ pub(crate) fn dct8_reg_fwd(line: &mut Array<f32>) {
 /// Each mirrored pair of outputs shares one even sum and one odd sum, and takes their sum and
 /// difference.
 #[cube]
-pub(crate) fn dct8_reg_inv(line: &mut Array<f32>) {
+pub(crate) fn dct8_reg_inv(line: &mut [f32]) {
     let mut snapshot = Array::<f32>::new(8usize);
     #[unroll]
     for j in 0..PATCH_SIZE {
@@ -119,7 +119,7 @@ pub(crate) fn dct8_reg_inv(line: &mut Array<f32>) {
 /// approximation at `k = 0`. `len` is comptime so every index into `stack` is a constant, because
 /// one runtime index turns the register array into scratch memory.
 #[cube]
-pub(crate) fn haar_reg_fwd_level(stack: &mut Array<f32>, #[comptime] len: u32) {
+pub(crate) fn haar_reg_fwd_level(stack: &mut [f32], #[comptime] len: u32) {
     let half = comptime!(len / 2);
     #[unroll]
     for pos in 0..PATCH_SIZE {
@@ -144,7 +144,7 @@ pub(crate) fn haar_reg_fwd_level(stack: &mut Array<f32>, #[comptime] len: u32) {
 ///
 /// Levels run in the opposite order to the forward pass.
 #[cube]
-pub(crate) fn haar_reg_inv_level(stack: &mut Array<f32>, #[comptime] len: u32) {
+pub(crate) fn haar_reg_inv_level(stack: &mut [f32], #[comptime] len: u32) {
     let half = comptime!(len / 2);
     #[unroll]
     for pos in 0..PATCH_SIZE {
@@ -170,7 +170,7 @@ pub(crate) fn haar_reg_inv_level(stack: &mut Array<f32>, #[comptime] len: u32) {
 /// Both outputs of a butterfly carry `(va + vb) / 2`, so running this over the same levels turns
 /// `v[j]` into the variance of stack coefficient `j`.
 #[cube]
-pub(crate) fn variance_reg_level(v: &mut Array<f32>, #[comptime] len: u32) {
+pub(crate) fn variance_reg_level(v: &mut [f32], #[comptime] len: u32) {
     let half = comptime!(len / 2);
     let mut snapshot = Array::<f32>::new(MAX_K as usize);
     #[unroll]

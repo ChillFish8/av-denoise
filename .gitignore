@@ -8,3 +8,4 @@ cubecl.log
 /workspaces
 /.vcpkg/
 /vcpkg_installed/
+.env

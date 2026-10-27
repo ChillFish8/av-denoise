@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::kernels::motion::nlm_mc_warp;
+use av_denoise_core::bench_api::kernels::motion::mc_warp;
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -10,8 +10,8 @@ const FINE_STEP: u32 = 8;
 /// Warps a neighbour into spatial alignment with the centre using the motion field.
 ///
 /// Cost is roughly one packed `Vector<f32, N>` read and store per output pixel.
-pub struct WarpBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct WarpBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
@@ -25,7 +25,7 @@ pub struct WarpInput {
     pub mv_len: usize,
 }
 
-impl<R: Runtime> Benchmark for WarpBench<R> {
+impl Benchmark for WarpBench {
     type Input = WarpInput;
     type Output = ();
 
@@ -61,14 +61,14 @@ impl<R: Runtime> Benchmark for WarpBench<R> {
         let blocks_y = HEIGHT.div_ceil(FINE_STEP);
 
         unsafe {
-            nlm_mc_warp::launch_unchecked::<R>(
+            mc_warp::launch_unchecked(
                 &self.client,
                 grid,
                 dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(args.src.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.dst.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.mv_field.clone(), args.mv_len),
+                BufferArg::from_raw_parts(args.src.clone(), args.frame_len),
+                BufferArg::from_raw_parts(args.dst.clone(), args.frame_len),
+                BufferArg::from_raw_parts(args.mv_field.clone(), args.mv_len),
                 0u32,
                 0u32,
                 FINE_STEP,

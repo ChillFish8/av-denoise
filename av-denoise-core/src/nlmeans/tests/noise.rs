@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::*;
-use crate::nlmeans::noise::{NoiseCtx, partials_len, run_noise_estimate, sigma_from_abs_sum};
+use crate::noise::{NoiseCtx, partials_len, run_noise_estimate, sigma_from_abs_sum};
 
 /// Runs both noise-estimate stages over one frame in a one-slot ring.
 ///
@@ -31,7 +31,7 @@ fn estimate_abs_sums(width: u32, height: u32, channels: u32, stored_ch: u32, den
         results_buf: &results_buf,
     };
 
-    run_noise_estimate::<R>(&client, &ctx).expect("noise estimate dispatch failed");
+    run_noise_estimate(&client, &ctx).expect("noise estimate dispatch failed");
 
     let bytes = client.read_one(results_buf).expect("readback failed");
     let data = f32::from_bytes(&bytes);

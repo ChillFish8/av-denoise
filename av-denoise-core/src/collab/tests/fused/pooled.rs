@@ -1,8 +1,9 @@
 use cubecl::prelude::*;
 
-use super::{Setup, cross_frame_setup, run_fused, run_fused_walk, unique_frame};
+use super::{Setup, cross_frame_setup, run_fused, run_fused_variant, unique_frame};
 use crate::collab::kernels::fused::pooled::pooled_threshold;
-use crate::collab::tests::helpers::{R, make_client};
+use crate::collab::kernels::fused::{CollabVariant, Walk};
+use crate::collab::tests::helpers::make_client;
 use crate::collab::{PATCH_AREA, PATCH_SIZE};
 
 const SIDE: usize = PATCH_SIZE as usize;
@@ -14,11 +15,11 @@ type Group = [[[f32; SIDE]; SIDE]; SIDE];
 
 #[cube(launch_unchecked)]
 fn pooled_kernel(
-    input: &Array<f32>,
-    variances: &Array<f32>,
-    profile: &Array<f32>,
-    output: &mut Array<f32>,
-    retained: &mut Array<f32>,
+    input: &[f32],
+    variances: &[f32],
+    profile: &[f32],
+    output: &mut [f32],
+    retained: &mut [f32],
     k_use: u32,
     threshold: f32,
     dc_lambda: f32,
@@ -33,7 +34,14 @@ fn pooled_kernel(
 
     let prof_sub = profile[sub as usize];
     let kept = pooled_threshold(
-        &mut stack, variances, profile, prof_sub, sub, k_use, threshold, dc_lambda,
+        stack.as_mut_slice(),
+        variances,
+        profile,
+        prof_sub,
+        sub,
+        k_use,
+        threshold,
+        dc_lambda,
     );
 
     #[unroll]
@@ -66,15 +74,15 @@ fn run_kernel(
     let retained_buf = client.empty(SIDE * size_of::<f32>());
 
     unsafe {
-        pooled_kernel::launch_unchecked::<R>(
+        pooled_kernel::launch_unchecked(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(SIDE as u32),
-            ArrayArg::from_raw_parts(input_buf, flat.len()),
-            ArrayArg::from_raw_parts(variance_buf, SIDE),
-            ArrayArg::from_raw_parts(profile_buf, SIDE),
-            ArrayArg::from_raw_parts(output_buf.clone(), SIDE * AREA),
-            ArrayArg::from_raw_parts(retained_buf.clone(), SIDE),
+            BufferArg::from_raw_parts(input_buf, flat.len()),
+            BufferArg::from_raw_parts(variance_buf, SIDE),
+            BufferArg::from_raw_parts(profile_buf, SIDE),
+            BufferArg::from_raw_parts(output_buf.clone(), SIDE * AREA),
+            BufferArg::from_raw_parts(retained_buf.clone(), SIDE),
             k_use,
             threshold,
             dc_lambda,
@@ -321,8 +329,12 @@ fn both_walks_agree_with_pooling_on() {
     let mut setup = cross_frame_setup(64, 48, 2);
     setup.pooled = Some(RATIO);
 
-    let divergent = run_fused_walk(&setup, Some(false));
-    let uniform = run_fused_walk(&setup, Some(true));
+    let uniform_variant = CollabVariant {
+        walk: Walk::Uniform,
+        ..CollabVariant::BASELINE
+    };
+    let divergent = run_fused_variant(&setup, CollabVariant::BASELINE);
+    let uniform = run_fused_variant(&setup, uniform_variant);
 
     assert_eq!(divergent.accum, uniform.accum);
     assert_eq!(divergent.wsum, uniform.wsum);
@@ -335,8 +347,12 @@ fn a_ragged_frame_with_pooling_on_completes_and_both_walks_agree() {
     let mut setup = Setup::spatial_only(frame, 70, 54);
     setup.pooled = Some(RATIO);
 
-    let divergent = run_fused_walk(&setup, Some(false));
-    let uniform = run_fused_walk(&setup, Some(true));
+    let uniform_variant = CollabVariant {
+        walk: Walk::Uniform,
+        ..CollabVariant::BASELINE
+    };
+    let divergent = run_fused_variant(&setup, CollabVariant::BASELINE);
+    let uniform = run_fused_variant(&setup, uniform_variant);
     let frame_sum = divergent.frame_weight_sum(0);
 
     assert_eq!(divergent.accum, uniform.accum);

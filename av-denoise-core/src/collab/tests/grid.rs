@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client};
+use super::helpers::make_client;
 use crate::collab::kernels::fused::grid::{
     grid_fwd,
     grid_fwd_host,
@@ -12,12 +12,7 @@ use crate::collab::kernels::fused::grid::{
 use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE, grid_frames};
 
 #[cube(launch_unchecked)]
-fn grid_probe(
-    input: &Array<f32>,
-    output: &mut Array<f32>,
-    #[comptime] grid_frames: u32,
-    #[comptime] inverse: bool,
-) {
+fn grid_probe(input: &[f32], output: &mut [f32], #[comptime] grid_frames: u32, #[comptime] inverse: bool) {
     let mut stack = Array::<f32>::new(PATCH_AREA as usize);
     #[unroll]
     for i in 0..PATCH_AREA {
@@ -25,9 +20,9 @@ fn grid_probe(
     }
 
     if inverse {
-        grid_inv(&mut stack, grid_frames);
+        grid_inv(stack.as_mut_slice(), grid_frames);
     } else {
-        grid_fwd(&mut stack, grid_frames);
+        grid_fwd(stack.as_mut_slice(), grid_frames);
     }
 
     #[unroll]
@@ -37,14 +32,14 @@ fn grid_probe(
 }
 
 #[cube(launch_unchecked)]
-fn grid_variance_probe(input: &Array<f32>, output: &mut Array<f32>, #[comptime] grid_frames: u32) {
+fn grid_variance_probe(input: &[f32], output: &mut [f32], #[comptime] grid_frames: u32) {
     let mut variances = Array::<f32>::new(MAX_K as usize);
     #[unroll]
     for m in 0..MAX_K {
         variances[m as usize] = input[m as usize];
     }
 
-    grid_variance(&mut variances, grid_frames);
+    grid_variance(variances.as_mut_slice(), grid_frames);
 
     #[unroll]
     for m in 0..MAX_K {
@@ -60,12 +55,12 @@ fn run_grid(stack: &[f32], grid_frames: u32, inverse: bool) -> Vec<f32> {
     let output = client.empty(stack_size);
 
     unsafe {
-        grid_probe::launch_unchecked::<R>(
+        grid_probe::launch_unchecked(
             &client,
             CubeCount::new_single(),
             CubeDim::new_1d(1),
-            ArrayArg::from_raw_parts(input, stack.len()),
-            ArrayArg::from_raw_parts(output.clone(), stack.len()),
+            BufferArg::from_raw_parts(input, stack.len()),
+            BufferArg::from_raw_parts(output.clone(), stack.len()),
             grid_frames,
             inverse,
         );
@@ -83,12 +78,12 @@ fn run_grid_variance(variances: &[f32; 8], grid_frames: u32) -> Vec<f32> {
     let output = client.empty(8 * size_of::<f32>());
 
     unsafe {
-        grid_variance_probe::launch_unchecked::<R>(
+        grid_variance_probe::launch_unchecked(
             &client,
             CubeCount::new_single(),
             CubeDim::new_1d(1),
-            ArrayArg::from_raw_parts(input, 8),
-            ArrayArg::from_raw_parts(output.clone(), 8),
+            BufferArg::from_raw_parts(input, 8),
+            BufferArg::from_raw_parts(output.clone(), 8),
             grid_frames,
         );
     }

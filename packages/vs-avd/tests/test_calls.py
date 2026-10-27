@@ -134,3 +134,26 @@ def test_sigma_is_not_a_typed_parameter():
 
     for fn in (Nlm, NlmHQ, Nl4d):
         assert "sigma" not in inspect.signature(fn).parameters, fn.__name__
+
+
+def test_nl4d_forwards_tune_and_deterministic(fake, monkeypatch):
+    monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
+    Nl4d("clip", tune="cached", deterministic=True)
+    _, kwargs = fake.calls[0]
+    assert kwargs == {"tune": "cached", "deterministic": True}
+
+
+def test_nlm_forwards_tune(fake, monkeypatch):
+    monkeypatch.setattr("vsavd._nlmeans_filter", lambda: fake)
+    Nlm("clip", tune="off")
+    _, kwargs = fake.calls[0]
+    assert kwargs["tune"] == "off"
+
+
+def test_tune_and_deterministic_are_typed_parameters():
+    import inspect
+
+    for fn in (Nlm, NlmHQ, Nl4d):
+        parameters = inspect.signature(fn).parameters
+        assert "tune" in parameters, fn.__name__
+        assert "deterministic" in parameters, fn.__name__

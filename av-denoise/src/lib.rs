@@ -7,6 +7,9 @@ pub mod cache;
 mod host;
 mod planar;
 pub mod stack;
+#[doc(hidden)]
+pub mod testing;
+pub mod tune;
 pub mod warmup;
 
 pub use av_denoise_core::{
@@ -54,9 +57,11 @@ pub use self::cache::{
     CacheError,
     compilation_cache_dir,
     default_cache_dir,
+    finish_compilation_cache,
     install_compilation_cache,
     install_compilation_cache_at,
     install_compilation_cache_once,
+    merge_compilation_cache,
 };
 pub use self::host::{
     Algorithm,
@@ -65,12 +70,14 @@ pub use self::host::{
     Depth,
     HostDenoiser,
     MAX_PENDING,
+    PlaneTiming,
     UnsupportedDepthError,
 };
 pub use self::planar::{
     ChannelIntent,
     FrameLayout,
     PlanarDenoiser,
+    PlanarTiming,
     PlaneOptions,
     Planes,
     ReseedWindow,
@@ -79,4 +86,5 @@ pub use self::planar::{
     push_needs_retry,
 };
 pub use self::stack::{CODEGEN_STACK_BYTES, codegen_stack_is_sufficient, raise_codegen_stack_limit};
-pub use self::warmup::{WarmUp, kernel_key};
+pub use self::tune::{TUNE_ENV, TuningMode};
+pub use self::warmup::{TuneLock, TuneLockOutcome, WarmUp, kernel_key};

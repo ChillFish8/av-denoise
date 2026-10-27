@@ -7,9 +7,10 @@ use super::helpers::{
     clamp_coord,
     line_sum_sq,
     read_clamped_line,
-    read_line,
     welsch_weight,
 };
+use crate::engine::kernels::read_line;
+use crate::noise::{DERIVED_H2_INV_NORM, DERIVED_NOISE_OFFSET};
 
 /// Writes the per-pixel squared distances to the forward and backward neighbours in one pass.
 ///
@@ -17,9 +18,9 @@ use super::helpers::{
 /// the pixel against `frame_t` at the pixel plus `q`.
 #[cube(launch_unchecked)]
 pub fn nlm_distance_pair<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    dist_fwd: &mut Array<f32>,
-    dist_bwd: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    dist_fwd: &mut [f32],
+    dist_bwd: &mut [f32],
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,
@@ -78,8 +79,8 @@ pub fn nlm_distance_pair<N: Size>(
 /// Writes the channel-scaled squared distance between each pixel and its neighbour at `q`.
 #[cube(launch_unchecked)]
 pub fn nlm_distance<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    dist: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    dist: &mut [f32],
     frame_t: u32,
     frame_q: u32,
     q_x: i32,
@@ -122,8 +123,8 @@ pub fn nlm_distance<N: Size>(
 /// The block caches a `(block_x + 2 * patch_radius) x block_y` tile in shared memory.
 #[cube(launch_unchecked)]
 pub fn nlm_horizontal_sum(
-    input: &Array<f32>,
-    output: &mut Array<f32>,
+    input: &[f32],
+    output: &mut [f32],
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -132,7 +133,7 @@ pub fn nlm_horizontal_sum(
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * block_y);
-    let mut smem = SharedMemory::<f32>::new(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
+    let mut smem = Shared::<[f32]>::new_slice(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -171,12 +172,16 @@ pub fn nlm_horizontal_sum(
 }
 
 /// The vertical half of the separable box filter, writing the Welsch weight of each patch total.
+///
+/// The strength is the derived buffer's `DERIVED_H2_INV_NORM` word, and the noise offset entry
+/// `offset_index` of the candidate's spatial table `offsets`.
 #[cube(launch_unchecked)]
 pub fn nlm_vertical_weight(
-    input: &Array<f32>,
-    output: &mut Array<f32>,
-    h2_inv_norm: f32,
-    noise_offset: f32,
+    input: &[f32],
+    output: &mut [f32],
+    noise: &[f32],
+    offsets: &[f32],
+    offset_index: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -184,7 +189,7 @@ pub fn nlm_vertical_weight(
     #[comptime] block_y: u32,
 ) {
     let tile_elems = comptime!(block_x * (block_y + 2 * patch_radius));
-    let mut smem = SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
+    let mut smem = Shared::<[f32]>::new_slice(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -218,16 +223,18 @@ pub fn nlm_vertical_weight(
         sum += smem[((local_y + offset_y) * block_x + local_x) as usize];
     }
 
+    let h2_inv_norm = noise[DERIVED_H2_INV_NORM as usize];
+    let noise_offset = offsets[offset_index as usize];
     output[(global_y * width + global_x) as usize] = welsch_weight(sum, h2_inv_norm, noise_offset);
 }
 
 /// The paired version of `nlm_horizontal_sum`, sharing one tile pass and barrier for both buffers.
 #[cube(launch_unchecked)]
 pub fn nlm_horizontal_sum_pair(
-    input_fwd: &Array<f32>,
-    input_bwd: &Array<f32>,
-    output_fwd: &mut Array<f32>,
-    output_bwd: &mut Array<f32>,
+    input_fwd: &[f32],
+    input_bwd: &[f32],
+    output_fwd: &mut [f32],
+    output_bwd: &mut [f32],
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -236,8 +243,8 @@ pub fn nlm_horizontal_sum_pair(
 ) {
     let tile_width = comptime!(block_x + 2 * patch_radius);
     let tile_elems = comptime!((block_x + 2 * patch_radius) * block_y);
-    let mut smem_fwd = SharedMemory::<f32>::new(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
-    let mut smem_bwd = SharedMemory::<f32>::new(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
+    let mut smem_fwd = Shared::<[f32]>::new_slice(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
+    let mut smem_bwd = Shared::<[f32]>::new_slice(comptime!((block_x + 2 * patch_radius) * block_y) as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -288,24 +295,26 @@ pub fn nlm_horizontal_sum_pair(
 ///
 /// When `use_confidence` is set, each weight is scaled by its block's confidence from `conf_fwd`
 /// and `conf_bwd`. `step`, `blocks_x` and `blocks_y` describe the motion block grid, which pixels
-/// map onto the same way as in `nlm_mc_warp`. When it is unset the confidence buffers are never read.
+/// map onto the same way as in `mc_warp`. When it is unset the confidence buffers are never read.
+///
+/// The strength and the noise offset are the derived buffer's `DERIVED_H2_INV_NORM` and
+/// `DERIVED_NOISE_OFFSET` words.
 #[cube(launch_unchecked)]
 pub fn nlm_vweight_pair_accumulate<N: Size>(
-    hsum_fwd: &Array<f32>,
-    hsum_bwd: &Array<f32>,
-    input: &Array<Vector<f32, N>>,
-    accum: &mut Array<Vector<f32, N>>,
-    weight_sum: &mut Array<f32>,
-    max_weight: &mut Array<f32>,
-    conf_fwd: &Array<f32>,
-    conf_bwd: &Array<f32>,
+    hsum_fwd: &[f32],
+    hsum_bwd: &[f32],
+    input: &[Vector<f32, N>],
+    accum: &mut [Vector<f32, N>],
+    weight_sum: &mut [f32],
+    max_weight: &mut [f32],
+    conf_fwd: &[f32],
+    conf_bwd: &[f32],
     #[comptime] use_confidence: bool,
     frame_fwd: u32,
     frame_bwd: u32,
     q_x: i32,
     q_y: i32,
-    h2_inv_norm: f32,
-    noise_offset: f32,
+    noise: &[f32],
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] patch_radius: u32,
@@ -316,8 +325,8 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
     #[comptime] blocks_y: u32,
 ) {
     let tile_elems = comptime!(block_x * (block_y + 2 * patch_radius));
-    let mut smem_fwd = SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
-    let mut smem_bwd = SharedMemory::<f32>::new(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
+    let mut smem_fwd = Shared::<[f32]>::new_slice(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
+    let mut smem_bwd = Shared::<[f32]>::new_slice(comptime!(block_x * (block_y + 2 * patch_radius)) as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -365,6 +374,8 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
         sum_bwd += smem_bwd[smem_idx];
     }
 
+    let h2_inv_norm = noise[DERIVED_H2_INV_NORM as usize];
+    let noise_offset = noise[DERIVED_NOISE_OFFSET as usize];
     let mut weight_fwd = welsch_weight(sum_fwd, h2_inv_norm, noise_offset);
     let mut weight_bwd = welsch_weight(sum_bwd, h2_inv_norm, noise_offset);
 
@@ -385,8 +396,8 @@ pub fn nlm_vweight_pair_accumulate<N: Size>(
 /// The reference-image version of `nlm_distance`, reading both pixels from `reference`.
 #[cube(launch_unchecked)]
 pub fn nlm_distance_ref<N: Size>(
-    reference: &Array<Vector<f32, N>>,
-    dist: &mut Array<f32>,
+    reference: &[Vector<f32, N>],
+    dist: &mut [f32],
     frame_t: u32,
     frame_q: u32,
     q_x: i32,
@@ -427,9 +438,9 @@ pub fn nlm_distance_ref<N: Size>(
 /// The reference-image version of `nlm_distance_pair`, reading every pixel from `reference`.
 #[cube(launch_unchecked)]
 pub fn nlm_distance_pair_ref<N: Size>(
-    reference: &Array<Vector<f32, N>>,
-    dist_fwd: &mut Array<f32>,
-    dist_bwd: &mut Array<f32>,
+    reference: &[Vector<f32, N>],
+    dist_fwd: &mut [f32],
+    dist_bwd: &mut [f32],
     frame_t: u32,
     frame_fwd: u32,
     frame_bwd: u32,

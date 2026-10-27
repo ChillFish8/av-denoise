@@ -1,4 +1,4 @@
-use cubecl::prelude::ComputeClient;
+use cubecl::prelude::Client;
 
 use super::helpers::*;
 use crate::bench_api::HostIo;
@@ -18,7 +18,7 @@ fn temporal_requires_full_window() {
     let height = 8;
     let frame = make_uniform_frame(width, height, 1, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     // The leading-edge mirror fills the R past slots, so the window needs only R+1 real pushes.
     denoiser.push_frame(&frame);
@@ -55,7 +55,7 @@ fn temporal_denoise_uniform() {
 
     let frame = make_uniform_frame(width, height, 1, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
     denoiser.push_frame(&frame);
@@ -91,7 +91,7 @@ fn temporal_with_noisy_center_frame() {
     let clean = make_uniform_frame(width, height, 1, 0.5);
     let noisy = make_frame_with_noisy_region(width, height, 1, 0.5, 8, 8, 1, 0.8);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&clean);
     denoiser.push_frame(&noisy);
     denoiser.push_frame(&clean);
@@ -133,7 +133,7 @@ fn temporal_asymmetric_frames_correct_weights() {
     let frame1 = vec![0.5f32; (width * height) as usize];
     let frame2 = vec![0.5f32; (width * height) as usize];
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame0);
     denoiser.push_frame(&frame1);
     denoiser.push_frame(&frame2);
@@ -161,7 +161,7 @@ fn flush_produces_remaining_frames() {
     let width = 8;
     let height = 8;
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     for _ in 0..4 {
         let frame = make_uniform_frame(width, height, 1, 0.5);
@@ -200,7 +200,7 @@ fn temporal_push_flush_frame_count_matches() {
             prefilter: PrefilterMode::None,
             ..NlmParams::default()
         };
-        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+        let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
         const PUSHES: usize = 10;
         let mut during_pushes = 0usize;
@@ -262,7 +262,7 @@ fn structured_base(width: u32, height: u32) -> Vec<f32> {
 /// The separable path shares no code with the windowed pair kernel, so it acts as an independent
 /// reference.
 fn windowed_vs_separable_psnr(
-    client: &ComputeClient<R>,
+    client: &Client,
     params: &NlmParams,
     width: u32,
     height: u32,
@@ -270,7 +270,7 @@ fn windowed_vs_separable_psnr(
     frames: &[Vec<f32>],
 ) -> (f64, f64) {
     let windowed_params = params.clone();
-    let mut windowed = NlmDenoiser::<R>::new(client, windowed_params, width, height);
+    let mut windowed = NlmDenoiser::new(client, windowed_params, width, height);
     for frame in frames {
         windowed.push_frame(frame);
     }
@@ -278,7 +278,7 @@ fn windowed_vs_separable_psnr(
     let windowed_result = windowed.denoise().unwrap().unwrap();
 
     let separable_params = params.clone();
-    let mut separable = NlmDenoiser::<R>::new(client, separable_params, width, height);
+    let mut separable = NlmDenoiser::new(client, separable_params, width, height);
     separable.use_separable = true;
     for frame in frames {
         separable.push_frame(frame);
@@ -433,7 +433,7 @@ fn temporal_uniform_passthrough_search_5_and_6() {
             hq: None,
         };
 
-        let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+        let mut denoiser = NlmDenoiser::new(&client, params, width, height);
         for _ in 0..5 {
             denoiser.push_frame(&frame);
         }

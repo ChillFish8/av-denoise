@@ -1,80 +1,96 @@
 use super::noise_curve::stepped_curve;
-use super::{Setup, chroma_cross_frame_setup, cross_frame_setup, run_fused_walk, unique_frame};
+use super::{Setup, chroma_cross_frame_setup, cross_frame_setup, run_fused_variant, unique_frame};
+use crate::collab::kernels::fused::CollabVariant;
+use crate::tune::SiteCandidate;
+use crate::tune::tests::fixtures::variant_chunk_tests;
 
-/// Asserts the two search walks aggregated the same thing, byte for byte.
+/// One labelled launch the variants are compared on.
+type Case = (&'static str, Setup);
+
+/// Asserts each of `variants` aggregated exactly what the baseline did, byte for byte.
 ///
-/// The warp-uniform walk offers the same candidates in the same order with the same arithmetic. Its
-/// extra turns carry the `3.0e38` an unfilled slot already holds, which cannot displace a slot. A
-/// difference therefore means the masking let a dead position in or dropped a live one, not that
-/// floating point drifted.
-fn assert_walks_agree(label: &str, setup: &Setup) {
-    let clipped = run_fused_walk(setup, Some(false));
-    let uniform = run_fused_walk(setup, Some(true));
+/// Every variant offers the same candidates with the same arithmetic. A masked turn carries
+/// [UNFILLED_DISTANCE](crate::collab::kernels::plane_ops::UNFILLED_DISTANCE), which cannot displace
+/// a slot. A difference therefore means a variant let a dead position in or dropped a live one, not
+/// that floating point drifted.
+fn assert_listed_variants_agree(label: &str, setup: &Setup, variants: &[CollabVariant]) {
+    let baseline = run_fused_variant(setup, CollabVariant::BASELINE);
+    let aggregated = baseline.group_weight.iter().any(|weight| *weight > 0.0);
 
-    assert_eq!(
-        clipped.group_weight, uniform.group_weight,
-        "{label}: the two search walks retired different groups",
-    );
-    assert_eq!(
-        clipped.accum, uniform.accum,
-        "{label}: the two search walks scattered different values",
-    );
-    assert_eq!(
-        clipped.wsum, uniform.wsum,
-        "{label}: the two search walks scattered different weights",
-    );
     assert!(
-        uniform.group_weight.iter().any(|weight| *weight > 0.0),
-        "{label}: neither walk aggregated anything, so agreeing proves nothing",
+        aggregated,
+        "{label}: the baseline aggregated nothing, so agreeing proves nothing"
     );
+
+    for &variant in variants {
+        if variant == CollabVariant::BASELINE {
+            continue;
+        }
+
+        let got = run_fused_variant(setup, variant);
+        let name = variant.name();
+
+        assert_eq!(
+            got.group_weight, baseline.group_weight,
+            "{label} {name}: retired different groups"
+        );
+        assert_eq!(
+            got.accum, baseline.accum,
+            "{label} {name}: scattered different values"
+        );
+        assert_eq!(
+            got.wsum, baseline.wsum,
+            "{label} {name}: scattered different weights"
+        );
+    }
+}
+
+fn assert_case_agrees(case: Case, variants: &[CollabVariant]) {
+    let (label, setup) = case;
+    assert_listed_variants_agree(label, &setup, variants);
 }
 
 /// References along the left and top edges have a clipped rectangle narrower than the unclipped
 /// span, which is where the uniform walk takes extra turns. Those turns must score nothing.
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_on_the_spatial_pass() {
+fn spatial_case() -> Case {
     let (width, height) = (48u32, 48u32);
     let frame = unique_frame(width, height);
     let setup = Setup::spatial_only(frame, width, height);
 
-    assert_walks_agree("spatial", &setup);
+    ("spatial", setup)
 }
 
 /// [cross_frame_setup] pushes some refine windows off the frame and its confidences straddle `c_min`,
 /// the two things that give groups sharing a warp different trip counts under the clipped walk.
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_across_frames() {
+fn cross_frame_case() -> Case {
     let setup = cross_frame_setup(64, 64, 2);
 
-    assert_walks_agree("cross frame", &setup);
+    ("cross frame", setup)
 }
 
 /// The uniform walk reads a gated motion block the clipped walk never touches, so the `seen_*` slot
 /// it leaves must stay empty or it would hide positions a later covering block still owes the search.
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_when_every_neighbour_is_gated() {
+fn all_gated_case() -> Case {
     let mut setup = cross_frame_setup(64, 64, 2);
     // Above every planted confidence, so every `seen_*` slot is one the uniform walk wrote.
     setup.c_min = 2.0;
 
-    assert_walks_agree("all gated", &setup);
+    ("all gated", setup)
 }
 
 /// At radius 1 the grid is four volumes of two frames.
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_at_radius_one() {
+fn radius_one_case() -> Case {
     let setup = cross_frame_setup(64, 64, 1);
 
-    assert_walks_agree("radius one", &setup);
+    ("radius one", setup)
 }
 
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_with_a_noise_curve() {
+fn noise_curve_case() -> Case {
     let mut setup = cross_frame_setup(64, 64, 2);
     let curve = stepped_curve();
     setup.noise_curve = Some(curve);
 
-    assert_walks_agree("noise curve", &setup);
+    ("noise curve", setup)
 }
 
 /// [cross_frame_setup] with every motion block of a neighbour carrying one vector, so the refine
@@ -111,45 +127,156 @@ fn edge_clamped_setup(radius: u32) -> Setup {
     setup
 }
 
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_when_covering_blocks_share_a_vector() {
+fn shared_vector_case() -> Case {
     let setup = shared_vector_setup(2);
 
-    assert_walks_agree("shared vector", &setup);
+    ("shared vector", setup)
 }
 
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_when_every_shared_block_is_confident() {
+fn shared_confident_case() -> Case {
     let mut setup = shared_vector_setup(2);
     setup.confidence.fill(1.0);
 
-    assert_walks_agree("shared vector, all confident", &setup);
+    ("shared vector, all confident", setup)
 }
 
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_when_the_edge_clamps_rectangles_together() {
+fn edge_clamped_case() -> Case {
     let mut setup = edge_clamped_setup(2);
     setup.confidence.fill(1.0);
 
-    assert_walks_agree("edge clamped", &setup);
+    ("edge clamped", setup)
 }
 
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_with_the_f16_search() {
-    let mut cross_frame = cross_frame_setup(64, 64, 2);
-    cross_frame.f16_search = true;
-    assert_walks_agree("f16 cross frame", &cross_frame);
+fn f16_cross_frame_case() -> Case {
+    let mut setup = cross_frame_setup(64, 64, 2);
+    setup.f16_search = true;
 
-    let mut shared = shared_vector_setup(2);
-    shared.f16_search = true;
-    shared.confidence.fill(1.0);
-    assert_walks_agree("f16 shared vector", &shared);
+    ("f16 cross frame", setup)
 }
 
-#[test]
-fn warp_uniform_search_matches_the_clipped_search_with_the_f16_search_on_wide_storage() {
+fn f16_shared_vector_case() -> Case {
+    let mut setup = shared_vector_setup(2);
+    setup.f16_search = true;
+    setup.confidence.fill(1.0);
+
+    ("f16 shared vector", setup)
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(spatial_case()), 4 chunks,
+    [
+        every_variant_matches_the_baseline_on_the_spatial_pass_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_on_the_spatial_pass_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_on_the_spatial_pass_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_on_the_spatial_pass_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(cross_frame_case()), 4 chunks,
+    [
+        every_variant_matches_the_baseline_across_frames_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_across_frames_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_across_frames_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_across_frames_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(all_gated_case()), 4 chunks,
+    [
+        every_variant_matches_the_baseline_when_every_neighbour_is_gated_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_when_every_neighbour_is_gated_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_when_every_neighbour_is_gated_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_when_every_neighbour_is_gated_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(radius_one_case()), 4 chunks,
+    [
+        every_variant_matches_the_baseline_at_radius_one_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_at_radius_one_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_at_radius_one_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_at_radius_one_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(noise_curve_case()), 4 chunks,
+    [
+        every_variant_matches_the_baseline_with_a_noise_curve_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_with_a_noise_curve_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_with_a_noise_curve_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_with_a_noise_curve_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(shared_vector_case()), 4 chunks,
+    [
+        every_variant_matches_the_baseline_when_covering_blocks_share_a_vector_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_when_covering_blocks_share_a_vector_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_when_covering_blocks_share_a_vector_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_when_covering_blocks_share_a_vector_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(shared_confident_case()), 4 chunks,
+    [
+        every_variant_matches_the_baseline_when_every_shared_block_is_confident_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_when_every_shared_block_is_confident_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_when_every_shared_block_is_confident_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_when_every_shared_block_is_confident_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(edge_clamped_case()), 4 chunks,
+    [
+        every_variant_matches_the_baseline_when_edges_clamp_rectangles_together_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_when_edges_clamp_rectangles_together_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_when_edges_clamp_rectangles_together_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_when_edges_clamp_rectangles_together_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(f16_cross_frame_case()), 4 chunks,
+    [
+        every_variant_matches_the_baseline_with_the_f16_search_across_frames_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_with_the_f16_search_across_frames_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_with_the_f16_search_across_frames_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_with_the_f16_search_across_frames_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(f16_shared_vector_case()), 4 chunks,
+    [
+        every_variant_matches_the_baseline_with_the_f16_search_on_a_shared_vector_in_the_first_quarter => 0,
+        every_variant_matches_the_baseline_with_the_f16_search_on_a_shared_vector_in_the_second_quarter => 1,
+        every_variant_matches_the_baseline_with_the_f16_search_on_a_shared_vector_in_the_third_quarter => 2,
+        every_variant_matches_the_baseline_with_the_f16_search_on_a_shared_vector_in_the_fourth_quarter => 3,
+    ]
+}
+
+fn f16_wide_storage_case() -> Case {
     let mut setup = chroma_cross_frame_setup(64, 64, 2);
     setup.f16_search = true;
 
-    assert_walks_agree("f16 chroma cross frame", &setup);
+    ("f16 chroma cross frame", setup)
+}
+
+variant_chunk_tests! {
+    assert_case_agrees(f16_wide_storage_case()), 6 chunks,
+    [
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_first_sixth => 0,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_second_sixth => 1,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_third_sixth => 2,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_fourth_sixth => 3,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_fifth_sixth => 4,
+        every_variant_matches_the_baseline_with_the_f16_search_on_wide_storage_in_the_sixth_sixth => 5,
+    ]
 }

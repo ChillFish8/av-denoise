@@ -7,14 +7,24 @@ use super::denoiser::{CompletedRegion, Nl4dDenoiser, buffer_sizes};
 use super::grain::GrainChunk;
 use super::options::{Nl4dOptions, resolve_params};
 use crate::collab::PATCH_SIZE;
-use crate::engine::{DevicePlane, EdgePadding, EgressSource, Engine, Geometry, WindowSpan, egress};
+use crate::engine::{
+    DevicePlane,
+    EdgePadding,
+    EgressSource,
+    Engine,
+    EngineTiming,
+    Geometry,
+    WindowSpan,
+    egress,
+};
 use crate::error::Error;
 use crate::nlmeans::denoiser::check_u32_indexable;
+use crate::tune::{EngineKernels, KernelSelector};
 
 /// Four-dimensional collaborative denoising over GPU planes.
-pub struct Nl4d<R: Runtime> {
-    inner: Nl4dDenoiser<R>,
-    client: ComputeClient<R>,
+pub struct Nl4d {
+    inner: Nl4dDenoiser,
+    client: Client,
     geometry: Geometry,
     temporal_radius: u32,
     /// Regions finished but not yet emitted, oldest first.
@@ -28,9 +38,20 @@ pub struct Nl4d<R: Runtime> {
     poisoned: bool,
 }
 
-impl<R: Runtime> Nl4d<R> {
+impl Nl4d {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
-    pub fn new(client: &ComputeClient<R>, options: Nl4dOptions, geometry: Geometry) -> Result<Self, Error> {
+    pub fn new(client: &Client, options: Nl4dOptions, geometry: Geometry) -> Result<Self, Error> {
+        let kernels = EngineKernels::default();
+        Self::with_kernels(client, options, geometry, kernels)
+    }
+
+    /// [Nl4d::new] with each launch site's candidate picked from `kernels`.
+    pub fn with_kernels(
+        client: &Client,
+        options: Nl4dOptions,
+        geometry: Geometry,
+        kernels: EngineKernels,
+    ) -> Result<Self, Error> {
         if geometry.width < PATCH_SIZE || geometry.height < PATCH_SIZE {
             let message = format!(
                 "frame dimensions {}x{} must be at least {PATCH_SIZE}x{PATCH_SIZE}",
@@ -59,7 +80,8 @@ impl<R: Runtime> Nl4d<R> {
         let indexable = check_u32_indexable(&sizes);
         indexable.map_err(Error::InvalidGeometry)?;
 
-        let inner = Nl4dDenoiser::new(client, params, geometry.width, geometry.height);
+        let selector = KernelSelector::new(client, kernels);
+        let inner = Nl4dDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
         let inner = inner.map_err(Error::InvalidOptions)?;
 
         Ok(Self {
@@ -130,7 +152,7 @@ impl<R: Runtime> Nl4d<R> {
         egress(&self.client, source, planes, self.geometry.output, placeholder);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn fail_through_guard_for_test(&mut self) -> Result<(), Error> {
         let failure = Err(anyhow::anyhow!("forced failure"));
 
@@ -138,7 +160,7 @@ impl<R: Runtime> Nl4d<R> {
     }
 }
 
-impl<R: Runtime> Engine for Nl4d<R> {
+impl Engine for Nl4d {
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error> {
         self.check_usable()?;
         self.check_nothing_pending()?;
@@ -240,5 +262,13 @@ impl<R: Runtime> Engine for Nl4d<R> {
 
         let drained = self.inner.drain_grain_chunks();
         self.guard(drained)
+    }
+
+    fn timing(&mut self) -> EngineTiming {
+        self.inner.timing()
+    }
+
+    fn sample_device_time(&mut self, every: u32) {
+        self.inner.sample_device_time(every);
     }
 }

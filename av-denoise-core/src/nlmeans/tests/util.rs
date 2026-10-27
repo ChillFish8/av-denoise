@@ -23,7 +23,7 @@ fn extreme_params_produce_finite_output() {
         hq: None,
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
     let result = denoiser.denoise().unwrap().unwrap();
 

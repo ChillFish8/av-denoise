@@ -20,13 +20,13 @@ use super::{
     stored_channels,
 };
 
-pub struct DistWeightRefBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct DistWeightRefBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
 
-impl<R: Runtime> Benchmark for DistWeightRefBench<R> {
+impl Benchmark for DistWeightRefBench {
     type Input = InputOutput;
     type Output = ();
 
@@ -52,13 +52,13 @@ impl<R: Runtime> Benchmark for DistWeightRefBench<R> {
         let inv_norm = h2_inv_norm();
 
         unsafe {
-            nlm_dist_2d_weight_ref::launch_unchecked::<R>(
+            nlm_dist_2d_weight_ref::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.output.clone(), pixels),
+                BufferArg::from_raw_parts(args.input.clone(), args.frame_len),
+                BufferArg::from_raw_parts(args.output.clone(), pixels),
                 0u32,
                 0u32,
                 Q_X,

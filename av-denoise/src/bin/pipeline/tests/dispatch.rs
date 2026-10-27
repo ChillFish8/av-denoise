@@ -38,7 +38,7 @@ fn dispatch_fails_on_a_forwarded_decode_error() {
         }
     });
 
-    let err = dispatch::<u8>(&frames_rx, &opened.info, &job_tx).expect_err("the error must surface");
+    let err = dispatch::<u8>(frames_rx.iter(), &opened.info, &job_tx).expect_err("the error must surface");
     drop(job_tx);
     drain.join().expect("drain panicked");
 

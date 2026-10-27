@@ -15,6 +15,7 @@ use av_denoise::{
     PlaneOptions,
     Planes,
     Subsampling,
+    TuningMode,
     push_needs_retry,
 };
 use clap::Parser;
@@ -62,6 +63,8 @@ fn plane_options(accelerators: &[Accelerator], device: &Device) -> PlaneOptions 
         chroma_strength: None,
         luma_lambda_ht: None,
         chroma_lambda_ht: None,
+        tuning: TuningMode::Off,
+        deterministic: false,
     }
 }
 

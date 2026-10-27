@@ -90,12 +90,12 @@ pub(crate) struct GrainExport {
     chunk_open: bool,
     last_completed: Option<Completed>,
     /// How many measured frames had a saved entry to their next frame.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     measured_with_entry: u32,
 }
 
 impl GrainExport {
-    pub(crate) fn new<R: Runtime>(client: &ComputeClient<R>, geometry: GrainGeometry) -> Self {
+    pub(crate) fn new(client: &Client, geometry: GrainGeometry) -> Self {
         let edges_host = bucket_edges();
         let saved_mv_host = vec![0i32; geometry.saved_mv_len()];
         let saved_conf_host = vec![0.0f32; geometry.saved_conf_len()];
@@ -119,7 +119,7 @@ impl GrainExport {
             chunks: Vec::new(),
             chunk_open: false,
             last_completed: None,
-            #[cfg(test)]
+            #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
             measured_with_entry: 0,
         }
     }
@@ -128,9 +128,9 @@ impl GrainExport {
     ///
     /// `next_neighbour` is the motion field's neighbour index of the frame after the centre,
     /// `None` when that frame is not a real frame of the same stream.
-    pub(in crate::nl4d) fn save_vectors<R: Runtime>(
+    pub(in crate::nl4d) fn save_vectors(
         &mut self,
-        client: &ComputeClient<R>,
+        client: &Client,
         fields: &LastFields,
         centre_slot: u32,
         next_neighbour: Option<u32>,
@@ -146,14 +146,14 @@ impl GrainExport {
         let conf_len = (fields.neighbours * fields.conf_stride) as usize;
 
         unsafe {
-            grain_save_vectors::launch_unchecked::<R>(
+            grain_save_vectors::launch_unchecked(
                 client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(SAVE_THREADS),
-                ArrayArg::from_raw_parts(fields.mv_field.clone(), mv_len),
-                ArrayArg::from_raw_parts(fields.confidence.clone(), conf_len),
-                ArrayArg::from_raw_parts(self.saved_mv.clone(), self.geometry.saved_mv_len()),
-                ArrayArg::from_raw_parts(self.saved_conf.clone(), self.geometry.saved_conf_len()),
+                BufferArg::from_raw_parts(fields.mv_field.clone(), mv_len),
+                BufferArg::from_raw_parts(fields.confidence.clone(), conf_len),
+                BufferArg::from_raw_parts(self.saved_mv.clone(), self.geometry.saved_mv_len()),
+                BufferArg::from_raw_parts(self.saved_conf.clone(), self.geometry.saved_conf_len()),
                 neighbour * fields.mv_stride,
                 neighbour * fields.conf_stride,
                 centre_slot,
@@ -168,9 +168,9 @@ impl GrainExport {
     /// Measures the frame that just completed into the newest chunk.
     ///
     /// `next_slot` is the ring slot of the next real frame, `None` for a stream's last frame.
-    pub(crate) fn measure<R: Runtime>(
+    pub(crate) fn measure(
         &mut self,
-        client: &ComputeClient<R>,
+        client: &Client,
         input: &Handle,
         outputs: &[Handle; 2],
         frame_slot: u32,
@@ -179,7 +179,7 @@ impl GrainExport {
     ) {
         let has_source = next_slot.is_some() && self.saved_valid[frame_slot as usize];
 
-        #[cfg(test)]
+        #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
         if self.saved_valid[frame_slot as usize] {
             self.measured_with_entry += 1;
         }
@@ -200,19 +200,19 @@ impl GrainExport {
         let cells_y = geometry.cells_y();
 
         unsafe {
-            grain_measure::launch_unchecked::<R>(
+            grain_measure::launch_unchecked(
                 client,
                 CubeCount::new_2d(cells_x, cells_y),
                 CubeDim::new_2d(CELL, CELL),
                 geometry.stored_ch as usize,
-                ArrayArg::from_raw_parts(input.clone(), ring_len),
-                ArrayArg::from_raw_parts(outputs[output_slot].clone(), frame_len),
-                ArrayArg::from_raw_parts(outputs[prev_output].clone(), frame_len),
-                ArrayArg::from_raw_parts(self.saved_mv.clone(), geometry.saved_mv_len()),
-                ArrayArg::from_raw_parts(self.saved_conf.clone(), geometry.saved_conf_len()),
-                ArrayArg::from_raw_parts(self.edges.clone(), EDGES_LEN),
-                ArrayArg::from_raw_parts(chunk_hist, 2 * HIST_LEN),
-                ArrayArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
+                BufferArg::from_raw_parts(input.clone(), ring_len),
+                BufferArg::from_raw_parts(outputs[output_slot].clone(), frame_len),
+                BufferArg::from_raw_parts(outputs[prev_output].clone(), frame_len),
+                BufferArg::from_raw_parts(self.saved_mv.clone(), geometry.saved_mv_len()),
+                BufferArg::from_raw_parts(self.saved_conf.clone(), geometry.saved_conf_len()),
+                BufferArg::from_raw_parts(self.edges.clone(), EDGES_LEN),
+                BufferArg::from_raw_parts(chunk_hist, 2 * HIST_LEN),
+                BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
                 frame_slot,
                 next_or_own_slot,
                 frame_slot,
@@ -227,12 +227,12 @@ impl GrainExport {
                 geometry.step,
             );
 
-            grain_reduce_partials::launch_unchecked::<R>(
+            grain_reduce_partials::launch_unchecked(
                 client,
                 CubeCount::new_1d(AUTOCOV_LEN as u32),
                 CubeDim::new_1d(REDUCE_THREADS),
-                ArrayArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
-                ArrayArg::from_raw_parts(chunk_autocov, GROUPED_AUTOCOV_LEN),
+                BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
+                BufferArg::from_raw_parts(chunk_autocov, GROUPED_AUTOCOV_LEN),
                 geometry.cells(),
             );
         }
@@ -250,7 +250,7 @@ impl GrainExport {
     }
 
     /// The newest chunk's histogram and autocovariance handles, opening a chunk when none is open.
-    fn open_chunk<R: Runtime>(&mut self, client: &ComputeClient<R>) -> (Handle, Handle) {
+    fn open_chunk(&mut self, client: &Client) -> (Handle, Handle) {
         if !self.chunk_open {
             let hist_host = vec![0i32; 2 * HIST_LEN];
             let autocov_host = vec![0.0f32; GROUPED_AUTOCOV_LEN];
@@ -270,7 +270,7 @@ impl GrainExport {
         (chunk.hist.clone(), chunk.autocov.clone())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn measured_with_entry(&self) -> u32 {
         self.measured_with_entry
     }
@@ -283,10 +283,7 @@ impl GrainExport {
     }
 
     /// Reads every chunk back, in order, and forgets them.
-    pub(crate) fn drain<R: Runtime>(
-        &mut self,
-        client: &ComputeClient<R>,
-    ) -> Result<Vec<GrainChunk>, anyhow::Error> {
+    pub(crate) fn drain(&mut self, client: &Client) -> Result<Vec<GrainChunk>, anyhow::Error> {
         let buffers = std::mem::take(&mut self.chunks);
         self.chunk_open = false;
 
@@ -300,10 +297,7 @@ impl GrainExport {
     }
 }
 
-fn read_chunk<R: Runtime>(
-    client: &ComputeClient<R>,
-    buffer: ChunkBuffers,
-) -> Result<GrainChunk, anyhow::Error> {
+fn read_chunk(client: &Client, buffer: ChunkBuffers) -> Result<GrainChunk, anyhow::Error> {
     let hist_bytes = client
         .read_one(buffer.hist)
         .map_err(|error| anyhow::anyhow!("grain histogram readback failed: {error}"))?;

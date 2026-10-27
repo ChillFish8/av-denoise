@@ -1,12 +1,15 @@
 use std::ops::Range;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Error, Result, anyhow, bail};
+use av_denoise::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest, is_tuned};
 use av_denoise::{
     EdgePadding,
     FrameLayout,
     MAX_PENDING,
     PlanarDenoiser,
+    PlaneOptions,
     Planes,
     ReseedWindow,
     WarmUp,
@@ -37,6 +40,8 @@ struct State {
     /// keeps the place until it exits, making other workers wait out the queue's limit before compiling
     /// for themselves, which is rare enough to accept.
     warm_up: Option<WarmUp>,
+    /// Set when this configuration has no stored tuning result, so the first request tunes.
+    tuning_pending: bool,
 }
 
 impl State {
@@ -49,17 +54,46 @@ impl State {
     }
 }
 
+/// How many filters are alive in this process.
+static LIVE_FILTERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts a filter as alive, and merges the kernel cache when the last one is dropped.
+///
+/// The plugin has no shutdown hook, so the last filter going away is the point where the kernels this
+/// process compiled reach the shared cache.
+struct LiveFilter;
+
+impl LiveFilter {
+    fn new() -> Self {
+        LIVE_FILTERS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for LiveFilter {
+    fn drop(&mut self) {
+        let previous = LIVE_FILTERS.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 {
+            av_denoise::merge_compilation_cache();
+        }
+    }
+}
+
 /// A denoising filter backed by one [PlanarDenoiser] stream shared by every request.
 ///
 /// `avd.NLMeans` and `avd.NL4D` both build one, differing only in the algorithm the denoiser runs.
 pub struct Denoise<'core> {
     source: Node<'core>,
     layout: FrameLayout,
+    /// The options the denoiser is rebuilt with once tuning is done, which carry no tuning ledger.
+    settled_options: PlaneOptions,
     geometry: StreamGeometry,
     /// Requests `get_frame_initial` has registered, kept apart from [State] so registering one never
     /// waits on GPU work.
     outstanding: Mutex<Outstanding>,
     state: Mutex<State>,
+    /// Declared last, so it is dropped after the denoiser.
+    _live: LiveFilter,
 }
 
 impl<'core> Denoise<'core> {
@@ -104,7 +138,8 @@ impl<'core> Denoise<'core> {
         };
 
         let layout = layout_from_format(raw_format, width, height)?;
-        let plane_options = plane_options_from(raw, algorithm_kind, layout)?;
+        let mut plane_options = plane_options_from(raw, algorithm_kind, layout)?;
+        plane_options.tuning = plane_options.tuning.with_env_override();
 
         // Av1an runs one of these per chunk, so without a cache every chunk pays the ten seconds it
         // takes to compile the kernels. The queue keeps the first wave of chunks from all paying it at
@@ -113,7 +148,26 @@ impl<'core> Denoise<'core> {
         let cache_key = av_denoise::kernel_key(&plane_options, layout);
         let warm_up = WarmUp::begin(cache_key);
 
-        let denoiser = PlanarDenoiser::create(&plane_options, layout)?;
+        let settled_tuning = plane_options.tuning.after_tuning();
+        let settled_options = PlaneOptions {
+            tuning: settled_tuning,
+            ..plane_options.clone()
+        };
+
+        let tuning_pending = !is_tuned(&plane_options, layout);
+        if tuning_pending {
+            tracing::warn!(
+                "no tuning results are stored for this device, so the first frame is slow while av-denoise \
+                 tunes. Run `av-denoise tune` with the same options beforehand to avoid it"
+            );
+        }
+
+        let build_options = if tuning_pending {
+            &plane_options
+        } else {
+            &settled_options
+        };
+        let denoiser = PlanarDenoiser::create(build_options, layout)?;
         let span = denoiser.window_span();
 
         let core_info = core.info();
@@ -132,14 +186,17 @@ impl<'core> Denoise<'core> {
             planner,
             buffer: OutputBuffer::new(),
             warm_up,
+            tuning_pending,
         };
 
         Ok(Self {
             source,
             layout,
+            settled_options,
             geometry,
             outstanding: Mutex::new(Outstanding::default()),
             state: Mutex::new(state),
+            _live: LiveFilter::new(),
         })
     }
 
@@ -164,6 +221,11 @@ impl<'core> Denoise<'core> {
         n: usize,
         fetch: &impl Fn(usize) -> Result<Planes, Error>,
     ) -> Result<Planes, Error> {
+        if state.tuning_pending {
+            self.tune_on(state, n, fetch);
+            self.settle(state);
+        }
+
         let buffered = state.buffer.contains(n);
         let plan = {
             let outstanding = self.outstanding.lock().expect("outstanding mutex poisoned");
@@ -193,6 +255,58 @@ impl<'core> Denoise<'core> {
         state.finish_warm_up();
 
         Ok(denoised)
+    }
+
+    /// Tunes the denoiser on the frames VapourSynth holds for request `n`, once.
+    ///
+    /// The frames the request already asked for are the tuning frames, looped as needed. Tuning
+    /// never fails the request.
+    fn tune_on(&self, state: &mut State, n: usize, fetch: &impl Fn(usize) -> Result<Planes, Error>) {
+        state.tuning_pending = false;
+
+        let range = self.geometry.request_range(n);
+        let indices: Vec<usize> = range.collect();
+        let fetched = fetch_all(&indices, fetch);
+        let window = match fetched {
+            Ok(window) => window,
+            Err(error) => {
+                tracing::warn!(%error, "cannot fetch frames to tune on, using the untuned kernels");
+                return;
+            },
+        };
+
+        let clip_frames = self.geometry.last_frame as u64 + 1;
+        let request = TuneRequest {
+            budget: BudgetRequest::Automatic {
+                frames: Some(clip_frames),
+            },
+            force: false,
+            mode: SearchMode::Families,
+        };
+        let report = state.denoiser.tune(&window, &request);
+
+        match report.outcome {
+            TuneOutcome::Tuned => tracing::warn!(
+                keys = report.tuned_keys,
+                partial_keys = report.partial_keys,
+                "av-denoise finished tuning"
+            ),
+            TuneOutcome::AlreadyTuned => {},
+            TuneOutcome::Skipped(reason) => tracing::info!(%reason, "av-denoise did not tune"),
+        }
+    }
+
+    /// Rebuilds the denoiser without its tuning ledger, and the stream with it.
+    fn settle(&self, state: &mut State) {
+        let rebuilt = PlanarDenoiser::create(&self.settled_options, self.layout);
+        match rebuilt {
+            Ok(denoiser) => state.denoiser = denoiser,
+            Err(error) => {
+                tracing::warn!(%error, "cannot rebuild the denoiser after tuning, keeping the tuned one")
+            },
+        }
+
+        state.planner.kill();
     }
 
     /// Rebuilds the stream so it has produced output `start`, buffering it and any clip-end tail.

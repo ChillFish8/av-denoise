@@ -1,13 +1,10 @@
 use cubecl::prelude::*;
-use cubecl::wgpu::WgpuRuntime;
 
 use crate::engine::{DevicePlane, EgressSource, IngestTarget, SampleFormat, egress, ingest};
 
-type R = WgpuRuntime;
-
-fn client() -> ComputeClient<R> {
-    let device = <R as Runtime>::Device::default();
-    R::client(&device)
+fn client() -> Client {
+    crate::tests::compilation_cache::install_test_compilation_cache();
+    crate::testing::test_client()
 }
 
 /// Sample codes where the first three pixels are always 0, `max` and `max - 1`.

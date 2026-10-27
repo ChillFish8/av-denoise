@@ -4,6 +4,7 @@ mod list_devices;
 mod motion;
 mod nl4d;
 mod nlmeans;
+mod tune;
 
 use std::path::PathBuf;
 
@@ -18,6 +19,7 @@ pub use self::list_devices::run_list_devices;
 pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
+pub use self::tune::{TuneArgs, run_tune};
 
 /// The options a denoising run takes.
 #[derive(Debug, Clone)]
@@ -27,6 +29,12 @@ pub struct RunOptions {
     pub progress: bool,
     /// Where to write the AV1 film grain table, when one was asked for.
     pub grain_table: Option<PathBuf>,
+    /// Seconds tuning may take, when the user set a budget.
+    pub tune_budget: Option<f64>,
+    /// Whether to print the timing report at the end of the run.
+    pub timing_report: bool,
+    /// Whether every worker shares one wgpu device.
+    pub shared_device: bool,
 }
 
 /// Which planes to clean up.
@@ -188,6 +196,13 @@ pub enum Command {
     /// Motion tracking is always on, and every preset keeps a temporal
     /// window, which this algorithm needs.
     Nl4d(Nl4dArgs),
+
+    /// Tune the kernels for this device ahead of a denoising run.
+    ///
+    /// Denoising runs tune on their own first frames when nothing is stored, which slows their
+    /// start. Running this once beforehand, with the same options and a representative clip,
+    /// moves that cost out of the encode. `--show` prints what is stored and `--clear` deletes it.
+    Tune(TuneArgs),
 
     /// List the devices each backend can see on this machine.
     ///

@@ -31,8 +31,8 @@ pub(super) struct LastFields {
 }
 
 /// Reads `fields` back and unpacks each neighbour's slice.
-pub(super) fn read_snapshot<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(super) fn read_snapshot(
+    client: &Client,
     fields: &LastFields,
     radius: u32,
     blocks_x: u32,

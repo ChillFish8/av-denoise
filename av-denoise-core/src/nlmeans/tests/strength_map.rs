@@ -1,4 +1,4 @@
-use super::helpers::{R, make_client};
+use super::helpers::make_client;
 use super::noise_curve::{
     SyntheticQuarter,
     banded_noisy_frame,
@@ -10,7 +10,8 @@ use super::noise_curve::{
 };
 use crate::bench_api::HostIo;
 use crate::collab::geometry::strength_map_dims;
-use crate::nlmeans::noise::{
+use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, NlmDenoiser, NlmParams, PrefilterMode};
+use crate::noise::{
     NOISE_CURVE_BINS,
     NoiseCurve,
     QuarterClass,
@@ -18,11 +19,11 @@ use crate::nlmeans::noise::{
     QuarterSettings,
     QuarterTensor,
     StrengthMapParams,
+    UNMEASURED_FLATNESS,
     classify_quarters,
     temporal_noise_reading,
     temporal_stats_record_len,
 };
-use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, NlmDenoiser, NlmParams, PrefilterMode};
 
 const SIGMA: f32 = 0.02;
 
@@ -150,7 +151,7 @@ fn clipped_quarters_are_not_flat() {
 #[test]
 fn a_ragged_quarter_is_not_flat() {
     let ragged = SyntheticQuarter {
-        flatness: 3.0e38,
+        flatness: UNMEASURED_FLATNESS,
         ..quarter_at(0.3, SIGMA)
     };
     let flat = is_flat(ragged);
@@ -354,7 +355,7 @@ fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.set_luma_noise_fields(true);
 
     let mut classes_seen = false;
@@ -364,7 +365,7 @@ fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
         let _ = denoiser.denoise().unwrap();
 
         let curve_present = denoiser.current_noise_curve().is_some();
-        let classes_present = denoiser.current_quarter_classes().is_some();
+        let classes_present = denoiser.current_classes_present();
         assert_eq!(curve_present, classes_present, "push {i}");
         classes_seen |= classes_present;
     }
@@ -372,7 +373,8 @@ fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
     assert!(classes_seen, "expected classes to form over the brightness ramp");
 
     denoiser.reset_stream_state();
-    assert!(denoiser.current_quarter_classes().is_none());
+    let classes_after_reset = denoiser.current_classes_present();
+    assert!(!classes_after_reset);
 }
 
 #[test]
@@ -632,7 +634,7 @@ fn the_front_end_rounds_the_line_ring_up_to_whole_quarters() {
             sigma_scale: 1.0,
         }),
     };
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, 64, 64);
+    let mut denoiser = NlmDenoiser::new(&client, params, 64, 64);
     let cases = [
         (None, None),
         (Some(0), None),

@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 
 use super::helpers::*;
 use crate::bench_api::HostIo;
-use crate::nlmeans::motion::neighbour_idx_for_k;
+use crate::motion::{neighbour_idx_for_k, sad_noise_floor};
 use crate::nlmeans::*;
 
 const RADIUS: u32 = 2;
@@ -54,9 +54,9 @@ fn machinery_params() -> NlmParams {
 
 /// Pushes `2 * RADIUS + 1` frames of a world translating one pixel per frame, exactly filling the
 /// window.
-fn push_translating_sequence(client: &ComputeClient<R>) -> NlmDenoiser<R> {
+fn push_translating_sequence(client: &Client) -> NlmDenoiser {
     let params = machinery_params();
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, SIZE, SIZE);
+    let mut denoiser = NlmDenoiser::new(client, params, SIZE, SIZE);
     let total_frames = 2 * RADIUS + 1;
     for frame_index in 0..total_frames {
         let frame = translating_frame(SIZE, frame_index as i32);
@@ -126,7 +126,7 @@ fn submit_machinery_reports_ring_view_with_correct_motion_and_confidence() {
 
     assert!(
         confidence.is_finite() && (0.0..=1.0).contains(&confidence),
-        "confidence must be finite and in [0, 1], got {confidence}"
+        "confidence must be finite and in 0.0..=1.0, got {confidence}"
     );
     assert!(
         confidence > 0.5,
@@ -222,14 +222,20 @@ fn ring_view_exposes_the_analysed_pyramid_and_the_noise_floor() {
     let bytes = client.read_one(pyramid).expect("pyramid readback failed");
     let plane = bytes.len() / (frames as usize * size_of::<f32>());
     assert!(plane > 0, "the pyramid must hold at least one plane per slot");
-    assert!(denoiser.sad_noise_floor_value() >= 0.0);
+
+    let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+    let floor_sigma = mc_sad_noise_floor_sigma(PrefilterMode::None, 4.0 / 255.0);
+    let expected_floor = sad_noise_floor(DEFAULT_BLKSIZE_FOR_TEST, floor_sigma);
+    let floor_bits = snapshot.derived.sad_noise_floor.to_bits();
+    let expected_bits = expected_floor.to_bits();
+    assert_eq!(floor_bits, expected_bits, "the pinned sigma's SAD floor");
 }
 
 #[test]
 fn submit_machinery_none_while_window_is_filling() {
     let client = make_client();
     let params = machinery_params();
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, SIZE, SIZE);
+    let mut denoiser = NlmDenoiser::new(&client, params, SIZE, SIZE);
 
     // Fewer than `2 * RADIUS + 1` pushes, so the window never fills.
     for frame_index in 0..RADIUS {

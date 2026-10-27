@@ -4,12 +4,22 @@ use cubecl::server::Handle;
 use super::denoiser::{GpuOutput, NlmDenoiser, check_u32_indexable, front_buffer_sizes};
 use super::options::{NlmeansAlgorithm, resolve_params};
 use super::params::validate_dimensions;
-use crate::engine::{DevicePlane, EdgePadding, EgressSource, Engine, Geometry, WindowSpan, egress};
+use crate::engine::{
+    DevicePlane,
+    EdgePadding,
+    EgressSource,
+    Engine,
+    EngineTiming,
+    Geometry,
+    WindowSpan,
+    egress,
+};
 use crate::error::Error;
+use crate::tune::{EngineKernels, KernelSelector};
 
 /// Non-local means over GPU planes.
-pub struct Nlmeans<R: Runtime> {
-    front: NlmDenoiser<R>,
+pub struct Nlmeans {
+    front: NlmDenoiser,
     geometry: Geometry,
     /// The finished frame waiting for `emit_into`, if any.
     ready: Option<Handle>,
@@ -20,12 +30,19 @@ pub struct Nlmeans<R: Runtime> {
     poisoned: bool,
 }
 
-impl<R: Runtime> Nlmeans<R> {
+impl Nlmeans {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
-    pub fn new(
-        client: &ComputeClient<R>,
+    pub fn new(client: &Client, algorithm: NlmeansAlgorithm, geometry: Geometry) -> Result<Self, Error> {
+        let kernels = EngineKernels::default();
+        Self::with_kernels(client, algorithm, geometry, kernels)
+    }
+
+    /// [Nlmeans::new] with each launch site's candidate picked from `kernels`.
+    pub fn with_kernels(
+        client: &Client,
         algorithm: NlmeansAlgorithm,
         geometry: Geometry,
+        kernels: EngineKernels,
     ) -> Result<Self, Error> {
         geometry.validate()?;
 
@@ -49,7 +66,8 @@ impl<R: Runtime> Nlmeans<R> {
         let indexable = check_u32_indexable(&sizes.buffers);
         indexable.map_err(Error::InvalidGeometry)?;
 
-        let front = NlmDenoiser::new(client, params, geometry.width, geometry.height);
+        let selector = KernelSelector::new(client, kernels);
+        let front = NlmDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
 
         Ok(Self {
             front,
@@ -125,7 +143,7 @@ impl<R: Runtime> Nlmeans<R> {
         egress(client, source, planes, self.geometry.output, placeholder);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn fail_through_guard_for_test(&mut self) -> Result<(), Error> {
         let failure = Err(anyhow::anyhow!("forced failure"));
 
@@ -133,7 +151,7 @@ impl<R: Runtime> Nlmeans<R> {
     }
 }
 
-impl<R: Runtime> Engine for Nlmeans<R> {
+impl Engine for Nlmeans {
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error> {
         self.check_usable()?;
         self.check_nothing_pending()?;
@@ -218,5 +236,13 @@ impl<R: Runtime> Engine for Nlmeans<R> {
 
     fn max_held_frames(&self) -> usize {
         self.front.params.temporal_radius as usize
+    }
+
+    fn timing(&mut self) -> EngineTiming {
+        self.front.timing()
+    }
+
+    fn sample_device_time(&mut self, every: u32) {
+        self.front.sample_device_time(every);
     }
 }

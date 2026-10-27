@@ -1,21 +1,30 @@
 use super::{
     Digest,
     Setup,
+    assert_listed_variants_match_recorded,
     assert_matches_recorded,
     cross_frame_setup,
     five_frame_ring_with_jittered_copies,
     run_fused,
     unique_frame,
 };
+use crate::collab::kernels::fused::CollabVariant;
 use crate::collab::tests::helpers::noisy_flat_field;
+use crate::tune::tests::fixtures::variant_chunk_tests;
+
+/// One labelled launch with the digest every variant must reproduce.
+type RecordedCase = (&'static str, Setup, Digest);
+
+fn assert_case_matches_recorded(case: RecordedCase, variants: &[CollabVariant]) {
+    let (label, setup, want) = case;
+    assert_listed_variants_match_recorded(label, &setup, &want, variants);
+}
 
 /// Content without ties, so nothing about the result depends on how the insert breaks one.
-#[test]
-fn fused_reproduces_recorded_output_on_unique_content() {
+fn on_unique_content_case() -> RecordedCase {
     let (width, height) = (128u32, 96u32);
     let frame = unique_frame(width, height);
     let setup = Setup::spatial_only(frame, width, height);
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 12288,
         pixel_mean: 0.500102660422,
@@ -33,14 +42,13 @@ fn fused_reproduces_recorded_output_on_unique_content() {
         ],
     };
 
-    assert_matches_recorded("unique content", &got, &want);
+    ("unique content", setup, want)
 }
 
 /// The unique frame ramps along x, so a one-column shift costs far more than a one-row shift and
 /// the search rectangle's x extent never decides anything. Transposing it makes the horizontal
 /// bounds load-bearing.
-#[test]
-fn fused_reproduces_recorded_output_on_a_transposed_ramp() {
+fn on_a_transposed_ramp_case() -> RecordedCase {
     let (width, height) = (128u32, 96u32);
     let source = unique_frame(height, width);
     let mut frame = vec![0.0f32; (width * height) as usize];
@@ -51,7 +59,6 @@ fn fused_reproduces_recorded_output_on_a_transposed_ramp() {
     }
 
     let setup = Setup::spatial_only(frame, width, height);
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 12288,
         pixel_mean: 0.500026936557,
@@ -69,20 +76,18 @@ fn fused_reproduces_recorded_output_on_a_transposed_ramp() {
         ],
     };
 
-    assert_matches_recorded("transposed ramp", &got, &want);
+    ("transposed ramp", setup, want)
 }
 
-/// 104 pixels wide gives 25 reference patches at `STEP = 4`, so the fourth cube of each row runs one
-/// live group and seven dead ones.
+/// 104 pixels wide gives 25 reference patches at `STEP = 4`, so the last cube of each row runs dead
+/// groups at every group count.
 ///
 /// The dead groups must reach every barrier and write nothing. One that scattered would double the
 /// last reference's contribution and move a pixel.
-#[test]
-fn fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight() {
+fn when_refs_are_not_a_multiple_of_eight_case() -> RecordedCase {
     let (width, height) = (104u32, 96u32);
     let frame = unique_frame(width, height);
     let setup = Setup::spatial_only(frame, width, height);
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 9984,
         pixel_mean: 0.500121022858,
@@ -100,7 +105,7 @@ fn fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight() {
         ],
     };
 
-    assert_matches_recorded("ragged reference row", &got, &want);
+    ("ragged reference row", setup, want)
 }
 
 /// At `spatial_radius = 1` a corner reference sees 2x2 candidates and an edge one 2x3, both keeping
@@ -108,13 +113,11 @@ fn fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight() {
 ///
 /// Every wider configuration fills every group to eight, so this is the run where the 2- and
 /// 4-member ladders execute.
-#[test]
-fn fused_reproduces_recorded_output_on_a_short_search_space() {
+fn on_a_short_search_space_case() -> RecordedCase {
     let (width, height) = (64u32, 64u32);
     let frame = unique_frame(width, height);
     let mut setup = Setup::spatial_only(frame, width, height);
     setup.spatial_radius = 1;
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 4096,
         pixel_mean: 0.500333883408,
@@ -132,17 +135,15 @@ fn fused_reproduces_recorded_output_on_a_short_search_space() {
         ],
     };
 
-    assert_matches_recorded("short search space", &got, &want);
+    ("short search space", setup, want)
 }
 
 /// Noise over a flat field has no ramp to separate candidates, so the self-match sentinel and the
 /// first-wins insert decide the member set.
-#[test]
-fn fused_reproduces_recorded_output_on_noise() {
+fn on_noise_case() -> RecordedCase {
     let (width, height) = (64u32, 64u32);
     let frame = noisy_flat_field(width, height, 0.5, 0.05);
     let setup = Setup::spatial_only(frame, width, height);
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 4096,
         pixel_mean: 0.500598531425,
@@ -160,7 +161,7 @@ fn fused_reproduces_recorded_output_on_noise() {
         ],
     };
 
-    assert_matches_recorded("noise", &got, &want);
+    ("noise", setup, want)
 }
 
 /// The kernel applies the correlation profile at the threshold, while the recording applied it to
@@ -169,13 +170,11 @@ fn fused_reproduces_recorded_output_on_noise() {
 /// The ladder only averages and the profile is constant along the stack axis, so both orders agree
 /// in exact arithmetic. Every other run uses the all-ones `rho = 0` profile, which cannot tell them
 /// apart. `0.86` is the shipped table's high end.
-#[test]
-fn fused_reproduces_recorded_output_under_correlation_shaping() {
+fn under_correlation_shaping_case() -> RecordedCase {
     let (width, height) = (64u32, 64u32);
     let frame = noisy_flat_field(width, height, 0.5, 0.05);
     let mut setup = Setup::spatial_only(frame, width, height);
     setup.rho = 0.86;
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 4096,
         pixel_mean: 0.500501375321,
@@ -193,7 +192,7 @@ fn fused_reproduces_recorded_output_under_correlation_shaping() {
         ],
     };
 
-    assert_matches_recorded("correlation shaping", &got, &want);
+    ("correlation shaping", setup, want)
 }
 
 /// Covers the `c_min` skip, the volume grid with its single-frame fallback, and the scatter into
@@ -203,10 +202,8 @@ fn fused_reproduces_recorded_output_under_correlation_shaping() {
 /// at, and the confidences straddle `c_min`, so some groups build a grid and others fall back. No
 /// second implementation exists, so the digest is this kernel's own output. It carries real,
 /// non-zero coverage, which a silently broken shader cannot reproduce.
-#[test]
-fn fused_reproduces_recorded_output_across_frames() {
+fn across_frames_case() -> RecordedCase {
     let setup = cross_frame_setup(64, 64, 2);
-    let got = run_fused(&setup);
     let want = Digest {
         covered: 16453,
         pixel_mean: 0.441598762473,
@@ -224,7 +221,77 @@ fn fused_reproduces_recorded_output_across_frames() {
         ],
     };
 
-    assert_matches_recorded("cross frame", &got, &want);
+    ("cross frame", setup, want)
+}
+
+variant_chunk_tests! {
+    assert_case_matches_recorded(on_unique_content_case()), 4 chunks,
+    [
+        fused_reproduces_recorded_output_on_unique_content_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_on_unique_content_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_on_unique_content_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_on_unique_content_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_matches_recorded(on_a_transposed_ramp_case()), 4 chunks,
+    [
+        fused_reproduces_recorded_output_on_a_transposed_ramp_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_on_a_transposed_ramp_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_on_a_transposed_ramp_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_on_a_transposed_ramp_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_matches_recorded(when_refs_are_not_a_multiple_of_eight_case()), 4 chunks,
+    [
+        fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_when_refs_are_not_a_multiple_of_eight_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_matches_recorded(on_a_short_search_space_case()), 4 chunks,
+    [
+        fused_reproduces_recorded_output_on_a_short_search_space_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_on_a_short_search_space_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_on_a_short_search_space_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_on_a_short_search_space_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_matches_recorded(on_noise_case()), 4 chunks,
+    [
+        fused_reproduces_recorded_output_on_noise_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_on_noise_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_on_noise_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_on_noise_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_matches_recorded(under_correlation_shaping_case()), 4 chunks,
+    [
+        fused_reproduces_recorded_output_under_correlation_shaping_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_under_correlation_shaping_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_under_correlation_shaping_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_under_correlation_shaping_in_the_fourth_quarter => 3,
+    ]
+}
+
+variant_chunk_tests! {
+    assert_case_matches_recorded(across_frames_case()), 4 chunks,
+    [
+        fused_reproduces_recorded_output_across_frames_in_the_first_quarter => 0,
+        fused_reproduces_recorded_output_across_frames_in_the_second_quarter => 1,
+        fused_reproduces_recorded_output_across_frames_in_the_third_quarter => 2,
+        fused_reproduces_recorded_output_across_frames_in_the_fourth_quarter => 3,
+    ]
 }
 
 /// Each neighbour holds the centre plus its own jitter, so every volume keeps a different three of

@@ -1,7 +1,5 @@
 use av_denoise_core::{ChannelMode, DenoisingMode, NlmTuning, NlmeansOptions};
 
-use crate::backend::Device;
-use crate::backend::accelerate::Accelerator;
 use crate::host::{Algorithm, DenoiserOptions, HostDenoiser, Pending, TryWait};
 
 /// A spatial luma denoiser with small radii, since wide kernels cost codegen stack.
@@ -22,8 +20,9 @@ fn spatial_luma(size: u32) -> HostDenoiser {
         .algorithm(algorithm)
         .build();
 
-    HostDenoiser::create(&[Accelerator::Vulkan], &Device::Default, size, size, options)
-        .expect("denoiser construction failed")
+    let accelerator = crate::testing::test_accelerator();
+    let device = crate::testing::test_device();
+    HostDenoiser::create(&[accelerator], &device, size, size, options).expect("denoiser construction failed")
 }
 
 /// Pushes one uniform frame and takes its readback out of the denoiser.

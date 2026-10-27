@@ -9,8 +9,10 @@ mod kernels;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
+use av_denoise_core::bench_api::tune_sites::RegulariseCandidate;
 use av_denoise_core::bench_api::{Device, HostIo, NlmDenoiser, NlmParams, start_read, wait_read};
-use av_denoise_core::{ChannelMode, MotionCompensationMode, MotionEstimation, PrefilterMode};
+use av_denoise_core::tune::SiteCandidate;
+use av_denoise_core::{ChannelMode, MotionCompensationMode, MotionEstimation, PrefilterMode, testing};
 use clap::Parser;
 use cubecl::prelude::*;
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
@@ -19,7 +21,7 @@ use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
 use kernels::mv_regularise::MvRegulariseBench;
-use kernels::{CHANNELS, make_synthetic_frame, print_header, run};
+use kernels::{BENCH_NEIGHBOURS, CHANNELS, make_synthetic_frame, print_header, run};
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
@@ -49,10 +51,10 @@ impl BenchResult {
     }
 }
 
-fn run_pipeline_bench<R: Runtime>(
+fn run_pipeline_bench(
     name: &str,
     backend: &str,
-    client: &ComputeClient<R>,
+    client: &Client,
     warmup: usize,
     iterations: usize,
     mut step: impl FnMut(),
@@ -133,8 +135,8 @@ fn mc_chained_default() -> MotionCompensationMode {
 ///
 /// Each frame is pushed, denoised and waited on inline before the next push, so the per-frame
 /// number is the full critical-path cost.
-fn bench_eager<R: Runtime>(
-    client: &ComputeClient<R>,
+fn bench_eager(
+    client: &Client,
     backend: &str,
     radius: u32,
     channels: ChannelMode,
@@ -148,7 +150,7 @@ fn bench_eager<R: Runtime>(
     let total_frames = 1 + 2 * params.temporal_radius as usize;
     let name = format!("denoise_temporal{tag}_1080p_{channel_name}");
 
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, WIDTH, HEIGHT);
+    let mut denoiser = NlmDenoiser::new(client, params, WIDTH, HEIGHT);
     for _ in 0..total_frames - 1 {
         denoiser.push_frame(&frame);
     }
@@ -167,8 +169,8 @@ fn bench_eager<R: Runtime>(
 ///
 /// Frame N+1's kernels are submitted before frame N's readback completes, so GPU and host work
 /// overlap.
-fn bench_pipelined<R: Runtime>(
-    client: &ComputeClient<R>,
+fn bench_pipelined(
+    client: &Client,
     backend: &str,
     radius: u32,
     channels: ChannelMode,
@@ -182,7 +184,7 @@ fn bench_pipelined<R: Runtime>(
     let total_frames = 1 + 2 * params.temporal_radius as usize;
     let name = format!("denoise_temporal_pipelined{tag}_1080p_{channel_name}");
 
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, WIDTH, HEIGHT);
+    let mut denoiser = NlmDenoiser::new(client, params, WIDTH, HEIGHT);
     for _ in 0..total_frames - 1 {
         denoiser.push_frame(&frame);
     }
@@ -213,7 +215,7 @@ fn bench_pipelined<R: Runtime>(
     result
 }
 
-fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
+fn run_kernels(backend: &str, client: &Client) {
     println!();
     println!("--- {backend}: MC kernels ---");
     print_header();
@@ -221,18 +223,32 @@ fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
     run(DownscaleBench {
         client: client.clone(),
     });
-    run(BlockMatchCoarseBench {
-        client: client.clone(),
-    });
-    run(BlockMatchFineBench {
-        client: client.clone(),
-    });
-    run(McConfidenceBench {
-        client: client.clone(),
-    });
-    run(MvRegulariseBench {
-        client: client.clone(),
-    });
+
+    for &neighbours in BENCH_NEIGHBOURS {
+        run(BlockMatchCoarseBench {
+            client: client.clone(),
+            neighbours,
+        });
+        run(BlockMatchFineBench {
+            client: client.clone(),
+            neighbours,
+        });
+        run(McConfidenceBench {
+            client: client.clone(),
+            neighbours,
+        });
+    }
+
+    for &neighbours in BENCH_NEIGHBOURS {
+        for &candidate in RegulariseCandidate::ALL {
+            run(MvRegulariseBench {
+                client: client.clone(),
+                candidate,
+                neighbours,
+                static_field: false,
+            });
+        }
+    }
 
     for &(channels, channel_name) in CHANNELS {
         run(WarpBench {
@@ -247,7 +263,7 @@ fn run_kernels<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
 ///
 /// The rows cover with and without motion compensation, eager and pipelined, so the cost delta is
 /// visible at a glance.
-fn run_pipelines<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
+fn run_pipelines(backend: &str, client: &Client) {
     println!();
     println!("--- {backend}: temporal pipeline (with vs without MC) ---");
 
@@ -264,11 +280,11 @@ fn run_pipelines<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
 
     for &(channel_name, mode) in &channel_modes {
         for &(variant, tag) in variants {
-            let eager = bench_eager::<R>(client, backend, TEMPORAL_RADIUS, mode, channel_name, variant, tag);
+            let eager = bench_eager(client, backend, TEMPORAL_RADIUS, mode, channel_name, variant, tag);
             eager.print();
 
             let pipelined =
-                bench_pipelined::<R>(client, backend, TEMPORAL_RADIUS, mode, channel_name, variant, tag);
+                bench_pipelined(client, backend, TEMPORAL_RADIUS, mode, channel_name, variant, tag);
             pipelined.print();
         }
     }
@@ -281,7 +297,7 @@ fn run_pipelines<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
 /// The cost delta lives entirely in the motion compensation path rather than per-channel weighting,
 /// so extra channels would add bench time without adding signal. Eager and pipelined rows for each
 /// radius and strategy print side by side.
-fn run_mc_estimation_comparison<R: Runtime>(backend: &str, client: &ComputeClient<R>) {
+fn run_mc_estimation_comparison(backend: &str, client: &Client) {
     println!();
     println!("--- {backend}: MC estimation comparison (direct vs chained, r2/r4) ---");
 
@@ -291,11 +307,11 @@ fn run_mc_estimation_comparison<R: Runtime>(backend: &str, client: &ComputeClien
         for (variant, label) in [(direct, "direct"), (chained, "chained")] {
             let tag = format!("_mc_r{radius}_{label}");
 
-            let eager = bench_eager::<R>(client, backend, radius, ChannelMode::Luma, "luma", variant, &tag);
+            let eager = bench_eager(client, backend, radius, ChannelMode::Luma, "luma", variant, &tag);
             eager.print();
 
             let pipelined =
-                bench_pipelined::<R>(client, backend, radius, ChannelMode::Luma, "luma", variant, &tag);
+                bench_pipelined(client, backend, radius, ChannelMode::Luma, "luma", variant, &tag);
             pipelined.print();
         }
     }
@@ -303,11 +319,10 @@ fn run_mc_estimation_comparison<R: Runtime>(backend: &str, client: &ComputeClien
     println!();
 }
 
-fn run_all<R: Runtime>(backend: &str, device: &R::Device) {
-    let client = R::client(device);
-    run_kernels::<R>(backend, &client);
-    run_pipelines::<R>(backend, &client);
-    run_mc_estimation_comparison::<R>(backend, &client);
+fn run_all(backend: &str, client: &Client) {
+    run_kernels(backend, client);
+    run_pipelines(backend, client);
+    run_mc_estimation_comparison(backend, client);
 }
 
 #[derive(clap::Parser, Debug)]
@@ -328,17 +343,9 @@ fn main() {
     println!("Motion-Compensation Benchmarks - 1920x1080");
     println!("  pipeline: warmup={WARMUP_PIPELINE}, timed={ITERS_PIPELINE}");
 
-    #[cfg(feature = "vulkan")]
-    {
-        let device = cli.device.to_wgpu().expect("wgpu device conversion failed");
-        println!("  device:   {device:?}");
-        run_all::<cubecl::wgpu::WgpuRuntime>("vulkan", &device);
-    }
-
-    #[cfg(not(feature = "vulkan"))]
-    {
-        let _ = cli;
-        eprintln!("No GPU backend enabled. Run with --features vulkan");
-        std::process::exit(1);
-    }
+    let accelerator = testing::test_accelerator();
+    let device = testing::device_on(accelerator, cli.device);
+    println!("  device:   {device:?}");
+    let client = device.client();
+    run_all(accelerator, &client);
 }

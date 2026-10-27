@@ -3,12 +3,11 @@
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
-use av_denoise::accelerate::Accelerator;
-use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Device, Nl4dOptions, PlaneOptions};
+use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Nl4dOptions, PlaneOptions, TuningMode};
 
 use super::{SharedBuffer, grainy_clip, multi_scene_clip};
-use crate::pipeline::run_with;
 use crate::pipeline::source::open_y4m;
+use crate::pipeline::{RunSettings, run_with};
 
 /// A directory unique to one test, removed when it drops.
 struct TestDir(PathBuf);
@@ -40,8 +39,8 @@ fn nl4d_opts(grain_export: bool) -> PlaneOptions {
     };
 
     PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![av_denoise::testing::test_accelerator()],
+        device: av_denoise::testing::test_device(),
         intent: ChannelIntent::LumaChroma,
         mode: DenoisingMode::Temporal { radius: 1 },
         algorithm: Algorithm::Nl4d(algorithm),
@@ -49,6 +48,8 @@ fn nl4d_opts(grain_export: bool) -> PlaneOptions {
         chroma_strength: None,
         luma_lambda_ht: None,
         chroma_lambda_ht: None,
+        tuning: TuningMode::Off,
+        deterministic: false,
     }
 }
 
@@ -62,8 +63,17 @@ fn run(bytes: Vec<u8>, workers: usize, table: Option<PathBuf>) -> Result<Vec<u8>
         let reader: Box<dyn Read> = Box::new(cursor);
         open_y4m(reader)
     };
+    let settings = RunSettings {
+        workers,
+        frame_budget_bytes: 1 << 30,
+        visible: false,
+        grain_table: table,
+        tune_budget: None,
+        timing_report: false,
+        shared_device: false,
+    };
 
-    run_with(&options, opener, workers, 1 << 30, false, writer, table)?;
+    run_with(&options, opener, settings, writer)?;
 
     let written = output.0.lock().expect("buffer lock").clone();
 

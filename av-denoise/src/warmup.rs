@@ -1,15 +1,15 @@
 //! Lets one process fill a cold kernel cache while the others wait
 //!
 //! CubeCL compiles a kernel the first time it is dispatched and writes it to the cache that
-//! [install_compilation_cache](crate::install_compilation_cache) points it at. The cache's table of
-//! contents is a snapshot taken when the GPU client is built, so a process that starts while another
-//! is still compiling shares nothing with it, pays the full compilation cost again and writes its
-//! own copy of the same kernels.
+//! [install_compilation_cache](crate::install_compilation_cache) points it at. A process that starts
+//! while another is still compiling misses every kernel the other has not stored yet, so it pays
+//! most of the compilation cost again and writes its own copy of the same kernels.
 //!
 //! [WarmUp] holds a lock file next to the cache while the first process compiles, and the rest
-//! block on it, so each waiting process builds its own client after the wait, when the cache
-//! already holds every kernel. A finished run leaves a stamp file behind, so later processes skip
-//! the lock entirely.
+//! block on it. Each process works on a private copy of the cache, so the first process merges its
+//! kernels into the shared cache when it finishes, and leaves a stamp file behind. A waiting process
+//! then copies the merged kernels into its private copy and builds its client, so it loads every
+//! kernel rather than compiling it. Later processes see the stamp and skip the lock entirely.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions, TryLockError};
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use cubecl::hash::StableHasher;
 
-use crate::cache::compilation_cache_dir;
+use crate::cache::{compilation_cache_dir, merge_compilation_cache};
 use crate::planar::{FrameLayout, PlaneOptions};
 
 /// How long a process waits for the one ahead of it before compiling for itself.
@@ -121,6 +121,7 @@ impl WarmUp {
         let stamp = dir.join(stamp_name);
 
         if stamp.exists() {
+            av_denoise_core::refill_kernel_cache();
             return None;
         }
 
@@ -136,6 +137,7 @@ impl WarmUp {
         // turns the queue into a single warm-up rather than one per waiting process.
         if stamp.exists() {
             let _ = lock.unlock();
+            av_denoise_core::refill_kernel_cache();
             return None;
         }
 
@@ -143,8 +145,11 @@ impl WarmUp {
         Some(Self { lock, stamp, key })
     }
 
-    /// Records that the kernels are compiled and lets the next process through.
+    /// Merges the compiled kernels into the shared cache, records that they are compiled and lets the
+    /// next process through.
     pub fn finish(self) {
+        merge_compilation_cache();
+
         if let Err(err) = std::fs::write(&self.stamp, b"") {
             // A missing stamp reads as a cold cache, which is slower but still correct.
             tracing::debug!(stamp = ?self.stamp, %err, "cannot write the kernel warm-up stamp");
@@ -156,6 +161,65 @@ impl Drop for WarmUp {
     fn drop(&mut self) {
         let _ = self.lock.unlock();
         release_key(self.key);
+    }
+}
+
+/// The lock file that keeps tuning to one process at a time.
+const TUNE_LOCK_NAME: &str = "tune.lock";
+
+/// How long a process waits for another to finish tuning before running with stored results.
+///
+/// Explicit tuning can take ten minutes, so the wait is longer than the compile wait.
+const TUNE_WAIT_LIMIT: Duration = Duration::from_secs(15 * 60);
+
+/// The one place on this machine to tune kernels at a time.
+///
+/// Tuning times kernels, so two processes tuning at once would measure each other. The lock is
+/// released when this is dropped.
+#[derive(Debug)]
+pub struct TuneLock {
+    lock: File,
+}
+
+/// What asking for the tune lock gave.
+#[derive(Debug)]
+pub enum TuneLockOutcome {
+    Held(TuneLock),
+    /// Caching is off or the lock file cannot be opened, so the caller tunes without a lock.
+    Unlocked,
+    /// Another process held the lock for the whole wait, so the caller should use stored results.
+    TimedOut,
+}
+
+impl TuneLock {
+    /// Waits for the tune lock next to the kernel cache.
+    pub fn acquire() -> TuneLockOutcome {
+        let Some(dir) = compilation_cache_dir() else {
+            return TuneLockOutcome::Unlocked;
+        };
+
+        Self::acquire_in(dir, TUNE_WAIT_LIMIT)
+    }
+
+    fn acquire_in(dir: &Path, wait_limit: Duration) -> TuneLockOutcome {
+        let path = dir.join(TUNE_LOCK_NAME);
+        let Some(lock) = open_lock_file(&path) else {
+            return TuneLockOutcome::Unlocked;
+        };
+
+        if !wait_for_lock(&lock, wait_limit) {
+            return TuneLockOutcome::TimedOut;
+        }
+
+        // A process that tuned before this one merged its kernels before it let the lock go.
+        av_denoise_core::refill_kernel_cache();
+        TuneLockOutcome::Held(TuneLock { lock })
+    }
+}
+
+impl Drop for TuneLock {
+    fn drop(&mut self) {
+        let _ = self.lock.unlock();
     }
 }
 
@@ -174,7 +238,7 @@ fn open_lock_file(path: &Path) -> Option<File> {
     match opened {
         Ok(file) => Some(file),
         Err(err) => {
-            tracing::debug!(?path, %err, "cannot open the kernel warm-up lock, compiling unqueued");
+            tracing::debug!(?path, %err, "cannot open the lock file, carrying on without it");
             None
         },
     }
@@ -193,14 +257,14 @@ fn wait_for_lock(lock: &File, wait_limit: Duration) -> bool {
             Ok(()) => return true,
             Err(TryLockError::WouldBlock) => {},
             Err(TryLockError::Error(err)) => {
-                tracing::debug!(%err, "cannot take the kernel warm-up lock, compiling unqueued");
+                tracing::debug!(%err, "cannot take the lock file, carrying on without it");
                 return false;
             },
         }
 
         if start.elapsed() >= wait_limit {
             tracing::warn!(
-                "waited {:?} for another process to compile kernels, compiling for ourselves",
+                "waited {:?} for another process to release the lock file, carrying on without it",
                 wait_limit,
             );
             return false;
@@ -239,6 +303,30 @@ mod tests {
             place.is_none(),
             "a caller gives up rather than compiling alongside the process ahead",
         );
+    }
+
+    #[test]
+    fn a_tune_lock_held_elsewhere_keeps_this_process_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(TUNE_LOCK_NAME);
+        let elsewhere = open_lock_file(&path).unwrap();
+        elsewhere.lock().unwrap();
+
+        let outcome = TuneLock::acquire_in(dir.path(), BRIEFLY);
+
+        assert!(matches!(outcome, TuneLockOutcome::TimedOut), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_free_tune_lock_is_taken_and_released() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let first = TuneLock::acquire_in(dir.path(), BRIEFLY);
+        assert!(matches!(first, TuneLockOutcome::Held(_)));
+        drop(first);
+
+        let second = TuneLock::acquire_in(dir.path(), BRIEFLY);
+        assert!(matches!(second, TuneLockOutcome::Held(_)));
     }
 
     #[test]
@@ -306,6 +394,8 @@ mod tests {
             chroma_strength: None,
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            tuning: crate::TuningMode::Off,
+            deterministic: false,
         }
     }
 

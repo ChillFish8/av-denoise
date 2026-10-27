@@ -1,5 +1,6 @@
 use cubecl::prelude::*;
 
+use super::packed::pack_accum;
 use super::transforms::RECIPROCAL_FLOOR;
 use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE, STEP};
 
@@ -72,6 +73,11 @@ pub const ACCUM_CLAMP: f32 = 5.0;
 /// `1 / RECIPROCAL_FLOOR`, so taking the larger of the two keeps the bound of 1.
 pub fn weight_scale(sigma: f32, dct_profile: &[f32; 8]) -> f32 {
     let g_max = dct_profile.iter().copied().fold(0.0f32, f32::max);
+    weight_scale_with_g_max(sigma, g_max)
+}
+
+/// [weight_scale] for a profile whose largest gain is `g_max`.
+pub fn weight_scale_with_g_max(sigma: f32, g_max: f32) -> f32 {
     let norm = sigma * sigma * g_max * g_max;
     if norm.is_finite() && norm > RECIPROCAL_FLOOR {
         norm
@@ -153,6 +159,20 @@ pub fn to_fixed_weight(weight: f32, scale: f32) -> i32 {
     f32::round(clamped * scale * WEIGHT_GAIN) as i32
 }
 
+/// Host mirror of `to_fixed`.
+#[cfg(test)]
+pub(crate) fn to_fixed_host(value: f32, scale: f32) -> i32 {
+    let clamped = value.clamp(-ACCUM_CLAMP, ACCUM_CLAMP);
+    (clamped * scale).round() as i32
+}
+
+/// Host mirror of `to_fixed_weight`.
+#[cfg(test)]
+pub(crate) fn to_fixed_weight_host(weight: f32, scale: f32) -> i32 {
+    let clamped = weight.clamp(0.0, WEIGHT_CLAMP);
+    (clamped * scale * WEIGHT_GAIN).round() as i32
+}
+
 /// Adds this thread's pixel of one filtered patch to the accumulators.
 ///
 /// Each of the cube's 64 threads owns the patch pixel `tid` picks, so one call per member scatters
@@ -163,27 +183,31 @@ pub fn to_fixed_weight(weight: f32, scale: f32) -> i32 {
 /// `write_weight` adds the weight to `wsum`, and only the first channel's pass sets it because
 /// aggregation needs one weight per patch. `accum_scale` is [ACCUM_SCALE] or a
 /// [cross_frame_accum_scale] result, and `wsum` counts at [WEIGHT_GAIN] times it.
+///
+/// With `packed`, channel 0 and the weight add as one 64-bit word into `wsum`, and `accum` holds
+/// the other channels.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
-pub fn scatter_patch(
-    accum: &mut Array<Atomic<i32>>,
-    wsum: &mut Array<Atomic<i32>>,
-    kaiser: &Array<f32>,
+pub fn scatter_patch<W: Int>(
+    accum: &mut [Atomic<i32>],
+    wsum: &mut [Atomic<W>],
+    kaiser: &[f32],
     value: f32,
     weight: f32,
     patch_x: u32,
     patch_y: u32,
     tid: u32,
     write_weight: bool,
-    #[comptime] channel: u32,
+    channel: u32,
     #[comptime] width: u32,
     #[comptime] stored_ch: u32,
     frame_slot: u32,
     #[comptime] frame_pixels: u32,
     accum_scale: f32,
+    #[comptime] packed: bool,
 ) {
     let row = tid / PATCH_SIZE;
     let col = tid % PATCH_SIZE;
@@ -194,26 +218,53 @@ pub fn scatter_patch(
     // and only reweights the blend where it is not.
     let window = kaiser[row as usize] * kaiser[col as usize];
     let weight = weight * window;
-    Atomic::fetch_add(
-        &accum[(pixel * stored_ch + channel) as usize],
-        to_fixed(value * weight, accum_scale),
-    );
-    if write_weight {
-        Atomic::fetch_add(&wsum[pixel as usize], to_fixed_weight(weight, accum_scale));
+    let accum_fixed = to_fixed(value * weight, accum_scale);
+
+    if comptime!(packed) {
+        let first_channel = channel == 0u32;
+
+        if first_channel {
+            let weight_fixed = to_fixed_weight(weight, accum_scale);
+            let word = pack_accum::<W>(accum_fixed, weight_fixed);
+            Atomic::fetch_add(&wsum[pixel as usize], word);
+        }
+
+        #[expect(
+            clippy::collapsible_if,
+            reason = "the outer condition is comptime, so luma compiles no access to the other channels"
+        )]
+        if comptime!(stored_ch > 1) {
+            if !first_channel {
+                let rest_channels = comptime!(stored_ch - 1);
+                let rest_index = pixel * rest_channels + channel - 1u32;
+                Atomic::fetch_add(&accum[rest_index as usize], accum_fixed);
+            }
+        }
+    } else {
+        let accum_index = pixel * stored_ch + channel;
+        Atomic::fetch_add(&accum[accum_index as usize], accum_fixed);
+
+        if write_weight {
+            let weight_fixed = to_fixed_weight(weight, accum_scale);
+            let weight_word = W::cast_from(weight_fixed);
+            Atomic::fetch_add(&wsum[pixel as usize], weight_word);
+        }
     }
 }
 
 /// Zeroes `pixels` pixels of both accumulators, starting `frame_offset` pixels in.
 ///
-/// `client.empty` memory is not zeroed, so the accumulators must be cleared before a pass, and a
-/// reused ring region must be cleared again before a later pass writes into it. The
-/// `accum` region is `pixels * stored_ch` slots and `wsum`'s is `pixels`, so the weight write is
-/// masked past its end. The loop is strided so the grid stays under the 65,535 workgroup limit,
+/// `client.empty` memory is not zeroed, so a stream's first pass clears the whole ring with this.
+/// [collab_normalise] leaves every region it reads zeroed. A later pass clears the newest region
+/// with this whenever normalise has not zeroed it, as in a continuation stream.
+///
+/// The `accum` region is `pixels * stored_ch` slots and `wsum`'s is `pixels`, so the weight write
+/// is masked past its end. The loop is strided so the grid stays under the 65,535 workgroup limit,
 /// which a 4K or 8K frame exceeds at 256 threads per block.
 #[cube(launch_unchecked)]
 pub fn collab_zero_accum(
-    accum: &mut Array<Atomic<i32>>,
-    wsum: &mut Array<Atomic<i32>>,
+    accum: &mut [Atomic<i32>],
+    wsum: &mut [Atomic<i32>],
     frame_offset: u32,
     #[comptime] pixels: u32,
     #[comptime] stored_ch: u32,
@@ -229,7 +280,8 @@ pub fn collab_zero_accum(
     }
 }
 
-/// Writes `accum / wsum` for one frame's region of the accumulators into `output`.
+/// Writes `accum / wsum` for one frame's region of the accumulators into `output`, then zeroes the
+/// region.
 ///
 /// Each pixel becomes the weighted mean of every filtered patch covering it. The fixed-point scale
 /// cancels, so only [WEIGHT_GAIN] is multiplied back. `frame_offset` (in pixels) picks the region,
@@ -244,9 +296,9 @@ pub fn collab_zero_accum(
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
 pub fn collab_normalise<N: Size>(
-    accum: &Array<i32>,
-    wsum: &Array<i32>,
-    output: &mut Array<Vector<f32, N>>,
+    accum: &mut [i32],
+    wsum: &mut [i32],
+    output: &mut [Vector<f32, N>],
     frame_offset: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -271,9 +323,17 @@ pub fn collab_normalise<N: Size>(
         if weight_total != 0i32 {
             value = accumulated * WEIGHT_GAIN / (weight_total as f32);
         }
-        pixel_out[channel as usize] = value;
+        pixel_out.insert(channel as usize, value);
     }
     output[local_pixel as usize] = pixel_out;
+
+    // A later frame reuses this region and expects it empty, padding lanes included.
+    #[unroll]
+    for channel in 0..stored_ch {
+        accum[(pixel * stored_ch + channel) as usize] = 0i32;
+    }
+
+    wsum[pixel as usize] = 0i32;
 }
 
 // Recheck ACCUM_SCALE's headroom if the patch area or group size moves, since both raise the

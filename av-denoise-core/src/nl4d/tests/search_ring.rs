@@ -1,9 +1,10 @@
-use super::helpers::{R, SIGMA, make_client, static_clip_params, textured_base};
+use super::helpers::{SIGMA, make_client, static_clip_params, textured_base};
 use crate::bench_api::HostIo;
 use crate::collab::supports_f16_search;
 use crate::nl4d::Nl4dDenoiser;
 use crate::nlmeans::ChannelMode;
 use crate::nlmeans::tests::helpers::noisy_field_over;
+use crate::tune::{DeviceLimits, EngineKernels, KernelSelector, Legality, PipelineProfile};
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
@@ -14,7 +15,7 @@ const FRAME_COUNT: usize = 9;
 fn the_f16_search_follows_the_device_query() {
     let client = make_client();
     let params = static_clip_params(RADIUS);
-    let denoiser = Nl4dDenoiser::<R>::new(&client, params, WIDTH, HEIGHT).expect("construction failed");
+    let denoiser = Nl4dDenoiser::new(&client, params, WIDTH, HEIGHT).expect("construction failed");
 
     let supported = supports_f16_search(&client);
     let has_search_ring = denoiser.front_for_test().search_ring().is_some();
@@ -77,7 +78,7 @@ fn denoise_clip(channels: ChannelMode, frames: &[Vec<f32>], f16_search: bool) ->
     let mut params = static_clip_params(RADIUS);
     params.nlm.channels = channels;
 
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, WIDTH, HEIGHT).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, WIDTH, HEIGHT).expect("construction failed");
     if !f16_search {
         denoiser.force_f32_search_for_test();
     }
@@ -145,4 +146,69 @@ fn rms_difference(left: &[f32], right: &[f32]) -> f64 {
         .sum();
     let mean = total / left.len() as f64;
     mean.sqrt()
+}
+
+#[test]
+fn the_f32_search_profile_never_enables_the_f16_ring() {
+    let client = make_client();
+    if !supports_f16_search(&client) {
+        eprintln!("skipping: this device has no f16 search");
+        return;
+    }
+
+    let params = static_clip_params(RADIUS);
+    let kernels = EngineKernels {
+        profile: PipelineProfile::F32Search,
+        ..EngineKernels::default()
+    };
+    let selector = KernelSelector::new(&client, kernels);
+
+    let denoiser =
+        Nl4dDenoiser::with_kernels(&client, params, WIDTH, HEIGHT, selector).expect("construction failed");
+    let has_search_ring = denoiser.front_for_test().search_ring().is_some();
+
+    assert!(!denoiser.uses_f16_search());
+    assert!(!has_search_ring);
+}
+
+#[test]
+fn slow_f16_devices_build_the_f32_search() {
+    let client = make_client();
+    let supported = supports_f16_search(&client);
+    assert!(
+        supported,
+        "the test device must support the f16 search for legality to turn it off"
+    );
+
+    let params = static_clip_params(RADIUS);
+    let legality = Legality {
+        f16_search: false,
+        ..Legality::default()
+    };
+    let kernels = EngineKernels {
+        legality,
+        ..EngineKernels::default()
+    };
+    let selector = KernelSelector::new(&client, kernels);
+
+    let denoiser =
+        Nl4dDenoiser::with_kernels(&client, params, WIDTH, HEIGHT, selector).expect("construction failed");
+    let has_search_ring = denoiser.front_for_test().search_ring().is_some();
+
+    assert!(!denoiser.uses_f16_search());
+    assert!(!has_search_ring);
+}
+
+#[test]
+fn nl4d_construction_fails_below_eight_lanes() {
+    let client = make_client();
+    let params = static_clip_params(RADIUS);
+    let mut limits = DeviceLimits::from_client(&client);
+    limits.plane_size_min = 4;
+    let selector = KernelSelector::with_limits(&client, EngineKernels::default(), limits);
+
+    let built = Nl4dDenoiser::with_kernels(&client, params, WIDTH, HEIGHT, selector);
+    let error = built.err().expect("4-lane planes cannot run nl4d");
+
+    assert!(error.contains("subgroups of 4 lanes"), "{error}");
 }

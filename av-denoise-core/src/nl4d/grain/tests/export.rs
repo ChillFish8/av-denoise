@@ -1,7 +1,6 @@
 #![cfg(any(feature = "vulkan", feature = "metal"))]
 
 use cubecl::prelude::*;
-use cubecl::wgpu::WgpuRuntime;
 
 use super::synthetic::gaussian_field;
 use crate::bench_api::HostIo;
@@ -18,8 +17,6 @@ use crate::nlmeans::{
     PrefilterMode,
 };
 
-type R = WgpuRuntime;
-
 const WIDTH: u32 = 96;
 const HEIGHT: u32 = 64;
 const PAN_WIDTH: u32 = 192;
@@ -35,9 +32,9 @@ const FLICKER: f32 = 2.0 / 255.0;
 /// The lane of lag `(0, 3)` in a record.
 const LAG_RIGHT_3: usize = 3;
 
-fn make_client() -> ComputeClient<R> {
-    let device = <R as Runtime>::Device::default();
-    R::client(&device)
+fn make_client() -> Client {
+    crate::tests::compilation_cache::install_test_compilation_cache();
+    crate::testing::test_client()
 }
 
 fn params(grain_export: bool) -> Nl4dParams {
@@ -108,7 +105,7 @@ fn panning_frames(sigma: f32, count: u32) -> Vec<Vec<f32>> {
 }
 
 /// Denoises and flushes one stream, appending every output frame to `outputs`.
-fn denoise_stream(denoiser: &mut Nl4dDenoiser<R>, frames: &[Vec<f32>], outputs: &mut Vec<Vec<f32>>) {
+fn denoise_stream(denoiser: &mut Nl4dDenoiser, frames: &[Vec<f32>], outputs: &mut Vec<Vec<f32>>) {
     for frame in frames {
         denoiser.push_frame(frame);
 
@@ -136,7 +133,7 @@ fn run_sized(
     height: u32,
 ) -> (Vec<Vec<f32>>, Vec<GrainChunk>, bool) {
     let client = make_client();
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, width, height).expect("construction");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction");
     let has_export = denoiser.has_grain_export();
     let mut outputs = Vec::new();
 
@@ -294,7 +291,7 @@ fn kept_grain_is_weaker_than_source_grain() {
 fn short_scene_measures_only_real_pairs() {
     let client = make_client();
     let export_on = params(true);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, export_on, WIDTH, HEIGHT).expect("construction");
+    let mut denoiser = Nl4dDenoiser::new(&client, export_on, WIDTH, HEIGHT).expect("construction");
     let frames = grain_frames(SIGMA, 3);
     let mut outputs = Vec::new();
 
@@ -350,7 +347,7 @@ fn chroma_denoisers_never_export() {
 fn chunks_close_when_full_and_at_each_stream_end() {
     let client = make_client();
     let export_on = params(true);
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, export_on, WIDTH, HEIGHT).expect("construction");
+    let mut denoiser = Nl4dDenoiser::new(&client, export_on, WIDTH, HEIGHT).expect("construction");
     let long_stream = grain_frames(SIGMA, 30);
     let short_stream = grain_frames(SIGMA, 5);
     let mut outputs = Vec::new();

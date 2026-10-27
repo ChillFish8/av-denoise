@@ -27,7 +27,7 @@ pub enum Accelerator {
     Vulkan,
     #[cfg(any(feature = "metal", docsrs))]
     #[cfg_attr(docsrs, doc(cfg(feature = "metal")))]
-    /// Runs kernels through the wgpu Metal backend.
+    /// Runs kernels through the native Metal backend.
     ///
     /// This is the only option on Apple Silicon.
     Metal,
@@ -38,6 +38,25 @@ pub enum Accelerator {
     /// ROCm is not the recommended backend for AMD GPUs. It is slower and often hit by driver issues,
     /// so Vulkan is almost always faster and less buggy.
     Rocm,
+}
+
+impl Accelerator {
+    /// Whether every thread working on one device submits into a single shared queue.
+    ///
+    /// Vulkan gives each thread its own command encoder and submits all of them to the device's one
+    /// queue. CUDA, ROCm and Metal give threads separate streams.
+    pub fn shares_device_queue(self) -> bool {
+        match self {
+            #[cfg(any(feature = "cuda", docsrs))]
+            Accelerator::Cuda => false,
+            #[cfg(any(feature = "vulkan", docsrs))]
+            Accelerator::Vulkan => true,
+            #[cfg(any(feature = "metal", docsrs))]
+            Accelerator::Metal => false,
+            #[cfg(any(feature = "rocm", docsrs))]
+            Accelerator::Rocm => false,
+        }
+    }
 }
 
 /// Returns every accelerator this build enables, in the order to try them.

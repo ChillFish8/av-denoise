@@ -1,14 +1,26 @@
+pub(crate) mod align;
 mod io;
 pub(crate) mod kernels;
 mod plane;
+pub(crate) mod timing;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use self::io::{EgressSource, IngestTarget, egress, ingest};
 pub use self::plane::{DevicePlane, Geometry, SampleFormat};
+pub use self::timing::EngineTiming;
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
+
+/// Largest 1D grid a dispatch may ask for, set by the WebGPU and Vulkan limits.
+pub(crate) const MAX_GRID_1D: u32 = 65535;
+
+/// Block size for the 1D copy and zero kernels.
+pub(crate) const BLOCK_1D: u32 = 256;
+
+/// A buffer's name and its element count, `None` when the count overflows `u64`.
+pub(crate) type BufferSize = (&'static str, Option<u64>);
 
 /// How many frames before and after a target frame are needed to denoise it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,4 +83,14 @@ pub trait Engine: Send {
     fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, Error> {
         Ok(Vec::new())
     }
+
+    /// Device time spent so far.
+    ///
+    /// Device time is only gathered after [Engine::sample_device_time] turns it on.
+    fn timing(&mut self) -> EngineTiming {
+        EngineTiming::default()
+    }
+
+    /// Samples the device time of one frame in every `every`, or of none at 0.
+    fn sample_device_time(&mut self, _every: u32) {}
 }

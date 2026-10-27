@@ -11,10 +11,10 @@ use cubecl::prelude::*;
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn ingest_words(
-    plane_0: &Array<u32>,
-    plane_1: &Array<u32>,
-    plane_2: &Array<u32>,
-    ring: &mut Array<f32>,
+    plane_0: &[u32],
+    plane_1: &[u32],
+    plane_2: &[u32],
+    ring: &mut [f32],
     max: f32,
     offset: u32,
     #[comptime] pixels: u32,
@@ -63,10 +63,10 @@ pub fn ingest_words(
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn ingest_f32(
-    plane_0: &Array<f32>,
-    plane_1: &Array<f32>,
-    plane_2: &Array<f32>,
-    ring: &mut Array<f32>,
+    plane_0: &[f32],
+    plane_1: &[f32],
+    plane_2: &[f32],
+    ring: &mut [f32],
     offset: u32,
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
@@ -98,20 +98,19 @@ pub fn ingest_f32(
 /// Quantises an interleaved f32 frame into word-packed planes.
 ///
 /// Values are clamped to `0.0..=1.0` and rounded to the nearest code up to `max`. Each thread
-/// packs and writes whole words, so no two threads share a word. Lanes past the last pixel read a
-/// clamped index and are masked to zero, because a branch-derived index inside an unrolled loop
-/// makes cubecl's GVN pass panic and the launch then silently writes nothing. A plane is only
-/// written when `channels` covers it, so an unused plane can be a placeholder.
+/// packs and writes whole words, so no two threads share a word. Lanes past the last pixel pack as
+/// zero. A plane is only written when `channels` covers it, so an unused plane can be a
+/// placeholder.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn egress_words(
-    frame: &Array<f32>,
-    plane_0: &mut Array<u32>,
-    plane_1: &mut Array<u32>,
-    plane_2: &mut Array<u32>,
+    frame: &[f32],
+    plane_0: &mut [u32],
+    plane_1: &mut [u32],
+    plane_2: &mut [u32],
     max: f32,
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
@@ -131,25 +130,26 @@ pub fn egress_words(
         #[unroll]
         for lane in 0..samples_per_word {
             let pixel = word * samples_per_word + lane;
-            let clamped = u32::min(pixel, pixels - 1);
-            let in_range = pixel < pixels;
-            let base = clamped * stored_ch;
-            let shift = lane * bits;
 
-            let value_0 = f32::clamp(frame[base as usize], 0.0, 1.0);
-            let code_0 = u32::cast_from(value_0 * max + 0.5);
-            packed_0 |= select(in_range, code_0, 0u32) << shift;
+            if pixel < pixels {
+                let base = pixel * stored_ch;
+                let shift = lane * bits;
 
-            if channels > 1 {
-                let value_1 = f32::clamp(frame[(base + 1) as usize], 0.0, 1.0);
-                let code_1 = u32::cast_from(value_1 * max + 0.5);
-                packed_1 |= select(in_range, code_1, 0u32) << shift;
-            }
+                let value_0 = f32::clamp(frame[base as usize], 0.0, 1.0);
+                let code_0 = u32::cast_from(value_0 * max + 0.5);
+                packed_0 |= code_0 << shift;
 
-            if channels > 2 {
-                let value_2 = f32::clamp(frame[(base + 2) as usize], 0.0, 1.0);
-                let code_2 = u32::cast_from(value_2 * max + 0.5);
-                packed_2 |= select(in_range, code_2, 0u32) << shift;
+                if channels > 1 {
+                    let value_1 = f32::clamp(frame[(base + 1) as usize], 0.0, 1.0);
+                    let code_1 = u32::cast_from(value_1 * max + 0.5);
+                    packed_1 |= code_1 << shift;
+                }
+
+                if channels > 2 {
+                    let value_2 = f32::clamp(frame[(base + 2) as usize], 0.0, 1.0);
+                    let code_2 = u32::cast_from(value_2 * max + 0.5);
+                    packed_2 |= code_2 << shift;
+                }
             }
         }
 
@@ -176,10 +176,10 @@ pub fn egress_words(
     reason = "every argument is a binding or a comptime shape"
 )]
 pub fn egress_f32(
-    frame: &Array<f32>,
-    plane_0: &mut Array<f32>,
-    plane_1: &mut Array<f32>,
-    plane_2: &mut Array<f32>,
+    frame: &[f32],
+    plane_0: &mut [f32],
+    plane_1: &mut [f32],
+    plane_2: &mut [f32],
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
     #[comptime] stored_ch: u32,
@@ -200,4 +200,20 @@ pub fn egress_f32(
 
         pixel += total_threads;
     }
+}
+
+/// Reads one pixel line without clamping its coordinates.
+///
+/// `x` must be within `0..width` and `y` within `0..height`.
+#[cube]
+pub(crate) fn read_line<F: Float, N: Size>(
+    buf: &[Vector<F, N>],
+    x: u32,
+    y: u32,
+    frame: u32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+) -> Vector<F, N> {
+    let idx = (frame * height + y) * width + x;
+    buf[idx as usize]
 }

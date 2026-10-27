@@ -125,10 +125,9 @@ pub(crate) fn nl4d_pool_ratio(channels: ChannelMode) -> f32 {
 /// would surface as a complaint about a `lambda_ht` the caller never set.
 fn resolve_lambda_ht(opts: &Nl4dOptions, channels: ChannelMode) -> Result<f32, String> {
     if !(opts.lambda_ht_scale.is_finite() && (0.1..=10.0).contains(&opts.lambda_ht_scale)) {
-        return Err(format!(
-            "lambda_ht_scale must be finite and in [0.1, 10.0], got {}",
-            opts.lambda_ht_scale
-        ));
+        let scale = opts.lambda_ht_scale;
+        let message = format!("lambda_ht_scale must be finite and in 0.1..=10.0, got {scale}");
+        return Err(message);
     }
 
     let lambda_ht = opts.lambda_ht.unwrap_or_else(|| nl4d_default_lambda_ht(channels));
@@ -194,9 +193,8 @@ pub(crate) fn nlm_params(options: &Nl4dOptions, channels: ChannelMode) -> NlmPar
 /// `channels`.
 pub(crate) fn resolve_params(options: &Nl4dOptions, channels: ChannelMode) -> Result<Nl4dParams, Error> {
     if options.temporal_radius == 0 {
-        return Err(Error::InvalidOptions(
-            "nl4d needs a temporal radius of at least 1".to_string(),
-        ));
+        let message = "nl4d needs a temporal radius of at least 1".to_string();
+        return Err(Error::InvalidOptions(message));
     }
 
     let lambda_ht = resolve_lambda_ht(options, channels).map_err(Error::InvalidOptions)?;

@@ -1,5 +1,7 @@
 use cubecl::prelude::*;
 
+use crate::engine::kernels::read_line;
+
 #[cube]
 pub(super) fn clamp_coord(value: i32, #[comptime] limit: u32) -> u32 {
     let mut result = value as u32;
@@ -16,7 +18,7 @@ pub(super) fn clamp_coord(value: i32, #[comptime] limit: u32) -> u32 {
 /// Only the coordinates are clamped. `frame` must be a loaded physical slot.
 #[cube]
 pub(crate) fn read_clamped_line<N: Size>(
-    buf: &Array<Vector<f32, N>>,
+    buf: &[Vector<f32, N>],
     x: i32,
     y: i32,
     frame: u32,
@@ -29,22 +31,6 @@ pub(crate) fn read_clamped_line<N: Size>(
     buf[idx as usize]
 }
 
-/// The unchecked version of `read_clamped_line`.
-///
-/// `x` must be within `0..width` and `y` within `0..height`.
-#[cube]
-pub(crate) fn read_line<F: Float, N: Size>(
-    buf: &Array<Vector<F, N>>,
-    x: u32,
-    y: u32,
-    frame: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-) -> Vector<F, N> {
-    let idx = (frame * height + y) * width + x;
-    buf[idx as usize]
-}
-
 /// Sums the squared differences across the first `channels` lanes.
 #[cube]
 pub(crate) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u32) -> f32 {
@@ -52,7 +38,8 @@ pub(crate) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u
 
     #[unroll]
     for channel in 0..channels {
-        sum += diff[channel as usize] * diff[channel as usize];
+        let lane = diff.extract(channel as usize);
+        sum += lane * lane;
     }
 
     sum
@@ -88,10 +75,10 @@ pub(super) fn welsch_weight(sum: f32, h2_inv_norm: f32, noise_offset: f32) -> f3
 /// in `frame_bwd`. Both reads fall back to clamped reads at the border.
 #[cube]
 pub(super) fn accumulate_pair<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    accum: &mut Array<Vector<f32, N>>,
-    weight_sum: &mut Array<f32>,
-    max_weight: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    accum: &mut [Vector<f32, N>],
+    weight_sum: &mut [f32],
+    max_weight: &mut [f32],
     global_x: u32,
     global_y: u32,
     q_x: i32,

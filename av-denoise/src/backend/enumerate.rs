@@ -1,11 +1,13 @@
 //! Listing the devices each backend can see
 
-use cubecl::device::DeviceId;
-use cubecl::prelude::*;
+use cubecl::device::{DeviceId, RuntimeId};
 
 use super::accelerate::Accelerator;
 use super::device::Device;
 use super::probe::open_client;
+#[cfg(feature = "metal")]
+use super::resolve::MetalGpus;
+use super::resolve::resolve;
 
 /// What one backend reports about this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,35 +32,9 @@ pub struct BackendDevices {
 pub fn enumerate_devices(enable: &[Accelerator]) -> Vec<BackendDevices> {
     enable
         .iter()
-        .map(|accelerator| match accelerator {
-            #[cfg(feature = "cuda")]
-            Accelerator::Cuda => match Device::Default.to_cuda() {
-                Ok(cuda_device) => query_runtime::<cubecl::cuda::CudaRuntime>(*accelerator, &cuda_device),
-                Err(_) => unavailable(*accelerator),
-            },
-            #[cfg(feature = "rocm")]
-            Accelerator::Rocm => match Device::Default.to_amd() {
-                Ok(amd_device) => query_runtime::<cubecl::hip::HipRuntime>(*accelerator, &amd_device),
-                Err(_) => unavailable(*accelerator),
-            },
-            #[cfg(feature = "vulkan")]
-            Accelerator::Vulkan => match Device::Default.to_wgpu() {
-                Ok(wgpu_device) => query_runtime::<cubecl::wgpu::WgpuRuntime>(*accelerator, &wgpu_device),
-                Err(_) => unavailable(*accelerator),
-            },
-            #[cfg(feature = "metal")]
-            Accelerator::Metal => match Device::Default.to_wgpu() {
-                Ok(wgpu_device) => query_runtime::<cubecl::wgpu::WgpuRuntime>(*accelerator, &wgpu_device),
-                Err(_) => unavailable(*accelerator),
-            },
-            // Keeps the match exhaustive on docs.rs, where `cfg(docsrs)` widens the `Accelerator` enum to
-            // include variants whose backend feature is not enabled. Never reached at runtime.
-            #[cfg(docsrs)]
-            #[expect(
-                unreachable_patterns,
-                reason = "the arm only keeps the match exhaustive on docs.rs"
-            )]
-            _ => unreachable!(),
+        .map(|accelerator| match resolve(*accelerator, Device::Default) {
+            Ok(selected) => query_runtime(*accelerator, selected),
+            Err(_) => unavailable(*accelerator),
         })
         .collect()
 }
@@ -75,17 +51,40 @@ fn unavailable(accelerator: Accelerator) -> BackendDevices {
 ///
 /// A backend that cannot open a client at all, because its driver libraries are missing, is reported
 /// as unavailable rather than allowed to take the process down.
-fn query_runtime<R: Runtime>(accelerator: Accelerator, device: &R::Device) -> BackendDevices {
-    let Some(client) = open_client::<R>(accelerator, device) else {
+fn query_runtime(accelerator: Accelerator, device: cubecl::Device) -> BackendDevices {
+    if open_client(accelerator, &device).is_none() {
         return unavailable(accelerator);
-    };
+    }
+
+    let devices = listed_devices(&device);
+
+    BackendDevices {
+        accelerator,
+        available: true,
+        devices,
+    }
+}
+
+/// The selector of every device on the runtime of `device`.
+fn listed_devices(device: &cubecl::Device) -> Vec<Device> {
+    #[cfg(feature = "metal")]
+    if let cubecl::Device::Metal(_) = device {
+        let gpus = MetalGpus::count();
+        return gpus.selectors();
+    }
 
     // Type ids 0 to 3 are the device kinds `Device` can name, and anything else is hardware this tool
     // cannot select. ROCm and CUDA report their whole device list for every type id, so a device that
     // comes back on several passes is kept only once.
+    let runtime = device.runtime();
     let mut devices: Vec<Device> = Vec::new();
     for type_id in 0..=3 {
-        for device_id in client.enumerate_devices(type_id) {
+        let kind_id = DeviceId::new(type_id, 0);
+        let stamped_id = runtime.stamp(kind_id);
+        let listed = cubecl::Device::enumerate(stamped_id);
+
+        for runtime_device_id in listed {
+            let device_id = RuntimeId::strip(runtime_device_id);
             if let Some(device) = to_device(device_id)
                 && !devices.contains(&device)
             {
@@ -94,11 +93,7 @@ fn query_runtime<R: Runtime>(accelerator: Accelerator, device: &R::Device) -> Ba
         }
     }
 
-    BackendDevices {
-        accelerator,
-        available: true,
-        devices,
-    }
+    devices
 }
 
 /// Maps a cubecl device id onto the selector that names it.

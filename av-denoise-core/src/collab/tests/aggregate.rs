@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client, noisy_flat_field};
+use super::helpers::{make_client, noisy_flat_field};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
@@ -10,10 +10,14 @@ use crate::collab::kernels::aggregate::{
     kaiser_window,
     weight_scale,
 };
-use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::fused::{CollabVariant, collab_fused};
+use crate::collab::kernels::packed::collab_zero_packed;
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_SIZE, grid_frames, needs_warp_uniform_search};
-use crate::nlmeans::{BLOCK_X, BLOCK_Y, NOISE_CURVE_BINS};
+use crate::collab::{PATCH_SIZE, grid_frames};
+use crate::nlmeans::{BLOCK_X, BLOCK_Y};
+use crate::noise::tests::{CollabNoise, collab_noise_buffer};
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use crate::tune::tests::runtime::packed_supported;
 
 /// Runs [collab_normalise] over hand-built accumulators.
 fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32) -> Vec<f32> {
@@ -34,14 +38,14 @@ fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32)
     let dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
     unsafe {
-        collab_normalise::launch_unchecked::<R>(
+        collab_normalise::launch_unchecked(
             &client,
             grid,
             dim,
             1usize,
-            ArrayArg::from_raw_parts(accum, pixels),
-            ArrayArg::from_raw_parts(wsum, pixels),
-            ArrayArg::from_raw_parts(output.clone(), pixels),
+            BufferArg::from_raw_parts(accum, pixels),
+            BufferArg::from_raw_parts(wsum, pixels),
+            BufferArg::from_raw_parts(output.clone(), pixels),
             0u32,
             width,
             height,
@@ -132,12 +136,12 @@ fn zero_accum_clears_both_buffers() {
     let grid = (pixels as u32).div_ceil(dim);
 
     unsafe {
-        collab_zero_accum::launch_unchecked::<R>(
+        collab_zero_accum::launch_unchecked(
             &client,
             CubeCount::new_1d(grid),
             CubeDim::new_1d(dim),
-            ArrayArg::from_raw_parts(accum.clone(), pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            BufferArg::from_raw_parts(accum.clone(), pixels),
+            BufferArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
             pixels as u32,
             1u32,
@@ -188,12 +192,12 @@ fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
     let grid = (pixels as u32).div_ceil(dim).min(MAX_GRID_1D);
 
     unsafe {
-        collab_zero_accum::launch_unchecked::<R>(
+        collab_zero_accum::launch_unchecked(
             &client,
             CubeCount::new_1d(grid),
             CubeDim::new_1d(dim),
-            ArrayArg::from_raw_parts(accum.clone(), pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            BufferArg::from_raw_parts(accum.clone(), pixels),
+            BufferArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
             pixels as u32,
             1u32,
@@ -212,6 +216,67 @@ fn zero_accum_clears_every_slot_of_a_buffer_past_the_grid_clamp() {
             "accum[{i}] left un-zeroed past the clamp point"
         );
         assert_eq!(wsum_values[i], 0, "wsum[{i}] left un-zeroed past the clamp point");
+    }
+}
+
+/// Clears the middle of three slots, so a wrong offset or stride shows in either neighbour.
+#[test]
+fn zero_packed_clears_only_its_slot_in_both_buffers() {
+    if !packed_supported() {
+        eprintln!("skipped, this device has no 64-bit atomic add");
+        return;
+    }
+
+    let pixels = 37usize;
+    let slots = 3usize;
+    let slot = 1usize;
+    let dim = 32u32;
+    let client = make_client();
+
+    for rest_channels in [0usize, 1, 3] {
+        let packed_host = vec![0x1234_5678_9ABCi64; pixels * slots];
+        let rest_host = vec![42i32; (pixels * rest_channels * slots).max(1)];
+        let packed_bytes = i64::as_bytes(&packed_host);
+        let rest_bytes = i32::as_bytes(&rest_host);
+        let packed = client.create_from_slice(packed_bytes);
+        let rest = client.create_from_slice(rest_bytes);
+        let packed_launched = packed.clone();
+        let rest_launched = rest.clone();
+        let packed_len = packed_host.len();
+        let rest_len = rest_host.len();
+        let packed_arg = unsafe { BufferArg::from_raw_parts(packed_launched, packed_len) };
+        let rest_arg = unsafe { BufferArg::from_raw_parts(rest_launched, rest_len) };
+
+        unsafe {
+            collab_zero_packed::launch_unchecked(
+                &client,
+                CubeCount::new_1d(1),
+                CubeDim::new_1d(dim),
+                packed_arg,
+                rest_arg,
+                (slot * pixels) as u32,
+                pixels as u32,
+                rest_channels as u32,
+                dim,
+            );
+        }
+
+        let packed_bytes_after = client.read_one(packed).expect("packed readback failed");
+        let rest_bytes_after = client.read_one(rest).expect("rest readback failed");
+        let packed_after = i64::from_bytes(&packed_bytes_after);
+        let rest_after = i32::from_bytes(&rest_bytes_after);
+
+        for (index, &word) in packed_after[..packed_host.len()].iter().enumerate() {
+            let inside = index / pixels == slot;
+            let want = if inside { 0 } else { packed_host[index] };
+            assert_eq!(word, want, "packed[{index}] with {rest_channels} rest channels");
+        }
+
+        for (index, &value) in rest_after[..rest_host.len()].iter().enumerate() {
+            let inside = rest_channels > 0 && index / (pixels * rest_channels) == slot;
+            let want = if inside { 0 } else { rest_host[index] };
+            assert_eq!(value, want, "rest[{index}] with {rest_channels} rest channels");
+        }
     }
 }
 
@@ -251,10 +316,16 @@ fn run_scatter_stage_windowed(
     let wsum = client.empty(pixels * size_of::<i32>());
     let group_weight = client.empty(refs * size_of::<f32>());
 
-    let sigma_values = [sigma];
-    let sigma_bytes = f32::as_bytes(&sigma_values);
-    let sigma_buf = client.create_from_slice(sigma_bytes);
     let profile = dct_noise_profile(0.0);
+    let sigma_values = [sigma];
+    let scale = weight_scale(sigma, &profile);
+    let noise_values = CollabNoise {
+        sigma: &sigma_values,
+        weight_scale: scale,
+        curve_valid: false,
+        map_mode: STRENGTH_MAP_OFF,
+    };
+    let noise_buf = collab_noise_buffer(&client, noise_values);
     let profile_bytes = f32::as_bytes(&profile);
     let profile_buf = client.create_from_slice(profile_bytes);
     let kaiser = kaiser_window(kaiser_beta);
@@ -273,11 +344,10 @@ fn run_scatter_stage_windowed(
 
     let zero_dim = 256u32;
     let zero_grid = (pixels as u32).div_ceil(zero_dim);
-    let cubes_x = fused_cubes_x(width);
+    let variant = CollabVariant::for_client(&client);
+    let cubes_x = fused_cubes_x(width, variant.groups);
     let fused_grid = CubeCount::new_2d(cubes_x, refs_y);
-    let fused_dim = CubeDim::new_1d(64);
-    let scale = weight_scale(sigma, &profile);
-    let warp_uniform = needs_warp_uniform_search(&client);
+    let fused_dim = CubeDim::new_1d(variant.lanes());
     let grid_frame_count = grid_frames(0);
     let refs_x = refs_along(width);
     let blocks_x = width.div_ceil(BLOCK_X);
@@ -288,43 +358,42 @@ fn run_scatter_stage_windowed(
     let stored_ch = 1usize;
 
     unsafe {
-        collab_zero_accum::launch_unchecked::<R>(
+        collab_zero_accum::launch_unchecked(
             &client,
             CubeCount::new_1d(zero_grid),
             CubeDim::new_1d(zero_dim),
-            ArrayArg::from_raw_parts(accum.clone(), pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
+            BufferArg::from_raw_parts(accum.clone(), pixels),
+            BufferArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
             pixels as u32,
             1u32,
             zero_grid * zero_dim,
         );
-        collab_fused::launch_unchecked::<f32, R>(
+
+        let ring_scalar = BufferArg::from_raw_parts(input.clone(), pixels);
+        collab_fused::launch_unchecked::<f32, i32>(
             &client,
             fused_grid,
             fused_dim,
             stored_ch,
-            ArrayArg::from_raw_parts(input.clone(), pixels),
-            ArrayArg::from_raw_parts(input.clone(), stored_ch),
-            ArrayArg::from_raw_parts(mv_dummy, 2),
-            ArrayArg::from_raw_parts(conf_dummy, 1),
-            ArrayArg::from_raw_parts(slots_dummy, 1),
-            ArrayArg::from_raw_parts(sigma_buf, 1),
-            ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-            ArrayArg::from_raw_parts(unit_map_buf, map_len),
-            ArrayArg::from_raw_parts(profile_buf, 8),
-            ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
-            ArrayArg::from_raw_parts(accum.clone(), pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
-            ArrayArg::from_raw_parts(group_weight, refs),
+            BufferArg::from_raw_parts(input.clone(), pixels),
+            ring_scalar,
+            BufferArg::from_raw_parts(input.clone(), stored_ch),
+            BufferArg::from_raw_parts(mv_dummy, 2),
+            BufferArg::from_raw_parts(conf_dummy, 1),
+            BufferArg::from_raw_parts(slots_dummy, 1),
+            BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
+            BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
+            BufferArg::from_raw_parts(unit_map_buf, map_len),
+            BufferArg::from_raw_parts(profile_buf, 8),
+            BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
+            BufferArg::from_raw_parts(accum.clone(), pixels),
+            BufferArg::from_raw_parts(wsum.clone(), pixels),
+            BufferArg::from_raw_parts(group_weight, refs),
             0u32,
             0.0f32,
             2.7f32,
-            0u32,
-            STRENGTH_MAP_OFF,
-            scale,
             ACCUM_SCALE,
-            warp_uniform,
             false,
             0u32,
             grid_frame_count,
@@ -346,15 +415,30 @@ fn run_scatter_stage_windowed(
             map_rows,
             0.0f32,
             false,
+            variant,
+            false,
         );
-        collab_normalise::launch_unchecked::<R>(
+    }
+
+    // Normalise zeroes the region it reads, so the weight sum is read before it runs.
+    let wsum_handle = wsum.clone();
+    let wsum_bytes = client.read_one(wsum_handle).expect("wsum readback failed");
+    let weight_sum = i32::from_bytes(&wsum_bytes)[..pixels].to_vec();
+    let output_launched = output.clone();
+
+    unsafe {
+        let accum_arg = BufferArg::from_raw_parts(accum, pixels);
+        let wsum_arg = BufferArg::from_raw_parts(wsum, pixels);
+        let output_arg = BufferArg::from_raw_parts(output_launched, pixels);
+
+        collab_normalise::launch_unchecked(
             &client,
             normalise_grid,
             normalise_dim,
             1usize,
-            ArrayArg::from_raw_parts(accum, pixels),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels),
-            ArrayArg::from_raw_parts(output.clone(), pixels),
+            accum_arg,
+            wsum_arg,
+            output_arg,
             0u32,
             width,
             height,
@@ -364,9 +448,7 @@ fn run_scatter_stage_windowed(
     }
 
     let output_bytes = client.read_one(output).expect("output readback failed");
-    let wsum_bytes = client.read_one(wsum).expect("wsum readback failed");
     let plane = f32::from_bytes(&output_bytes)[..pixels].to_vec();
-    let weight_sum = i32::from_bytes(&wsum_bytes)[..pixels].to_vec();
 
     (plane, weight_sum)
 }

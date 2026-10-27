@@ -10,6 +10,7 @@ use av_denoise::PlanarDenoiser;
 use super::{temporal_opts, tiny_layout, tiny_planes};
 #[cfg(feature = "vulkan")]
 use crate::pipeline::coordinator::OutputMsg;
+use crate::pipeline::worker::WorkerSettings;
 #[cfg(feature = "vulkan")]
 use crate::pipeline::worker::flush_worker;
 
@@ -38,4 +39,19 @@ fn flush_worker_errors_when_coordinator_has_disconnected() {
         err.to_string().contains("disconnect"),
         "error should mention the coordinator disconnect: {err}"
     );
+}
+
+#[test]
+fn only_several_workers_without_shared_device_open_own_devices() {
+    let several = WorkerSettings::for_run(2, false, false);
+    let several_shared = WorkerSettings::for_run(2, false, true);
+    let one = WorkerSettings::for_run(1, false, false);
+    let timed = WorkerSettings::for_run(3, true, false);
+
+    assert!(several.own_device);
+    assert!(!several_shared.own_device);
+    assert!(!one.own_device);
+    assert!(timed.own_device);
+    assert!(timed.device_timing);
+    assert!(!several.device_timing);
 }

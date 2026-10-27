@@ -1133,3 +1133,44 @@ fn a_negative_spatial_radius_is_rejected() {
 
     assert!(err.contains("spatial_radius"), "got {err}");
 }
+
+#[test]
+fn tuning_defaults_to_auto_and_not_deterministic() {
+    let raw = RawParams::default();
+    let layout = yuv420_layout();
+
+    let options = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+
+    assert_eq!(options.tuning, av_denoise::TuningMode::Auto);
+    assert!(!options.deterministic);
+}
+
+#[test]
+fn tune_and_deterministic_are_read() {
+    let raw = RawParams {
+        tune: Some("cached".to_string()),
+        deterministic: Some(true),
+        ..RawParams::default()
+    };
+    let layout = yuv420_layout();
+
+    let options = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+
+    assert_eq!(options.tuning, av_denoise::TuningMode::Cached);
+    assert!(options.deterministic);
+}
+
+#[test]
+fn an_unknown_tune_mode_is_rejected() {
+    let raw = RawParams {
+        tune: Some("sometimes".to_string()),
+        ..RawParams::default()
+    };
+    let layout = yuv420_layout();
+
+    let error = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("sometimes"), "got {error}");
+}

@@ -3,10 +3,12 @@ mod coordinator;
 mod decode;
 mod dispatch;
 mod grain_table;
+mod report;
 mod run;
 mod scenes;
 mod source;
 mod stage;
+mod tune;
 mod worker;
 
 use std::io::{Cursor, Read};
@@ -14,9 +16,7 @@ use std::io::{Cursor, Read};
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "vulkan")]
-use av_denoise::accelerate::Accelerator;
-#[cfg(feature = "vulkan")]
-use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Device, PlaneOptions};
+use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, PlaneOptions, TuningMode};
 use av_denoise::{Depth, FrameLayout, Planes, Subsampling, fill_plane};
 
 /// A writer the test can read back after the coordinator thread drops it.
@@ -45,8 +45,8 @@ pub(super) fn y4m_reader(bytes: Vec<u8>) -> Box<dyn Read> {
 #[cfg(feature = "vulkan")]
 pub(super) fn temporal_opts() -> PlaneOptions {
     PlaneOptions {
-        accelerators: vec![Accelerator::Vulkan],
-        device: Device::Default,
+        accelerators: vec![av_denoise::testing::test_accelerator()],
+        device: av_denoise::testing::test_device(),
         intent: ChannelIntent::LumaChroma,
         mode: DenoisingMode::Temporal { radius: 1 },
         algorithm: Algorithm::default(),
@@ -54,6 +54,8 @@ pub(super) fn temporal_opts() -> PlaneOptions {
         chroma_strength: None,
         luma_lambda_ht: None,
         chroma_lambda_ht: None,
+        tuning: TuningMode::Off,
+        deterministic: false,
     }
 }
 
@@ -150,6 +152,29 @@ pub fn multi_scene_clip(frames: usize) -> Vec<u8> {
     }
 
     bytes
+}
+
+/// The layout [multi_scene_clip] decodes to.
+#[cfg(feature = "vulkan")]
+pub(super) fn scene_clip_layout() -> FrameLayout {
+    FrameLayout {
+        width: SCENE_CLIP_SIZE as u32,
+        height: SCENE_CLIP_SIZE as u32,
+        subsampling: Subsampling::Yuv420,
+        depth: Depth::Eight,
+    }
+}
+
+#[cfg(feature = "vulkan")]
+pub(super) fn frame_count(y4m_bytes: &[u8]) -> usize {
+    let mut decoder = y4m::Decoder::new(y4m_bytes).expect("the output is y4m");
+    let mut count = 0;
+
+    while decoder.read_frame().is_ok() {
+        count += 1;
+    }
+
+    count
 }
 
 /// Frames per scene in [grainy_clip].

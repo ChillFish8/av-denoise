@@ -1,9 +1,9 @@
-use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, nlm_mc_block_match_coarse};
+use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, mc_block_match_coarse};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channels};
+use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, neighbour_bench_name, shapes_with_channels};
 
 // The library's default Mvtools block geometry, so the bench reflects the cost of motion
 // compensation with no overrides.
@@ -15,40 +15,50 @@ const SEARCH_RADIUS: u32 = 4;
 ///
 /// One cube per coarse block runs a SAD search over a `(2·r + 1)²` window, and each block's
 /// vector is scaled up to seed the fine pass.
-pub struct BlockMatchCoarseBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct BlockMatchCoarseBench {
+    pub client: Client,
+    /// Neighbours matched in one launch, each against the centre frame.
+    pub neighbours: u32,
 }
 
 #[derive(Clone)]
 pub struct CoarseInput {
-    pub centre: Handle,
-    pub neighbour: Handle,
+    /// The centre frame in slot 0 and each neighbour in the slots after it.
+    pub pyramid: Handle,
+    /// One entry per neighbour, naming slots 1 onwards.
+    pub neighbour_slots: Handle,
     pub mv_field: Handle,
 }
 
-impl<R: Runtime> Benchmark for BlockMatchCoarseBench<R> {
+impl Benchmark for BlockMatchCoarseBench {
     type Input = CoarseInput;
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
         let coarse_width = WIDTH / 2;
         let coarse_height = HEIGHT / 2;
-        let centre_frame = make_synthetic_frame(coarse_width, coarse_height, 1);
-        let neighbour_frame = make_synthetic_frame(coarse_width, coarse_height, 1);
-        let centre_bytes = f32::as_bytes(&centre_frame);
-        let centre = self.client.create_from_slice(centre_bytes);
-        let neighbour_bytes = f32::as_bytes(&neighbour_frame);
-        let neighbour = self.client.create_from_slice(neighbour_bytes);
+        let mut frames = make_synthetic_frame(coarse_width, coarse_height, 1);
+
+        for _ in 0..self.neighbours {
+            let neighbour_frame = make_synthetic_frame(coarse_width, coarse_height, 1);
+            frames.extend_from_slice(&neighbour_frame);
+        }
+
+        let frame_bytes = f32::as_bytes(&frames);
+        let pyramid = self.client.create_from_slice(frame_bytes);
+        let table: Vec<u32> = (1..=self.neighbours).collect();
+        let table_bytes = u32::as_bytes(&table);
+        let neighbour_slots = self.client.create_from_slice(table_bytes);
 
         let fine_blocks_x = WIDTH.div_ceil(FINE_STEP);
         let fine_blocks_y = HEIGHT.div_ceil(FINE_STEP);
-        let mv_field = self
-            .client
-            .empty((fine_blocks_x * fine_blocks_y * 2) as usize * size_of::<i32>());
+        let mv_stride = (fine_blocks_x * fine_blocks_y * 2) as usize;
+        let mv_len = self.neighbours as usize * mv_stride;
+        let mv_field = self.client.empty(mv_len * size_of::<i32>());
 
         CoarseInput {
-            centre,
-            neighbour,
+            pyramid,
+            neighbour_slots,
             mv_field,
         }
     }
@@ -65,20 +75,30 @@ impl<R: Runtime> Benchmark for BlockMatchCoarseBench<R> {
         let coarse_blocks_y = coarse_height.div_ceil(coarse_step);
 
         let level_len = (coarse_width * coarse_height) as usize;
-        let mv_len = (fine_blocks_x * fine_blocks_y * 2) as usize;
-        let grid = CubeCount::new_2d(coarse_blocks_x, coarse_blocks_y);
+        let pyramid_len = (self.neighbours as usize + 1) * level_len;
+        let slots_len = self.neighbours as usize;
+        let mv_stride = fine_blocks_x * fine_blocks_y * 2;
+        let mv_len = self.neighbours as usize * mv_stride as usize;
+        let grid = CubeCount::new_3d(coarse_blocks_x, coarse_blocks_y, self.neighbours);
         let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
         unsafe {
-            nlm_mc_block_match_coarse::launch_unchecked::<R>(
+            let pyramid_arg = BufferArg::from_raw_parts(args.pyramid, pyramid_len);
+            let neighbour_slots_arg = BufferArg::from_raw_parts(args.neighbour_slots, slots_len);
+            let mv_field_arg = BufferArg::from_raw_parts(args.mv_field, mv_len);
+
+            mc_block_match_coarse::launch_unchecked(
                 &self.client,
                 grid,
                 dim,
-                ArrayArg::from_raw_parts(args.centre.clone(), level_len),
-                ArrayArg::from_raw_parts(args.neighbour.clone(), level_len),
-                ArrayArg::from_raw_parts(args.mv_field.clone(), mv_len),
+                pyramid_arg,
+                neighbour_slots_arg,
+                mv_field_arg,
+                0u32,
                 coarse_width,
                 coarse_height,
+                0,
+                level_len as u32,
                 coarse_blksize,
                 coarse_step,
                 SEARCH_RADIUS,
@@ -86,6 +106,7 @@ impl<R: Runtime> Benchmark for BlockMatchCoarseBench<R> {
                 fine_blocks_x,
                 fine_blocks_y,
                 FINE_STEP,
+                mv_stride,
             );
         }
 
@@ -93,7 +114,7 @@ impl<R: Runtime> Benchmark for BlockMatchCoarseBench<R> {
     }
 
     fn name(&self) -> String {
-        "mc_block_match_coarse_540p_luma".to_string()
+        neighbour_bench_name("mc_block_match_coarse_540p_luma", self.neighbours)
     }
 
     fn sync(&self) {

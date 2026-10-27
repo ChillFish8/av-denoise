@@ -30,15 +30,19 @@ strum = "0.28"
 bon = "3"
 half = "2.7.1"
 
-cubecl = { version = "0.10", features = ["std"] }
+cubecl = { version = "0.11.3", features = ["std"] }
+cubecl-environment = { version = "0.11.3", default-features = false, features = ["persistence"] }
+wgpu = { version = "30", optional = true }
 
 [dev-dependencies]
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }
+y4m = "0.8"
+tempfile = "3"
 
 [features]
-vulkan = ["cubecl/vulkan"]
-metal = ["cubecl/metal"]
+vulkan = ["cubecl/vulkan", "dep:wgpu"]
+metal = ["cubecl/metal-native"]
 cuda = ["cubecl/cuda"]
 rocm = ["cubecl/hip"]
 default = ["vulkan"]
@@ -62,3 +66,8 @@ harness = false
 [[bench]]
 name = "mc_accuracy"
 harness = false
+
+[[bench]]
+name = "tune_timing_check"
+harness = false
+

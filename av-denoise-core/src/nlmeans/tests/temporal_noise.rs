@@ -2,7 +2,9 @@ use cubecl::prelude::*;
 
 use super::helpers::*;
 use crate::bench_api::HostIo;
-use crate::nlmeans::noise::{
+use crate::nlmeans::*;
+use crate::noise::tests::read_temporal_stats_slot;
+use crate::noise::{
     NoiseCtx,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -19,10 +21,10 @@ use crate::nlmeans::noise::{
     TEMPORAL_QUARTER_SIZE,
     TEMPORAL_QUARTERS,
     TemporalStatsCtx,
+    UNMEASURED_FLATNESS,
     aggregate_temporal_noise_stats,
     correlation_factor,
     partials_len,
-    read_temporal_stats_slot,
     run_noise_estimate,
     run_temporal_noise_stats,
     sigma_from_abs_sum,
@@ -30,7 +32,6 @@ use crate::nlmeans::noise::{
     temporal_stats_buf_bytes,
     temporal_stats_record_len,
 };
-use crate::nlmeans::*;
 
 /// Runs the temporal-residual stats kernel on `previous` and `new` as ring slots 0 and 1.
 ///
@@ -86,9 +87,9 @@ fn run_temporal_stats_prefilled(
         stats_buf: &stats_buf,
         align,
     };
-    run_temporal_noise_stats::<R>(&client, &ctx, luma_fields).expect("temporal noise stats dispatch failed");
+    run_temporal_noise_stats(&client, &ctx, luma_fields).expect("temporal noise stats dispatch failed");
 
-    read_temporal_stats_slot::<R>(
+    read_temporal_stats_slot(
         &client,
         &stats_buf,
         width,
@@ -244,7 +245,7 @@ fn quarter_fields_host(
 
         energy / 24.0
     } else {
-        3.0e38
+        UNMEASURED_FLATNESS
     };
 
     let mean_at = |x: u32, y: u32| {
@@ -464,8 +465,8 @@ fn assert_quarters_match_mirror(width: u32, height: u32, previous: &[f32], new: 
                 let flatness_index = QUARTER_FLATNESS as usize;
                 let expected_flatness = expected[flatness_index];
                 let got_flatness = fields[flatness_index];
-                if expected_flatness == 3.0e38 {
-                    assert_eq!(got_flatness, 3.0e38, "{label}: flatness sentinel");
+                if expected_flatness == UNMEASURED_FLATNESS {
+                    assert_eq!(got_flatness, UNMEASURED_FLATNESS, "{label}: flatness sentinel");
                 } else {
                     let flatness_label = format!("{label} flatness");
                     assert_relative(got_flatness, expected_flatness, 1e-4, &flatness_label);
@@ -711,7 +712,7 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
             partials_buf: &partials_buf,
             results_buf: &results_buf,
         };
-        run_noise_estimate::<R>(&client, &ctx).expect("immerkaer dispatch failed");
+        run_noise_estimate(&client, &ctx).expect("immerkaer dispatch failed");
 
         let bytes = client.read_one(results_buf).expect("immerkaer readback failed");
         let data = f32::from_bytes(&bytes);
@@ -743,16 +744,17 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     for frame in &frames {
         denoiser.push_frame(frame);
         let _ = denoiser.denoise().unwrap();
     }
 
-    let folded = denoiser
-        .noise_estimator
-        .current()
-        .expect("estimator should hold a value after several full-window submits")[0];
+    let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+    let median = snapshot
+        .median
+        .expect("estimator should hold a value after several full-window submits");
+    let folded = median[0];
 
     let expected = sigma_marginal * correlation_factor(2.0 / 3.0);
     let rel_err = (folded - expected).abs() / expected;
@@ -794,13 +796,15 @@ fn rho_smoothed_seeds_from_first_sample_not_from_zero() {
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     let mut first_seeded_rho = None;
     for i in 0..(width.min(height)) {
         let frame = correlated_noisy_frame(width, height, base, sigma_pre, 200 + i);
         denoiser.push_frame(&frame);
         let _ = denoiser.denoise().unwrap();
-        if let Some(rho) = denoiser.rho_smoothed {
+
+        let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+        if let Some(rho) = snapshot.rho {
             first_seeded_rho = Some(rho);
             break;
         }

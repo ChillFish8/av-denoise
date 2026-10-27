@@ -23,13 +23,13 @@ pub struct DistanceInput {
     pub frame_len: usize,
 }
 
-pub struct DistanceBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct DistanceBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
 
-impl<R: Runtime> Benchmark for DistanceBench<R> {
+impl Benchmark for DistanceBench {
     type Input = DistanceInput;
     type Output = ();
 
@@ -54,13 +54,13 @@ impl<R: Runtime> Benchmark for DistanceBench<R> {
         let cube_dim = cube_dim_2d();
 
         unsafe {
-            nlm_distance::launch_unchecked::<R>(
+            nlm_distance::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.dist.clone(), pixels),
+                BufferArg::from_raw_parts(args.input.clone(), args.frame_len),
+                BufferArg::from_raw_parts(args.dist.clone(), pixels),
                 0u32,
                 0u32,
                 Q_X,

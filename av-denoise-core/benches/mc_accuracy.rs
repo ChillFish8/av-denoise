@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use av_denoise_core::bench_api::harness::{Clip, KindScore, MotionClass, Score, Still, score, synthesise};
 use av_denoise_core::bench_api::{Device, HostIo, Nl4dDenoiser, Nl4dParams, NlmParams};
-use av_denoise_core::{ChannelMode, MotionCompensationMode};
+use av_denoise_core::{ChannelMode, MotionCompensationMode, testing};
 use clap::Parser;
 use cubecl::prelude::*;
 
@@ -98,10 +98,10 @@ fn parse_still(spec: &str) -> Result<NamedStill, String> {
     })
 }
 
-fn run_clip<R: Runtime>(client: &ComputeClient<R>, params: Nl4dParams, clip: &Clip) -> Score {
+fn run_clip(client: &Client, params: Nl4dParams, clip: &Clip) -> Score {
     let refine = params.refine;
     let mut denoiser =
-        Nl4dDenoiser::<R>::new(client, params, clip.width, clip.height).expect("construction failed");
+        Nl4dDenoiser::new(client, params, clip.width, clip.height).expect("construction failed");
     for frame in &clip.frames {
         denoiser.push_frame(frame);
         let _ = denoiser.denoise().expect("denoise failed");
@@ -131,9 +131,7 @@ fn print_kind(label: &str, kind: &KindScore) {
     );
 }
 
-fn run_all<R: Runtime>(device: &R::Device, stills: &[NamedStill]) {
-    let client = R::client(device);
-
+fn run_all(client: &Client, stills: &[NamedStill]) {
     for arm in arms() {
         println!();
         println!("=== arm: {} ===", arm.name);
@@ -143,7 +141,7 @@ fn run_all<R: Runtime>(device: &R::Device, stills: &[NamedStill]) {
                 for grain in GRAIN {
                     let params = (arm.params)();
                     let clip = synthesise(&still.still, class, params.temporal_radius, grain / 255.0, 7);
-                    let clip_score = run_clip::<R>(&client, params, &clip);
+                    let clip_score = run_clip(client, params, &clip);
                     let class_label = class.label();
 
                     println!("  {:<10} {:<9} grain {grain:>4.0}", still.name, class_label);
@@ -191,17 +189,9 @@ fn main() {
             .collect()
     };
 
-    #[cfg(feature = "vulkan")]
-    {
-        let device = cli.device.to_wgpu().expect("wgpu device conversion failed");
-        println!("device: {device:?}");
-        run_all::<cubecl::wgpu::WgpuRuntime>(&device, &stills);
-    }
-
-    #[cfg(not(feature = "vulkan"))]
-    {
-        let _ = stills;
-        eprintln!("No GPU backend enabled. Run with --features vulkan");
-        std::process::exit(1);
-    }
+    let accelerator = testing::test_accelerator();
+    let device = testing::device_on(accelerator, cli.device);
+    println!("device: {device:?}");
+    let client = device.client();
+    run_all(&client, &stills);
 }

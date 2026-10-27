@@ -116,27 +116,21 @@ impl Nl4dParams {
     /// Rejects a configuration that would fail to launch or fail the front end's checks on submit.
     pub fn validate(&self) -> Result<(), String> {
         let Some(hq) = self.nlm.hq else {
-            return Err(
-                "nlm.hq must be Some, the front end's noise estimate and confidence weighting \
-                 are what submit_machinery builds the ring view from"
-                    .to_string(),
-            );
+            let message = "nlm.hq must be Some, the front end's noise estimate and confidence weighting \
+                           are what submit_machinery builds the ring view from";
+            return Err(message.to_string());
         };
 
         if !self.nlm.motion_compensation.is_active() {
-            return Err(
-                "nlm.motion_compensation must be active, the temporal grouping kernel reads \
-                 the motion field submit_machinery builds from it"
-                    .to_string(),
-            );
+            let message = "nlm.motion_compensation must be active, the temporal grouping kernel reads \
+                           the motion field submit_machinery builds from it";
+            return Err(message.to_string());
         }
 
         if !hq.temporal_confidence {
-            return Err(
-                "nlm.hq.temporal_confidence must be true, submit_machinery returns an error \
-                 unless both motion compensation and the confidence buffer are active"
-                    .to_string(),
-            );
+            let message = "nlm.hq.temporal_confidence must be true, submit_machinery returns an error \
+                           unless both motion compensation and the confidence buffer are active";
+            return Err(message.to_string());
         }
 
         // An overlap at or past `blksize` is left to `nlm.validate()`, which names the real fault
@@ -147,20 +141,20 @@ impl Nl4dParams {
             let step = blksize - overlap;
             let covers = blksize.div_ceil(step);
             if covers > MAX_COVERING_BLOCKS {
-                return Err(format!(
+                let message = format!(
                     "nlm.motion_compensation blksize={blksize} at overlap={overlap} gives a step \
                      of {step}, so {covers} blocks cover a patch on each axis, past the \
                      {MAX_COVERING_BLOCKS} the temporal grouping kernel unrolls its search over. \
                      Raise the step by lowering the overlap."
-                ));
+                );
+                return Err(message);
             }
         }
 
         if !(1..=MAX_TEMPORAL_RADIUS).contains(&self.temporal_radius) {
-            return Err(format!(
-                "temporal_radius={} must be in 1..={}",
-                self.temporal_radius, MAX_TEMPORAL_RADIUS,
-            ));
+            let radius = self.temporal_radius;
+            let message = format!("temporal_radius={radius} must be in 1..={MAX_TEMPORAL_RADIUS}");
+            return Err(message);
         }
 
         if !(1..=4).contains(&self.refine) {
@@ -168,35 +162,33 @@ impl Nl4dParams {
         }
 
         if !(1..=16).contains(&self.spatial_radius) {
-            return Err(format!(
-                "spatial_radius={} must be in 1..=16",
-                self.spatial_radius
-            ));
+            let radius = self.spatial_radius;
+            let message = format!("spatial_radius={radius} must be in 1..=16");
+            return Err(message);
         }
 
         if !(self.lambda_ht.is_finite() && self.lambda_ht > 0.0) {
-            return Err(format!(
-                "lambda_ht must be finite and greater than 0, got {}",
-                self.lambda_ht
-            ));
+            let lambda_ht = self.lambda_ht;
+            let message = format!("lambda_ht must be finite and greater than 0, got {lambda_ht}");
+            return Err(message);
         }
 
         if !(self.c_min.is_finite() && self.c_min >= 0.0 && self.c_min < 1.0) {
-            return Err(format!("c_min must be finite and in [0, 1), got {}", self.c_min));
+            let c_min = self.c_min;
+            let message = format!("c_min must be finite, at least 0 and below 1, got {c_min}");
+            return Err(message);
         }
 
         if !(self.kaiser_beta.is_finite() && (0.0..=MAX_KAISER_BETA).contains(&self.kaiser_beta)) {
-            return Err(format!(
-                "kaiser_beta must be finite and in 0..={MAX_KAISER_BETA}, got {}",
-                self.kaiser_beta
-            ));
+            let beta = self.kaiser_beta;
+            let message = format!("kaiser_beta must be finite and in 0..={MAX_KAISER_BETA}, got {beta}");
+            return Err(message);
         }
 
         if !(self.field_lambda.is_finite() && self.field_lambda >= 0.0) {
-            return Err(format!(
-                "field_lambda must be finite and at least 0, got {}",
-                self.field_lambda
-            ));
+            let field_lambda = self.field_lambda;
+            let message = format!("field_lambda must be finite and at least 0, got {field_lambda}");
+            return Err(message);
         }
 
         if let Some(psy) = &self.psy {

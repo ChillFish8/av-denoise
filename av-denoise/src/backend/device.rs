@@ -9,8 +9,7 @@ use std::str::FromStr;
 /// because most backends expose more than one device. Each variant maps onto the concrete `Device`
 /// type of whichever cubecl runtime was selected.
 ///
-/// `Integrated`, `Virtual` and `Cpu` are wgpu-only. Asking for a variant a runtime cannot honour
-/// returns an error from the matching `to_*` conversion.
+/// `Integrated`, `Virtual` and `Cpu` are Vulkan-only.
 ///
 /// ```
 /// use av_denoise::Device;
@@ -31,11 +30,12 @@ pub enum Device {
     Default,
     /// Discrete GPU at ordinal `index`.
     ///
-    /// Maps to `CudaDevice { index }`, `AmdDevice { index }`, or `WgpuDevice::DiscreteGpu(index)`.
+    /// Maps to `CudaDevice { index }`, `AmdDevice { index }`, or `WgpuDeviceKind::DiscreteGpu(index)`.
+    /// On Metal the index counts the discrete GPUs first and the integrated ones after.
     Discrete { index: usize },
-    /// Integrated GPU at ordinal `index`. wgpu-only.
+    /// Integrated GPU at ordinal `index`. Vulkan-only.
     Integrated { index: usize },
-    /// Virtual GPU at ordinal `index`. wgpu-only.
+    /// Virtual GPU at ordinal `index`. Vulkan-only.
     Virtual { index: usize },
     /// The software device, which picks the lavapipe or software adapter on wgpu.
     Cpu,
@@ -56,9 +56,11 @@ impl FromStr for Device {
         };
 
         if matches!(kind, "default" | "cpu") && suffix.is_some() {
-            return Err(format!(
-                "device kind '{kind}' takes no index, got '{selector}'. Only discrete, integrated, and virtual take an index"
-            ));
+            let message = format!(
+                "device kind '{kind}' takes no index, got '{selector}'. Only discrete, integrated, \
+                 and virtual take an index"
+            );
+            return Err(message);
         }
 
         let parse_index = |index_text: &str| -> Result<usize, String> {
@@ -83,9 +85,13 @@ impl FromStr for Device {
                 let index = parse_index(index_text)?;
                 Ok(Device::Virtual { index })
             },
-            other => Err(format!(
-                "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], virtual[:N], or cpu"
-            )),
+            other => {
+                let message = format!(
+                    "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], \
+                     virtual[:N], or cpu"
+                );
+                Err(message)
+            },
         }
     }
 }
@@ -100,47 +106,6 @@ impl fmt::Display for Device {
             Device::Virtual { index } => write!(formatter, "virtual:{index}"),
             Device::Cpu => formatter.write_str("cpu"),
         }
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl Device {
-    pub fn to_cuda(&self) -> Result<cubecl::cuda::CudaDevice, anyhow::Error> {
-        match self {
-            Device::Default => Ok(cubecl::cuda::CudaDevice { index: 0 }),
-            Device::Discrete { index } => Ok(cubecl::cuda::CudaDevice { index: *index }),
-            other => Err(anyhow::anyhow!(
-                "device {other:?} is not supported on the CUDA runtime, use `default` or `discrete[:N]`"
-            )),
-        }
-    }
-}
-
-#[cfg(feature = "rocm")]
-impl Device {
-    pub fn to_amd(&self) -> Result<cubecl::hip::AmdDevice, anyhow::Error> {
-        match self {
-            Device::Default => Ok(cubecl::hip::AmdDevice { index: 0 }),
-            Device::Discrete { index } => Ok(cubecl::hip::AmdDevice { index: *index }),
-            other => Err(anyhow::anyhow!(
-                "device {other:?} is not supported on the ROCm runtime, use `default` or `discrete[:N]`"
-            )),
-        }
-    }
-}
-
-#[cfg(any(feature = "vulkan", feature = "metal"))]
-impl Device {
-    pub fn to_wgpu(&self) -> Result<cubecl::wgpu::WgpuDevice, anyhow::Error> {
-        use cubecl::wgpu::WgpuDevice;
-
-        Ok(match self {
-            Device::Default => WgpuDevice::DefaultDevice,
-            Device::Discrete { index } => WgpuDevice::DiscreteGpu(*index),
-            Device::Integrated { index } => WgpuDevice::IntegratedGpu(*index),
-            Device::Virtual { index } => WgpuDevice::VirtualGpu(*index),
-            Device::Cpu => WgpuDevice::Cpu,
-        })
     }
 }
 

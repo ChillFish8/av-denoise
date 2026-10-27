@@ -16,13 +16,13 @@ use super::{
     stored_channels,
 };
 
-pub struct DistanceRefBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct DistanceRefBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
 
-impl<R: Runtime> Benchmark for DistanceRefBench<R> {
+impl Benchmark for DistanceRefBench {
     type Input = DistanceInput;
     type Output = ();
 
@@ -47,13 +47,13 @@ impl<R: Runtime> Benchmark for DistanceRefBench<R> {
         let cube_dim = cube_dim_2d();
 
         unsafe {
-            nlm_distance_ref::launch_unchecked::<R>(
+            nlm_distance_ref::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
                 stored_ch,
-                ArrayArg::from_raw_parts(args.input.clone(), args.frame_len),
-                ArrayArg::from_raw_parts(args.dist.clone(), pixels),
+                BufferArg::from_raw_parts(args.input.clone(), args.frame_len),
+                BufferArg::from_raw_parts(args.dist.clone(), pixels),
                 0u32,
                 0u32,
                 Q_X,

@@ -1,4 +1,4 @@
-use super::helpers::{R, make_client, static_clip_params};
+use super::helpers::{make_client, static_clip_params};
 use crate::bench_api::HostIo;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::tests::helpers::noisy_field_over;
@@ -33,7 +33,7 @@ fn faint_line_clip() -> Vec<Vec<f32>> {
 
 fn denoise(params: Nl4dParams, frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
     let client = make_client();
-    let mut denoiser = Nl4dDenoiser::<R>::new(&client, params, WIDTH, HEIGHT).expect("construction failed");
+    let mut denoiser = Nl4dDenoiser::new(&client, params, WIDTH, HEIGHT).expect("construction failed");
 
     let mut outputs = Vec::new();
     for frame in frames {

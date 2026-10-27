@@ -1,9 +1,10 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::frame_shifted_by;
 use crate::bench_api::HostIo;
-use crate::nlmeans::motion::{
+use crate::engine::align::StorageAlign;
+use crate::motion::tests::frame_shifted_by;
+use crate::motion::{
     CHAINED_RADIUS_THRESHOLD,
     MotionCtx,
     mv_field_byte_offset,
@@ -64,15 +65,15 @@ fn frame_shifted_wrapped(world: &[f32], width: u32, height: u32, shift_x: i32, s
 /// Pushes a sequence moving `velocity` pixels per frame on both axes through a `Chained` denoiser.
 ///
 /// A pair-ring slot lives for `2 * radius` pushes (see
-/// [pair_ring_slot_count](crate::nlmeans::motion::pair_ring_slot_count)), so `1 + 3 * radius`
+/// [pair_ring_slot_count](crate::motion::pair_ring_slot_count)), so `1 + 3 * radius`
 /// pushes replace every priming duplicate with a real analyse. Two more frames give margin.
-fn push_constant_velocity(client: &ComputeClient<R>, radius: u32, velocity: i32) -> NlmDenoiser<R> {
+fn push_constant_velocity(client: &Client, radius: u32, velocity: i32) -> NlmDenoiser {
     let width = CHAIN_TEST_SIZE;
     let height = CHAIN_TEST_SIZE;
     let world = noisy_copy(width, 0.5, 0.2, 99);
 
     let params = chained_params(2);
-    let mut denoiser = NlmDenoiser::<R>::new(client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(client, params, width, height);
 
     let real_pushes = 1 + 3 * radius as i32 + 2;
     for frame_number in 0..real_pushes {
@@ -84,16 +85,17 @@ fn push_constant_velocity(client: &ComputeClient<R>, radius: u32, velocity: i32)
 }
 
 /// Runs chain compose for offset `k` and reads back the composed vector at the centre block.
-fn composed_centre_mv(denoiser: &NlmDenoiser<R>, center_t: u32, k: i32, neighbour_idx: u32) -> (i32, i32) {
+fn composed_centre_mv(denoiser: &NlmDenoiser, center_t: u32, k: i32, neighbour_idx: u32) -> (i32, i32) {
     denoiser
         .run_chain_compose(center_t, k, neighbour_idx)
         .expect("chain compose dispatch failed");
 
+    let align = StorageAlign::from_client(&denoiser.client);
     let motion_ctx = MotionCtx::new(
         denoiser.params.motion_compensation,
         denoiser.width,
         denoiser.height,
-        denoiser.align,
+        align,
     )
     .unwrap();
     let mv_field = denoiser
@@ -115,12 +117,13 @@ fn composed_centre_mv(denoiser: &NlmDenoiser<R>, center_t: u32, k: i32, neighbou
 ///
 /// `ring_head_before` is the head the first write saw, before it advanced. Duplicated slots hold
 /// zero motion by definition.
-fn assert_pair_ring_zero_from(denoiser: &NlmDenoiser<R>, ring_head_before: i32, radius: u32) {
+fn assert_pair_ring_zero_from(denoiser: &NlmDenoiser, ring_head_before: i32, radius: u32) {
+    let align = StorageAlign::from_client(&denoiser.client);
     let motion_ctx = MotionCtx::new(
         denoiser.params.motion_compensation,
         denoiser.width,
         denoiser.height,
-        denoiser.align,
+        align,
     )
     .unwrap();
     let pair_ring = denoiser
@@ -242,7 +245,7 @@ fn chain_compose_duplicated_slot_pairs_are_zero_filled() {
     let world = noisy_copy(width, 0.5, 0.2, 7);
 
     let params = chained_params(2);
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     // The first push has no older partner, so the `radius` primed duplicates that follow fill the
     // first gap. Their pair writes start with `ring_head` at 1.
@@ -286,7 +289,7 @@ fn auto_estimation_at_high_radius_allocates_pair_ring() {
     let client = make_client();
     let params = auto_params(CHAINED_RADIUS_THRESHOLD);
 
-    let denoiser = NlmDenoiser::<R>::new(&client, params, 32, 32);
+    let denoiser = NlmDenoiser::new(&client, params, 32, 32);
 
     assert!(
         denoiser.pair_ring_buf.is_some(),
@@ -300,7 +303,7 @@ fn auto_estimation_at_low_radius_does_not_allocate_pair_ring() {
     let client = make_client();
     let params = auto_params(CHAINED_RADIUS_THRESHOLD - 1);
 
-    let denoiser = NlmDenoiser::<R>::new(&client, params, 32, 32);
+    let denoiser = NlmDenoiser::new(&client, params, 32, 32);
 
     assert!(
         denoiser.pair_ring_buf.is_none(),
@@ -332,7 +335,7 @@ fn k4_params(estimation: MotionEstimation) -> NlmParams {
 
 /// Reads frame `slot` from a ring buffer of `height * width * stored_channels` f32 frames.
 fn read_frame_slot(
-    client: &ComputeClient<R>,
+    client: &Client,
     buf: &Handle,
     slot: u32,
     width: u32,
@@ -358,7 +361,7 @@ fn k4_compensated_residual(estimation: MotionEstimation, k: i32) -> f32 {
     let world = noisy_copy(width, 0.5, 0.2, 55);
 
     let params = k4_params(estimation);
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
     let real_pushes = 2 * K4_RADIUS as i32 + 4;
     for frame_number in 0..real_pushes {

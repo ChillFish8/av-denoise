@@ -303,7 +303,9 @@ impl Nl4dArgs {
         if let Some(sigma) = self.sigma
             && (!sigma.is_finite() || sigma <= 0.0 || sigma > 255.0)
         {
-            anyhow::bail!("--sigma must be a finite value in (0, 255] 8-bit units (got {sigma})");
+            anyhow::bail!(
+                "--sigma must be a finite value above 0 and at most 255 in 8-bit units (got {sigma})"
+            );
         }
 
         if self.sigma.is_some() && self.sigma_scale.is_some_and(|scale| scale != 1.0) {
@@ -353,12 +355,17 @@ impl Nl4dArgs {
             chroma_strength: None,
             luma_lambda_ht: self.luma_lambda_ht,
             chroma_lambda_ht: self.chroma_lambda_ht,
+            tuning: self.common.tuning_mode(),
+            deterministic: self.common.deterministic,
         };
 
         Ok(RunOptions {
             planes,
             progress: globals.progress,
             grain_table: self.unstable_export_av1_fgs.clone(),
+            tune_budget: self.common.checked_tune_budget()?,
+            timing_report: self.common.timing_report,
+            shared_device: self.common.shared_device,
         })
     }
 

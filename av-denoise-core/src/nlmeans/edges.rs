@@ -1,9 +1,6 @@
-use cubecl::prelude::*;
-
 use super::NlmDenoiser;
-use super::noise::TemporalNoiseReading;
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     /// Whether every ring slot holds a frame, so a pass can run at any centre.
     pub(crate) fn window_ready(&self) -> bool {
         self.frames_loaded >= self.params.total_frames() as usize
@@ -14,9 +11,10 @@ impl<R: Runtime> NlmDenoiser<R> {
         self.phys_frame(logical as i32)
     }
 
-    /// Turns the shifted-edge stream layout on or off.
+    /// Turns the shifted-edge stream layout on or off, and with it borrowing a sample ahead.
     pub(crate) fn set_shifted_edges(&mut self, on: bool) {
         self.shifted_edges = on;
+        self.set_borrow_ahead(on);
     }
 
     /// Copies the last pushed frame forward until every ring slot holds a frame.
@@ -31,31 +29,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         Ok(())
     }
 
-    /// The temporal reading a pass centred on `center_t` folds.
-    ///
-    /// It is the centre's own reading, unless shifted edges are on and the centre has no usable
-    /// sample. Then it is the first usable reading at a later ring position, or the centre's empty
-    /// one when there is none.
-    pub(super) fn borrow_reading_ahead(&self, center_t: u32) -> Result<TemporalNoiseReading, anyhow::Error> {
-        let centre_slot = self.ring_slot(center_t);
-        let own = self.read_temporal_noise(centre_slot)?;
-        if own.sample.is_some() || !self.shifted_edges {
-            return Ok(own);
-        }
-
-        let total_frames = self.params.total_frames();
-        for logical in center_t + 1..total_frames {
-            let slot = self.ring_slot(logical);
-            let candidate = self.read_temporal_noise(slot)?;
-            if candidate.sample.is_some() {
-                return Ok(candidate);
-            }
-        }
-
-        Ok(own)
-    }
-
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn frames_loaded_for_test(&self) -> usize {
         self.frames_loaded
     }

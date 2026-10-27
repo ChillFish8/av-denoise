@@ -151,6 +151,8 @@ fn raw_params(
     psy_flat_texture_cut: Option<f64>,
     psy_line_ring: Option<i64>,
     pooled_threshold: Option<i64>,
+    tune: Option<&[u8]>,
+    deterministic: Option<i64>,
 ) -> Result<RawParams, Error> {
     Ok(RawParams {
         strength,
@@ -182,6 +184,8 @@ fn raw_params(
         psy_flat_texture_cut,
         psy_line_ring,
         pooled_threshold: opt_bool(pooled_threshold),
+        tune: opt_string(tune, "tune")?,
+        deterministic: opt_bool(deterministic),
     })
 }
 
@@ -211,6 +215,8 @@ make_filter_function! {
         sigma: Option<f64>,
         sigma_scale: Option<f64>,
         motion_compensation: Option<i64>,
+        tune: Option<&[u8]>,
+        deterministic: Option<i64>,
     ) -> Result<Option<Box<dyn Filter<'core> + 'core>>, Error> {
         let raw = raw_params(
             strength,
@@ -242,6 +248,8 @@ make_filter_function! {
             None,
             None,
             None,
+            tune,
+            deterministic,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nlmeans, &raw)?;
         let boxed: Box<dyn Filter<'core> + 'core> = Box::new(filter);
@@ -289,6 +297,8 @@ make_filter_function! {
         psy_flat_texture_cut: Option<f64>,
         psy_line_ring: Option<i64>,
         pooled_threshold: Option<i64>,
+        tune: Option<&[u8]>,
+        deterministic: Option<i64>,
     ) -> Result<Option<Box<dyn Filter<'core> + 'core>>, Error> {
         let raw = raw_params(
             None,
@@ -320,6 +330,8 @@ make_filter_function! {
             psy_flat_texture_cut,
             psy_line_ring,
             pooled_threshold,
+            tune,
+            deterministic,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nl4d, &raw)?;
         let boxed: Box<dyn Filter<'core> + 'core> = Box::new(filter);

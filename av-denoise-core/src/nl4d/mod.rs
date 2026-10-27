@@ -9,6 +9,7 @@
 //! - [PsyParams], the perceptual tuning that filters each area by what it looks like
 //! - film grain measurement for AV1 grain tables
 
+mod collab_pass;
 pub(crate) mod denoiser;
 mod engine;
 pub mod grain;
@@ -28,7 +29,7 @@ pub(crate) mod tests;
 pub(crate) use self::denoiser::Nl4dDenoiser;
 pub use self::engine::Nl4d;
 pub(crate) use self::options::nl4d_pool_ratio;
-#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+#[cfg(test)]
 pub(crate) use self::options::resolve_params;
 pub use self::options::{
     Nl4dOptions,

@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
-use crate::nlmeans::kernels::helpers::read_line;
-use crate::nlmeans::noise::{
+use crate::engine::kernels::read_line;
+use crate::noise::{
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,
@@ -14,13 +14,14 @@ use crate::nlmeans::noise::{
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     TEMPORAL_QUARTERS,
+    UNMEASURED_FLATNESS,
 };
 
 /// The single-thread reduction the production kernel must reproduce.
 #[cube(launch_unchecked)]
 pub(super) fn reference_noise_partial<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    partials: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    partials: &mut [f32],
     frame: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -29,7 +30,7 @@ pub(super) fn reference_noise_partial<N: Size>(
     #[comptime] block_y: u32,
 ) {
     let threads = comptime!(block_x * block_y);
-    let mut scratch = SharedMemory::<f32>::new(comptime!(block_x * block_y * 4) as usize);
+    let mut scratch = Shared::<[f32]>::new_slice(comptime!(block_x * block_y * 4) as usize);
 
     let x = ABSOLUTE_POS_X;
     let y = ABSOLUTE_POS_Y;
@@ -56,7 +57,8 @@ pub(super) fn reference_noise_partial<N: Size>(
 
     #[unroll]
     for channel in 0..channels {
-        scratch[(thread_id * 4 + channel) as usize] = f32::abs(response[channel as usize]);
+        let lane = response.extract(channel as usize);
+        scratch[(thread_id * 4 + channel) as usize] = f32::abs(lane);
     }
 
     #[unroll]
@@ -84,13 +86,13 @@ pub(super) fn reference_noise_partial<N: Size>(
 /// The single-thread reduction the production kernel must reproduce.
 #[cube(launch_unchecked)]
 pub(super) fn reference_noise_reduce(
-    partials: &Array<f32>,
-    results: &mut Array<f32>,
+    partials: &[f32],
+    results: &mut [f32],
     slot: u32,
     num_partials: u32,
     #[comptime] block: u32,
 ) {
-    let mut scratch = SharedMemory::<f32>::new(comptime!(block * 4) as usize);
+    let mut scratch = Shared::<[f32]>::new_slice(comptime!(block * 4) as usize);
     let thread_id = UNIT_POS_X;
 
     let mut sum0 = 0.0f32;
@@ -129,8 +131,8 @@ pub(super) fn reference_noise_reduce(
 /// The single-thread reduction the production kernel must reproduce.
 #[cube(launch_unchecked)]
 pub(super) fn reference_temporal_noise_stats<N: Size>(
-    input: &Array<Vector<f32, N>>,
-    stats: &mut Array<f32>,
+    input: &[Vector<f32, N>],
+    stats: &mut [f32],
     slot_new: u32,
     slot_prev: u32,
     #[comptime] width: u32,
@@ -147,8 +149,8 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
     let scratch_len = comptime!(2 * stored_ch + 1);
     let threads = comptime!(block * block);
 
-    let mut scratch = SharedMemory::<f32>::new(comptime!(threads * scratch_len) as usize);
-    let mut d0_tile = SharedMemory::<f32>::new(threads as usize);
+    let mut scratch = Shared::<[f32]>::new_slice(comptime!(threads * scratch_len) as usize);
+    let mut d0_tile = Shared::<[f32]>::new_slice(threads as usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -184,32 +186,24 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
         residual = new_pixel - prev_pixel;
 
         if comptime!(luma_fields) {
-            new_luma_raw = new_pixel[0];
-            mean_luma_raw = 0.5f32 * (new_pixel[0] + prev_pixel[0]);
-            min_seed = new_pixel[0];
-            max_seed = new_pixel[0];
+            let new_luma = new_pixel.extract(0usize);
+            let prev_luma = prev_pixel.extract(0usize);
+            new_luma_raw = new_luma;
+            mean_luma_raw = 0.5f32 * (new_luma + prev_luma);
+            min_seed = new_luma;
+            max_seed = new_luma;
         }
     }
 
-    #[expect(
-        clippy::useless_conversion,
-        reason = "both branches have to expand to the same cubecl native type, which the \
-                  conversion supplies"
-    )]
-    let d0 = if valid { residual[0] } else { 0.0f32.into() };
+    let d0 = if valid { residual.extract(0usize) } else { 0.0f32 };
     d0_tile[thread_id as usize] = d0;
 
     #[unroll]
     for channel in 0..stored_ch {
-        #[expect(
-            clippy::useless_conversion,
-            reason = "both branches have to expand to the same cubecl native type, which the \
-                      conversion supplies"
-        )]
         let lane_residual = if valid {
-            residual[channel as usize]
+            residual.extract(channel as usize)
         } else {
-            0.0f32.into()
+            0.0f32
         };
         scratch[(thread_id * scratch_len + channel) as usize] = lane_residual;
         scratch[(thread_id * scratch_len + stored_ch + channel) as usize] = lane_residual * lane_residual;
@@ -218,15 +212,10 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
     sync_cube();
 
     let pair_valid = valid && local_x + 1 < block_w;
-    #[expect(
-        clippy::useless_conversion,
-        reason = "both branches have to expand to the same cubecl native type, which the \
-                  conversion supplies"
-    )]
     let lag = if pair_valid {
         d0 * d0_tile[(thread_id + 1) as usize]
     } else {
-        0.0f32.into()
+        0.0f32
     };
     scratch[(thread_id * scratch_len + 2 * stored_ch) as usize] = lag;
 
@@ -265,13 +254,13 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
         let quarter_pos = (local_y % 8u32) * 8u32 + local_x % 8u32;
         let slot = quarter * 64u32 + quarter_pos;
 
-        let mut sum_tile = SharedMemory::<f32>::new(threads as usize);
-        let mut min_tile = SharedMemory::<f32>::new(threads as usize);
-        let mut max_tile = SharedMemory::<f32>::new(threads as usize);
-        let mut residual_tile = SharedMemory::<f32>::new(threads as usize);
-        let mut residual_sq_tile = SharedMemory::<f32>::new(threads as usize);
-        let mut cells = SharedMemory::<f32>::new(64usize);
-        let mut pair_tile = SharedMemory::<f32>::new(64usize);
+        let mut sum_tile = Shared::<[f32]>::new_slice(threads as usize);
+        let mut min_tile = Shared::<[f32]>::new_slice(threads as usize);
+        let mut max_tile = Shared::<[f32]>::new_slice(threads as usize);
+        let mut residual_tile = Shared::<[f32]>::new_slice(threads as usize);
+        let mut residual_sq_tile = Shared::<[f32]>::new_slice(threads as usize);
+        let mut cells = Shared::<[f32]>::new_slice(64usize);
+        let mut pair_tile = Shared::<[f32]>::new_slice(64usize);
 
         sum_tile[slot as usize] = new_luma_raw;
         min_tile[slot as usize] = min_seed;
@@ -396,7 +385,7 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
             let full_width = block_w >= (quarter_x + 1u32) * 8u32;
             let full_height = block_h >= (quarter_y + 1u32) * 8u32;
 
-            let mut flatness = 3.0e38f32;
+            let mut flatness = UNMEASURED_FLATNESS.runtime();
             if full_width && full_height {
                 flatness = pair_tile[(quarter * 16u32) as usize] / 24.0f32;
             }

@@ -11,11 +11,11 @@ pub struct HSumInput {
     pub output: Handle,
 }
 
-pub struct HSumBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct HSumBench {
+    pub client: Client,
 }
 
-impl<R: Runtime> Benchmark for HSumBench<R> {
+impl Benchmark for HSumBench {
     type Input = HSumInput;
     type Output = ();
 
@@ -35,12 +35,12 @@ impl<R: Runtime> Benchmark for HSumBench<R> {
         let cube_dim = cube_dim_2d();
 
         unsafe {
-            nlm_horizontal_sum::launch_unchecked::<R>(
+            nlm_horizontal_sum::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
-                ArrayArg::from_raw_parts(args.input.clone(), pixels),
-                ArrayArg::from_raw_parts(args.output.clone(), pixels),
+                BufferArg::from_raw_parts(args.input.clone(), pixels),
+                BufferArg::from_raw_parts(args.output.clone(), pixels),
                 WIDTH,
                 HEIGHT,
                 PATCH_RADIUS,

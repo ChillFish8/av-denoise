@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
@@ -10,8 +12,6 @@ use av_denoise_core::{
     WindowSpan,
 };
 
-use crate::backend::Device;
-use crate::backend::accelerate::Accelerator;
 use crate::host::{Algorithm, DenoiserError, DenoiserOptions, HostDenoiser, OUTPUT_SETS};
 
 fn luma_options(mode: DenoisingMode) -> DenoiserOptions {
@@ -22,7 +22,9 @@ fn luma_options(mode: DenoisingMode) -> DenoiserOptions {
 }
 
 fn create(width: u32, height: u32, options: DenoiserOptions) -> Result<HostDenoiser, DenoiserError> {
-    HostDenoiser::create(&[Accelerator::Vulkan], &Device::Default, width, height, options)
+    let accelerator = crate::testing::test_accelerator();
+    let device = crate::testing::test_device();
+    HostDenoiser::create(&[accelerator], &device, width, height, options)
 }
 
 fn luma_denoiser(mode: DenoisingMode) -> HostDenoiser {
@@ -74,7 +76,10 @@ fn push_n_with_drain(denoiser: &mut HostDenoiser, count: usize, value: u8, outpu
 #[test]
 fn spatial_denoise_roundtrip() {
     let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
-    assert_eq!(denoiser.selected_accelerator(), Accelerator::Vulkan);
+    assert_eq!(
+        denoiser.selected_accelerator(),
+        crate::testing::test_accelerator()
+    );
 
     let plane = frame(16, 16);
     denoiser.push(&[&plane]).expect("push failed");
@@ -311,7 +316,10 @@ fn nl4d_algorithm_round_trips_through_the_host() {
         .algorithm(algorithm)
         .build();
     let mut denoiser = create(16, 16, options).expect("nl4d denoiser construction failed");
-    assert_eq!(denoiser.selected_accelerator(), Accelerator::Vulkan);
+    assert_eq!(
+        denoiser.selected_accelerator(),
+        crate::testing::test_accelerator()
+    );
 
     let plane = frame(16, 16);
     denoiser.push(&[&plane]).expect("push failed");
@@ -721,4 +729,62 @@ fn try_recv_returns_none_when_nothing_is_in_flight() {
     let polled = denoiser.try_recv().unwrap();
 
     assert_eq!(polled, None);
+}
+
+#[test]
+fn flush_sink_time_is_left_out_of_submit_time() {
+    let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
+    let engine = ScriptedEngine {
+        finish_outcome: || Ok(1),
+        ..ScriptedEngine::pushing(|_| Ok(1))
+    };
+    denoiser.engine = Box::new(engine);
+
+    let plane = frame(16, 16);
+    denoiser.push(&[&plane]).expect("first push should land");
+    denoiser.push(&[&plane]).expect("second push should land");
+
+    let sink_sleep = Duration::from_millis(50);
+    let mut flushed = 0;
+    denoiser
+        .flush(|_| {
+            std::thread::sleep(sink_sleep);
+            flushed += 1;
+        })
+        .expect("flush");
+
+    let timing = denoiser.timing();
+    let total_sleep = sink_sleep * flushed;
+
+    assert_eq!(flushed, 3);
+    assert_eq!(timing.frames, 3);
+    assert!(
+        timing.submit < total_sleep,
+        "submit {:?} includes the sink's {total_sleep:?}",
+        timing.submit
+    );
+}
+
+#[test]
+fn try_recv_counts_a_frame_only_once_it_lands() {
+    let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
+    let engine = ScriptedEngine::pushing(|_| Ok(1));
+    denoiser.engine = Box::new(engine);
+
+    let empty = denoiser.try_recv().expect("try_recv with nothing in flight");
+    assert!(empty.is_none());
+    assert_eq!(denoiser.timing().frames, 0);
+
+    let plane = frame(16, 16);
+    denoiser.push(&[&plane]).expect("push should land");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut received = None;
+
+    while received.is_none() && Instant::now() < deadline {
+        received = denoiser.try_recv().expect("try_recv");
+    }
+
+    assert!(received.is_some(), "the readback never landed");
+    assert_eq!(denoiser.timing().frames, 1);
 }

@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::helpers::{R, make_client};
+use super::helpers::make_client;
 use crate::collab::kernels::group::{
     clamp_top_left,
     pack_pos,
@@ -16,14 +16,14 @@ use crate::collab::kernels::group::{
 /// This checks the host mirrors against the kernels that consume them rather than against themselves.
 #[cube(launch_unchecked)]
 fn group_helpers_kernel(
-    xs: &Array<u32>,
-    ys: &Array<u32>,
-    ts: &Array<u32>,
-    coords: &Array<i32>,
-    max_pos: &Array<u32>,
-    packed: &mut Array<u32>,
-    packed_t: &mut Array<u32>,
-    clamped: &mut Array<u32>,
+    xs: &[u32],
+    ys: &[u32],
+    ts: &[u32],
+    coords: &[i32],
+    max_pos: &[u32],
+    packed: &mut [u32],
+    packed_t: &mut [u32],
+    clamped: &mut [u32],
     #[comptime] n: u32,
 ) {
     let i = ABSOLUTE_POS_X;
@@ -75,18 +75,18 @@ fn run_helpers(
     let clamped_buf = client.empty(count * size_of::<u32>());
 
     unsafe {
-        group_helpers_kernel::launch_unchecked::<R>(
+        group_helpers_kernel::launch_unchecked(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(64),
-            ArrayArg::from_raw_parts(xs_buf, count),
-            ArrayArg::from_raw_parts(ys_buf, count),
-            ArrayArg::from_raw_parts(ts_buf, count),
-            ArrayArg::from_raw_parts(coords_buf, count),
-            ArrayArg::from_raw_parts(max_buf, count),
-            ArrayArg::from_raw_parts(packed_buf.clone(), count),
-            ArrayArg::from_raw_parts(packed_t_buf.clone(), count),
-            ArrayArg::from_raw_parts(clamped_buf.clone(), count),
+            BufferArg::from_raw_parts(xs_buf, count),
+            BufferArg::from_raw_parts(ys_buf, count),
+            BufferArg::from_raw_parts(ts_buf, count),
+            BufferArg::from_raw_parts(coords_buf, count),
+            BufferArg::from_raw_parts(max_buf, count),
+            BufferArg::from_raw_parts(packed_buf.clone(), count),
+            BufferArg::from_raw_parts(packed_t_buf.clone(), count),
+            BufferArg::from_raw_parts(clamped_buf.clone(), count),
             count as u32,
         );
     }
@@ -207,6 +207,6 @@ fn the_gpu_helpers_match_their_host_mirrors() {
     assert_eq!(
         clamped,
         vec![0, 0, 0, 1, 24, 24, 24],
-        "clamp_top_left must pin every coordinate into [0, 24]"
+        "clamp_top_left must pin every coordinate into 0..=24"
     );
 }

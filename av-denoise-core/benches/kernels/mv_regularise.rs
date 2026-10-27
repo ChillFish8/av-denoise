@@ -1,95 +1,118 @@
-use av_denoise_core::bench_api::nl4d_kernels::nl4d_mv_regularise;
+use av_denoise_core::bench_api::DerivedValues;
+use av_denoise_core::bench_api::tune_sites::{RegulariseCandidate, RegulariseOutputs, RegulariseSite};
+use av_denoise_core::tune::{SiteCandidate, VariantSite};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
-use cubecl::server::Handle;
 
-use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channels};
+use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, neighbour_bench_name, shapes_with_channels};
 
 const BLKSIZE: u32 = 16;
 const STEP: u32 = 8;
 const THSAD_PIXEL: f32 = 0.02;
 const FIELD_LAMBDA: f32 = 1.0;
 
-/// The nl4d field regularisation pass over one neighbour at 1080p.
-pub struct MvRegulariseBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+/// The nl4d field regularisation pass over every neighbour at 1080p in one launch.
+pub struct MvRegulariseBench {
+    pub client: Client,
+    pub candidate: RegulariseCandidate,
+    /// Neighbours regularised in one launch, each against the centre frame.
+    pub neighbours: u32,
+    /// Whether the motion field is all zero, so six of every block's seven candidates repeat.
+    pub static_field: bool,
 }
 
-#[derive(Clone)]
-pub struct RegulariseInput {
-    pub centre: Handle,
-    pub neighbour: Handle,
-    pub mv_in: Handle,
-    pub mv_out: Handle,
-    pub confidence: Handle,
-}
-
-impl<R: Runtime> Benchmark for MvRegulariseBench<R> {
-    type Input = RegulariseInput;
+impl Benchmark for MvRegulariseBench {
+    type Input = (RegulariseSite, RegulariseOutputs);
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
         let blocks_x = WIDTH.div_ceil(STEP);
         let blocks_y = HEIGHT.div_ceil(STEP);
         let blocks = (blocks_x * blocks_y) as usize;
+        let neighbours = self.neighbours as usize;
+        let frame_pixels = (WIDTH * HEIGHT) as usize;
 
-        let centre_frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
-        let centre_bytes = f32::as_bytes(&centre_frame);
-        let centre = self.client.create_from_slice(centre_bytes);
-        let neighbour_frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
-        let neighbour_bytes = f32::as_bytes(&neighbour_frame);
-        let neighbour = self.client.create_from_slice(neighbour_bytes);
+        // Every neighbour takes slots `0..neighbours` and the centre takes the last slot.
+        let mut frames = Vec::with_capacity((neighbours + 1) * frame_pixels);
+        for _ in 0..=self.neighbours {
+            let frame = make_synthetic_frame(WIDTH, HEIGHT, 1);
+            frames.extend_from_slice(&frame);
+        }
 
-        let field: Vec<i32> = (0..2 * blocks).map(|index| (index % 7) as i32 - 3).collect();
+        let frame_bytes = f32::as_bytes(&frames);
+        let pyramid = self.client.create_from_slice(frame_bytes);
+        let table: Vec<u32> = (0..self.neighbours).collect();
+        let table_bytes = u32::as_bytes(&table);
+        let neighbour_slots = self.client.create_from_slice(table_bytes);
+
+        let mv_stride = 2 * blocks;
+        let conf_stride = blocks;
+        let mut field: Vec<i32> = (0..neighbours * mv_stride)
+            .map(|index| (index % 7) as i32 - 3)
+            .collect();
+        if self.static_field {
+            field.fill(0);
+        }
+
         let field_bytes = i32::as_bytes(&field);
         let mv_in = self.client.create_from_slice(field_bytes);
-        let mv_out = self.client.empty(2 * blocks * size_of::<i32>());
-        let confidence = self.client.empty(blocks * size_of::<f32>());
-
-        RegulariseInput {
-            centre,
-            neighbour,
-            mv_in,
-            mv_out,
+        let vectors = self.client.empty(neighbours * mv_stride * size_of::<i32>());
+        let confidence = self.client.empty(neighbours * conf_stride * size_of::<f32>());
+        let outputs = RegulariseOutputs {
+            vectors,
             confidence,
-        }
+            blocks,
+            neighbours: self.neighbours,
+            mv_stride: mv_stride as u32,
+            conf_stride: conf_stride as u32,
+        };
+
+        let block_area = (BLKSIZE * BLKSIZE) as f32;
+        let lambda_pixel = FIELD_LAMBDA * block_area * THSAD_PIXEL;
+        let thsad = block_area * THSAD_PIXEL;
+        let noise_words = DerivedValues::default().to_words();
+        let noise_bytes = f32::as_bytes(&noise_words);
+        let noise = self.client.create_from_slice(noise_bytes);
+
+        let site = RegulariseSite {
+            client: self.client.clone(),
+            pyramid,
+            pyramid_len: frames.len(),
+            centre_slot: self.neighbours,
+            neighbour_slots,
+            slot_pixels: frame_pixels as u32,
+            mv_in,
+            outputs: outputs.clone(),
+            lambda_pixel,
+            noise,
+            thsad,
+            width: WIDTH,
+            height: HEIGHT,
+            blksize: BLKSIZE,
+            step: STEP,
+            blocks_x,
+            blocks_y,
+        };
+
+        (site, outputs)
     }
 
-    fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let blocks_x = WIDTH.div_ceil(STEP);
-        let blocks_y = HEIGHT.div_ceil(STEP);
-        let blocks = (blocks_x * blocks_y) as usize;
-        let block_area = (BLKSIZE * BLKSIZE) as f32;
-        let lambda = FIELD_LAMBDA * block_area * THSAD_PIXEL;
-        let thsad = block_area * THSAD_PIXEL;
-
-        unsafe {
-            nl4d_mv_regularise::launch_unchecked::<R>(
-                &self.client,
-                CubeCount::new_2d(blocks_x, blocks_y),
-                CubeDim::new_2d(8, 8),
-                ArrayArg::from_raw_parts(args.centre.clone(), (WIDTH * HEIGHT) as usize),
-                ArrayArg::from_raw_parts(args.neighbour.clone(), (WIDTH * HEIGHT) as usize),
-                ArrayArg::from_raw_parts(args.mv_in.clone(), 2 * blocks),
-                ArrayArg::from_raw_parts(args.mv_out.clone(), 2 * blocks),
-                ArrayArg::from_raw_parts(args.confidence.clone(), blocks),
-                lambda,
-                0.0,
-                thsad,
-                WIDTH,
-                HEIGHT,
-                BLKSIZE,
-                STEP,
-                blocks_x,
-                blocks_y,
-            );
-        }
+    fn execute(&self, input: Self::Input) -> Result<(), String> {
+        let (site, outputs) = input;
+        site.launch(self.candidate, &outputs);
 
         Ok(())
     }
 
     fn name(&self) -> String {
-        "nl4d_mv_regularise_1080p_luma".to_string()
+        let content = if self.static_field { "_static" } else { "" };
+        let base = format!(
+            "{}/{}/1080p_luma{content}",
+            RegulariseCandidate::SITE,
+            self.candidate.name()
+        );
+
+        neighbour_bench_name(&base, self.neighbours)
     }
 
     fn sync(&self) {

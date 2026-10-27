@@ -7,7 +7,7 @@ use crate::collab::{MAX_K, PATCH_SIZE};
 /// Approximations land in the first half of the span and details in the second.
 #[cube]
 fn haar_strided_level_fwd(
-    vals: &mut Array<f32>,
+    vals: &mut [f32],
     #[comptime] start: u32,
     #[comptime] stride: u32,
     #[comptime] len: u32,
@@ -32,7 +32,7 @@ fn haar_strided_level_fwd(
 /// The inverse of `haar_strided_level_fwd`.
 #[cube]
 fn haar_strided_level_inv(
-    vals: &mut Array<f32>,
+    vals: &mut [f32],
     #[comptime] start: u32,
     #[comptime] stride: u32,
     #[comptime] len: u32,
@@ -59,7 +59,7 @@ fn haar_strided_level_inv(
 /// Both outputs of a Haar pair carry the mean variance of its inputs.
 #[cube]
 fn variance_strided_level(
-    vals: &mut Array<f32>,
+    vals: &mut [f32],
     #[comptime] start: u32,
     #[comptime] stride: u32,
     #[comptime] len: u32,
@@ -82,12 +82,7 @@ fn variance_strided_level(
 }
 
 #[cube]
-fn haar_strided_fwd(
-    vals: &mut Array<f32>,
-    #[comptime] start: u32,
-    #[comptime] stride: u32,
-    #[comptime] len: u32,
-) {
+fn haar_strided_fwd(vals: &mut [f32], #[comptime] start: u32, #[comptime] stride: u32, #[comptime] len: u32) {
     if comptime!(len >= 4) {
         haar_strided_level_fwd(vals, start, stride, 4u32);
     }
@@ -97,12 +92,7 @@ fn haar_strided_fwd(
 }
 
 #[cube]
-fn haar_strided_inv(
-    vals: &mut Array<f32>,
-    #[comptime] start: u32,
-    #[comptime] stride: u32,
-    #[comptime] len: u32,
-) {
+fn haar_strided_inv(vals: &mut [f32], #[comptime] start: u32, #[comptime] stride: u32, #[comptime] len: u32) {
     if comptime!(len >= 2) {
         haar_strided_level_inv(vals, start, stride, 2u32);
     }
@@ -112,12 +102,7 @@ fn haar_strided_inv(
 }
 
 #[cube]
-fn variance_strided(
-    vals: &mut Array<f32>,
-    #[comptime] start: u32,
-    #[comptime] stride: u32,
-    #[comptime] len: u32,
-) {
+fn variance_strided(vals: &mut [f32], #[comptime] start: u32, #[comptime] stride: u32, #[comptime] len: u32) {
     if comptime!(len >= 4) {
         variance_strided_level(vals, start, stride, 4u32);
     }
@@ -131,7 +116,7 @@ fn variance_strided(
 /// Member `s * grid_frames + t` is frame `t` of volume `s`. Each volume is transformed along time,
 /// then every temporal coefficient is transformed across the volumes.
 #[cube]
-pub(crate) fn grid_fwd(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
+pub(crate) fn grid_fwd(stack: &mut [f32], #[comptime] grid_frames: u32) {
     let volumes = comptime!(MAX_K / grid_frames);
 
     #[unroll]
@@ -144,12 +129,17 @@ pub(crate) fn grid_fwd(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
 
         #[unroll]
         for volume in 0..volumes {
-            haar_strided_fwd(&mut vals, comptime!(volume * grid_frames), 1u32, grid_frames);
+            haar_strided_fwd(
+                vals.as_mut_slice(),
+                comptime!(volume * grid_frames),
+                1u32,
+                grid_frames,
+            );
         }
 
         #[unroll]
         for frame in 0..grid_frames {
-            haar_strided_fwd(&mut vals, frame, grid_frames, volumes);
+            haar_strided_fwd(vals.as_mut_slice(), frame, grid_frames, volumes);
         }
 
         #[unroll]
@@ -161,7 +151,7 @@ pub(crate) fn grid_fwd(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
 
 /// The inverse of `grid_fwd`.
 #[cube]
-pub(crate) fn grid_inv(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
+pub(crate) fn grid_inv(stack: &mut [f32], #[comptime] grid_frames: u32) {
     let volumes = comptime!(MAX_K / grid_frames);
 
     #[unroll]
@@ -174,12 +164,17 @@ pub(crate) fn grid_inv(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
 
         #[unroll]
         for frame in 0..grid_frames {
-            haar_strided_inv(&mut vals, frame, grid_frames, volumes);
+            haar_strided_inv(vals.as_mut_slice(), frame, grid_frames, volumes);
         }
 
         #[unroll]
         for volume in 0..volumes {
-            haar_strided_inv(&mut vals, comptime!(volume * grid_frames), 1u32, grid_frames);
+            haar_strided_inv(
+                vals.as_mut_slice(),
+                comptime!(volume * grid_frames),
+                1u32,
+                grid_frames,
+            );
         }
 
         #[unroll]
@@ -191,7 +186,7 @@ pub(crate) fn grid_inv(stack: &mut Array<f32>, #[comptime] grid_frames: u32) {
 
 /// Propagates each member's variance to the coefficient it lands on under `grid_fwd`.
 #[cube]
-pub(crate) fn grid_variance(v: &mut Array<f32>, #[comptime] grid_frames: u32) {
+pub(crate) fn grid_variance(v: &mut [f32], #[comptime] grid_frames: u32) {
     let volumes = comptime!(MAX_K / grid_frames);
 
     #[unroll]

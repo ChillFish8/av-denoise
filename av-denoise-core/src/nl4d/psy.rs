@@ -60,17 +60,15 @@ impl PsyParams {
         }
 
         if !(self.shadow_soften.is_finite() && (0.1..=1.0).contains(&self.shadow_soften)) {
-            return Err(format!(
-                "psy_shadow_soften must be finite and in 0.1..=1.0, got {}",
-                self.shadow_soften
-            ));
+            let soften = self.shadow_soften;
+            let message = format!("psy_shadow_soften must be finite and in 0.1..=1.0, got {soften}");
+            return Err(message);
         }
 
         if !(self.flat_texture_cut.is_finite() && (0.0..=1.0).contains(&self.flat_texture_cut)) {
-            return Err(format!(
-                "psy_flat_texture_cut must be finite and in 0.0..=1.0, got {}",
-                self.flat_texture_cut
-            ));
+            let cut = self.flat_texture_cut;
+            let message = format!("psy_flat_texture_cut must be finite and in 0.0..=1.0, got {cut}");
+            return Err(message);
         }
 
         if self.line_ring > 64 {

@@ -1,21 +1,14 @@
 use cubecl::prelude::*;
 
-use super::helpers::{
-    BLK_STEP,
-    R,
-    RingFixture,
-    deterministic_texture,
-    make_client,
-    noisy_ring,
-    planted_ring,
-};
+use super::helpers::{BLK_STEP, RingFixture, deterministic_texture, make_client, noisy_ring, planted_ring};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
-use crate::collab::kernels::fused::{STRENGTH_MAP_OFF, collab_fused};
+use crate::collab::kernels::fused::{CollabVariant, Walk, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
-use crate::collab::{PATCH_SIZE, STEP, grid_frames, needs_warp_uniform_search};
-use crate::nlmeans::NOISE_CURVE_BINS;
-use crate::nlmeans::motion::neighbour_idx_for_k;
+use crate::collab::{PATCH_SIZE, STEP, grid_frames};
+use crate::motion::neighbour_idx_for_k;
+use crate::noise::tests::{CollabNoise, collab_noise_buffer};
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
 
 /// The motion block side length these fixtures score confidence against.
 ///
@@ -42,8 +35,8 @@ struct Knobs {
     spatial_radius: u32,
     /// The motion block side length. At [BLK_STEP] exactly one block covers a patch.
     blksize: u32,
-    /// Pins the search walk. `None` follows [needs_warp_uniform_search].
-    warp_uniform: Option<bool>,
+    /// Pins the kernel variant. `None` runs this runtime's baseline.
+    variant: Option<CollabVariant>,
 }
 
 impl Default for Knobs {
@@ -56,7 +49,7 @@ impl Default for Knobs {
             refine: REFINE,
             spatial_radius: SPATIAL_RADIUS,
             blksize: BLKSIZE,
-            warp_uniform: None,
+            variant: None,
         }
     }
 }
@@ -87,7 +80,7 @@ impl FusedRun {
     }
 }
 
-/// Launches [collab_fused] over a fixture on the denoiser's eight-references-per-cube grid.
+/// Launches [collab_fused] over a fixture as the variant `knobs` pins.
 ///
 /// Luma always stores one channel per line, so the kernel's `Size` selector is fixed at 1.
 fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
@@ -108,8 +101,6 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let mv_bytes = i32::as_bytes(&fixture.mv_field);
     let conf_bytes = f32::as_bytes(&fixture.confidence);
     let slots_bytes = u32::as_bytes(&fixture.neighbour_slots);
-    let sigma = [knobs.sigma];
-    let sigma_bytes = f32::as_bytes(&sigma);
     let profile_bytes = f32::as_bytes(&profile);
     let kaiser_bytes = f32::as_bytes(&kaiser);
     let curve_bytes = f32::as_bytes(&zeroed_curve);
@@ -117,10 +108,19 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let mv_buf = client.create_from_slice(mv_bytes);
     let conf_buf = client.create_from_slice(conf_bytes);
     let slots_buf = client.create_from_slice(slots_bytes);
-    let sigma_buf = client.create_from_slice(sigma_bytes);
     let profile_buf = client.create_from_slice(profile_bytes);
     let kaiser_buf = client.create_from_slice(kaiser_bytes);
     let zero_curve = client.create_from_slice(curve_bytes);
+
+    let sigma = [knobs.sigma];
+    let scale = weight_scale(knobs.sigma, &profile);
+    let noise_values = CollabNoise {
+        sigma: &sigma,
+        weight_scale: scale,
+        curve_valid: false,
+        map_mode: STRENGTH_MAP_OFF,
+    };
+    let noise_buf = collab_noise_buffer(&client, noise_values);
 
     let (map_cols, map_rows) = strength_map_dims(width, height);
     let map_len = (map_cols * map_rows) as usize;
@@ -134,46 +134,43 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let wsum = client.create_from_slice(wsum_bytes);
     let group_weight = client.empty(refs * size_of::<f32>());
 
-    let cubes_x = fused_cubes_x(width);
+    let runtime_baseline = CollabVariant::for_client(&client);
+    let variant = knobs.variant.unwrap_or(runtime_baseline);
+
+    let cubes_x = fused_cubes_x(width, variant.groups);
     let refs_y = refs_along(height);
     let grid = CubeCount::new_2d(cubes_x, refs_y);
-    let dim = CubeDim::new_1d(64);
-    let scale = weight_scale(knobs.sigma, &profile);
+    let dim = CubeDim::new_1d(variant.lanes());
     let accum_scale = cross_frame_accum_scale(knobs.spatial_radius, fixture.radius);
-    let warp_uniform = knobs
-        .warp_uniform
-        .unwrap_or_else(|| needs_warp_uniform_search(&client));
     let grid_frame_count = grid_frames(fixture.radius);
 
     let stored_ch = 1usize;
 
     unsafe {
-        collab_fused::launch_unchecked::<f32, R>(
+        let ring_scalar = BufferArg::from_raw_parts(ring_buf.clone(), fixture.ring.len());
+        collab_fused::launch_unchecked::<f32, i32>(
             &client,
             grid,
             dim,
             stored_ch,
-            ArrayArg::from_raw_parts(ring_buf.clone(), fixture.ring.len()),
-            ArrayArg::from_raw_parts(ring_buf, stored_ch),
-            ArrayArg::from_raw_parts(mv_buf, fixture.mv_field.len()),
-            ArrayArg::from_raw_parts(conf_buf, fixture.confidence.len()),
-            ArrayArg::from_raw_parts(slots_buf, fixture.neighbour_slots.len()),
-            ArrayArg::from_raw_parts(sigma_buf, 1),
-            ArrayArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-            ArrayArg::from_raw_parts(unit_map_buf, map_len),
-            ArrayArg::from_raw_parts(profile_buf, 8),
-            ArrayArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
-            ArrayArg::from_raw_parts(accum, pixels * frames),
-            ArrayArg::from_raw_parts(wsum.clone(), pixels * frames),
-            ArrayArg::from_raw_parts(group_weight.clone(), refs),
+            BufferArg::from_raw_parts(ring_buf.clone(), fixture.ring.len()),
+            ring_scalar,
+            BufferArg::from_raw_parts(ring_buf, stored_ch),
+            BufferArg::from_raw_parts(mv_buf, fixture.mv_field.len()),
+            BufferArg::from_raw_parts(conf_buf, fixture.confidence.len()),
+            BufferArg::from_raw_parts(slots_buf, fixture.neighbour_slots.len()),
+            BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
+            BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
+            BufferArg::from_raw_parts(unit_map_buf, map_len),
+            BufferArg::from_raw_parts(profile_buf, 8),
+            BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
+            BufferArg::from_raw_parts(accum, pixels * frames),
+            BufferArg::from_raw_parts(wsum.clone(), pixels * frames),
+            BufferArg::from_raw_parts(group_weight.clone(), refs),
             fixture.centre_slot,
             knobs.c_min,
             knobs.lambda_ht,
-            0u32,
-            STRENGTH_MAP_OFF,
-            scale,
             accum_scale,
-            warp_uniform,
             false,
             fixture.radius,
             grid_frame_count,
@@ -194,6 +191,8 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             map_cols,
             map_rows,
             0.0f32,
+            false,
+            variant,
             false,
         );
     }
@@ -692,11 +691,14 @@ fn a_position_claimed_by_an_earlier_volume_agrees_across_search_walks() {
     let bait = twin_ring(&patch, |k| [3 * k, 16], |k| [3 * k, 16]);
 
     let clipped_knobs = Knobs {
-        warp_uniform: Some(false),
+        variant: Some(CollabVariant::BASELINE),
         ..twin_knobs()
     };
     let uniform_knobs = Knobs {
-        warp_uniform: Some(true),
+        variant: Some(CollabVariant {
+            walk: Walk::Uniform,
+            ..CollabVariant::BASELINE
+        }),
         ..twin_knobs()
     };
 

@@ -1,6 +1,8 @@
 use super::helpers::*;
 use crate::bench_api::HostIo;
-use crate::nlmeans::noise::{
+use crate::nlmeans::*;
+use crate::noise::{
+    NOISE_CURVE_BINS,
     NoiseCurve,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -14,13 +16,13 @@ use crate::nlmeans::noise::{
     QuarterSettings,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
+    UNMEASURED_FLATNESS,
     accepted_static_blocks,
     aggregate_temporal_noise_stats,
     build_noise_curve,
     temporal_noise_reading,
     temporal_stats_record_len,
 };
-use crate::nlmeans::*;
 
 /// One synthetic 8x8 quarter, as the stats kernel would record it.
 #[derive(Clone, Copy)]
@@ -323,7 +325,7 @@ fn the_flat_and_clip_gates_reject_their_quarters() {
 #[test]
 fn a_ragged_quarter_is_rejected_by_the_flat_gate() {
     let ragged = SyntheticQuarter {
-        flatness: 3.0e38,
+        flatness: UNMEASURED_FLATNESS,
         ..quarter_at(0.6, 0.02)
     };
     assert_gate_keeps_the_bin_empty(ragged);
@@ -459,7 +461,7 @@ fn a_ragged_parent_reads_its_partial_quarters_with_their_own_pixel_count() {
         ..quarter_at(0.5, 0.02)
     };
     let ragged = SyntheticQuarter {
-        flatness: 3.0e38,
+        flatness: UNMEASURED_FLATNESS,
         ..quarter_at(0.5, 0.02)
     };
     let full_block = [
@@ -583,7 +585,7 @@ fn reset_stream_state_clears_the_curve() {
         }),
     };
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.set_luma_noise_fields(true);
 
     let mut curve_seen = false;

@@ -20,6 +20,8 @@ fn base_options(
         chroma_strength,
         luma_lambda_ht: None,
         chroma_lambda_ht: None,
+        tuning: TuningMode::Off,
+        deterministic: false,
     }
 }
 
@@ -111,6 +113,8 @@ fn nl4d_options(luma_lambda_ht: Option<f32>, chroma_lambda_ht: Option<f32>) -> P
         chroma_strength: None,
         luma_lambda_ht,
         chroma_lambda_ht,
+        tuning: TuningMode::Off,
+        deterministic: false,
     }
 }
 

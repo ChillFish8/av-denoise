@@ -12,13 +12,13 @@ pub struct ZeroInput {
     max_weight: Handle,
 }
 
-pub struct ZeroBench<R: Runtime> {
-    pub client: ComputeClient<R>,
+pub struct ZeroBench {
+    pub client: Client,
     pub channels: u32,
     pub channel_name: &'static str,
 }
 
-impl<R: Runtime> Benchmark for ZeroBench<R> {
+impl Benchmark for ZeroBench {
     type Input = ZeroInput;
     type Output = ();
 
@@ -42,13 +42,13 @@ impl<R: Runtime> Benchmark for ZeroBench<R> {
         let total_threads = COPY_GRID_1D * BLOCK_1D;
 
         unsafe {
-            gpu_zero_buffers::launch_unchecked::<R>(
+            gpu_zero_buffers::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(COPY_GRID_1D),
                 CubeDim::new_1d(BLOCK_1D),
-                ArrayArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
-                ArrayArg::from_raw_parts(args.weight_sum.clone(), pixels),
-                ArrayArg::from_raw_parts(args.max_weight.clone(), pixels),
+                BufferArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
+                BufferArg::from_raw_parts(args.weight_sum.clone(), pixels),
+                BufferArg::from_raw_parts(args.max_weight.clone(), pixels),
                 (pixels * stored_ch) as u32,
                 pixels as u32,
                 total_threads,

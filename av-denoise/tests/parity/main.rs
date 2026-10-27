@@ -2,6 +2,8 @@
 //!
 //! Setting `AVD_PARITY_RECORD=1` records the fixture instead of checking it.
 
+#![cfg(feature = "vulkan")]
+
 mod clips;
 mod configs;
 mod fixture;
@@ -23,7 +25,7 @@ fn record_planes(entries: &mut Entries, config: &str, prefix: &str, planes: &Pla
 }
 
 fn run(config: &ParityConfig, entries: &mut Entries) {
-    let clip = clips::clip(config.layout, config.frames);
+    let clip = clips::clip(config.clip, config.layout, config.frames);
     let mut denoiser = PlanarDenoiser::create(&config.options, config.layout).expect("create");
     let mut outputs = Vec::new();
 

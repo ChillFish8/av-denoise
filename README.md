@@ -167,7 +167,8 @@ without use.
 - `AV_DENOISE_COMPILATION_CACHE=/some/dir` puts the compiled-kernel and autotune caches somewhere else, which is
   what CI runs and containers use to keep the cache on a mounted volume. It overrides whatever is in `cubecl.toml`.
 - `AV_DENOISE_COMPILATION_CACHE=off` disables caching entirely. Use this when benchmarking, because a warm cache
-  hides the compilation cost a first run pays.
+  hides the compilation cost a first run pays. Kernel tuning results live in the cache too, so with caching off
+  every run tunes from scratch and stores nothing.
 
 If the cache directory cannot be created, `av-denoise` logs a warning and carries on without a cache.
 

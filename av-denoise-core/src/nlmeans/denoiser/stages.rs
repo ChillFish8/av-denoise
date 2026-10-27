@@ -1,19 +1,32 @@
 use anyhow::Context;
-use cubecl::prelude::*;
 
 use super::NlmDenoiser;
-use crate::nlmeans::motion::{self, MotionEstimation, build_pyramid_for_slot, run_pyramid_build};
+use crate::engine::timing::timed;
+use crate::motion::{self, MotionEstimation, run_pyramid_build};
 use crate::nlmeans::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     /// Runs every per-frame stage on a freshly pushed `slot`, through to the ring advance.
+    ///
+    /// The GPU stages run in device spans when the frame is sampled. The first frame's noise seed
+    /// is queued between two spans.
     pub(super) fn run_post_upload_stages(&mut self, slot: usize) -> Result<(), anyhow::Error> {
-        self.run_noise_estimate_for_slot(slot as u32)?;
-        self.run_temporal_stats_for_slot(slot as u32)?;
-        self.seed_noise_estimate_if_first_frame(slot as u32)?;
+        let client = self.client.clone();
+        let frame_slot = slot as u32;
 
-        if let PrefilterMode::NlmSpatial { strength_scale } = self.params.prefilter {
-            self.run_nlm_spatial_pilot(slot as u32, strength_scale)
+        timed(&client, self, move |front| front.queue_noise_stats(frame_slot))?;
+        self.seed_noise_estimate_if_first_frame(frame_slot)?;
+
+        timed(&client, self, move |front| front.run_reference_stages(slot))?;
+
+        self.advance_ring();
+        self.prime_leading_edge_if_first()
+    }
+
+    /// Queues the prefilter, the motion pyramids and the pair analyse for `slot`.
+    fn run_reference_stages(&mut self, slot: usize) -> Result<(), anyhow::Error> {
+        if let PrefilterMode::NlmSpatial { .. } = self.params.prefilter {
+            self.run_nlm_spatial_pilot(slot as u32)
                 .context("nlm spatial pilot dispatch failed")?;
         } else if self.params.prefilter.is_gpu_internal() {
             self.run_prefilter_for_slot(slot)?;
@@ -21,10 +34,7 @@ impl<R: Runtime> NlmDenoiser<R> {
 
         self.build_pyramids_for_slot(slot as u32)?;
         self.build_confidence_pyramid_for_slot(slot as u32)?;
-        self.run_pair_analyse_for_slot(slot as u32)?;
-
-        self.advance_ring();
-        self.prime_leading_edge_if_first()
+        self.run_pair_analyse_for_slot(slot as u32)
     }
 
     fn run_prefilter_for_slot(&self, slot: usize) -> Result<(), anyhow::Error> {
@@ -44,7 +54,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             reference_buf,
         };
 
-        run_prefilter::<R>(self.params.prefilter, &self.client, &prefilter_ctx)
+        run_prefilter(self.params.prefilter, &self.client, &prefilter_ctx)
             .context("prefilter dispatch failed")
     }
 
@@ -58,7 +68,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         let frame_count = self.params.total_frames();
 
         if let Some(input_pyramid) = self.pyramid_input.as_ref() {
-            build_pyramid_for_slot::<R>(
+            run_pyramid_build(
                 &self.client,
                 motion_ctx,
                 self.width,
@@ -75,7 +85,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         if let (Some(reference_pyramid), Some(reference_buf)) =
             (self.pyramid_reference.as_ref(), self.reference_buf.as_ref())
         {
-            build_pyramid_for_slot::<R>(
+            run_pyramid_build(
                 &self.client,
                 motion_ctx,
                 self.width,
@@ -102,7 +112,7 @@ impl<R: Runtime> NlmDenoiser<R> {
             return Ok(());
         };
 
-        run_pyramid_build::<R>(
+        run_pyramid_build(
             &self.client,
             confidence_ctx,
             self.width,
@@ -160,8 +170,9 @@ impl<R: Runtime> NlmDenoiser<R> {
         let total_frames = self.params.total_frames();
         let older_slot = (newer_slot + total_frames - 1) % total_frames;
         let pair_slot = self.pair_slot(0);
+        let noise = self.derived_handle();
 
-        motion::run_pair_analyse::<R>(
+        motion::run_pair_analyse(
             &self.client,
             motion_ctx,
             self.width,
@@ -171,8 +182,10 @@ impl<R: Runtime> NlmDenoiser<R> {
             newer_slot,
             pair_slot,
             pyramid,
+            &self.ring_slot_tables,
             pair_ring,
             &self.confidence_dummy,
+            &noise,
         )
         .context("pair analyse dispatch failed")
     }
@@ -192,6 +205,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             .as_ref()
             .expect("pair_ring allocated when Chained is active");
         let pair_slot = self.pair_slot(0);
-        motion::zero_pair_slot::<R>(&self.client, motion_ctx, pair_ring, pair_slot);
+        motion::zero_pair_slot(&self.client, motion_ctx, pair_ring, pair_slot);
     }
 }

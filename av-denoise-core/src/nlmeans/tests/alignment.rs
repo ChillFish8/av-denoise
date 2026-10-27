@@ -24,7 +24,7 @@ fn denoise_uniform(width: u32, height: u32, params: NlmParams) {
     let client = make_client();
     let frame = make_uniform_frame(width, height, 1, 0.5);
 
-    let mut denoiser = NlmDenoiser::<R>::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     for _ in 0..5 {
         denoiser.push_frame(&frame);
     }

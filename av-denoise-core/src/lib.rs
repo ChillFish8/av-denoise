@@ -7,12 +7,29 @@ pub mod bench_api;
 mod collab;
 mod engine;
 mod error;
+mod kernel_cache;
+#[cfg(test)]
+mod kernel_hash;
+mod motion;
 pub mod nl4d;
 pub mod nlmeans;
+mod noise;
 mod options;
+#[doc(hidden)]
+pub mod testing;
+#[cfg(test)]
+mod tests;
+pub mod tune;
 
-pub use self::engine::{DevicePlane, EdgePadding, Engine, Geometry, SampleFormat, WindowSpan};
+pub use self::engine::{DevicePlane, EdgePadding, Engine, EngineTiming, Geometry, SampleFormat, WindowSpan};
 pub use self::error::Error;
+pub use self::kernel_cache::{
+    PrivateKernelCache,
+    finish_kernel_cache,
+    finish_kernel_cache_at_exit,
+    merge_kernel_cache,
+    refill_kernel_cache,
+};
 pub use self::nl4d::grain::{GrainChunk, SceneGrain, build_table};
 pub use self::nl4d::{
     Nl4d,
@@ -44,5 +61,9 @@ pub use self::nlmeans::{
 };
 pub use self::options::Preset;
 
-/// A hash of this crate's sources, which names a build's directory in the compiled kernel cache.
+#[cfg(all(feature = "metal", not(target_vendor = "apple")))]
+compile_error!("the `metal` feature needs an Apple target, such as `aarch64-apple-darwin`");
+
+/// A hash of this crate's sources and the CubeCL version, which names a build's directory for its
+/// compiled kernels and tuning results.
 pub const KERNEL_HASH: &str = env!("AV_DENOISE_KERNEL_HASH");

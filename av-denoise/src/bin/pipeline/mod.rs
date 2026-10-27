@@ -2,9 +2,11 @@ mod convert;
 mod coordinator;
 mod decode;
 mod grain_table;
+pub mod report;
 mod scenes;
 mod source;
 mod stage;
+mod tune;
 mod worker;
 
 #[cfg(test)]
@@ -12,6 +14,7 @@ mod tests;
 
 use std::io::{IsTerminal, stdout};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use av_denoise::{DenoisingMode, Depth, FrameLayout, PlaneOptions, SceneGrain};
 
@@ -19,12 +22,30 @@ use self::convert::SourcePixel;
 use self::coordinator::spawn_coordinator;
 use self::decode::{DecodeThread, FrameMsg};
 use self::grain_table::TablePath;
+use self::report::{RunSummary, WorkerTiming};
 use self::scenes::{Decided, SceneSplitter};
 use self::source::{OpenedSource, SourceInfo};
 use self::stage::{SceneJob, Stager, checked_frame_permits, frame_permit_channel};
-use self::worker::{WorkerJoin, spawn_workers};
+pub use self::tune::{budget_request, tune_input};
+use self::worker::{WorkerJoin, WorkerOutput, WorkerSettings, spawn_workers};
 use crate::cli::{InputSource, RunOptions};
 use crate::progress::denoise_bar_visible;
+
+/// How a pipeline run uses the machine and what it writes beside the video.
+pub struct RunSettings {
+    pub workers: usize,
+    pub frame_budget_bytes: u64,
+    /// Whether to draw the denoising progress bar.
+    pub visible: bool,
+    /// Where to write the AV1 film grain table, when one was asked for.
+    pub grain_table: Option<PathBuf>,
+    /// Seconds tuning may take, when the user set a budget.
+    pub tune_budget: Option<f64>,
+    /// Whether the workers sample device time for the timing report.
+    pub timing_report: bool,
+    /// Whether every worker shares one wgpu device instead of opening its own.
+    pub shared_device: bool,
+}
 
 /// Denoises `input` scene by scene, writing y4m on stdout.
 pub fn run(
@@ -39,35 +60,62 @@ pub fn run(
     let opener = move || source::open_source(&owned_input);
     let output = stdout();
     let grain_table = opts.grain_table.clone();
-
-    run_with(
-        &opts.planes,
-        opener,
+    let settings = RunSettings {
         workers,
         frame_budget_bytes,
         visible,
-        output,
         grain_table,
-    )
+        tune_budget: opts.tune_budget,
+        timing_report: opts.timing_report,
+        shared_device: opts.shared_device,
+    };
+
+    let summary = run_with(&opts.planes, opener, settings, output)?;
+    let seconds = summary.wall.as_secs_f64();
+    let fps = summary.frames as f64 / seconds.max(f64::EPSILON);
+    tracing::info!(
+        frames = summary.frames,
+        seconds = format_args!("{seconds:.2}"),
+        fps = format_args!("{fps:.2}"),
+        "finished denoising"
+    );
+
+    if opts.timing_report {
+        let report = report::format_report(&summary);
+        eprint!("{report}");
+    }
+
+    Ok(())
 }
 
 /// Denoises the source `opener` returns scene by scene, writing y4m into `output`.
 ///
-/// Blocks until every thread in the pipeline has finished. The grain table is written to
-/// `grain_table` only when every stage succeeds.
+/// Blocks until every thread in the pipeline has finished. The grain table is written only when
+/// every stage succeeds. When the options ask for `auto` tuning and nothing is stored for this
+/// configuration, the first frames are tuned on before the workers start, then denoised as usual.
+/// Returns where the run's time went.
 pub fn run_with<W, F>(
     planes: &PlaneOptions,
     opener: F,
-    workers: usize,
-    frame_budget_bytes: u64,
-    visible: bool,
+    settings: RunSettings,
     output: W,
-    grain_table: Option<PathBuf>,
-) -> Result<(), anyhow::Error>
+) -> Result<RunSummary, anyhow::Error>
 where
     W: std::io::Write + Send + 'static,
     F: FnOnce() -> Result<OpenedSource, anyhow::Error> + Send + 'static,
 {
+    let RunSettings {
+        workers,
+        frame_budget_bytes,
+        visible,
+        grain_table,
+        tune_budget,
+        timing_report,
+        shared_device,
+    } = settings;
+
+    let started = Instant::now();
+
     if workers == 0 {
         anyhow::bail!("--workers must be at least 1");
     }
@@ -102,15 +150,20 @@ where
         "frame buffer budget",
     );
 
+    let frames = decode_thread.start(take);
+    let prefix = tune::tune_before_workers(planes, &info, &frames, permits, tune_budget);
+
     let (staged_tx, staged_rx) = crossbeam_channel::bounded::<u64>(1);
-    let (job_tx, worker_handles, output_rx) = spawn_workers(planes, layout, workers);
+    let worker_planes = tune::worker_options(planes);
+    let worker_settings = WorkerSettings::for_run(workers, timing_report, shared_device);
+    let (job_tx, worker_handles, output_rx) = spawn_workers(&worker_planes, layout, workers, worker_settings);
     let coordinator_info = info.clone();
     let coordinator = spawn_coordinator(coordinator_info, output_rx, staged_rx, visible, give, output);
-    let frames = decode_thread.start(take);
 
+    let feed = prefix.into_iter().chain(frames.iter());
     let dispatched = match layout.depth {
-        Depth::Eight => dispatch::<u8>(&frames, &info, &job_tx),
-        Depth::Ten | Depth::Twelve => dispatch::<u16>(&frames, &info, &job_tx),
+        Depth::Eight => dispatch::<u8>(feed, &info, &job_tx),
+        Depth::Ten | Depth::Twelve => dispatch::<u16>(feed, &info, &job_tx),
     };
 
     // Closing the queue tells the workers there are no more scenes, and dropping the frame
@@ -118,8 +171,10 @@ where
     drop(job_tx);
     drop(frames);
 
+    let staged = dispatched.as_ref().ok().copied();
+
     // A closed channel means the coordinator failed, and it reports its own error when joined.
-    if let Ok(staged) = dispatched {
+    if let Some(staged) = staged {
         let _ = staged_tx.send(staged);
     }
 
@@ -138,13 +193,12 @@ where
     // Root causes come first. A coordinator error is a failed write. A worker error only shows
     // elsewhere as the dispatcher's disconnect. Dispatch errors carry decode failures, which
     // never make a worker fail.
-    let outcome = coordinator_joined
-        .and(workers_joined)
-        .and_then(|scenes| dispatched.map(|_| scenes))
-        .and_then(|scenes| decoder_joined.map(|_| scenes));
-
+    //
     // Returning early drops `table`, which removes its temporary file.
-    let scenes = outcome?;
+    let (scenes, worker_timings) = coordinator_joined
+        .and(workers_joined)
+        .and_then(|joined| dispatched.map(|_| joined))
+        .and_then(|joined| decoder_joined.map(|_| joined))?;
 
     if let Some(table) = table {
         let rate = info.details.frame_rate;
@@ -152,21 +206,27 @@ where
         table.write(&scenes, frame_rate)?;
     }
 
-    Ok(())
+    let summary = RunSummary {
+        wall: started.elapsed(),
+        frames: staged.unwrap_or_default(),
+        workers: worker_timings,
+    };
+
+    Ok(summary)
 }
 
 /// Feeds decoded frames through the scene splitter into scene jobs.
 ///
 /// Returns how many frames were staged.
 pub fn dispatch<T: SourcePixel>(
-    frames: &crossbeam_channel::Receiver<FrameMsg>,
+    frames: impl Iterator<Item = FrameMsg>,
     info: &SourceInfo,
     jobs: &crossbeam_channel::Sender<SceneJob>,
 ) -> Result<u64, anyhow::Error> {
     let mut splitter = SceneSplitter::<T>::new(&info.details);
     let mut stager = Stager::new(jobs);
 
-    for message in frames.iter() {
+    for message in frames {
         let decoded = message?;
         let frame = T::from_decoded(decoded)
             .ok_or_else(|| anyhow::anyhow!("the decoder changed sample width mid-stream"))?;
@@ -202,12 +262,13 @@ fn stage_decided<T: SourcePixel>(
     Ok(())
 }
 
-/// Joins every worker and gathers the grain they measured.
+/// Joins every worker and gathers the grain and timing they measured.
 ///
 /// Logs each error or panic and returns the first.
-fn join_workers(handles: Vec<WorkerJoin>) -> Result<Vec<SceneGrain>, anyhow::Error> {
+fn join_workers(handles: Vec<WorkerJoin>) -> Result<(Vec<SceneGrain>, Vec<WorkerTiming>), anyhow::Error> {
     let mut first_error = None;
     let mut scenes = Vec::new();
+    let mut timings = Vec::new();
 
     for (worker_id, handle) in handles.into_iter().enumerate() {
         let result = handle
@@ -216,8 +277,12 @@ fn join_workers(handles: Vec<WorkerJoin>) -> Result<Vec<SceneGrain>, anyhow::Err
             .and_then(|result| result);
 
         let err = match result {
-            Ok(worker_scenes) => {
+            Ok(WorkerOutput {
+                scenes: worker_scenes,
+                timing,
+            }) => {
                 scenes.extend(worker_scenes);
+                timings.push(timing);
                 continue;
             },
             Err(err) => err,
@@ -230,5 +295,5 @@ fn join_workers(handles: Vec<WorkerJoin>) -> Result<Vec<SceneGrain>, anyhow::Err
         }
     }
 
-    first_error.map_or(Ok(scenes), Err)
+    first_error.map_or(Ok((scenes, timings)), Err)
 }

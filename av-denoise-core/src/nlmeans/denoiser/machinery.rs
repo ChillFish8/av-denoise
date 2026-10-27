@@ -2,8 +2,9 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NlmDenoiser;
-use crate::nlmeans::dispatch::mc_sad_noise_floor_sigma;
-use crate::nlmeans::motion::{self, MotionCtx};
+use crate::motion::{self, MotionCtx};
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::params::ChannelMode;
 
 /// Handles and geometry a collaborative stage needs to read the ring.
@@ -23,6 +24,8 @@ pub(crate) struct RingView {
     pub centre_slot: u32,
     /// Physical ring slot of each neighbour in logical order, skipping the centre.
     pub neighbour_slots: Vec<u32>,
+    /// The neighbour slots as a device table, one u32 per neighbour.
+    pub neighbour_slots_buf: Handle,
     /// `i32` element stride between neighbours in `mv_field`.
     pub mv_stride: u32,
     /// `f32` element stride between neighbours in `confidence`.
@@ -35,7 +38,7 @@ pub(crate) struct RingView {
     pub frame_count: u32,
 }
 
-impl<R: Runtime> NlmDenoiser<R> {
+impl NlmDenoiser {
     /// Runs the per-submit noise and motion estimates without launching any NLM kernel.
     ///
     /// The view is centred on logical ring position `center_t` and reads the unshifted input
@@ -56,11 +59,16 @@ impl<R: Runtime> NlmDenoiser<R> {
             return Ok(None);
         }
 
-        if self.noise_results.is_some() {
+        if self.noise.is_measured() {
             self.update_noise_estimate(center_t)?;
         }
 
-        let neighbour_slots = self.run_motion_machinery(center_t)?;
+        // The table upload comes before the first motion dispatch, because an upload ends a device
+        // span's timed pass.
+        let neighbour_slots = self.window_neighbour_slots(center_t);
+        self.update_neighbour_slots(&neighbour_slots);
+
+        self.run_motion_machinery(center_t)?;
 
         let motion_ctx = self
             .mc_ctx
@@ -84,8 +92,9 @@ impl<R: Runtime> NlmDenoiser<R> {
             .clone();
 
         let centre_slot = self.phys_frame(center_t as i32);
-        let mv_stride = (motion_ctx.mv_field_bytes_per_neighbour() / size_of::<i32>() as u64) as u32;
-        let conf_stride = (motion_ctx.confidence_bytes_per_neighbour() / size_of::<f32>() as u64) as u32;
+        let mv_stride = motion_ctx.mv_stride();
+        let conf_stride = motion_ctx.conf_stride();
+        let neighbour_slots_buf = self.neighbour_slots_handle();
 
         let view = RingView {
             input: self.input_buf.clone(),
@@ -94,12 +103,42 @@ impl<R: Runtime> NlmDenoiser<R> {
             confidence,
             centre_slot,
             neighbour_slots,
+            neighbour_slots_buf,
             mv_stride,
             conf_stride,
             pyramid,
             frame_count: self.params.total_frames(),
         };
         Ok(Some(view))
+    }
+
+    /// Points the neighbour-slot table at `slots`, uploading only when they changed.
+    pub(in crate::nlmeans) fn update_neighbour_slots(&mut self, slots: &[u32]) {
+        let Some(table) = self.neighbour_slots.as_mut() else {
+            return;
+        };
+
+        let bytes = u32::as_bytes(slots);
+        table.update(&self.client, bytes);
+    }
+
+    /// The neighbour-slot table's handle.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the temporal radius is above 0.
+    pub(crate) fn neighbour_slots_handle(&self) -> Handle {
+        let table = self
+            .neighbour_slots
+            .as_ref()
+            .expect("a temporal window has a neighbour-slot table");
+
+        table.handle().clone()
+    }
+
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub(crate) fn neighbour_slots_for_test(&self) -> Option<&MirroredBuffer> {
+        self.neighbour_slots.as_ref()
     }
 
     /// The motion-compensation geometry.
@@ -113,17 +152,6 @@ impl<R: Runtime> NlmDenoiser<R> {
             .expect("motion_ctx called without motion compensation active")
     }
 
-    /// The SAD two noisy copies of one block show by chance, which confidence is scored against.
-    ///
-    /// # Panics
-    ///
-    /// Panics unless motion compensation is active.
-    pub(crate) fn sad_noise_floor_value(&self) -> f32 {
-        let blksize = self.motion_ctx().blksize;
-        let sigma = mc_sad_noise_floor_sigma(self.params.prefilter, self.sigma_y);
-        motion::sad_noise_floor(blksize, sigma)
-    }
-
     /// The SAD threshold that confidence is scored against.
     ///
     /// # Panics
@@ -135,7 +163,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         motion::thsad(blksize, thsad_scale)
     }
 
-    pub(crate) fn compute_client(&self) -> &ComputeClient<R> {
+    pub(crate) fn compute_client(&self) -> &Client {
         &self.client
     }
 
@@ -143,7 +171,7 @@ impl<R: Runtime> NlmDenoiser<R> {
         &self.input_buf
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn search_ring(&self) -> Option<&Handle> {
         self.search_buf.as_ref()
     }

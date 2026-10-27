@@ -21,8 +21,8 @@ pub(crate) fn inv_two_sigma_sq(sigma: f32) -> f32 {
     1.0 / (2.0 * sigma * sigma)
 }
 
-pub(super) fn run_bilateral<R: Runtime>(
-    client: &ComputeClient<R>,
+pub(super) fn run_bilateral(
+    client: &Client,
     ctx: &PrefilterCtx<'_>,
     sigma_s: f32,
     sigma_r: f32,
@@ -38,13 +38,13 @@ pub(super) fn run_bilateral<R: Runtime>(
     let cubes_y = ctx.height.div_ceil(BLOCK_Y);
 
     unsafe {
-        nlm_bilateral::launch_unchecked::<R>(
+        nlm_bilateral::launch_unchecked(
             client,
             CubeCount::new_2d(cubes_x, cubes_y),
             CubeDim::new_2d(BLOCK_X, BLOCK_Y),
             stored_ch,
-            ArrayArg::from_raw_parts(ctx.input_buf.clone(), total),
-            ArrayArg::from_raw_parts(ctx.reference_buf.clone(), total),
+            BufferArg::from_raw_parts(ctx.input_buf.clone(), total),
+            BufferArg::from_raw_parts(ctx.reference_buf.clone(), total),
             ctx.frame,
             inv_two_sigma_s_sq,
             inv_two_sigma_r_sq,

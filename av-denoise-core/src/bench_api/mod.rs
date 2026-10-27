@@ -1,0 +1,374 @@
+//! Internal items and host helpers shared by the benches and tests. Not a stable interface.
+
+pub mod noise_reading;
+
+pub mod collab {
+    pub use crate::collab::*;
+}
+
+pub mod engine_kernels {
+    pub use crate::engine::kernels::*;
+}
+
+pub mod harness {
+    pub use crate::nl4d::harness::*;
+}
+
+pub mod kernels {
+    pub use crate::nlmeans::kernels::*;
+
+    pub mod motion {
+        pub use crate::motion::kernels::*;
+    }
+}
+
+pub const MAX_GRID_1D: u32 = crate::engine::MAX_GRID_1D;
+
+pub mod motion {
+    pub use crate::motion::*;
+}
+
+pub mod nl4d_kernels {
+    pub use crate::nl4d::kernels::*;
+}
+
+pub mod noise_kernels {
+    pub use crate::noise::kernels::*;
+}
+
+pub mod noise_select {
+    pub use crate::noise::select::{
+        RankRule,
+        SELECT_CUBE_THREADS,
+        SELECT_QUERY_WORDS,
+        SELECT_TAG_WORDS,
+        SelectQuery,
+        UNTAGGED,
+        histogram_len,
+        order_key_host,
+        pass_rows,
+        query_table,
+        read_pass,
+        resolve_cube_threads,
+        state_len,
+        tag_table,
+    };
+}
+
+pub mod prefilter {
+    pub use crate::nlmeans::prefilter::*;
+}
+
+pub mod tune_sites {
+    pub use crate::tune::sites::*;
+}
+
+use std::future::Future;
+use std::pin::Pin;
+use std::str::FromStr;
+
+use anyhow::Context;
+use cubecl::bytes::Bytes;
+use cubecl::prelude::*;
+use cubecl::server::{Handle, ServerError};
+
+use crate::engine::{DevicePlane, EgressSource, SampleFormat, egress};
+pub use crate::nl4d::denoiser::Nl4dDenoiser;
+pub use crate::nl4d::params::Nl4dParams;
+pub use crate::nl4d::snapshot::MotionSnapshot;
+use crate::nlmeans::ChannelMode;
+pub use crate::nlmeans::denoiser::{GpuOutput, NlmDenoiser};
+pub use crate::nlmeans::params::NlmParams;
+pub use crate::noise::DerivedValues;
+
+pub const BLOCK_X: u32 = crate::nlmeans::BLOCK_X;
+pub const BLOCK_Y: u32 = crate::nlmeans::BLOCK_Y;
+pub const NOISE_CURVE_BINS: usize = crate::noise::NOISE_CURVE_BINS;
+pub const DERIVED_WORDS: u32 = crate::noise::DERIVED_WORDS;
+pub const DERIVED_SAD_FLOOR: u32 = crate::noise::DERIVED_SAD_FLOOR;
+pub const DERIVED_CONFIDENCE_SAD_FLOOR: u32 = crate::noise::DERIVED_CONFIDENCE_SAD_FLOOR;
+pub const DERIVED_H2_INV_NORM: u32 = crate::noise::DERIVED_H2_INV_NORM;
+pub const STRENGTH_MAP_OFF: u32 = crate::noise::STRENGTH_MAP_OFF;
+pub const STRENGTH_MAP_LUMA: u32 = crate::noise::STRENGTH_MAP_LUMA;
+pub const STRENGTH_MAP_ALL: u32 = crate::noise::STRENGTH_MAP_ALL;
+
+/// A readback in flight, resolving to one buffer per handle read.
+pub type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send>>;
+
+/// Starts reading `handle` back. Nothing is read until the future is first polled.
+pub fn start_read(client: &Client, handle: Handle) -> ReadFuture {
+    let client = client.clone();
+    let future = async move { client.read_async(vec![handle]).await };
+
+    Box::pin(future)
+}
+
+/// Blocks on a readback and copies the frame out as f32.
+pub fn wait_read(read: ReadFuture) -> Vec<f32> {
+    let buffers = cubecl::future::block_on(read).expect("readback failed");
+    let samples = f32::from_bytes(&buffers[0]);
+
+    samples.to_vec()
+}
+
+/// Pushes interleaved host frames and reads denoised frames back as interleaved f32.
+pub trait HostIo {
+    /// Uploads one frame of `width * height * channels` values and pushes it.
+    fn push_frame(&mut self, frame: &[f32]);
+
+    /// Denoises the next frame, or returns `None` while the window is still filling.
+    fn denoise(&mut self) -> Result<Option<Vec<f32>>, anyhow::Error>;
+
+    /// Hands every frame the stream still holds to `sink`, then starts a fresh stream.
+    fn flush(&mut self, sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error>;
+}
+
+impl HostIo for NlmDenoiser {
+    fn push_frame(&mut self, frame: &[f32]) {
+        let (width, height, channels) = self.frame_shape();
+        let handles = upload_frame(self.compute_client(), frame, width, height, channels);
+        let planes = device_planes(&handles, width, height);
+
+        let pushed = self.push_planes(&planes, SampleFormat::F32);
+        pushed.expect("frame push failed");
+    }
+
+    fn denoise(&mut self) -> Result<Option<Vec<f32>>, anyhow::Error> {
+        let Some(output) = self.denoise_submit_gpu()? else {
+            return Ok(None);
+        };
+
+        let frame = self.read_back(&output.handle)?;
+        Ok(Some(frame))
+    }
+
+    fn flush(&mut self, mut sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error> {
+        let target = self.flush_target();
+
+        for _ in 0..target {
+            let output = loop {
+                let step = self.flush_step_gpu()?;
+                if let Some(output) = step {
+                    break output;
+                }
+            };
+
+            let frame = self.read_back(&output.handle)?;
+            sink(&frame);
+        }
+
+        self.reset_stream_state();
+
+        Ok(())
+    }
+}
+
+impl NlmDenoiser {
+    fn read_back(&self, frame: &Handle) -> Result<Vec<f32>, anyhow::Error> {
+        let shape = self.frame_shape();
+        read_frame(self.compute_client(), self.placeholder(), frame, shape)
+    }
+}
+
+impl HostIo for Nl4dDenoiser {
+    fn push_frame(&mut self, frame: &[f32]) {
+        let (width, height, channels) = self.frame_shape();
+        let handles = upload_frame(self.compute_client(), frame, width, height, channels);
+        let planes = device_planes(&handles, width, height);
+
+        let pushed = self.push_planes(&planes, SampleFormat::F32);
+        pushed.expect("frame push failed");
+    }
+
+    fn denoise(&mut self) -> Result<Option<Vec<f32>>, anyhow::Error> {
+        let Some(region) = self.submit_passes()? else {
+            return Ok(None);
+        };
+
+        let handle = self.read_region(region);
+        let frame = self.read_back(&handle)?;
+        Ok(Some(frame))
+    }
+
+    fn flush(&mut self, mut sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error> {
+        let regions = self.finish_passes()?;
+
+        for region in regions {
+            let handle = self.read_region(region);
+            let frame = self.read_back(&handle)?;
+            sink(&frame);
+        }
+
+        self.reset_stream();
+
+        Ok(())
+    }
+}
+
+impl Nl4dDenoiser {
+    fn read_back(&self, frame: &Handle) -> Result<Vec<f32>, anyhow::Error> {
+        let shape = self.frame_shape();
+        read_frame(self.compute_client(), self.placeholder(), frame, shape)
+    }
+}
+
+/// Splits an interleaved frame into one uploaded f32 plane per channel.
+fn upload_frame(
+    client: &Client,
+    frame: &[f32],
+    width: u32,
+    height: u32,
+    channels: ChannelMode,
+) -> Vec<Handle> {
+    let channel_count = channels.count() as usize;
+    let expected = width as usize * height as usize * channel_count;
+
+    assert_eq!(
+        frame.len(),
+        expected,
+        "frame size mismatch: expected {expected}, got {}",
+        frame.len()
+    );
+
+    let mut handles = Vec::with_capacity(channel_count);
+
+    for channel in 0..channel_count {
+        let samples: Vec<f32> = frame
+            .iter()
+            .skip(channel)
+            .step_by(channel_count)
+            .copied()
+            .collect();
+        let bytes = f32::as_bytes(&samples);
+        let handle = client.create_from_slice(bytes);
+        handles.push(handle);
+    }
+
+    handles
+}
+
+fn device_planes(handles: &[Handle], width: u32, height: u32) -> Vec<DevicePlane<'_>> {
+    handles
+        .iter()
+        .map(|handle| DevicePlane::new(handle, width, height))
+        .collect()
+}
+
+/// Egresses an internal interleaved frame into f32 planes and reads them back interleaved.
+fn read_frame(
+    client: &Client,
+    placeholder: &Handle,
+    frame: &Handle,
+    shape: (u32, u32, ChannelMode),
+) -> Result<Vec<f32>, anyhow::Error> {
+    let (width, height, channels) = shape;
+    let pixels = width * height;
+    let channel_count = channels.count() as usize;
+    let plane_bytes = pixels as usize * size_of::<f32>();
+
+    let handles: Vec<Handle> = (0..channel_count).map(|_| client.empty(plane_bytes)).collect();
+    let planes = device_planes(&handles, width, height);
+    let source = EgressSource {
+        frame,
+        pixels,
+        channels: channels.count(),
+        stored_ch: channels.storage_count(),
+    };
+
+    egress(client, source, &planes, SampleFormat::F32, placeholder);
+
+    let mut plane_samples = Vec::with_capacity(channel_count);
+
+    for handle in handles {
+        let bytes = client.read_one(handle).context("plane readback failed")?;
+        let samples = f32::from_bytes(&bytes).to_vec();
+        plane_samples.push(samples);
+    }
+
+    let mut interleaved = Vec::with_capacity(pixels as usize * channel_count);
+
+    for pixel in 0..pixels as usize {
+        for samples in &plane_samples {
+            interleaved.push(samples[pixel]);
+        }
+    }
+
+    Ok(interleaved)
+}
+
+/// A `--device` selector, such as `default` or `discrete:1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Device {
+    Default,
+    Discrete(usize),
+    Integrated(usize),
+    Virtual(usize),
+    Cpu,
+}
+
+impl FromStr for Device {
+    type Err = String;
+
+    fn from_str(selector: &str) -> Result<Self, Self::Err> {
+        let (kind, suffix) = match selector.split_once(':') {
+            Some((kind, index)) => (kind, Some(index)),
+            None => (selector, None),
+        };
+
+        if matches!(kind, "default" | "cpu") && suffix.is_some() {
+            return Err(format!("device kind '{kind}' takes no index, got '{selector}'"));
+        }
+
+        let index_text = suffix.unwrap_or("0");
+        let index = index_text.parse::<usize>();
+        let index = index.map_err(|_| format!("invalid device index '{index_text}' in '{selector}'"));
+
+        match kind {
+            "default" => Ok(Device::Default),
+            "cpu" => Ok(Device::Cpu),
+            "discrete" => Ok(Device::Discrete(index?)),
+            "integrated" => Ok(Device::Integrated(index?)),
+            "virtual" => Ok(Device::Virtual(index?)),
+            other => {
+                let message = format!(
+                    "unknown device kind '{other}', expected default, discrete[:N], integrated[:N], \
+                     virtual[:N], or cpu"
+                );
+                Err(message)
+            },
+        }
+    }
+}
+
+/// The tuner's own timing path, for checking its rankings against other methods.
+pub mod tune_timing {
+    use cubecl::prelude::*;
+
+    use crate::tune::gpu::{self, GpuSampler};
+    use crate::tune::{self, Sampler, VariantSite};
+
+    /// The tuner's sampler over `candidates`, `launches` launches per sample.
+    pub fn gpu_sampler<'a, S: VariantSite>(
+        site: &'a S,
+        candidates: &'a [S::Candidate],
+        outputs: &'a S::Outputs,
+        launches: u32,
+    ) -> impl Sampler + 'a {
+        GpuSampler::new(site, candidates, outputs, launches)
+    }
+
+    /// Waits for every launch queued on `client`.
+    pub fn sync(client: &Client) -> Result<(), anyhow::Error> {
+        gpu::sync(client)
+    }
+
+    /// Runs the baseline for the tuner's re-warm time.
+    pub fn rewarm<S: VariantSite>(site: &S, outputs: &S::Outputs) -> Result<(), anyhow::Error> {
+        tune::rewarm(site, outputs)
+    }
+
+    /// The launches per sample the tuner would pick for `site`.
+    pub fn calibrate<S: VariantSite>(site: &S, outputs: &S::Outputs) -> Result<u32, anyhow::Error> {
+        tune::calibrate(site, outputs)
+    }
+}

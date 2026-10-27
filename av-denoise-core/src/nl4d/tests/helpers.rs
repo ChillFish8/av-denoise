@@ -1,9 +1,8 @@
 use cubecl::prelude::*;
-use cubecl::wgpu::WgpuRuntime;
 
+use crate::motion::neighbour_idx_for_k;
 use crate::nl4d::{Nl4dParams, PsyParams};
-use crate::nlmeans::motion::neighbour_idx_for_k;
-use crate::nlmeans::tests::helpers::noisy_field_over;
+use crate::nlmeans::tests::helpers::{noisy_field_over, seeded_unit_gaussian};
 use crate::nlmeans::{
     ChannelMode,
     HqParams,
@@ -12,8 +11,6 @@ use crate::nlmeans::{
     NlmParams,
     PrefilterMode,
 };
-
-pub(super) type R = WgpuRuntime;
 
 pub(super) const SIGMA: f32 = 6.0 / 255.0;
 pub(super) const SPATIAL_RADIUS: u32 = 9;
@@ -24,6 +21,14 @@ pub(super) const LAMBDA_HT: f32 = 2.7;
 /// The motion block step, equal to [PATCH_SIZE](crate::collab::PATCH_SIZE) so a block boundary
 /// always lines up with a patch boundary.
 pub(super) const BLK_STEP: u32 = 8;
+
+// Large enough that each luma bin the ramp crosses gathers the blocks a curve needs. At 320x240
+// no curve forms.
+pub(super) const RAMP_WIDTH: u32 = 640;
+pub(super) const RAMP_HEIGHT: u32 = 360;
+const RAMP_FRAMES: u32 = 12;
+const RAMP_TOP: f32 = 0.15;
+const RAMP_BOTTOM: f32 = 0.85;
 
 /// Parameters for a still clip with sigma pinned to [SIGMA].
 pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
@@ -111,9 +116,9 @@ pub(super) fn psnr(output: &[f32], reference: &[f32]) -> f64 {
     10.0 * (1.0f64 / mse).log10()
 }
 
-pub(super) fn make_client() -> ComputeClient<R> {
-    let device = <R as Runtime>::Device::default();
-    R::client(&device)
+pub(super) fn make_client() -> Client {
+    crate::tests::compilation_cache::install_test_compilation_cache();
+    crate::testing::test_client()
 }
 
 /// A ring of `2 * radius + 1` frames with the centre frame at physical slot `radius`.
@@ -315,4 +320,65 @@ pub(crate) fn noisy_frames(width: u32, height: u32, channels: u32, count: usize)
     }
 
     frames
+}
+
+fn ramp_luma(y: u32) -> f32 {
+    let fraction = y as f32 / (RAMP_HEIGHT - 1) as f32;
+    RAMP_TOP + (RAMP_BOTTOM - RAMP_TOP) * fraction
+}
+
+/// The noise std at `luma`, which grows with brightness.
+fn noise_std_at(luma: f32) -> f32 {
+    0.004 + 0.02 * luma
+}
+
+/// A static vertical brightness ramp with fresh noise per frame, in `channels` interleaved planes
+/// that all carry the same ramp.
+pub(super) fn ramp_clip(channels: u32) -> Vec<Vec<f32>> {
+    let mut frames = Vec::new();
+    for frame_index in 0..RAMP_FRAMES {
+        let mut frame = vec![0.0f32; (RAMP_WIDTH * RAMP_HEIGHT * channels) as usize];
+        for y in 0..RAMP_HEIGHT {
+            let luma = ramp_luma(y);
+            let noise_std = noise_std_at(luma);
+
+            for x in 0..RAMP_WIDTH {
+                for channel in 0..channels {
+                    let pixel = y * RAMP_WIDTH + x;
+                    let sample = pixel * channels + channel;
+                    let seed = frame_index * channels + channel;
+                    let noise = seeded_unit_gaussian(pixel, seed);
+                    frame[sample as usize] = (luma + noise * noise_std).clamp(0.0, 1.0);
+                }
+            }
+        }
+
+        frames.push(frame);
+    }
+
+    frames
+}
+
+pub(super) fn ramp_params(channels: ChannelMode, noise_map: bool, sigma_scale: f32) -> Nl4dParams {
+    let defaults = Nl4dParams::default();
+    let hq = HqParams {
+        sigma_scale,
+        ..HqParams::default()
+    };
+    let nlm = NlmParams {
+        channels,
+        prefilter: PrefilterMode::None,
+        hq: Some(hq),
+        ..defaults.nlm
+    };
+
+    Nl4dParams {
+        nlm,
+        noise_map,
+        psy: Some(PsyParams {
+            line_ring: 0,
+            ..PsyParams::default()
+        }),
+        ..defaults
+    }
 }

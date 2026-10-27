@@ -1,21 +1,22 @@
 use cubecl::prelude::*;
 
 use super::noise_curve::{assert_columns_identical, assert_identical, columns_differ};
-use super::{Aggregated, Setup, cross_frame_setup, run_fused, run_fused_walk};
+use super::{Aggregated, Setup, cross_frame_setup, run_fused, run_fused_variant};
 use crate::collab::geometry::{ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::fused::strength_map::strength_map_scale;
-use crate::collab::kernels::fused::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
-use crate::collab::tests::helpers::{R, make_client, noisy_flat_field};
-use crate::nlmeans::{ChannelMode, NOISE_CURVE_BINS};
+use crate::collab::kernels::fused::{CollabVariant, Walk};
+use crate::collab::tests::helpers::{make_client, noisy_flat_field};
+use crate::nlmeans::ChannelMode;
+use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
 
 const FRAME_SIDE: u32 = 64;
 const LAMBDA: f32 = 1.0;
 
 #[cube(launch_unchecked)]
 fn map_scale_kernel(
-    map: &Array<f32>,
-    positions: &Array<u32>,
-    out: &mut Array<f32>,
+    map: &[f32],
+    positions: &[u32],
+    out: &mut [f32],
     #[comptime] map_cols: u32,
     #[comptime] map_rows: u32,
 ) {
@@ -58,13 +59,13 @@ fn the_map_scale_is_the_mean_of_the_overlapped_quarters_on_a_ragged_frame() {
     let out_buf = client.empty(count * size_of::<f32>());
 
     unsafe {
-        map_scale_kernel::launch_unchecked::<R>(
+        map_scale_kernel::launch_unchecked(
             &client,
             CubeCount::new_1d(1),
             CubeDim::new_1d(count as u32),
-            ArrayArg::from_raw_parts(map_buf, map.len()),
-            ArrayArg::from_raw_parts(positions_buf, positions.len()),
-            ArrayArg::from_raw_parts(out_buf.clone(), count),
+            BufferArg::from_raw_parts(map_buf, map.len()),
+            BufferArg::from_raw_parts(positions_buf, positions.len()),
+            BufferArg::from_raw_parts(out_buf.clone(), count),
             map_cols,
             map_rows,
         );
@@ -211,8 +212,12 @@ fn both_walks_agree_with_a_map_active() {
         .collect();
     setup.strength_map = Some((map, STRENGTH_MAP_LUMA));
 
-    let uniform = run_fused_walk(&setup, Some(true));
-    let branching = run_fused_walk(&setup, Some(false));
+    let uniform_variant = CollabVariant {
+        walk: Walk::Uniform,
+        ..CollabVariant::BASELINE
+    };
+    let uniform = run_fused_variant(&setup, uniform_variant);
+    let branching = run_fused_variant(&setup, CollabVariant::BASELINE);
 
     assert_identical("walks with a map", &uniform, &branching);
 }

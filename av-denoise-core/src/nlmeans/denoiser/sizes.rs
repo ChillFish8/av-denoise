@@ -1,16 +1,20 @@
 use cubecl::prelude::*;
 
-use crate::nlmeans::align::StorageAlign;
-use crate::nlmeans::motion::{self, MotionCtx, MotionEstimation};
-use crate::nlmeans::noise::{temporal_stats_blocks, temporal_stats_record_len};
+use super::noise::measured_noise_shape;
+pub(crate) use crate::engine::BufferSize;
+use crate::engine::align::StorageAlign;
+use crate::motion::{self, MotionCtx, MotionEstimation};
 use crate::nlmeans::params::NlmParams;
-use crate::nlmeans::{BLOCK_X, BLOCK_Y};
+use crate::noise::{
+    IMMERKAER_BLOCK_X,
+    IMMERKAER_BLOCK_Y,
+    reading_buffer_sizes,
+    temporal_stats_blocks,
+    temporal_stats_record_len,
+};
 
 /// Bytes in one element of every buffer sized here, which all hold `f32`, `i32` or `u32`.
 const ELEMENT_BYTES: u64 = 4;
-
-/// A buffer's name and its element count, `None` when the count overflows `u64`.
-pub(crate) type BufferSize = (&'static str, Option<u64>);
 
 /// The geometry-sized buffers of an [NlmDenoiser](super::NlmDenoiser) beyond its frame rings.
 pub(crate) struct FrontSizes {
@@ -52,32 +56,30 @@ fn pyramid_ring(width: u32, height: u32, levels: u32, align: StorageAlign, slots
 /// The element count of every buffer [NlmDenoiser::new](super::NlmDenoiser::new) sizes from the frame,
 /// other than the frame rings.
 ///
+/// It also counts the noise buffers only the reading setters allocate, which are far smaller than
+/// the frame ring.
+///
 /// Each count repeats its allocation's formula in checked `u64`. The geometry must have passed
 /// [Geometry::check_ring_fits](crate::engine::Geometry::check_ring_fits) for the frame ring, which
 /// keeps the pixel count within `u32` so the shared size helpers called here cannot overflow.
-pub(crate) fn front_buffer_sizes<R: Runtime>(
-    client: &ComputeClient<R>,
-    params: &NlmParams,
-    width: u32,
-    height: u32,
-) -> FrontSizes {
+pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32, height: u32) -> FrontSizes {
     let align = StorageAlign::from_client(client);
     let stored_ch = params.channels.storage_count();
     let total_frames = u64::from(params.total_frames());
     let neighbours = 2 * u64::from(params.temporal_radius);
     let mut buffers = Vec::new();
 
-    let auto_noise = params.hq.is_some_and(|hq| hq.sigma_override.is_none());
-    if auto_noise {
-        let cubes_x = u64::from(width.div_ceil(BLOCK_X));
-        let cubes_y = u64::from(height.div_ceil(BLOCK_Y));
+    let noise_shape = measured_noise_shape(params, width, height, align);
+    if noise_shape.is_some() {
+        let cubes_x = u64::from(width.div_ceil(IMMERKAER_BLOCK_X));
+        let cubes_y = u64::from(height.div_ceil(IMMERKAER_BLOCK_Y));
         let partials = times(cubes_x.checked_mul(cubes_y), 4);
         let slot_bytes = padded_slot_bytes(partials, align);
         let ring = slot_ring(slot_bytes, total_frames);
         buffers.push(("noise partials ring", ring));
     }
 
-    if auto_noise && params.temporal_radius >= 1 {
+    if noise_shape.is_some_and(|shape| shape.temporal) {
         let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
         let blocks = u64::from(blocks_x).checked_mul(u64::from(blocks_y));
         let record_len = u64::from(temporal_stats_record_len(stored_ch));
@@ -85,6 +87,11 @@ pub(crate) fn front_buffer_sizes<R: Runtime>(
         let slot_bytes = padded_slot_bytes(slot_len, align);
         let ring = slot_ring(slot_bytes, total_frames);
         buffers.push(("temporal stats ring", ring));
+    }
+
+    if let Some(shape) = noise_shape {
+        let reading_buffers = reading_buffer_sizes(shape);
+        buffers.extend(reading_buffers);
     }
 
     let motion_active = params.motion_compensation.is_active() && params.temporal_radius > 0;
@@ -140,7 +147,9 @@ pub(crate) fn front_buffer_sizes<R: Runtime>(
         buffers.push(("confidence pyramid ring", pyramid));
 
         let blocks = block_count(geometry);
-        let scratch = times(blocks, 2);
+        let field_len = times(blocks, 2);
+        let field_bytes = padded_slot_bytes(field_len, align);
+        let scratch = slot_ring(field_bytes, neighbours);
         buffers.push(("confidence vector scratch", scratch));
     }
 
