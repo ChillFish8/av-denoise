@@ -1,5 +1,6 @@
 use std::ops::Range;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Error, Result, anyhow, bail};
 use av_denoise::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest, is_tuned};
@@ -53,6 +54,31 @@ impl State {
     }
 }
 
+/// How many filters are alive in this process.
+static LIVE_FILTERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts a filter as alive, and merges the kernel cache when the last one is dropped.
+///
+/// The plugin has no shutdown hook, so the last filter going away is the point where the kernels this
+/// process compiled reach the shared cache.
+struct LiveFilter;
+
+impl LiveFilter {
+    fn new() -> Self {
+        LIVE_FILTERS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for LiveFilter {
+    fn drop(&mut self) {
+        let previous = LIVE_FILTERS.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 {
+            av_denoise::merge_compilation_cache();
+        }
+    }
+}
+
 /// A denoising filter backed by one [PlanarDenoiser] stream shared by every request.
 ///
 /// `avd.NLMeans` and `avd.NL4D` both build one, differing only in the algorithm the denoiser runs.
@@ -66,6 +92,8 @@ pub struct Denoise<'core> {
     /// waits on GPU work.
     outstanding: Mutex<Outstanding>,
     state: Mutex<State>,
+    /// Declared last, so it is dropped after the denoiser.
+    _live: LiveFilter,
 }
 
 impl<'core> Denoise<'core> {
@@ -168,6 +196,7 @@ impl<'core> Denoise<'core> {
             geometry,
             outstanding: Mutex::new(Outstanding::default()),
             state: Mutex::new(state),
+            _live: LiveFilter::new(),
         })
     }
 

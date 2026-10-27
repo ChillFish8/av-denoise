@@ -1,3 +1,5 @@
+set dotenv-load
+
 # Feature set for the end-to-end benchmark binary. Override to build against another
 # backend, e.g. `AVD_BENCH_FEATURES="vulkan,cuda" just benchmark-e2e`. The `binary`
 # feature is always added, without it Cargo skips the CLI target.

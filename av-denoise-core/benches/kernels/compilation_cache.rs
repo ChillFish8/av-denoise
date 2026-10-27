@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use cubecl::config::cache::CacheConfig;
+use av_denoise_core::PrivateKernelCache;
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 
 const CACHE_DIR_NAME: &str = "bench-kernel-cache";
@@ -11,7 +11,8 @@ const BENCH_KERNEL_HASH: &str = env!("AV_DENOISE_BENCH_KERNEL_HASH");
 /// Points CubeCL's compilation cache at a directory every run of this build shares.
 ///
 /// A rerun of the same build reuses the kernels an earlier run compiled. The directory is named by a
-/// hash of the crate's sources and benches, so each build has its own. It panics if CubeCL has
+/// hash of the crate's sources and benches, so each build has its own. The run works on a private
+/// copy of the shared cache and merges its new kernels back when it exits. It panics if CubeCL has
 /// already read its config.
 pub fn install_bench_compilation_cache() {
     let cache_dir = cache_dir();
@@ -19,8 +20,11 @@ pub fn install_bench_compilation_cache() {
 
     let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
     config.compilation.cache = true;
-    config.environment.path = CacheConfig::Directory(cache_dir);
+    let private_cache = PrivateKernelCache::configure(&cache_dir, &mut config);
     CubeClRuntimeConfig::set(config);
+
+    private_cache.start();
+    av_denoise_core::finish_kernel_cache_at_exit();
 }
 
 fn cache_dir() -> PathBuf {

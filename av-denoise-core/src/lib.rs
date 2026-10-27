@@ -7,6 +7,7 @@ pub mod bench_api;
 mod collab;
 mod engine;
 mod error;
+mod kernel_cache;
 #[cfg(test)]
 mod kernel_hash;
 mod motion;
@@ -22,6 +23,13 @@ pub mod tune;
 
 pub use self::engine::{DevicePlane, EdgePadding, Engine, EngineTiming, Geometry, SampleFormat, WindowSpan};
 pub use self::error::Error;
+pub use self::kernel_cache::{
+    PrivateKernelCache,
+    finish_kernel_cache,
+    finish_kernel_cache_at_exit,
+    merge_kernel_cache,
+    refill_kernel_cache,
+};
 pub use self::nl4d::grain::{GrainChunk, SceneGrain, build_table};
 pub use self::nl4d::{
     Nl4d,

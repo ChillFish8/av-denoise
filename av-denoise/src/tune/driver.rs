@@ -44,6 +44,7 @@ use super::setup::{KernelSetup, device_priority};
 use super::store::TuneStore;
 use super::{reload, remember, resolve};
 use crate::backend::selected_device;
+use crate::cache::merge_compilation_cache;
 use crate::host::Algorithm;
 use crate::planar::{
     FrameLayout,
@@ -313,6 +314,9 @@ pub(crate) fn tune_planar(
         },
     };
 
+    // Tuning compiles kernels nothing else has, so they reach the shared cache before the next
+    // process tunes.
+    merge_compilation_cache();
     drop(lock);
     report
 }

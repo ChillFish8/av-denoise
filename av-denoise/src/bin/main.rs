@@ -88,19 +88,26 @@ fn main() -> anyhow::Result<()> {
         },
     }
 
+    let outcome = run_command(&args);
+    av_denoise::finish_compilation_cache();
+    outcome
+}
+
+/// Runs a command that denoises or tunes, once the kernel cache is installed.
+fn run_command(args: &Args) -> anyhow::Result<()> {
     if let Command::Tune(tune) = &args.command {
-        return run_tune(tune, &args);
+        return run_tune(tune, args);
     }
 
     let (opts, input, workers, frame_budget) = match &args.command {
         Command::Nlmeans(nlm) => (
-            nlm.build_options(&args)?,
+            nlm.build_options(args)?,
             &nlm.common.input,
             nlm.common.workers,
             nlm.common.frame_budget,
         ),
         Command::Nl4d(nl4d) => (
-            nl4d.build_options(&args)?,
+            nl4d.build_options(args)?,
             &nl4d.common.input,
             nl4d.common.workers,
             nl4d.common.frame_budget,

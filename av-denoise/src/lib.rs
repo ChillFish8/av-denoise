@@ -57,9 +57,11 @@ pub use self::cache::{
     CacheError,
     compilation_cache_dir,
     default_cache_dir,
+    finish_compilation_cache,
     install_compilation_cache,
     install_compilation_cache_at,
     install_compilation_cache_once,
+    merge_compilation_cache,
 };
 pub use self::host::{
     Algorithm,
