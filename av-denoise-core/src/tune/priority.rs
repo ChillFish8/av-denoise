@@ -194,53 +194,55 @@ const AMD_ROCM: PriorityTable = PriorityTable {
     ],
 };
 
-/// NVIDIA from Volta onwards, from RTX 3050 Ti timings.
+/// NVIDIA from Volta onwards on Vulkan, from RTX 3050 Ti timings.
 const NVIDIA: PriorityTable = PriorityTable {
     sites: &[
-        // centre_tiled -6..-3%, groups16 -5..0%, batched_on -1%, walk_uniform +3%, groups4 n/a,
-        // centre_sliding n/a, neighbour_sliding n/a
+        // Representatives against the fastest candidate on luma: batched_on +6%,
+        // centre_sliding +10%, groups16 +15%, neighbour_sliding +15%, centre_tiled +15%,
+        // walk_uniform +19%, groups4 +38%
         SitePriority {
             site: COLLAB_FUSED,
             basis: Basis::Measured,
             order: &[
                 BASELINE_FAMILY,
-                FamilyId("centre_tiled"),
-                FamilyId("groups16"),
                 FamilyId("batched_on"),
+                FamilyId("centre_sliding"),
+                FamilyId("groups16"),
+                FamilyId("neighbour_sliding"),
+                FamilyId("centre_tiled"),
                 FamilyId("walk_uniform"),
                 FamilyId("groups4"),
-                FamilyId("centre_sliding"),
-                FamilyId("neighbour_sliding"),
             ],
             skip: &[],
         },
-        // centre_tiled -6..-3%, batched_on -1%, walk_uniform +3%, centre_sliding n/a, neighbour_sliding n/a
+        // Representatives against the fastest candidate on luma: centre_sliding 0%,
+        // neighbour_sliding +7%, batched_on +7%, centre_tiled +10%, walk_uniform +29%
         SitePriority {
             site: COLLAB_SEARCH,
             basis: Basis::Measured,
             order: &[
                 BASELINE_FAMILY,
-                FamilyId("centre_tiled"),
-                FamilyId("batched_on"),
-                FamilyId("walk_uniform"),
                 FamilyId("centre_sliding"),
                 FamilyId("neighbour_sliding"),
+                FamilyId("batched_on"),
+                FamilyId("centre_tiled"),
+                FamilyId("walk_uniform"),
             ],
             skip: &[],
         },
-        // No timings, expected order
+        // groups8 0%, groups16 +2%, groups4 +17% on luma
         SitePriority {
             site: COLLAB_FILTER,
-            basis: Basis::Expected,
-            order: &[FamilyId("groups16"), FamilyId("groups8"), FamilyId("groups4")],
+            basis: Basis::Measured,
+            order: &[FamilyId("groups8"), FamilyId("groups16"), FamilyId("groups4")],
             skip: &[],
         },
         NVIDIA_WINDOW,
         NVIDIA_ACCUMULATE,
         NVIDIA_REGULARISE,
     ],
-    // No timings, expected order
-    profiles_basis: Basis::Expected,
+    // split_search fastest, then packed_atomics, then f32_search
+    profiles_basis: Basis::Measured,
     profiles: &[
         PipelineProfile::SplitSearch,
         PipelineProfile::PackedAtomics,

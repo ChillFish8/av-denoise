@@ -244,20 +244,20 @@ fn unknown_devices_keep_declaration_order_and_skip_nothing() {
 }
 
 #[test]
-fn nvidia_on_cuda_tries_batched_fused_candidates_first() {
+fn nvidia_cuda_and_vulkan_try_different_search_families_first() {
     let sites = every_site();
-    let fused = sites
+    let search = sites
         .iter()
-        .find(|site| site.site == COLLAB_FUSED)
-        .expect("the fused site exists");
+        .find(|site| site.site == COLLAB_SEARCH)
+        .expect("the search site exists");
     let cuda = priority_for(DeviceClass::Nvidia, "cuda");
     let vulkan = priority_for(DeviceClass::Nvidia, "vulkan");
 
-    let cuda_order = family_order(cuda, COLLAB_FUSED, &fused.ids);
-    let vulkan_order = family_order(vulkan, COLLAB_FUSED, &fused.ids);
+    let cuda_order = family_order(cuda, COLLAB_SEARCH, &search.ids);
+    let vulkan_order = family_order(vulkan, COLLAB_SEARCH, &search.ids);
 
-    assert_eq!(cuda_order[1], FamilyId("batched_on"));
-    assert_eq!(vulkan_order[1], FamilyId("centre_tiled"));
+    assert_eq!(cuda_order[1], FamilyId("neighbour_sliding"));
+    assert_eq!(vulkan_order[1], FamilyId("centre_sliding"));
 }
 
 #[test]
