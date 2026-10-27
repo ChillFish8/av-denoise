@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
         // warnings. A target matches by prefix, so `wgpu` also covers `wgpu_core` and `wgpu_hal`.
         let default_filter = match args.command {
             Command::ListDevices => "warn",
-            _ => "info,cubecl=warn,wgpu=warn,naga=warn",
+            _ => "info,cubecl=warn,wgpu=warn,naga=warn,pliron=warn",
         };
 
         // SAFETY: still single-threaded, no other thread can race the env mutation.
