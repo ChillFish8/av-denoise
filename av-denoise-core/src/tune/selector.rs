@@ -278,7 +278,7 @@ fn log_timings(key: &SiteKey, ranking: &SiteRanking) {
         let family = family_label(ranking.search.as_ref(), &record.name);
         let median = Duration::from_nanos(record.median_ns);
 
-        tracing::info!(
+        tracing::debug!(
             site,
             %key,
             candidate = %record.name,

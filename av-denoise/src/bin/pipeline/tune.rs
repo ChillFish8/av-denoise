@@ -8,7 +8,7 @@ use av_denoise::tune::{
     tune_planes,
     tuning_frame_count,
 };
-use av_denoise::{PlaneOptions, Planes};
+use av_denoise::{PlaneOptions, Planes, TuningMode};
 
 use super::convert::decoded_planes;
 use super::decode::{DecodeThread, FrameMsg};
@@ -99,8 +99,19 @@ fn log_report(report: &TuneReport) {
             saved = report.saved,
             "tuned kernels for this device"
         ),
-        TuneOutcome::AlreadyTuned => tracing::debug!("kernels are already tuned for this device"),
+        TuneOutcome::AlreadyTuned => tracing::info!("using the stored tuning results for this device"),
         TuneOutcome::Skipped(reason) => tracing::debug!(%reason, "kernel tuning skipped"),
+    }
+}
+
+/// Says which kernels a run that needs no tuning pass uses.
+fn log_untuned_run(tuning: TuningMode) {
+    match tuning {
+        TuningMode::Auto => tracing::info!("using the stored tuning results for this device"),
+        TuningMode::Cached => {
+            tracing::info!("using the stored tuning results only, untuned launch sites run their baseline")
+        },
+        TuningMode::Off => tracing::info!("tuning is off, every launch site runs its baseline"),
     }
 }
 
@@ -117,6 +128,7 @@ pub fn tune_before_workers(
     tune_budget: Option<f64>,
 ) -> Vec<FrameMsg> {
     if is_tuned(planes, info.layout) {
+        log_untuned_run(planes.tuning);
         return Vec::new();
     }
 

@@ -49,11 +49,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     if std::env::var("RUST_LOG").is_err() {
-        // `list-devices` prints only a table, and the backends log at info level while they
-        // start, so it runs quieter than a denoising run.
+        // `list-devices` prints only a table, so it runs quieter than a denoising run. The GPU
+        // libraries log their own start-up at info level, so a denoising run keeps them to
+        // warnings. A target matches by prefix, so `wgpu` also covers `wgpu_core` and `wgpu_hal`.
         let default_filter = match args.command {
             Command::ListDevices => "warn",
-            _ => "info",
+            _ => "info,cubecl=warn,wgpu=warn,naga=warn",
         };
 
         // SAFETY: still single-threaded, no other thread can race the env mutation.

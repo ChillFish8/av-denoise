@@ -21,21 +21,21 @@ use crate::pipeline::{budget_request, tune_input};
 #[derive(Debug, clap::Args)]
 pub struct TuneArgs {
     /// Tunes again even when results are already stored.
-    #[arg(long, conflicts_with_all = ["show", "clear"])]
+    #[arg(long, global = true, conflicts_with_all = ["show", "clear"])]
     pub force: bool,
 
     /// Times every candidate and profile with wide limits, a 30 s cap per site and a one hour budget,
     /// then prints how the family search and the device table compare. It stores the result,
     /// implies `--force` and cannot be combined with `--tune-budget`.
-    #[arg(long, conflicts_with_all = ["show", "clear"])]
+    #[arg(long, global = true, conflicts_with_all = ["show", "clear"])]
     pub report: bool,
 
     /// Prints the stored results for the selected device and exits.
-    #[arg(long, conflicts_with = "clear")]
+    #[arg(long, global = true, conflicts_with = "clear")]
     pub show: bool,
 
     /// Deletes the stored results for the selected device and exits.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub clear: bool,
 
     /// The algorithm to tune, with the same options and input a denoising run takes.
@@ -352,6 +352,34 @@ mod tests {
         assert!(tune_options.planes.deterministic);
         assert_eq!(tune_options.planes.tuning, TuningMode::Off);
         assert_eq!(tune_options.tune_budget, Some(12.5));
+    }
+
+    #[test]
+    fn tune_flags_after_the_algorithm_parse_the_same() {
+        let after = ["av-denoise", "tune", "nl4d", "-i", "clip.mkv", "--report"];
+        let parsed = Args::try_parse_from(after).expect("a flag after the algorithm parses");
+        let Command::Tune(tune) = parsed.command else {
+            panic!("expected tune");
+        };
+
+        assert!(tune.report);
+        assert!(matches!(tune.algorithm, Some(TuneAlgorithm::Nl4d(_))));
+    }
+
+    #[test]
+    fn tune_flags_after_the_algorithm_keep_their_conflicts() {
+        let flags = [
+            "av-denoise",
+            "tune",
+            "nl4d",
+            "-i",
+            "clip.mkv",
+            "--force",
+            "--show",
+        ];
+        let result = Args::try_parse_from(flags);
+
+        assert!(result.is_err());
     }
 
     #[test]
