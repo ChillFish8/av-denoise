@@ -12,6 +12,7 @@ use av_denoise_core::tune::{
     Basis,
     CandidateRecord,
     DecideLimits,
+    DeviceIdentity,
     FamilyId,
     FidelityClass,
     PipelineProfile,
@@ -39,6 +40,18 @@ use av_denoise_core::tune::{
 use crate::tune::report::{format_report, replay, replay_profiles};
 
 const FLAT_SITE: &str = "flat_report";
+
+fn report_device() -> DeviceIdentity {
+    DeviceIdentity {
+        backend: "cuda".to_string(),
+        adapter: "Test GPU".to_string(),
+        vendor_id: 0x10de,
+        device_id: 0x25a0,
+        driver: "test driver 1.0".to_string(),
+        os: "linux".to_string(),
+        compute_capability: Some(86),
+    }
+}
 
 const FORWARD: PriorityTable = PriorityTable {
     sites: &[SitePriority {
@@ -355,13 +368,18 @@ fn the_report_has_a_block_per_key_then_profiles_then_totals() {
     ranked.sites.insert(key.clone(), ranking);
     let profiles = profile_timings();
 
-    let text = format_report(&ranked, &profiles, &FORWARD);
+    let device = report_device();
+    let text = format_report(&device, &ranked, &profiles, &FORWARD);
+    let header_at = text
+        .find("Test GPU on cuda (test driver 1.0)")
+        .expect("the header names the device");
     let key_at = text.find(key.as_str()).expect("the key has a block");
     let profiles_at = text.find("pipeline profiles").expect("the profiles have a block");
     let totals_at = text
         .find("matched 1 of 1 keys")
         .expect("the totals close the report");
 
+    assert!(header_at < key_at, "{text}");
     assert!(key_at < profiles_at, "{text}");
     assert!(profiles_at < totals_at, "{text}");
     assert!(text.contains("b1"), "{text}");
@@ -564,7 +582,8 @@ fn a_pick_kept_over_a_faster_record_names_it() {
     let mut ranked = TuneResult::default();
     ranked.sites.insert(key, ranking);
 
-    let text = format_report(&ranked, &[], &FORWARD);
+    let device = report_device();
+    let text = format_report(&device, &ranked, &[], &FORWARD);
 
     assert!(
         text.contains("full    a0  0.100 ms  kept over a1 0.099 ms as the baseline within 2%"),

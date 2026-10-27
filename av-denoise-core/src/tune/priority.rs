@@ -235,27 +235,9 @@ const NVIDIA: PriorityTable = PriorityTable {
             order: &[FamilyId("groups16"), FamilyId("groups8"), FamilyId("groups4")],
             skip: &[],
         },
-        // separable -42..-39%, direct 0%
-        SitePriority {
-            site: NLM_WINDOW,
-            basis: Basis::Measured,
-            order: &[FamilyId("separable"), FamilyId("direct")],
-            skip: &[],
-        },
-        // No timings, default order
-        SitePriority {
-            site: NLM_ACCUMULATE,
-            basis: Basis::Expected,
-            order: &[FamilyId("thin32x16"), FamilyId("thin32x8")],
-            skip: &[],
-        },
-        // coop -56..-29%, serial 0%
-        SitePriority {
-            site: NL4D_MV_REGULARISE,
-            basis: Basis::Measured,
-            order: &[FamilyId("coop"), FamilyId("serial")],
-            skip: &[],
-        },
+        NVIDIA_WINDOW,
+        NVIDIA_ACCUMULATE,
+        NVIDIA_REGULARISE,
     ],
     // No timings, expected order
     profiles_basis: Basis::Expected,
@@ -265,6 +247,87 @@ const NVIDIA: PriorityTable = PriorityTable {
         PipelineProfile::Baseline,
         PipelineProfile::F32Search,
     ],
+};
+
+/// NVIDIA from Volta onwards on CUDA, from RTX 3050 Ti timings.
+const NVIDIA_CUDA: PriorityTable = PriorityTable {
+    sites: &[
+        // Representatives against the fastest candidate on luma: batched_on +21%,
+        // neighbour_sliding +21%, centre_sliding +28%, groups4 +38%, centre_tiled +41%,
+        // groups16 +43%, walk_uniform untimed
+        SitePriority {
+            site: COLLAB_FUSED,
+            basis: Basis::Measured,
+            order: &[
+                BASELINE_FAMILY,
+                FamilyId("batched_on"),
+                FamilyId("neighbour_sliding"),
+                FamilyId("centre_sliding"),
+                FamilyId("groups4"),
+                FamilyId("centre_tiled"),
+                FamilyId("groups16"),
+                FamilyId("walk_uniform"),
+            ],
+            skip: &[],
+        },
+        // Representatives against the fastest candidate on luma: neighbour_sliding +13%,
+        // centre_tiled +21%, batched_on +24%, centre_sliding +33%, walk_uniform untimed
+        SitePriority {
+            site: COLLAB_SEARCH,
+            basis: Basis::Measured,
+            order: &[
+                BASELINE_FAMILY,
+                FamilyId("neighbour_sliding"),
+                FamilyId("centre_tiled"),
+                FamilyId("batched_on"),
+                FamilyId("centre_sliding"),
+                FamilyId("walk_uniform"),
+            ],
+            skip: &[],
+        },
+        // groups4 0%, groups8 +14%, groups16 +19% on luma
+        SitePriority {
+            site: COLLAB_FILTER,
+            basis: Basis::Measured,
+            order: &[FamilyId("groups4"), FamilyId("groups8"), FamilyId("groups16")],
+            skip: &[],
+        },
+        NVIDIA_WINDOW,
+        NVIDIA_ACCUMULATE,
+        NVIDIA_REGULARISE,
+    ],
+    // split_search fastest, then packed_atomics, then f32_search
+    profiles_basis: Basis::Measured,
+    profiles: &[
+        PipelineProfile::SplitSearch,
+        PipelineProfile::PackedAtomics,
+        PipelineProfile::Baseline,
+        PipelineProfile::F32Search,
+    ],
+};
+
+// separable -42..-39%, direct 0%
+const NVIDIA_WINDOW: SitePriority = SitePriority {
+    site: NLM_WINDOW,
+    basis: Basis::Measured,
+    order: &[FamilyId("separable"), FamilyId("direct")],
+    skip: &[],
+};
+
+// No timings, default order
+const NVIDIA_ACCUMULATE: SitePriority = SitePriority {
+    site: NLM_ACCUMULATE,
+    basis: Basis::Expected,
+    order: &[FamilyId("thin32x16"), FamilyId("thin32x8")],
+    skip: &[],
+};
+
+// coop -56..-29%, serial 0%
+const NVIDIA_REGULARISE: SitePriority = SitePriority {
+    site: NL4D_MV_REGULARISE,
+    basis: Basis::Measured,
+    order: &[FamilyId("coop"), FamilyId("serial")],
+    skip: &[],
 };
 
 /// NVIDIA before Volta.
@@ -493,6 +556,7 @@ pub fn priority_for(class: DeviceClass, backend: &str) -> &'static PriorityTable
     match (class, backend) {
         (DeviceClass::Amd, "rocm") => &AMD_ROCM,
         (DeviceClass::Amd, _) => &AMD_VULKAN,
+        (DeviceClass::Nvidia, "cuda") => &NVIDIA_CUDA,
         (DeviceClass::Nvidia, _) => &NVIDIA,
         (DeviceClass::NvidiaPreVolta { .. }, _) => &NVIDIA_PRE_VOLTA,
         (DeviceClass::Apple, _) => &APPLE,

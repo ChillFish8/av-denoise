@@ -124,7 +124,10 @@ impl TuneReport {
 
     fn skipped(reason: impl Into<String>, started: Instant) -> Self {
         let reason = reason.into();
-        tracing::info!(%reason, "kernel tuning skipped, stored results are used");
+        tracing::info!(
+            %reason,
+            "kernel tuning skipped, launch sites without stored results run their baseline"
+        );
 
         Self::finished(TuneOutcome::Skipped(reason), started)
     }
@@ -154,6 +157,7 @@ impl<'a> FrameCycle<'a> {
 
 /// What every step of one pass reads.
 struct PassInputs<'a> {
+    identity: &'a DeviceIdentity,
     ledger: &'a Arc<TuneLedger>,
     frames: &'a [Planes],
     stored: &'a TuneResult,
@@ -276,11 +280,12 @@ pub(crate) fn tune_planar(
         return TuneReport::finished(TuneOutcome::AlreadyTuned, started);
     }
 
-    tracing::info!("tuning kernels for this device, this takes a while once per device and configuration");
+    tracing::debug!("warming up to see whether tuning earns back its time");
 
     ledger.set_search_mode(request.mode);
 
     let inputs = PassInputs {
+        identity: &identity,
         ledger: &ledger,
         frames,
         stored: &stored,
@@ -298,7 +303,7 @@ pub(crate) fn tune_planar(
         Ok(summary) => {
             let replayed = match request.mode {
                 SearchMode::Exhaustive => {
-                    let text = summarise(&ledger, &summary, table);
+                    let text = summarise(&identity, &ledger, &summary, table);
                     Some(text)
                 },
                 SearchMode::Families => None,
@@ -322,14 +327,19 @@ pub(crate) fn tune_planar(
 }
 
 /// The printed summary of an exhaustive pass, from the rankings it recorded and its profile timings.
-fn summarise(ledger: &TuneLedger, summary: &PassSummary, table: &PriorityTable) -> String {
+fn summarise(
+    identity: &DeviceIdentity,
+    ledger: &TuneLedger,
+    summary: &PassSummary,
+    table: &PriorityTable,
+) -> String {
     let ranked = ledger.result();
     let profiles = match &summary.profiles {
         ProfilePhase::Compared { records, .. } => records.as_slice(),
         _ => &[],
     };
 
-    format_report(&ranked, profiles, table)
+    format_report(identity, &ranked, profiles, table)
 }
 
 /// Drops the grain chunks measured on the tuning frames, so a later drain holds only real frames.
@@ -359,6 +369,12 @@ fn run_pass(planar: &mut PlanarDenoiser, inputs: &PassInputs<'_>) -> Result<Pass
     if !can_afford(&budget, spent, one_site) {
         anyhow::bail!("the tuning budget does not cover the warm-up and one site");
     }
+
+    tracing::info!(
+        adapter = %inputs.identity.adapter,
+        backend = %inputs.identity.backend,
+        "tuning kernels for this device, this takes a while once per device and configuration"
+    );
 
     let compile_ceiling = match inputs.request.mode {
         SearchMode::Families => budget.total,

@@ -5,6 +5,7 @@ use av_denoise::tune::{
     TuneReport,
     TuneRequest,
     is_tuned,
+    selected_device,
     tune_planes,
     tuning_frame_count,
 };
@@ -104,14 +105,27 @@ fn log_report(report: &TuneReport) {
     }
 }
 
-/// Says which kernels a run that needs no tuning pass uses.
-fn log_untuned_run(tuning: TuningMode) {
-    match tuning {
-        TuningMode::Auto => tracing::info!("using the stored tuning results for this device"),
-        TuningMode::Cached => {
-            tracing::info!("using the stored tuning results only, untuned launch sites run their baseline")
-        },
-        TuningMode::Off => tracing::info!("tuning is off, every launch site runs its baseline"),
+/// Says which kernels a run that needs no tuning pass uses, and for which device.
+fn log_untuned_run(planes: &PlaneOptions) {
+    if planes.tuning == TuningMode::Off {
+        tracing::info!("tuning is off, every launch site runs its baseline");
+        return;
+    }
+
+    let selected = selected_device(&planes.accelerators, &planes.device);
+    let Ok(device) = selected else {
+        return;
+    };
+
+    let adapter = &device.identity.adapter;
+    let backend = &device.identity.backend;
+    match planes.tuning {
+        TuningMode::Cached => tracing::info!(
+            %adapter,
+            %backend,
+            "using the stored tuning results only, untuned launch sites run their baseline"
+        ),
+        _ => tracing::info!(%adapter, %backend, "using the stored tuning results for this device"),
     }
 }
 
@@ -128,7 +142,7 @@ pub fn tune_before_workers(
     tune_budget: Option<f64>,
 ) -> Vec<FrameMsg> {
     if is_tuned(planes, info.layout) {
-        log_untuned_run(planes.tuning);
+        log_untuned_run(planes);
         return Vec::new();
     }
 

@@ -6,6 +6,7 @@ use av_denoise_core::tune::{
     BASELINE_FAMILY,
     BASELINE_INDEX,
     CandidateRecord,
+    DeviceIdentity,
     FamilyId,
     HYSTERESIS,
     PipelineProfile,
@@ -231,11 +232,12 @@ pub(crate) fn replay_profiles(records: &[ProfileRecord], table: &PriorityTable) 
     })
 }
 
-/// The printed summary of an exhaustive tune.
+/// The printed summary of an exhaustive tune on the device `identity` names.
 ///
-/// It has one block per site key `ranked` searched exhaustively, then the profiles in `profiles`,
-/// then a line of totals.
+/// It has a header naming the device, one block per site key `ranked` searched exhaustively, then
+/// the profiles in `profiles`, then a line of totals.
 pub(crate) fn format_report(
+    identity: &DeviceIdentity,
     ranked: &TuneResult,
     profiles: &[ProfileRecord],
     table: &PriorityTable,
@@ -243,7 +245,11 @@ pub(crate) fn format_report(
     let mut text = String::new();
     let mut replays = Vec::new();
 
-    let _ = writeln!(text, "Exhaustive tune against the families search");
+    let _ = writeln!(
+        text,
+        "Exhaustive tune against the families search, {} on {} ({})",
+        identity.adapter, identity.backend, identity.driver
+    );
 
     for (key, ranking) in &ranked.sites {
         let Some(search) = &ranking.search else {
