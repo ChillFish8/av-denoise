@@ -71,6 +71,14 @@ pub fn run(
     };
 
     let summary = run_with(&opts.planes, opener, settings, output)?;
+    let seconds = summary.wall.as_secs_f64();
+    let fps = summary.frames as f64 / seconds.max(f64::EPSILON);
+    tracing::info!(
+        frames = summary.frames,
+        seconds = format_args!("{seconds:.2}"),
+        fps = format_args!("{fps:.2}"),
+        "finished denoising"
+    );
 
     if opts.timing_report {
         let report = report::format_report(&summary);
