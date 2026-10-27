@@ -5,6 +5,7 @@ use crate::tune::{
     DecideLimits,
     MIN_CANDIDATE_TIME,
     MIN_SAMPLES,
+    SAMPLES_PER_WAIT,
     SampleTiming,
     Sampler,
     Samples,
@@ -14,11 +15,14 @@ use crate::tune::{
 
 /// Returns each candidate's scripted durations in turn, repeating the last one.
 ///
-/// Elapsed time is the sum of every sample handed out, so tests never wait on a clock.
+/// Elapsed time is the sum of every sample handed out, so tests never wait on a clock. A candidate
+/// in `failing_from` fails every sample once it has been served that many.
 pub(super) struct ScriptedSampler {
     scripts: BTreeMap<usize, Vec<Duration>>,
     served: BTreeMap<usize, usize>,
     pub(super) failing: Vec<usize>,
+    pub(super) failing_from: BTreeMap<usize, usize>,
+    pub(super) batches: Vec<usize>,
     elapsed: Duration,
 }
 
@@ -34,6 +38,8 @@ impl ScriptedSampler {
             scripts: scripted,
             served: BTreeMap::new(),
             failing: Vec::new(),
+            failing_from: BTreeMap::new(),
+            batches: Vec::new(),
             elapsed: Duration::ZERO,
         }
     }
@@ -49,6 +55,11 @@ impl Sampler for ScriptedSampler {
             anyhow::bail!("candidate {index} failed to launch");
         }
 
+        let fails_from = self.failing_from.get(&index).copied();
+        if fails_from.is_some_and(|limit| self.served(index) >= limit) {
+            anyhow::bail!("candidate {index} failed mid-batch");
+        }
+
         let script = &self.scripts[&index];
         let position = self.served(index).min(script.len() - 1);
         let total = script[position];
@@ -56,6 +67,18 @@ impl Sampler for ScriptedSampler {
         self.elapsed += total;
 
         Ok(SampleTiming { total, launches: 1 })
+    }
+
+    fn sample_batch(&mut self, index: usize, count: usize) -> Result<Vec<SampleTiming>, anyhow::Error> {
+        self.batches.push(count);
+
+        let mut timings = Vec::with_capacity(count);
+        for _ in 0..count {
+            let timing = self.sample(index)?;
+            timings.push(timing);
+        }
+
+        Ok(timings)
     }
 
     fn elapsed(&self) -> Duration {
@@ -95,10 +118,10 @@ fn a_separated_leader_stops_as_soon_as_every_minimum_is_met() {
 
     let timing = sample_until_settled(&mut sampler, &[0, 1], 0, &limits).expect("sampling succeeds");
 
-    // Candidate 1 reaches 250 ms after 250 rounds of 1 ms, the later of the two minimums.
+    // Candidate 1 reaches 250 ms after 250 samples of 1 ms, rounded up to whole rounds of samples.
     assert!(!timing.capped);
-    assert_eq!(sampler.served(1), 250);
-    assert_eq!(sampler.served(0), 250);
+    assert_eq!(sampler.served(1), 252);
+    assert_eq!(sampler.served(0), 252);
     for stats in &timing.timed {
         assert!(stats.samples.count() >= MIN_SAMPLES);
         assert!(stats.samples.spent() >= MIN_CANDIDATE_TIME);
@@ -178,6 +201,38 @@ fn a_failing_candidate_is_dropped_and_the_rest_carry_on() {
 
     assert_eq!(timing.failed, vec![2]);
     assert_eq!(timed, vec![0, 1]);
+}
+
+#[test]
+fn rounds_take_several_samples_per_wait() {
+    let mut sampler = ScriptedSampler::new(&[(0, &[2_000]), (1, &[1_000])]);
+    let limits = DecideLimits::default();
+
+    let timing = sample_until_settled(&mut sampler, &[0, 1], 0, &limits).expect("sampling succeeds");
+
+    assert!(!sampler.batches.is_empty());
+    assert!(sampler.batches.iter().all(|&count| count == SAMPLES_PER_WAIT));
+    for stats in &timing.timed {
+        assert_eq!(stats.samples.count() % SAMPLES_PER_WAIT, 0);
+    }
+}
+
+#[test]
+fn a_failure_in_a_batched_sample_drops_only_that_candidate() {
+    let mut sampler = ScriptedSampler::new(&[(0, &[2_000]), (1, &[1_000]), (2, &[500])]);
+    sampler.failing_from.insert(2, SAMPLES_PER_WAIT + 1);
+    let limits = DecideLimits::default();
+
+    let timing = sample_until_settled(&mut sampler, &[0, 1, 2], 0, &limits).expect("sampling succeeds");
+    let timed: Vec<usize> = timing.timed.iter().map(|stats| stats.index).collect();
+
+    assert_eq!(timing.failed, vec![2]);
+    assert_eq!(timed, vec![0, 1]);
+    for stats in &timing.timed {
+        assert!(stats.samples.count() >= MIN_SAMPLES);
+        assert!(stats.samples.spent() >= MIN_CANDIDATE_TIME);
+        assert_eq!(stats.samples.count(), sampler.served(stats.index));
+    }
 }
 
 #[test]

@@ -149,9 +149,28 @@ pub(crate) fn profile_launches<S: VariantSite>(
     outputs: &S::Outputs,
     launches: u32,
 ) -> Result<Duration, ProfileFailure> {
+    let queued = submit_launches(site, candidate, outputs, launches)?;
+    resolve_launches(queued)
+}
+
+/// The profiles of one sample's launches, submitted and not yet resolved.
+struct QueuedLaunches {
+    site: &'static str,
+    profiles: Vec<ProfileDuration>,
+}
+
+/// Submits `launches` launches of `candidate` into `outputs` in profiles of a few launches each.
+///
+/// A failure says whether any of these launches were submitted before it.
+fn submit_launches<S: VariantSite>(
+    site: &S,
+    candidate: S::Candidate,
+    outputs: &S::Outputs,
+    launches: u32,
+) -> Result<QueuedLaunches, ProfileFailure> {
     let chunk_limit = profile_chunk_limit();
     let work_ran = AtomicBool::new(false);
-    let mut pending = Vec::new();
+    let mut profiles = Vec::new();
     let mut remaining = launches;
 
     while remaining > 0 {
@@ -164,17 +183,25 @@ pub(crate) fn profile_launches<S: VariantSite>(
             reason: format!("{error:?}"),
             work_ran: work_ran.load(Ordering::Relaxed),
         })?;
-        pending.push(duration);
+        profiles.push(duration);
     }
 
+    Ok(QueuedLaunches {
+        site: S::Candidate::SITE,
+        profiles,
+    })
+}
+
+/// Waits for the device times of `queued` and sums them.
+fn resolve_launches(queued: QueuedLaunches) -> Result<Duration, ProfileFailure> {
     let mut elapsed = Duration::ZERO;
 
-    for duration in pending {
+    for duration in queued.profiles {
         let resolving = duration.resolve();
         let resolved = cubecl::future::block_on(resolving);
         let Some(ticks) = resolved else {
             return Err(ProfileFailure {
-                site: S::Candidate::SITE,
+                site: queued.site,
                 reason: "the device timer returned no measurement".to_string(),
                 work_ran: true,
             });
@@ -248,13 +275,9 @@ impl<'a, S: VariantSite> GpuSampler<'a, S> {
             excluded: Duration::ZERO,
         }
     }
-}
 
-impl<S: VariantSite> Sampler for GpuSampler<'_, S> {
-    fn sample(&mut self, index: usize) -> Result<SampleTiming, anyhow::Error> {
-        let candidate = self.candidates[index];
-        let total = profile_launches(self.site, candidate, self.outputs, self.launches)?;
-
+    /// The timing of one sample that took `total`, failing when the device timer reports no time.
+    fn timing(&self, candidate: S::Candidate, total: Duration) -> Result<SampleTiming, anyhow::Error> {
         if total.is_zero() {
             anyhow::bail!("the device timer reported no time for {}", candidate.name());
         }
@@ -263,6 +286,35 @@ impl<S: VariantSite> Sampler for GpuSampler<'_, S> {
             total,
             launches: self.launches,
         })
+    }
+}
+
+impl<S: VariantSite> Sampler for GpuSampler<'_, S> {
+    fn sample(&mut self, index: usize) -> Result<SampleTiming, anyhow::Error> {
+        let candidate = self.candidates[index];
+        let total = profile_launches(self.site, candidate, self.outputs, self.launches)?;
+
+        self.timing(candidate, total)
+    }
+
+    /// Queues the profiles of every sample before it resolves any, so the device never idles between them.
+    fn sample_batch(&mut self, index: usize, count: usize) -> Result<Vec<SampleTiming>, anyhow::Error> {
+        let candidate = self.candidates[index];
+
+        let mut queued = Vec::with_capacity(count);
+        for _ in 0..count {
+            let submitted = submit_launches(self.site, candidate, self.outputs, self.launches)?;
+            queued.push(submitted);
+        }
+
+        let mut timings = Vec::with_capacity(count);
+        for submitted in queued {
+            let total = resolve_launches(submitted)?;
+            let timing = self.timing(candidate, total)?;
+            timings.push(timing);
+        }
+
+        Ok(timings)
     }
 
     fn elapsed(&self) -> Duration {

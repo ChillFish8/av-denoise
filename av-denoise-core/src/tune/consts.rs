@@ -35,6 +35,9 @@ pub const SAMPLE_TARGET: Duration = Duration::from_millis(2);
 /// The most launches batched into one sample.
 pub const MAX_LAUNCHES_PER_SAMPLE: u32 = 4096;
 
+/// The samples a candidate queues on the device before any of them is resolved.
+pub const SAMPLES_PER_WAIT: usize = 4;
+
 /// The fewest samples a candidate takes before the stop rule may end its site.
 pub const MIN_SAMPLES: usize = 15;
 

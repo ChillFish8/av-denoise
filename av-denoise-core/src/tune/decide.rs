@@ -9,6 +9,7 @@ use super::consts::{
     MIN_SAMPLES,
     PRESCREEN_MARGIN,
     PRESCREEN_SAMPLES,
+    SAMPLES_PER_WAIT,
     SITE_CAP,
 };
 
@@ -31,6 +32,19 @@ impl SampleTiming {
 pub trait Sampler {
     /// Takes one sample of the candidate at `index`.
     fn sample(&mut self, index: usize) -> Result<SampleTiming, anyhow::Error>;
+
+    /// Takes `count` samples of the candidate at `index`.
+    ///
+    /// It returns all `count` timings or an error.
+    fn sample_batch(&mut self, index: usize, count: usize) -> Result<Vec<SampleTiming>, anyhow::Error> {
+        let mut timings = Vec::with_capacity(count);
+        for _ in 0..count {
+            let timing = self.sample(index)?;
+            timings.push(timing);
+        }
+
+        Ok(timings)
+    }
 
     /// Time spent on the current site so far.
     ///
@@ -229,6 +243,7 @@ pub fn prescreen<S: Sampler>(
 
 /// Samples `candidates` round-robin until the leader separates or the site cap passes.
 ///
+/// Each round takes [SAMPLES_PER_WAIT](crate::tune::SAMPLES_PER_WAIT) samples of every candidate.
 /// Sampling never stops before every candidate has its minimum samples and time. After that it
 /// stops once the leader's median sits below the runner-up's lower quartile, or once the sampler's
 /// elapsed time reaches the site cap. A site still short of its minimums at the hard cap fails. A
@@ -255,11 +270,14 @@ pub fn sample_until_settled<S: Sampler>(
 
         while position < active.len() {
             let index = active[position].index;
-            let sampled = sampler.sample(index);
+            let sampled = sampler.sample_batch(index, SAMPLES_PER_WAIT);
 
             match sampled {
-                Ok(timing) => {
-                    active[position].samples.push(timing);
+                Ok(timings) => {
+                    for timing in timings {
+                        active[position].samples.push(timing);
+                    }
+
                     position += 1;
                 },
                 Err(error) if index == baseline => {
