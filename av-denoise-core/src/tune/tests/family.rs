@@ -200,6 +200,16 @@ fn assert_value_of_inverts_compose<C: SiteCandidate>() {
 }
 
 #[test]
+fn removed_candidates_are_gone() {
+    assert_eq!(RegulariseCandidate::from_name("coop64"), None);
+    assert_eq!(WindowCandidate::from_name("16x16"), None);
+
+    assert!(RegulariseCandidate::from_name("coop32").is_some());
+    assert!(WindowCandidate::from_name("16x16_separable").is_some());
+    assert!(CollabVariant::from_name("groups8_uniform").is_some());
+}
+
+#[test]
 fn every_candidate_is_reachable_from_its_families() {
     assert_reachable::<CollabVariant>();
     assert_reachable::<SearchVariant>();

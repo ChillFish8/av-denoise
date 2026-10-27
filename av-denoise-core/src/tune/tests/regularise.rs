@@ -17,6 +17,7 @@ use crate::tune::sites::{
     RegulariseLayout,
     RegulariseOutputs,
     RegulariseSite,
+    candidate_known,
     compare_fields,
 };
 use crate::tune::{
@@ -272,10 +273,6 @@ fn cooperative_shared_bytes_add_one_partial_per_candidate_per_thread() {
         site.shared_bytes(RegulariseCandidate::Coop32),
         serial_bytes + 7 * 32 * 4
     );
-    assert_eq!(
-        site.shared_bytes(RegulariseCandidate::Coop64),
-        serial_bytes + 7 * 64 * 4
-    );
 }
 
 #[test]
@@ -322,34 +319,31 @@ fn the_cooperative_kernels_match_the_verbatim_reference() {
         let vectors = site.outputs.neighbours as usize * site.outputs.blocks;
         let allowed = (vectors as f64 * COOP_MAX_FLIPPED_SHARE).floor() as usize;
 
-        for candidate in [RegulariseCandidate::Coop32, RegulariseCandidate::Coop64] {
-            let label = format!("{spec:?} {}", candidate.name());
-            let outputs = site.scratch_outputs();
-            site.launch(candidate, &outputs);
+        let label = format!("{spec:?}");
+        let outputs = site.scratch_outputs();
+        site.launch(RegulariseCandidate::Coop32, &outputs);
 
-            let vectors_len = outputs.vectors_len();
-            let confidence_len = outputs.confidence_len();
-            let field = read_i32(&client, &outputs.vectors, vectors_len).expect("vectors read back");
-            let scores =
-                read_f32(&client, &outputs.confidence, confidence_len).expect("confidence reads back");
-            let agreement = compare_fields(&outputs, &reference_field, &field, &reference_scores, &scores);
-            let flipped = agreement.flipped;
-            let difference = agreement.confidence.max_abs;
-            assert!(difference <= COOP_MAX_ABS, "{label}: confidence {difference:e}");
+        let vectors_len = outputs.vectors_len();
+        let confidence_len = outputs.confidence_len();
+        let field = read_i32(&client, &outputs.vectors, vectors_len).expect("vectors read back");
+        let scores = read_f32(&client, &outputs.confidence, confidence_len).expect("confidence reads back");
+        let agreement = compare_fields(&outputs, &reference_field, &field, &reference_scores, &scores);
+        let flipped = agreement.flipped;
+        let difference = agreement.confidence.max_abs;
+        assert!(difference <= COOP_MAX_ABS, "{label}: confidence {difference:e}");
 
-            assert!(flipped <= allowed, "{label}: {flipped} flipped vectors");
+        assert!(flipped <= allowed, "{label}: {flipped} flipped vectors");
 
-            if spec.content == RegulariseContent::Textured {
-                let wrote_vectors = field.iter().any(|&component| component != 0);
-                assert!(wrote_vectors, "{label}: wrote an all-zero field");
+        if spec.content == RegulariseContent::Textured {
+            let wrote_vectors = field.iter().any(|&component| component != 0);
+            assert!(wrote_vectors, "{label}: wrote an all-zero field");
 
-                let wrote_scores = scores.iter().any(|&score| score != 0.0);
-                assert_eq!(
-                    wrote_scores, reference_wrote_scores,
-                    "{label}: confidence written"
-                );
-                textured_confidence_written |= wrote_scores;
-            }
+            let wrote_scores = scores.iter().any(|&score| score != 0.0);
+            assert_eq!(
+                wrote_scores, reference_wrote_scores,
+                "{label}: confidence written"
+            );
+            textured_confidence_written |= wrote_scores;
         }
     }
 
@@ -374,12 +368,10 @@ fn tie_heavy_content_picks_the_same_vectors_as_the_serial_kernel() {
         let serial_field =
             read_i32(&client, &serial.vectors, serial.vectors_len()).expect("vectors read back");
 
-        for candidate in [RegulariseCandidate::Coop32, RegulariseCandidate::Coop64] {
-            let coop = site.scratch_outputs();
-            site.launch(candidate, &coop);
-            let coop_field = read_i32(&client, &coop.vectors, coop.vectors_len()).expect("vectors read back");
-            assert_eq!(coop_field, serial_field, "{spec:?} {}", candidate.name());
-        }
+        let coop = site.scratch_outputs();
+        site.launch(RegulariseCandidate::Coop32, &coop);
+        let coop_field = read_i32(&client, &coop.vectors, coop.vectors_len()).expect("vectors read back");
+        assert_eq!(coop_field, serial_field, "{spec:?}");
     }
 }
 
@@ -398,17 +390,15 @@ fn cooperative_confidence_stays_well_inside_its_declared_bound() {
         let serial_scores =
             read_f32(&client, &serial.confidence, serial.confidence_len()).expect("confidence reads back");
 
-        for candidate in [RegulariseCandidate::Coop32, RegulariseCandidate::Coop64] {
-            let coop = site.scratch_outputs();
-            site.launch(candidate, &coop);
-            let coop_field = read_i32(&client, &coop.vectors, coop.vectors_len()).expect("vectors read back");
-            let coop_scores =
-                read_f32(&client, &coop.confidence, coop.confidence_len()).expect("confidence reads back");
+        let coop = site.scratch_outputs();
+        site.launch(RegulariseCandidate::Coop32, &coop);
+        let coop_field = read_i32(&client, &coop.vectors, coop.vectors_len()).expect("vectors read back");
+        let coop_scores =
+            read_f32(&client, &coop.confidence, coop.confidence_len()).expect("confidence reads back");
 
-            let agreement = compare_fields(&serial, &serial_field, &coop_field, &serial_scores, &coop_scores);
-            worst = worst.max(agreement.confidence.max_abs);
-            flipped += agreement.flipped;
-        }
+        let agreement = compare_fields(&serial, &serial_field, &coop_field, &serial_scores, &coop_scores);
+        worst = worst.max(agreement.confidence.max_abs);
+        flipped += agreement.flipped;
     }
 
     eprintln!("worst cooperative confidence difference {worst:e}, {flipped} flipped vectors");
@@ -441,16 +431,36 @@ fn forcing_the_cooperative_kernel_keeps_nl4d_output_within_rounding() {
     let baseline_plan = KernelPlan::baseline();
     let baseline = nl4d_outputs(options, channels, width, height, &frames, baseline_plan);
 
-    for candidate in [RegulariseCandidate::Coop32, RegulariseCandidate::Coop64] {
-        let plan = KernelPlan::baseline().with_site(NL4D_MV_REGULARISE, candidate.name());
-        let forced = nl4d_outputs(options, channels, width, height, &frames, plan);
-        assert_eq!(forced.len(), baseline.len());
+    let coop_name = RegulariseCandidate::Coop32.name();
+    let plan = KernelPlan::baseline().with_site(NL4D_MV_REGULARISE, coop_name);
+    let forced = nl4d_outputs(options, channels, width, height, &frames, plan);
+    assert_eq!(forced.len(), baseline.len());
 
-        for (forced_frame, baseline_frame) in forced.iter().zip(&baseline) {
-            let diff = diff_plane(baseline_frame, forced_frame);
-            assert!(diff.psnr >= 60.0, "{}: psnr {:.2}", candidate.name(), diff.psnr);
-        }
+    for (forced_frame, baseline_frame) in forced.iter().zip(&baseline) {
+        let diff = diff_plane(baseline_frame, forced_frame);
+        assert!(diff.psnr >= 60.0, "{coop_name}: psnr {:.2}", diff.psnr);
     }
+}
+
+#[test]
+fn a_stored_pick_of_a_removed_candidate_runs_the_baseline() {
+    let known = candidate_known(NL4D_MV_REGULARISE, "coop64");
+    assert!(!known, "coop64 is no longer a candidate");
+
+    let options = Nl4dOptions {
+        temporal_radius: 1,
+        ..Nl4dOptions::default()
+    };
+    let channels = ChannelMode::Luma;
+    let (width, height) = (72u32, 48u32);
+    let frames = noisy_frames(width, height, 1, 7);
+    let baseline_plan = KernelPlan::baseline();
+    let baseline = nl4d_outputs(options, channels, width, height, &frames, baseline_plan);
+
+    let stored_plan = KernelPlan::baseline().with_site(NL4D_MV_REGULARISE, "coop64");
+    let stored = nl4d_outputs(options, channels, width, height, &frames, stored_plan);
+
+    assert_eq!(stored, baseline);
 }
 
 fn upload_field(site: &RegulariseSite, vectors: &[i32], confidence: &[f32]) -> RegulariseOutputs {

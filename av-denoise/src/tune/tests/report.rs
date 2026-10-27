@@ -515,15 +515,14 @@ fn collab_nanos(variant: CollabVariant) -> u64 {
     (10_000_000.0 * scale).round() as u64
 }
 
-/// The serial family leads, and the cooperative family stays shut although it holds the fastest
-/// member.
+/// The cooperative family leads, and the serial family stays shut although it holds a member faster
+/// than its representative.
 fn regularise_nanos(candidate: RegulariseCandidate) -> u64 {
     match candidate {
         RegulariseCandidate::Serial8x8 => 10_000_000,
         RegulariseCandidate::Serial8x4 => 9_800_000,
         RegulariseCandidate::Serial4x4 => 10_400_000,
-        RegulariseCandidate::Coop32 => 10_600_000,
-        RegulariseCandidate::Coop64 => 9_000_000,
+        RegulariseCandidate::Coop32 => 9_000_000,
     }
 }
 

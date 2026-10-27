@@ -30,7 +30,6 @@ pub const SEPARABLE_MAX_ABS: f32 = 1.0e-3;
 pub enum WindowCandidate {
     Block32x8,
     Block32x16,
-    Block16x16,
     Separable32x8,
     Separable32x16,
     Separable16x16,
@@ -42,7 +41,7 @@ impl WindowCandidate {
         match self {
             WindowCandidate::Block32x8 | WindowCandidate::Separable32x8 => (32, 8),
             WindowCandidate::Block32x16 | WindowCandidate::Separable32x16 => (32, 16),
-            WindowCandidate::Block16x16 | WindowCandidate::Separable16x16 => (16, 16),
+            WindowCandidate::Separable16x16 => (16, 16),
         }
     }
 
@@ -62,11 +61,7 @@ const WINDOW_FAMILIES: &[FlatFamily<WindowCandidate>] = &[
     FlatFamily {
         id: FamilyId("direct"),
         representative: WindowCandidate::Block32x8,
-        members: &[
-            WindowCandidate::Block32x8,
-            WindowCandidate::Block32x16,
-            WindowCandidate::Block16x16,
-        ],
+        members: &[WindowCandidate::Block32x8, WindowCandidate::Block32x16],
     },
     FlatFamily {
         id: FamilyId("separable"),
@@ -84,7 +79,6 @@ impl SiteCandidate for WindowCandidate {
     const ALL: &'static [Self] = &[
         WindowCandidate::Block32x8,
         WindowCandidate::Block32x16,
-        WindowCandidate::Block16x16,
         WindowCandidate::Separable32x8,
         WindowCandidate::Separable32x16,
         WindowCandidate::Separable16x16,
@@ -94,7 +88,6 @@ impl SiteCandidate for WindowCandidate {
         match self {
             WindowCandidate::Block32x8 => "32x8",
             WindowCandidate::Block32x16 => "32x16",
-            WindowCandidate::Block16x16 => "16x16",
             WindowCandidate::Separable32x8 => "32x8_separable",
             WindowCandidate::Separable32x16 => "32x16_separable",
             WindowCandidate::Separable16x16 => "16x16_separable",

@@ -98,7 +98,6 @@ pub enum RegulariseCandidate {
     Serial8x4,
     Serial4x4,
     Coop32,
-    Coop64,
 }
 
 impl RegulariseCandidate {
@@ -108,12 +107,11 @@ impl RegulariseCandidate {
             RegulariseCandidate::Serial8x4 => RegulariseLayout::Serial { x: 8, y: 4 },
             RegulariseCandidate::Serial4x4 => RegulariseLayout::Serial { x: 4, y: 4 },
             RegulariseCandidate::Coop32 => RegulariseLayout::Cooperative { threads: 32 },
-            RegulariseCandidate::Coop64 => RegulariseLayout::Cooperative { threads: 64 },
         }
     }
 }
 
-/// The serial layouts, led by 8x8, and the cooperative layouts, led by 32 threads.
+/// The serial layouts, led by 8x8, and the cooperative layout on 32 threads.
 const REGULARISE_FAMILIES: &[FlatFamily<RegulariseCandidate>] = &[
     FlatFamily {
         id: FamilyId("serial"),
@@ -127,7 +125,7 @@ const REGULARISE_FAMILIES: &[FlatFamily<RegulariseCandidate>] = &[
     FlatFamily {
         id: FamilyId("coop"),
         representative: RegulariseCandidate::Coop32,
-        members: &[RegulariseCandidate::Coop32, RegulariseCandidate::Coop64],
+        members: &[RegulariseCandidate::Coop32],
     },
 ];
 
@@ -138,7 +136,6 @@ impl SiteCandidate for RegulariseCandidate {
         RegulariseCandidate::Serial8x4,
         RegulariseCandidate::Serial4x4,
         RegulariseCandidate::Coop32,
-        RegulariseCandidate::Coop64,
     ];
 
     fn name(self) -> &'static str {
@@ -147,7 +144,6 @@ impl SiteCandidate for RegulariseCandidate {
             RegulariseCandidate::Serial8x4 => "serial8x4",
             RegulariseCandidate::Serial4x4 => "serial4x4",
             RegulariseCandidate::Coop32 => "coop32",
-            RegulariseCandidate::Coop64 => "coop64",
         }
     }
 

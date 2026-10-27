@@ -2,7 +2,8 @@ use super::fixtures::{CollabSpec, collab_site};
 use super::probe::small_device_limits;
 use super::runtime::test_client;
 use crate::nlmeans::ChannelMode;
-use crate::tune::sites::Walk;
+use crate::tune::gpu::sync;
+use crate::tune::sites::{CollabVariant, Walk};
 use crate::tune::{
     APPLE_VENDOR_ID,
     DeviceClass,
@@ -12,6 +13,7 @@ use crate::tune::{
     INTEL_VENDOR_ID,
     Legality,
     NVIDIA_VENDOR_ID,
+    SiteCandidate,
     VariantSite,
     check_plane_size,
     legal_candidates,
@@ -222,6 +224,46 @@ fn pre_volta_devices_are_offered_only_uniform_walks() {
             device.identity.backend,
         );
     }
+}
+
+#[test]
+fn uniform_only_devices_keep_the_combined_uniform_variants() {
+    let client = test_client();
+    let limits = DeviceLimits::from_client(&client);
+    let devices = [
+        faked_profile("vulkan", NVIDIA_VENDOR_ID, GTX_1070, None),
+        faked_profile("cuda", NVIDIA_VENDOR_ID, GTX_970, Some(52)),
+    ];
+    let uniform: Vec<CollabVariant> = CollabVariant::ALL
+        .iter()
+        .copied()
+        .filter(|variant| variant.walk == Walk::Uniform)
+        .collect();
+
+    for device in devices {
+        let legality = Legality::for_device(&device);
+        let mut site = collab_site(&client, &luma_spec());
+        site.shape.uniform_walk_only = legality.uniform_walk_only;
+
+        let offered = legal_candidates(&site, &limits, &legality).expect("the baseline fits");
+        let names: Vec<&str> = offered.iter().map(|variant| variant.name()).collect();
+        let backend = &device.identity.backend;
+
+        assert_eq!(offered, uniform, "{backend}");
+        assert_eq!(offered.len(), 30, "{backend}");
+        assert_eq!(names[0], "groups8_uniform", "{backend}");
+        assert!(names.contains(&"groups4_uniform"), "{backend}");
+        assert!(names.contains(&"groups16_uniform"), "{backend}");
+        assert!(names.contains(&"groups4_uniform_tiled"), "{backend}");
+        assert!(names.contains(&"groups16_uniform_nslide"), "{backend}");
+        assert!(
+            names.contains(&"groups16_uniform_tiled_batched_nslide"),
+            "{backend}"
+        );
+    }
+
+    // The HIP runtime crashes at process exit while an upload is still queued.
+    sync(&client).expect("the uploads finish");
 }
 
 #[test]

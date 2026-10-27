@@ -154,15 +154,14 @@ fn a_tall_cube_does_not_fit_a_32kb_device_at_wide_radii() {
     let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
 
     // 32x16 needs 29952 + 2 * 3344 + 2 * 4 = 36648 bytes, and 42272 with separable sums.
-    // 16x16 needs 20736 + 2 * 1936 + 2 * 4 = 24616, and 27424 with separable sums.
+    // 16x16 needs 27424 with separable sums.
     // 32x8 needs 27560, and 31136 with separable sums.
     assert_eq!(site.shared_bytes(WindowCandidate::Block32x16), 36648);
-    assert_eq!(site.shared_bytes(WindowCandidate::Block16x16), 24616);
+    assert_eq!(site.shared_bytes(WindowCandidate::Separable16x16), 27424);
     assert_eq!(
         fitted,
         vec![
             WindowCandidate::Block32x8,
-            WindowCandidate::Block16x16,
             WindowCandidate::Separable32x8,
             WindowCandidate::Separable16x16,
         ]
