@@ -26,8 +26,6 @@ pub use av_denoise_core::tune::{
     TuneResult,
 };
 
-pub use crate::backend::selected_device;
-
 pub(crate) use self::driver::tune_planar;
 pub use self::driver::{TuneOutcome, TuneReport, TuneRequest, is_tuned, tune_planes};
 pub(crate) use self::mode::profile_key;
@@ -48,3 +46,4 @@ pub(crate) use self::setup::{KernelRequest, KernelSetup, engine_kernels};
 pub(crate) use self::store::remembered;
 pub use self::store::{StoreError, TuneStore};
 pub(crate) use self::store::{reload, remember, resolve};
+pub use crate::backend::selected_device;
