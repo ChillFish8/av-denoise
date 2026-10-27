@@ -3,12 +3,15 @@ use std::time::Duration;
 
 use crate::tune::{
     DecideLimits,
+    FidelityClass,
     MIN_CANDIDATE_TIME,
     MIN_SAMPLES,
+    RACE_MIN_SAMPLES,
     SAMPLES_PER_WAIT,
     SampleTiming,
     Sampler,
     Samples,
+    SiteTiming,
     prescreen,
     sample_until_settled,
 };
@@ -16,12 +19,14 @@ use crate::tune::{
 /// Returns each candidate's scripted durations in turn, repeating the last one.
 ///
 /// Elapsed time is the sum of every sample handed out, so tests never wait on a clock. A candidate
-/// in `failing_from` fails every sample once it has been served that many.
+/// in `failing_from` fails every sample once it has been served that many. A candidate missing from
+/// `fidelities` is Exact.
 pub(super) struct ScriptedSampler {
     scripts: BTreeMap<usize, Vec<Duration>>,
     served: BTreeMap<usize, usize>,
     pub(super) failing: Vec<usize>,
     pub(super) failing_from: BTreeMap<usize, usize>,
+    pub(super) fidelities: BTreeMap<usize, FidelityClass>,
     pub(super) batches: Vec<usize>,
     elapsed: Duration,
 }
@@ -39,6 +44,7 @@ impl ScriptedSampler {
             served: BTreeMap::new(),
             failing: Vec::new(),
             failing_from: BTreeMap::new(),
+            fidelities: BTreeMap::new(),
             batches: Vec::new(),
             elapsed: Duration::ZERO,
         }
@@ -83,6 +89,11 @@ impl Sampler for ScriptedSampler {
 
     fn elapsed(&self) -> Duration {
         self.elapsed
+    }
+
+    fn fidelity(&self, index: usize) -> FidelityClass {
+        let fidelity = self.fidelities.get(&index).copied();
+        fidelity.unwrap_or(FidelityClass::Exact)
     }
 }
 
@@ -300,4 +311,165 @@ fn a_quantile_rank_past_one_gives_the_slowest_sample() {
     }
 
     assert_eq!(samples.quantile(2.0), Duration::from_micros(3));
+}
+
+fn timed_indices(timing: &SiteTiming) -> Vec<usize> {
+    timing.timed.iter().map(|stats| stats.index).collect()
+}
+
+fn sample_count(timing: &SiteTiming, index: usize) -> usize {
+    let stats = timing.timed.iter().find(|stats| stats.index == index);
+    let stats = stats.expect("the candidate is timed");
+    stats.samples.count()
+}
+
+fn assert_minimums(timing: &SiteTiming, index: usize) {
+    let stats = timing.timed.iter().find(|stats| stats.index == index);
+    let stats = stats.expect("the candidate is timed");
+
+    assert!(stats.samples.count() >= MIN_SAMPLES, "{index}");
+    assert!(stats.samples.spent() >= MIN_CANDIDATE_TIME, "{index}");
+}
+
+#[test]
+fn a_clear_loser_is_raced_out_with_fewer_samples() {
+    let mut sampler = ScriptedSampler::new(&[(0, &[100]), (1, &[102]), (2, &[150])]);
+    let limits = DecideLimits::default();
+
+    let timing = sample_until_settled(&mut sampler, &[0, 1, 2], 0, &limits).expect("sampling succeeds");
+
+    assert_eq!(timing.raced, vec![2]);
+    assert_eq!(timed_indices(&timing), vec![0, 1, 2]);
+    assert!(sample_count(&timing, 2) < sample_count(&timing, 0));
+    assert!(sample_count(&timing, 2) >= RACE_MIN_SAMPLES);
+    assert_minimums(&timing, 0);
+    assert_minimums(&timing, 1);
+}
+
+#[test]
+fn the_baseline_is_never_raced_out() {
+    let mut sampler = ScriptedSampler::new(&[(0, &[150]), (1, &[100]), (2, &[100])]);
+    let limits = DecideLimits::default();
+
+    let timing = sample_until_settled(&mut sampler, &[0, 1, 2], 0, &limits).expect("sampling succeeds");
+
+    assert!(timing.raced.is_empty());
+    assert_minimums(&timing, 0);
+}
+
+#[test]
+fn the_fastest_exact_candidate_is_never_raced_out() {
+    let mut sampler = ScriptedSampler::new(&[(1, &[100]), (2, &[140]), (3, &[150])]);
+    sampler.fidelities.insert(1, FidelityClass::Approximate);
+    let limits = DecideLimits::default();
+
+    // The baseline sits in an earlier batch, as it does in a search's later batches.
+    let timing = sample_until_settled(&mut sampler, &[1, 2, 3], 0, &limits).expect("sampling succeeds");
+
+    assert_eq!(timing.raced, vec![3]);
+    assert_minimums(&timing, 1);
+    assert_minimums(&timing, 2);
+}
+
+#[test]
+fn ties_within_the_hysteresis_are_never_raced_out() {
+    let mut sampler = ScriptedSampler::new(&[(0, &[100]), (1, &[101]), (2, &[101]), (3, &[102])]);
+    let limits = DecideLimits::default();
+
+    let timing = sample_until_settled(&mut sampler, &[0, 1, 2, 3], 0, &limits).expect("sampling succeeds");
+
+    assert!(timing.raced.is_empty());
+    for index in 0..4 {
+        assert_minimums(&timing, index);
+    }
+}
+
+#[test]
+fn no_candidate_is_raced_out_before_its_first_samples() {
+    // Only the first round is slow, so the candidate looks a clear loser only before it has its first samples.
+    let mut slow_start = vec![300u64; SAMPLES_PER_WAIT];
+    slow_start.push(104);
+    let mut sampler = ScriptedSampler::new(&[(0, &[100]), (1, &[104]), (2, &slow_start)]);
+    let limits = DecideLimits::default();
+
+    let timing = sample_until_settled(&mut sampler, &[0, 1, 2], 0, &limits).expect("sampling succeeds");
+
+    assert!(timing.raced.is_empty());
+    assert_minimums(&timing, 2);
+}
+
+fn sample_pair(script: &[(usize, &[u64])], race: bool) -> SiteTiming {
+    let mut sampler = ScriptedSampler::new(script);
+    let limits = DecideLimits {
+        race,
+        ..DecideLimits::default()
+    };
+
+    sample_until_settled(&mut sampler, &[0, 1], 0, &limits).expect("sampling succeeds")
+}
+
+fn fastest_index(timing: &SiteTiming) -> usize {
+    let fastest = timing.timed.iter().min_by_key(|stats| stats.samples.median());
+    let fastest = fastest.expect("a candidate is timed");
+    fastest.index
+}
+
+#[test]
+fn two_candidate_sites_end_as_before() {
+    let scripts: [&[(usize, &[u64])]; 2] = [&[(0, &[150]), (1, &[100])], &[(0, &[105]), (1, &[100])]];
+
+    for script in scripts {
+        let raced = sample_pair(script, true);
+        let unraced = sample_pair(script, false);
+
+        assert!(raced.raced.is_empty());
+        assert_eq!(raced, unraced);
+    }
+
+    // A baseline leading by more than the race threshold races the other out but keeps its pick.
+    let leading_baseline: &[(usize, &[u64])] = &[(0, &[100]), (1, &[150])];
+    let raced = sample_pair(leading_baseline, true);
+    let unraced = sample_pair(leading_baseline, false);
+
+    assert_eq!(raced.raced, vec![1]);
+    assert_eq!(fastest_index(&raced), fastest_index(&unraced));
+    assert_eq!(raced.timed[0], unraced.timed[0]);
+}
+
+#[test]
+fn candidates_inside_the_race_margin_are_never_raced_out() {
+    let mut sampler = ScriptedSampler::new(&[(0, &[100]), (1, &[105]), (2, &[150])]);
+    let limits = DecideLimits::default();
+
+    let timing = sample_until_settled(&mut sampler, &[0, 1, 2], 0, &limits).expect("sampling succeeds");
+
+    assert_eq!(timing.raced, vec![2]);
+    assert_minimums(&timing, 1);
+}
+
+#[test]
+fn close_exact_runners_up_are_never_raced_out() {
+    let mut sampler = ScriptedSampler::new(&[(1, &[100]), (2, &[140]), (3, &[141]), (4, &[155])]);
+    sampler.fidelities.insert(1, FidelityClass::Approximate);
+    let limits = DecideLimits::default();
+
+    // The 141 candidate could still tie the fastest Exact, and the 155 one sits beyond the margin.
+    let timing = sample_until_settled(&mut sampler, &[1, 2, 3, 4], 0, &limits).expect("sampling succeeds");
+
+    assert_eq!(timing.raced, vec![4]);
+    assert_minimums(&timing, 2);
+    assert_minimums(&timing, 3);
+}
+
+#[test]
+fn exhaustive_limits_never_race() {
+    let mut sampler = ScriptedSampler::new(&[(0, &[100]), (1, &[102]), (2, &[150])]);
+    let limits = DecideLimits::exhaustive();
+
+    let timing = sample_until_settled(&mut sampler, &[0, 1, 2], 0, &limits).expect("sampling succeeds");
+
+    assert!(timing.raced.is_empty());
+    for index in 0..3 {
+        assert_minimums(&timing, index);
+    }
 }

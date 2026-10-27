@@ -129,6 +129,7 @@ pub fn search_candidates<C: SiteCandidate, S: Sampler>(
         steps: vec![None; allowed.len()],
         timed: Vec::new(),
         failed: Vec::new(),
+        raced: Vec::new(),
         capped: false,
     };
 
@@ -164,6 +165,7 @@ pub fn search_candidates<C: SiteCandidate, S: Sampler>(
     let timing = SiteTiming {
         timed: search.timed,
         failed: search.failed,
+        raced: search.raced,
         capped: search.capped,
     };
 
@@ -251,6 +253,7 @@ struct Search<'a, C, S, P, K> {
     steps: Vec<Option<SearchStep>>,
     timed: Vec<CandidateStats>,
     failed: Vec<usize>,
+    raced: Vec<usize>,
     capped: bool,
 }
 
@@ -319,6 +322,7 @@ where
         let timing = sample_until_settled(self.sampler, &checked, BASELINE_INDEX, &batch_limits)?;
 
         self.failed.extend(timing.failed);
+        self.raced.extend(timing.raced);
         self.capped |= timing.capped;
         self.timed.extend(timing.timed.iter().cloned());
 

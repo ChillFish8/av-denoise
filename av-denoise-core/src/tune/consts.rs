@@ -56,6 +56,12 @@ pub const EXHAUSTIVE_SITE_CAP: Duration = Duration::from_secs(30);
 /// How close to the fastest median a more faithful candidate must be to win instead.
 pub const HYSTERESIS: f64 = 0.02;
 
+/// The samples a candidate takes before it can be raced out of its site.
+pub const RACE_MIN_SAMPLES: usize = 8;
+
+/// How far beyond the hysteresis a candidate's fast samples must sit for it to be raced out.
+pub const RACE_MARGIN: f64 = 0.05;
+
 /// Short samples each candidate takes in a pre-screen.
 pub const PRESCREEN_SAMPLES: usize = 3;
 

@@ -9,6 +9,7 @@ use cubecl::server::{Handle, ProfileError};
 use crate::engine::{BLOCK_1D, MAX_GRID_1D};
 use crate::nlmeans::kernels::gpu_zero_buffers;
 use crate::tune::decide::{SampleTiming, Sampler};
+use crate::tune::fidelity::FidelityClass;
 use crate::tune::site::{SiteCandidate, VariantSite};
 
 /// Binds the first `len` elements of `handle` as a kernel array argument.
@@ -329,5 +330,11 @@ impl<S: VariantSite> Sampler for GpuSampler<'_, S> {
     fn candidate_name(&self, index: usize) -> String {
         let candidate = self.candidates[index];
         candidate.name().to_string()
+    }
+
+    fn fidelity(&self, index: usize) -> FidelityClass {
+        let candidate = self.candidates[index];
+        let fidelity = candidate.fidelity();
+        fidelity.class()
     }
 }

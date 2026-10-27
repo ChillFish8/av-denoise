@@ -5,13 +5,17 @@ use anyhow::Context;
 use super::consts::{
     EXHAUSTIVE_SITE_CAP,
     HARD_SITE_CAP,
+    HYSTERESIS,
     MIN_CANDIDATE_TIME,
     MIN_SAMPLES,
     PRESCREEN_MARGIN,
     PRESCREEN_SAMPLES,
+    RACE_MARGIN,
+    RACE_MIN_SAMPLES,
     SAMPLES_PER_WAIT,
     SITE_CAP,
 };
+use super::fidelity::FidelityClass;
 
 /// One timing sample, `launches` back-to-back launches that took `total` together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +58,11 @@ pub trait Sampler {
     /// The name of the candidate at `index`, for logs.
     fn candidate_name(&self, index: usize) -> String {
         index.to_string()
+    }
+
+    /// The fidelity class of the candidate at `index`.
+    fn fidelity(&self, _index: usize) -> FidelityClass {
+        FidelityClass::Exact
     }
 
     /// Leaves `spent` out of [Sampler::elapsed] from now on.
@@ -137,6 +146,8 @@ pub struct DecideLimits {
     pub prescreen_samples: usize,
     /// How much slower than the fastest a candidate may be and survive the pre-screen.
     pub prescreen_margin: f64,
+    /// Whether candidates that can no longer win are raced out before their minimums.
+    pub race: bool,
 }
 
 impl Default for DecideLimits {
@@ -148,16 +159,20 @@ impl Default for DecideLimits {
             hard_cap: HARD_SITE_CAP,
             prescreen_samples: PRESCREEN_SAMPLES,
             prescreen_margin: PRESCREEN_MARGIN,
+            race: true,
         }
     }
 }
 
 impl DecideLimits {
-    /// The limits of an exhaustive search, with the usual minimums, a wider site cap and no hard cap.
+    /// The limits of an exhaustive search.
+    ///
+    /// It keeps the usual minimums, with a wider site cap, no hard cap and no racing.
     pub fn exhaustive() -> Self {
         Self {
             site_cap: EXHAUSTIVE_SITE_CAP,
             hard_cap: Duration::MAX,
+            race: false,
             ..Self::default()
         }
     }
@@ -173,10 +188,14 @@ pub struct CandidateStats {
 /// How one site's sampling ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiteTiming {
-    /// Candidates timed to the end, in the order they were given.
+    /// Every candidate timed, with the samples it took.
+    ///
+    /// The candidates timed to the end come first, then the raced-out ones, each in the order given.
     pub timed: Vec<CandidateStats>,
     /// Candidates dropped after a sample failed.
     pub failed: Vec<usize>,
+    /// Candidates raced out before their minimums, in the order given.
+    pub raced: Vec<usize>,
     /// Whether the site cap ended sampling before the leader separated.
     pub capped: bool,
 }
@@ -249,6 +268,11 @@ pub fn prescreen<S: Sampler>(
 /// elapsed time reaches the site cap. A site still short of its minimums at the hard cap fails. A
 /// failing candidate is dropped. A failing `baseline` fails the site. A round that adds no elapsed
 /// time fails the site.
+///
+/// When the limits race, each round ends by racing out the candidates that can no longer win or tie
+/// the leader. A raced-out candidate takes no more samples, and the minimum, separation and cap
+/// checks look only at the candidates still being sampled. The baseline, the leader, the fastest
+/// Exact candidate and any Exact candidate that could still tie it are never raced out.
 pub fn sample_until_settled<S: Sampler>(
     sampler: &mut S,
     candidates: &[usize],
@@ -262,6 +286,7 @@ pub fn sample_until_settled<S: Sampler>(
             samples: Samples::default(),
         })
         .collect();
+    let mut raced = Vec::new();
     let mut failed = Vec::new();
 
     loop {
@@ -291,6 +316,10 @@ pub fn sample_until_settled<S: Sampler>(
             }
         }
 
+        if limits.race {
+            race_out(sampler, &mut active, &mut raced, baseline);
+        }
+
         let minimums_met = active.iter().all(|stats| stats.samples.has_minimums(limits));
         let elapsed = sampler.elapsed();
 
@@ -309,11 +338,8 @@ pub fn sample_until_settled<S: Sampler>(
         }
 
         if leader_separated(&active) {
-            return Ok(SiteTiming {
-                timed: active,
-                failed,
-                capped: false,
-            });
+            let timing = site_timing(candidates, active, raced, failed, false);
+            return Ok(timing);
         }
 
         if stalled {
@@ -321,12 +347,97 @@ pub fn sample_until_settled<S: Sampler>(
         }
 
         if elapsed >= limits.site_cap {
-            return Ok(SiteTiming {
-                timed: active,
-                failed,
-                capped: true,
-            });
+            let timing = site_timing(candidates, active, raced, failed, true);
+            return Ok(timing);
         }
+    }
+}
+
+/// Moves every candidate in `active` that can no longer win or tie the leader into `raced`.
+///
+/// The leader is the candidate with the lowest median. A candidate is raced out once it has
+/// [RACE_MIN_SAMPLES](crate::tune::RACE_MIN_SAMPLES) samples and its lower quartile sits above the
+/// leader's median by more than the hysteresis plus [RACE_MARGIN](crate::tune::RACE_MARGIN). An Exact
+/// candidate must also sit that far above the fastest Exact candidate's median. The baseline, the
+/// leader and the Exact candidate with the lowest median are never raced out.
+fn race_out<S: Sampler>(
+    sampler: &S,
+    active: &mut Vec<CandidateStats>,
+    raced: &mut Vec<CandidateStats>,
+    baseline: usize,
+) {
+    let Some(leader) = fastest_of(active.iter()) else {
+        return;
+    };
+
+    let exact = active
+        .iter()
+        .filter(|stats| sampler.fidelity(stats.index) == FidelityClass::Exact);
+    let fastest_exact = fastest_of(exact);
+    let fastest_exact_index = fastest_exact.map(|stats| stats.index);
+    let fastest_exact_median = fastest_exact.map(|stats| stats.samples.median());
+
+    let leader_index = leader.index;
+    let leader_median = leader.samples.median();
+    let threshold = race_threshold(leader_median);
+    let exact_threshold = fastest_exact_median.map(race_threshold);
+
+    let mut position = 0;
+    while position < active.len() {
+        let stats = &active[position];
+        let protected = stats.index == baseline
+            || stats.index == leader_index
+            || Some(stats.index) == fastest_exact_index;
+        let sampled_enough = stats.samples.count() >= RACE_MIN_SAMPLES;
+        let lower_quartile = stats.samples.quantile(0.25).as_secs_f64();
+        let is_exact = sampler.fidelity(stats.index) == FidelityClass::Exact;
+        let beaten_by_exact = exact_threshold.is_none_or(|exact_limit| lower_quartile > exact_limit);
+        let beaten = lower_quartile > threshold && (!is_exact || beaten_by_exact);
+
+        if protected || !sampled_enough || !beaten {
+            position += 1;
+            continue;
+        }
+
+        let stats = active.remove(position);
+        let name = sampler.candidate_name(stats.index);
+        let samples = stats.samples.count();
+        let median = stats.samples.median();
+        tracing::debug!(candidate = %name, samples, median = ?median, "raced a candidate out");
+
+        raced.push(stats);
+    }
+}
+
+/// The lower quartile, in seconds, above which a candidate can no longer win or tie `median`.
+fn race_threshold(median: Duration) -> f64 {
+    median.as_secs_f64() * (1.0 + HYSTERESIS + RACE_MARGIN)
+}
+
+/// The candidate with the lowest median, the first of any tie.
+fn fastest_of<'a>(stats: impl Iterator<Item = &'a CandidateStats>) -> Option<&'a CandidateStats> {
+    stats.min_by_key(|stats| stats.samples.median())
+}
+
+/// The end of a site, with the raced-out candidates after the active ones in the order given.
+fn site_timing(
+    candidates: &[usize],
+    active: Vec<CandidateStats>,
+    mut raced: Vec<CandidateStats>,
+    failed: Vec<usize>,
+    capped: bool,
+) -> SiteTiming {
+    raced.sort_by_key(|stats| candidates.iter().position(|&index| index == stats.index));
+    let raced_indices = raced.iter().map(|stats| stats.index).collect();
+
+    let mut timed = active;
+    timed.extend(raced);
+
+    SiteTiming {
+        timed,
+        failed,
+        raced: raced_indices,
+        capped,
     }
 }
 
