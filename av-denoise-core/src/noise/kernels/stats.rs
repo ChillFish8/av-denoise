@@ -477,9 +477,6 @@ pub fn nlm_temporal_noise_stats<N: Size>(
         }
 
         stats[(out_base + texture_lane) as usize] = texture;
-    }
-
-    if thread_id == 0 {
         stats[(out_base + 2 * stored_ch + BLOCK_MOVED_LANE) as usize] = moved;
     }
 
@@ -514,9 +511,6 @@ pub fn nlm_temporal_noise_stats<N: Size>(
         max_tile[slot as usize] = max_seed;
         residual_tile[slot as usize] = d0;
         residual_sq_tile[slot as usize] = d0 * d0;
-
-        // The tile takes the temporal mean once the texture cells have read it.
-        sync_cube();
 
         scratch[(tile_base + thread_id) as usize] = mean_luma_raw;
 

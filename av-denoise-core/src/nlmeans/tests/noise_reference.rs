@@ -145,10 +145,10 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
 ) {
     // The scratch is sized by `scratch_len`, not `record_len`, or its unwritten tail would enter
     // the reduction as uninitialised memory. The luma branch reuses it for three `threads`-long
-    // tensor runs, which fit because `scratch_len` is at least 4.
+    // tensor runs, which fit because `scratch_len` is at least 3.
     let quarter_lanes = comptime!(TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS);
     let record_len = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE + quarter_lanes);
-    let scratch_len = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE + 1);
+    let scratch_len = comptime!(2 * stored_ch + 1);
     let threads = comptime!(block * block);
     let texture_lane = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE);
 

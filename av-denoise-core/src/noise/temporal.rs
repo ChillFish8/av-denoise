@@ -24,12 +24,6 @@ pub(crate) const TEMPORAL_QUARTER_SIZE: u32 = TEMPORAL_NOISE_BLOCK / 2;
 /// It is the mean squared difference between adjacent 4x4-cell means of the new frame, over the
 /// cells fully inside the frame. Averaging each cell first keeps the noise from reading as texture.
 pub(crate) const BLOCK_TEXTURE_LANE: u32 = 1;
-/// The largest share of the zero-vector residual variance a block's compensated residual may keep
-/// for the block to follow its motion vector.
-///
-/// The search picks the best of many candidates, so a vector fitted to the noise on still content
-/// routinely reaches a gain near 0.8. Real motion falls far below this.
-pub(crate) const COMPENSATION_GAIN_MAX: f32 = 0.5;
 /// The offset of the block's moved flag past `2 * stored_ch`.
 ///
 /// It reads 1.0 when the block was differenced along a non-zero motion vector, else 0.0.
@@ -41,6 +35,12 @@ pub(crate) const BLOCK_MOVED_LANE: u32 = 2;
 pub(crate) const TEMPORAL_QUARTER_BASE: u32 = 3;
 /// How many `f32`s one quarter record holds.
 pub(crate) const TEMPORAL_QUARTER_FIELDS: u32 = 9;
+/// The largest share of the zero-vector residual variance a block's compensated residual may keep
+/// for the block to follow its motion vector.
+///
+/// The search picks the best of many candidates, so a vector fitted to the noise on still content
+/// routinely reaches a gain near 0.8. Real motion falls far below this.
+pub(crate) const COMPENSATION_GAIN_MAX: f32 = 0.5;
 /// The quarter-record offset of channel 0's summed residual.
 pub(crate) const QUARTER_SUM_D: u32 = 0;
 /// The quarter-record offset of channel 0's summed squared residual.

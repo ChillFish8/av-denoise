@@ -87,7 +87,7 @@ impl NlmDenoiser {
     /// The motion-field index of the neighbour `offset` frames from logical position `center_t`.
     ///
     /// It is `None` when the window holds no frame at that offset.
-    pub(in crate::nlmeans) fn neighbour_index(&self, center_t: u32, offset: i32) -> Option<u32> {
+    fn neighbour_index(&self, center_t: u32, offset: i32) -> Option<u32> {
         let offsets = self.neighbour_offsets(center_t);
         let position = offsets.iter().position(|&candidate| candidate == offset)?;
 
