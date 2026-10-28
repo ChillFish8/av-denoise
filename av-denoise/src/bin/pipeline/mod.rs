@@ -16,7 +16,7 @@ use std::io::{IsTerminal, stdout};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use av_denoise::{DenoisingMode, Depth, FrameLayout, PlaneOptions, SceneGrain};
+use av_denoise::{Depth, FrameLayout, PlaneOptions, SceneGrain};
 
 use self::convert::SourcePixel;
 use self::coordinator::spawn_coordinator;
@@ -135,12 +135,9 @@ where
         "input opened",
     );
 
-    let radius = match planes.mode {
-        DenoisingMode::Temporal { radius } => radius,
-        DenoisingMode::Spacial => 0,
-    };
+    let held_frames = planes.max_held_frames(layout);
     let frame_bytes = layout.luma_bytes() + 2 * layout.chroma_bytes();
-    let permits = checked_frame_permits(frame_budget_bytes, frame_bytes, workers, radius)?;
+    let permits = checked_frame_permits(frame_budget_bytes, frame_bytes, workers, held_frames)?;
     let (give, take) = frame_permit_channel(permits);
 
     tracing::info!(

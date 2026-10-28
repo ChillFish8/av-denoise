@@ -232,6 +232,18 @@ impl PlaneOptions {
         }
     }
 
+    /// The most frames a [PlanarDenoiser] built from these options holds before it emits one.
+    pub fn max_held_frames(&self, layout: FrameLayout) -> usize {
+        let planes = denoised_planes(self, layout);
+        let held = planes.into_iter().map(|(channels, width, height)| {
+            let plane_options = self.denoiser_options(channels, layout.depth);
+            let spec = plane_options.algorithm.engine_spec(&plane_options, width, height);
+            spec.max_held_frames()
+        });
+
+        held.max().unwrap_or(0)
+    }
+
     /// The options for one plane's denoiser at the source's wire `depth`.
     ///
     /// Every denoiser quantises to `depth` on the GPU.
@@ -264,10 +276,11 @@ fn with_plane_strength(nlm: NlmeansOptions, strength: Option<f32>) -> NlmeansOpt
     }
 }
 
-/// The profile key of every plane `options` denoises at `layout`.
-pub(crate) fn plane_profile_keys(options: &PlaneOptions, layout: FrameLayout) -> Vec<String> {
+/// The channel mode and dimensions of every plane `options` denoises at `layout`.
+fn denoised_planes(options: &PlaneOptions, layout: FrameLayout) -> Vec<(ChannelMode, u32, u32)> {
     let (chroma_width, chroma_height) = layout.chroma_dims();
-    let planes = match options.intent {
+
+    match options.intent {
         ChannelIntent::Luma => vec![(ChannelMode::Luma, layout.width, layout.height)],
         ChannelIntent::Chroma => vec![(ChannelMode::Chroma, chroma_width, chroma_height)],
         ChannelIntent::LumaChroma => vec![
@@ -275,7 +288,12 @@ pub(crate) fn plane_profile_keys(options: &PlaneOptions, layout: FrameLayout) ->
             (ChannelMode::Chroma, chroma_width, chroma_height),
         ],
         ChannelIntent::YuvFused => vec![(ChannelMode::Yuv, layout.width, layout.height)],
-    };
+    }
+}
+
+/// The profile key of every plane `options` denoises at `layout`.
+pub(crate) fn plane_profile_keys(options: &PlaneOptions, layout: FrameLayout) -> Vec<String> {
+    let planes = denoised_planes(options, layout);
 
     planes
         .into_iter()

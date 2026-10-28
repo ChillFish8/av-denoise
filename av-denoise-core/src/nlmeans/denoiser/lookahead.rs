@@ -3,13 +3,26 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NlmDenoiser;
+use super::noise::measures_noise;
 use crate::engine::timing::timed;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
 use crate::motion::{self, MatchTargets, MotionCtx, run_analyse, run_pyramid_build};
+use crate::nlmeans::params::NlmParams;
 use crate::noise::{DERIVED_SAD_FLOOR, NOISE_WINDOW_RADIUS, StatsMotion};
 
 /// The frames the look-ahead holds before releasing the oldest into the frame ring.
 pub(crate) const LOOKAHEAD_FRAMES: u32 = NOISE_WINDOW_RADIUS;
+
+/// The frames a push waits in the look-ahead of a front built from `params`.
+///
+/// It is [LOOKAHEAD_FRAMES] for a front that measures the noise and 0 otherwise.
+pub(crate) fn lookahead_depth_for(params: &NlmParams) -> usize {
+    if measures_noise(params) {
+        LOOKAHEAD_FRAMES as usize
+    } else {
+        0
+    }
+}
 
 /// The pair-field direction from the older frame to the newer one.
 const OLDER_TO_NEWER: u32 = 0;
@@ -211,7 +224,6 @@ impl NlmDenoiser {
     /// The frames a push waits in the look-ahead before it enters the frame ring.
     ///
     /// It is 0 for a front that does not measure the noise.
-    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn lookahead_depth(&self) -> usize {
         if self.lookahead.is_some() {
             LOOKAHEAD_FRAMES as usize

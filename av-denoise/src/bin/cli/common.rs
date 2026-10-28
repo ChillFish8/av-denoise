@@ -51,7 +51,7 @@ pub struct CommonArgs {
     /// Av1an chunking does. Raise it when one run has the machine to
     /// itself and the decoder is the bottleneck.
     ///
-    /// Defaults to 1GiB when unset.
+    /// Defaults to 1.5GiB when unset.
     #[arg(long, value_name = "SIZE", value_parser = parse_frame_budget)]
     pub frame_budget: Option<u64>,
 

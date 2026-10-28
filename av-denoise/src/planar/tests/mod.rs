@@ -9,6 +9,9 @@ mod lockstep;
 mod passthrough_retry;
 // Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
 #[cfg(feature = "vulkan")]
+mod measured_reseed;
+// Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
 mod profile_keys;
 mod push_retry;
 // Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
@@ -23,7 +26,7 @@ mod reseed {
     use super::*;
     use crate::HqParams;
 
-    fn layout() -> FrameLayout {
+    pub(super) fn layout() -> FrameLayout {
         FrameLayout {
             width: 64,
             height: 64,
@@ -33,7 +36,7 @@ mod reseed {
     }
 
     /// Temporal nlmeans at `radius`, denoising both planes independently.
-    fn test_plane_options(radius: u32) -> PlaneOptions {
+    pub(super) fn test_plane_options(radius: u32) -> PlaneOptions {
         PlaneOptions {
             accelerators: vec![crate::testing::test_accelerator()],
             device: crate::testing::test_device(),
@@ -87,7 +90,7 @@ mod reseed {
 
     /// `count` frames whose bytes vary per frame and per pixel, so a temporal filter sees a
     /// non-degenerate signal.
-    fn ramp_clip(layout: &FrameLayout, count: usize) -> Vec<Planes> {
+    pub(super) fn ramp_clip(layout: &FrameLayout, count: usize) -> Vec<Planes> {
         let (chroma_width, _) = layout.chroma_dims();
 
         (0..count)
@@ -106,7 +109,7 @@ mod reseed {
     }
 
     /// Renders every frame through the streaming path.
-    fn stream_all(options: &PlaneOptions, frames: &[Planes]) -> Vec<Planes> {
+    pub(super) fn stream_all(options: &PlaneOptions, frames: &[Planes]) -> Vec<Planes> {
         let frame_layout = layout();
         stream_all_with_layout(options, frame_layout, frames)
     }
@@ -409,9 +412,7 @@ mod reseed {
 
     /// Temporal nl4d at `radius` with a pinned `sigma`.
     ///
-    /// The automatic estimate is a moving average over every frame since the stream last reset,
-    /// history a windowed `reseed` cannot supply. Pinning it keeps these tests on what the window
-    /// shape and pass sequence decide.
+    /// Pinning it keeps these tests on what the window shape and pass sequence decide.
     fn nl4d_plane_options(radius: u32) -> PlaneOptions {
         let nl4d_options = Nl4dOptions {
             sigma: Some(0.03),
@@ -425,7 +426,7 @@ mod reseed {
     }
 
     /// The window `span` needs for frame `target`, clamped at both clip ends like `window_of`.
-    fn window_of_span(frames: &[Planes], target: usize, span: WindowSpan) -> Vec<Planes> {
+    pub(super) fn window_of_span(frames: &[Planes], target: usize, span: WindowSpan) -> Vec<Planes> {
         (0..span.frame_count())
             .map(|i| {
                 let index = (target + i).saturating_sub(span.behind).min(frames.len() - 1);
@@ -459,7 +460,11 @@ mod reseed {
         at_clip_end: bool,
     }
 
-    fn reseed_shifted(denoiser: &mut PlanarDenoiser, frames: &[Planes], target: usize) -> Vec<Planes> {
+    pub(super) fn reseed_shifted(
+        denoiser: &mut PlanarDenoiser,
+        frames: &[Planes],
+        target: usize,
+    ) -> Vec<Planes> {
         let span = denoiser.window_span();
         let (window, flags) = shifted_window_of(frames, target, span);
         let request = ReseedWindow {
@@ -474,7 +479,7 @@ mod reseed {
     /// How many outputs a shifted reseed at `target` returns.
     ///
     /// That is the target alone mid-clip, or the target through the clip's end.
-    fn shifted_output_count(denoiser: &PlanarDenoiser, clip_len: usize, target: usize) -> usize {
+    pub(super) fn shifted_output_count(denoiser: &PlanarDenoiser, clip_len: usize, target: usize) -> usize {
         let span = denoiser.window_span();
         if target + span.ahead >= clip_len - 1 {
             clip_len - target

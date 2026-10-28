@@ -422,6 +422,11 @@ impl Nl4dDenoiser {
         self.front.push_planes(planes, format)
     }
 
+    /// The frames a push waits in the front's noise look-ahead before it enters the ring.
+    pub(crate) fn lookahead_depth(&self) -> usize {
+        self.front.lookahead_depth()
+    }
+
     /// A 4-byte handle to bind for planes a kernel never reads.
     pub(crate) fn placeholder(&self) -> &Handle {
         self.front.placeholder()

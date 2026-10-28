@@ -215,6 +215,20 @@ fn an_in_order_repeat_render_reseeds_once() {
     assert_eq!(harness.reseeds(), 1);
 }
 
+/// The spans of an nl4d and an HQ engine at radius 2 that measure the noise through a look-ahead.
+#[test]
+fn an_in_order_render_with_a_lookahead_span_reseeds_once() {
+    let spans = [(EdgePadding::Shifted, 12), (EdgePadding::Repeat, 10)];
+
+    for (edges, held) in spans {
+        let mut harness = Harness::new(geometry(edges, held, held, LAST_FRAME));
+
+        render_in_order(&mut harness, 0..=LAST_FRAME);
+
+        assert_eq!(harness.reseeds(), 1, "{edges:?}");
+    }
+}
+
 #[test]
 fn a_shuffled_burst_within_the_lookback_reseeds_once() {
     let mut harness = Harness::new(shifted());

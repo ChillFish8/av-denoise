@@ -56,6 +56,23 @@ fn hq(radius: u32) -> NlmeansAlgorithm {
     })
 }
 
+/// [hq] with the sigma pinned, so the front measures nothing and has no look-ahead.
+fn pinned_hq(radius: u32) -> NlmeansAlgorithm {
+    let NlmeansAlgorithm::Hq(options) = hq(radius) else {
+        unreachable!("hq builds the HQ algorithm");
+    };
+
+    let hq_params = HqParams {
+        sigma_override: Some(0.03),
+        ..options.hq
+    };
+
+    NlmeansAlgorithm::Hq(NlmeansHqOptions {
+        hq: hq_params,
+        ..options
+    })
+}
+
 fn frames(count: usize, channels: u32) -> Vec<Vec<f32>> {
     (0..count)
         .map(|index| {
@@ -230,27 +247,54 @@ fn a_second_stream_after_finish_matches_a_fresh_engine() {
     assert_eq!(second, fresh);
 }
 
+/// Pushes `frames` with `push_context`.
+fn push_context_frames(engine: &mut Nlmeans, client: &Client, frames: &[Vec<f32>]) {
+    for frame in frames {
+        let pushed = try_push_context(engine, client, frame);
+        pushed.expect("push context");
+    }
+}
+
 #[test]
 fn push_context_then_one_push_matches_the_streaming_centre() {
     let radius = 2u32;
-    let context = 2 * radius as usize + LOOKAHEAD;
-    let window = context + 1;
-    let frames = frames(window, 1);
     let client = make_client();
     let mut engine = build_engine(&client, radius, ChannelMode::Luma);
+    let span = engine.window_span();
+    let context = span.behind + span.ahead;
+    let frames = frames(span.frame_count(), 1);
 
-    for frame in &frames[..context] {
-        let handles = upload_planes(&client, frame, 1);
-        let planes = [DevicePlane::new(&handles[0], WIDTH, HEIGHT)];
-        engine.push_context(&planes).expect("push context");
-    }
+    push_context_frames(&mut engine, &client, &frames[..context]);
 
     let ready = push_frame(&mut engine, &client, &frames[context], 1);
     assert_eq!(ready, 1);
 
     let actual = emit(&mut engine, &client, 1);
     let expected = run_oracle(radius, ChannelMode::Luma, &frames);
-    assert_eq!(actual, expected[radius as usize]);
+    assert_eq!(actual, expected[span.behind]);
+}
+
+#[test]
+fn a_span_of_context_emits_no_frame_before_the_target() {
+    let radius = 2u32;
+    let client = make_client();
+    let mut engine = build_engine(&client, radius, ChannelMode::Luma);
+    let span = engine.window_span();
+    let context = span.behind + span.ahead;
+    let frames = frames(context + 5, 1);
+
+    push_context_frames(&mut engine, &client, &frames[..context]);
+
+    let mut outputs = Vec::new();
+    for frame in &frames[context..] {
+        push_and_emit(&mut engine, &client, frame, 1, &mut outputs);
+    }
+
+    finish_and_emit(&mut engine, &client, 1, &mut outputs);
+
+    let expected = run_oracle(radius, ChannelMode::Luma, &frames);
+    assert_eq!(outputs.len(), frames.len() - span.behind);
+    assert_eq!(outputs, expected[span.behind..]);
 }
 
 #[test]
@@ -617,12 +661,32 @@ fn hd_and_4k_geometries_construct() {
 }
 
 #[test]
-fn window_span_and_held_frames_follow_the_radius() {
+fn window_span_and_held_frames_add_the_lookahead_to_the_radius() {
     let client = make_client();
     let engine = build_engine(&client, 3, ChannelMode::Luma);
+    let span = engine.window_span();
+    let expected = 3 + LOOKAHEAD;
+    assert_eq!((span.behind, span.ahead), (expected, expected));
+
+    let held = engine.max_held_frames();
+    assert_eq!(held, expected);
+
+    let computed = Nlmeans::held_frames_for(&hq(3), ChannelMode::Luma);
+    assert_eq!(computed, expected);
+}
+
+#[test]
+fn window_span_and_held_frames_follow_the_radius_without_a_lookahead() {
+    let client = make_client();
+    let pinned = pinned_hq(3);
+    let geometry = geometry(ChannelMode::Luma);
+    let engine = Nlmeans::new(&client, pinned, geometry).expect("build");
     let span = engine.window_span();
     assert_eq!((span.behind, span.ahead), (3, 3));
 
     let held = engine.max_held_frames();
     assert_eq!(held, 3);
+
+    let computed = Nlmeans::held_frames_for(&pinned_hq(3), ChannelMode::Luma);
+    assert_eq!(computed, 3);
 }

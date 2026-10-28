@@ -39,6 +39,18 @@ pub enum EngineSpec {
     },
 }
 
+impl EngineSpec {
+    /// The most frames the engine this describes holds before it emits one.
+    pub(crate) fn max_held_frames(&self) -> usize {
+        match self {
+            EngineSpec::Nlmeans { algorithm, geometry } => {
+                Nlmeans::held_frames_for(algorithm, geometry.channels)
+            },
+            EngineSpec::Nl4d { options, geometry } => Nl4d::held_frames_for(options, geometry.channels),
+        }
+    }
+}
+
 /// An engine and the plane I/O for the runtime it was built on.
 pub(crate) struct BuiltEngine {
     pub engine: Box<dyn Engine>,

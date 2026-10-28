@@ -18,8 +18,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Scene workers used when `--workers` is not given.
 const DEFAULT_WORKERS: usize = 2;
 
-/// Frame budget in bytes used when `--frame-budget` is not given, 1 GiB.
-const DEFAULT_FRAME_BUDGET_BYTES: u64 = 1 << 30;
+/// Frame budget in bytes used when `--frame-budget` is not given, 1.5 GiB.
+const DEFAULT_FRAME_BUDGET_BYTES: u64 = 1536 << 20;
 
 /// Runs the scene-parallel pipeline on an input, with defaults for unset worker and budget flags.
 fn run_input(

@@ -8,6 +8,7 @@ use av_denoise_core::{
     Engine,
     Nl4dOptions,
     NlmTuning,
+    NlmeansHqOptions,
     NlmeansOptions,
     WindowSpan,
 };
@@ -377,7 +378,7 @@ fn window_span_is_symmetric_for_nlmeans() {
 }
 
 #[test]
-fn window_span_is_doubled_on_both_sides_for_nl4d() {
+fn window_span_is_doubled_and_looks_ahead_on_both_sides_for_nl4d() {
     let algorithm = Algorithm::Nl4d(Nl4dOptions::default());
     let options = DenoiserOptions::builder()
         .channel_mode(ChannelMode::Luma)
@@ -388,9 +389,40 @@ fn window_span_is_doubled_on_both_sides_for_nl4d() {
 
     let span = denoiser.window_span();
 
-    assert_eq!(span.behind, 6, "behind should equal 2 * the temporal radius");
-    assert_eq!(span.ahead, 6, "ahead should equal 2 * the temporal radius");
+    // Twice the radius, plus the 8 frames the noise look-ahead holds.
+    assert_eq!(
+        span.behind, 14,
+        "behind should equal 2 * the temporal radius plus the look-ahead"
+    );
+    assert_eq!(
+        span.ahead, 14,
+        "ahead should equal 2 * the temporal radius plus the look-ahead"
+    );
     assert_eq!(span.edges, EdgePadding::Shifted);
+}
+
+#[test]
+fn window_span_adds_the_lookahead_for_nlmeans_hq() {
+    let algorithm = Algorithm::NlmeansHq(NlmeansHqOptions::default());
+    let options = DenoiserOptions::builder()
+        .channel_mode(ChannelMode::Luma)
+        .mode(DenoisingMode::Temporal { radius: 3 })
+        .algorithm(algorithm)
+        .build();
+    let denoiser = create(16, 16, options).expect("denoiser construction failed");
+
+    let span = denoiser.window_span();
+
+    // The radius, plus the 8 frames the noise look-ahead holds.
+    assert_eq!(
+        span.behind, 11,
+        "behind should equal the temporal radius plus the look-ahead"
+    );
+    assert_eq!(
+        span.ahead, 11,
+        "ahead should equal the temporal radius plus the look-ahead"
+    );
+    assert_eq!(span.edges, EdgePadding::Repeat);
 }
 
 #[test]

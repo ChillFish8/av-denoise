@@ -5,6 +5,7 @@ use crate::bench_api::HostIo;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::*;
+use crate::noise::NOISE_WINDOW_RADIUS;
 
 const PAN_WIDTH: u32 = 256;
 const PAN_HEIGHT: u32 = 192;
@@ -242,5 +243,129 @@ fn released_frames_are_bit_identical_to_pushed_frames() {
             stored_bits == pushed_bits,
             "released frame {released} differs from the pushed frame"
         );
+    }
+}
+
+/// A measuring radius 2 front with motion compensation, at the pan size.
+fn scene_front() -> NlmDenoiser {
+    let client = make_client();
+    let params = hq_params(2, MotionCompensationMode::mvtools_default());
+
+    NlmDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT)
+}
+
+/// Pushes one scene and flushes it, returning every output in emit order.
+fn scene_outputs(frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    let mut denoiser = scene_front();
+    let mut outputs = Vec::new();
+
+    for frame in frames {
+        denoiser.push_frame(frame);
+
+        let output = denoiser.denoise().expect("denoise failed");
+        outputs.extend(output);
+    }
+
+    denoiser
+        .flush(|output| outputs.push(output.to_vec()))
+        .expect("flush failed");
+
+    outputs
+}
+
+/// Pushes one scene and flushes it, returning the derived luma sigma of each pass.
+fn scene_pass_sigmas(frames: &[Vec<f32>]) -> Vec<f32> {
+    let mut denoiser = scene_front();
+    let mut sigmas = Vec::new();
+    let mut sample = |front: &NlmDenoiser| {
+        let snapshot = front.noise_snapshot().expect("the noise state reads back");
+        sigmas.push(snapshot.derived.sigma[0]);
+    };
+
+    for frame in frames {
+        denoiser.push_frame(frame);
+
+        let output = denoiser.denoise_submit_gpu().expect("denoise failed");
+        if output.is_some() {
+            sample(&denoiser);
+        }
+    }
+
+    let mut flushed = 0;
+    let target = denoiser.flush_target();
+    while flushed < target {
+        let step = denoiser.flush_step_gpu().expect("flush step failed");
+        if step.is_none() {
+            continue;
+        }
+
+        sample(&denoiser);
+        flushed += 1;
+    }
+
+    sigmas
+}
+
+/// The index of the frame in `frames` closest to `output`.
+fn nearest_frame(output: &[f32], frames: &[Vec<f32>]) -> usize {
+    let distance = |frame: &Vec<f32>| -> f32 {
+        let pairs = frame.iter().zip(output);
+        pairs.map(|(input, denoised)| (input - denoised).powi(2)).sum()
+    };
+    let distances: Vec<f32> = frames.iter().map(distance).collect();
+    let nearest = distances
+        .iter()
+        .enumerate()
+        .min_by(|left, right| left.1.total_cmp(right.1));
+
+    nearest.map(|(index, _)| index).expect("a scene has frames")
+}
+
+#[test]
+fn short_scene_windows_cover_the_whole_scene() {
+    let longest = 20;
+    let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, PAN_SHIFT, longest, PAN_SIGMA, PAN_SEED);
+    let whole_scene_limit = NOISE_WINDOW_RADIUS as usize + 1;
+    let first_window = &frames[..whole_scene_limit];
+    let first_window_sigmas = scene_pass_sigmas(first_window);
+
+    for length in [1, 8, longest] {
+        let scene = &frames[..length];
+        let outputs = scene_outputs(scene);
+        assert_eq!(
+            outputs.len(),
+            length,
+            "a {length} frame scene emits each frame once"
+        );
+
+        // Each pan frame is shifted `PAN_SHIFT` pixels from the last over texture, so a denoised frame is
+        // far closer to its own input than to any other, and the nearest input gives its index.
+        for (index, output) in outputs.iter().enumerate() {
+            let nearest = nearest_frame(output, scene);
+            assert_eq!(
+                nearest, index,
+                "output {index} of a {length} frame scene is out of order"
+            );
+        }
+
+        let sigmas = scene_pass_sigmas(scene);
+        assert_eq!(
+            sigmas.len(),
+            length,
+            "a {length} frame scene runs one pass per frame"
+        );
+
+        if length <= whole_scene_limit {
+            let first = sigmas[0];
+            assert!(
+                sigmas.iter().all(|&sigma| sigma == first),
+                "every window of a {length} frame scene is the whole scene: {sigmas:?}"
+            );
+            continue;
+        }
+
+        // The first centre's window stops at the scene start, so it holds the scene's first
+        // `NOISE_WINDOW_RADIUS + 1` frames and reads like a scene of only those.
+        assert_eq!(sigmas[0], first_window_sigmas[0]);
     }
 }

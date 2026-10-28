@@ -5,7 +5,7 @@ use cubecl::server::Handle;
 
 use super::denoiser::{CompletedRegion, Nl4dDenoiser, buffer_sizes};
 use super::grain::GrainChunk;
-use super::options::{Nl4dOptions, resolve_params};
+use super::options::{Nl4dOptions, nlm_params, resolve_params};
 use crate::collab::PATCH_SIZE;
 use crate::engine::{
     DevicePlane,
@@ -18,8 +18,16 @@ use crate::engine::{
     egress,
 };
 use crate::error::Error;
-use crate::nlmeans::denoiser::check_u32_indexable;
+use crate::nlmeans::ChannelMode;
+use crate::nlmeans::denoiser::{check_u32_indexable, lookahead_depth_for};
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+use crate::noise::NoiseSnapshot;
 use crate::tune::{EngineKernels, KernelSelector};
+
+/// The frames an engine at `temporal_radius` holds with a noise look-ahead `lookahead` deep.
+fn held_frames(temporal_radius: u32, lookahead: usize) -> usize {
+    2 * temporal_radius as usize + lookahead
+}
 
 /// Four-dimensional collaborative denoising over GPU planes.
 pub struct Nl4d {
@@ -170,6 +178,22 @@ impl Nl4d {
         egress(&self.client, source, planes, self.geometry.output, placeholder);
     }
 
+    /// The most frames an engine built from `options` holds before it emits one.
+    ///
+    /// A front that measures the noise holds each frame in its noise look-ahead before the frame
+    /// enters the ring, on top of the `2 * temporal_radius` frames a region waits for its last pass.
+    pub fn held_frames_for(options: &Nl4dOptions, channels: ChannelMode) -> usize {
+        let front_params = nlm_params(options, channels);
+        let lookahead = lookahead_depth_for(&front_params);
+
+        held_frames(options.temporal_radius, lookahead)
+    }
+
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub(crate) fn noise_snapshot_for_test(&self) -> Option<NoiseSnapshot> {
+        self.inner.noise_snapshot()
+    }
+
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn fail_through_guard_for_test(&mut self) -> Result<(), Error> {
         let failure = Err(anyhow::anyhow!("forced failure"));
@@ -267,17 +291,19 @@ impl Engine for Nl4d {
     }
 
     fn window_span(&self) -> WindowSpan {
-        let span = 2 * self.temporal_radius as usize;
+        let held = self.max_held_frames();
 
         WindowSpan {
-            behind: span,
-            ahead: span,
+            behind: held,
+            ahead: held,
             edges: EdgePadding::Shifted,
         }
     }
 
     fn max_held_frames(&self) -> usize {
-        2 * self.temporal_radius as usize
+        let lookahead = self.inner.lookahead_depth();
+
+        held_frames(self.temporal_radius, lookahead)
     }
 
     fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, Error> {

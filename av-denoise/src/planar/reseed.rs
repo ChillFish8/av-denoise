@@ -23,6 +23,18 @@ fn drop_leading<T>(queue: &mut VecDeque<T>, count: usize) {
     }
 }
 
+/// The window index of the first frame a primed nl4d stream of `frame_count` frames emits.
+///
+/// A primed stream picks up mid-clip and runs no head passes, so it emits from `radius` frames
+/// in. A stream too short for a pass to finish a region only emits its last `2 * radius` frames,
+/// when it flushes.
+fn first_primed_output(frame_count: usize, radius: usize) -> usize {
+    let flushed = frame_count.min(2 * radius);
+    let before_flush = frame_count - flushed;
+
+    radius.min(before_flush)
+}
+
 impl PlanarDenoiser {
     /// Denoises the target frame of a mid-clip window of exactly
     /// [Self::window_span] frames, oldest first.
@@ -45,6 +57,13 @@ impl PlanarDenoiser {
     /// ahead of it has run, and it first collects from the pass centred
     /// `r` frames behind it, which needs `r` more frames behind again.
     /// That doubles the span on both sides.
+    ///
+    /// # Look-ahead
+    ///
+    /// A denoiser that measures the noise holds each frame in a
+    /// look-ahead before it enters its window. [Self::window_span]
+    /// counts that depth on both sides, so the window passed here is
+    /// wider by it.
     pub fn reseed(&mut self, window: &[Planes]) -> Result<Planes, anyhow::Error> {
         let span = self.window_span();
         let expected = span.frame_count();
@@ -68,20 +87,20 @@ impl PlanarDenoiser {
 
         self.reset_streams();
 
-        // Prime the first `2 * radius` frames, filling the underlying
+        // Prime every frame but the last, filling the underlying
         // denoiser's window without submitting anything, as streaming
         // would have primed it. The single real push that follows emits
         // the target.
-        let radius = self.temporal_radius as usize;
-        let (head, tail) = window.split_at(2 * radius);
+        let primed = span.behind + span.ahead;
+        let (head, tail) = window.split_at(primed);
         for planes in head {
             self.push_priming(planes)?;
         }
 
         // Priming queues one passthrough entry per frame. Dropping the
-        // leading `radius` puts the target's own entry at the front.
-        drop_leading(&mut self.luma_passthrough, radius);
-        drop_leading(&mut self.chroma_passthrough, radius);
+        // frames behind the target puts its own entry at the front.
+        drop_leading(&mut self.luma_passthrough, span.behind);
+        drop_leading(&mut self.chroma_passthrough, span.behind);
 
         let mut result = None;
         for planes in tail {
@@ -142,17 +161,18 @@ impl PlanarDenoiser {
 
         self.reset_streams();
 
-        let real_frames = if window.at_clip_start {
-            frames
+        let (real_frames, never_emitted) = if window.at_clip_start {
+            (frames, 0)
         } else {
-            let (priming, real) = frames.split_at(2 * radius);
+            let (priming, real) = frames.split_at(span.behind);
             for planes in priming {
                 self.push_priming(planes)?;
             }
 
-            drop_leading(&mut self.luma_passthrough, radius);
-            drop_leading(&mut self.chroma_passthrough, radius);
-            real
+            let never_emitted = first_primed_output(frames.len(), radius);
+            drop_leading(&mut self.luma_passthrough, never_emitted);
+            drop_leading(&mut self.chroma_passthrough, never_emitted);
+            (real, never_emitted)
         };
 
         let mut outputs = Vec::new();
@@ -171,8 +191,8 @@ impl PlanarDenoiser {
             return Ok(target_only);
         }
 
-        let tail_count = frames.len().min(2 * radius);
-        let tail_start = frames.len() - tail_count;
+        // The flush emits every frame the pushes have not.
+        let tail_start = never_emitted + outputs.len();
         self.replace_passthrough_with(&frames[tail_start..]);
         self.flush(|planes| outputs.push(planes))?;
 

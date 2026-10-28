@@ -1,7 +1,8 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::denoiser::{GpuOutput, NlmDenoiser, check_u32_indexable, front_buffer_sizes};
+use super::ChannelMode;
+use super::denoiser::{GpuOutput, NlmDenoiser, check_u32_indexable, front_buffer_sizes, lookahead_depth_for};
 use super::options::{NlmeansAlgorithm, resolve_params};
 use super::params::validate_dimensions;
 use crate::engine::{
@@ -16,6 +17,11 @@ use crate::engine::{
 };
 use crate::error::Error;
 use crate::tune::{EngineKernels, KernelSelector};
+
+/// The frames an engine at `temporal_radius` holds with a noise look-ahead `lookahead` deep.
+fn held_frames(temporal_radius: u32, lookahead: usize) -> usize {
+    temporal_radius as usize + lookahead
+}
 
 /// Non-local means over GPU planes.
 pub struct Nlmeans {
@@ -143,6 +149,17 @@ impl Nlmeans {
         egress(client, source, planes, self.geometry.output, placeholder);
     }
 
+    /// The most frames an engine built from `algorithm` holds before it emits one.
+    ///
+    /// A front that measures the noise holds each frame in its noise look-ahead before the frame
+    /// enters the ring, on top of the `temporal_radius` frames the ring needs ahead of its centre.
+    pub fn held_frames_for(algorithm: &NlmeansAlgorithm, channels: ChannelMode) -> usize {
+        let params = resolve_params(algorithm, channels);
+        let lookahead = lookahead_depth_for(&params);
+
+        held_frames(params.temporal_radius, lookahead)
+    }
+
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn fail_through_guard_for_test(&mut self) -> Result<(), Error> {
         let failure = Err(anyhow::anyhow!("forced failure"));
@@ -225,17 +242,19 @@ impl Engine for Nlmeans {
     }
 
     fn window_span(&self) -> WindowSpan {
-        let radius = self.front.params.temporal_radius as usize;
+        let held = self.max_held_frames();
 
         WindowSpan {
-            behind: radius,
-            ahead: radius,
+            behind: held,
+            ahead: held,
             edges: EdgePadding::Repeat,
         }
     }
 
     fn max_held_frames(&self) -> usize {
-        self.front.params.temporal_radius as usize
+        let lookahead = self.front.lookahead_depth();
+
+        held_frames(self.front.params.temporal_radius, lookahead)
     }
 
     fn timing(&mut self) -> EngineTiming {

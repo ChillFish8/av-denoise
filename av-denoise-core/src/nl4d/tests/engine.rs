@@ -1,3 +1,5 @@
+use std::ops::RangeInclusive;
+
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
@@ -603,15 +605,111 @@ fn u8_input_matches_f32_input_from_the_ingest_kernel() {
 }
 
 #[test]
-fn window_span_doubles_the_radius_with_shifted_edges() {
+fn window_span_doubles_the_radius_and_adds_the_lookahead() {
     let client = make_client();
     let engine = build_engine(&client, 2, ChannelMode::Luma);
     let span = engine.window_span();
-    assert_eq!((span.behind, span.ahead), (4, 4));
+    let expected = 4 + LOOKAHEAD_FRAMES as usize;
+    assert_eq!((span.behind, span.ahead), (expected, expected));
     assert_eq!(span.edges, EdgePadding::Shifted);
 
     let held = engine.max_held_frames();
+    assert_eq!(held, expected);
+
+    let computed = Nl4d::held_frames_for(&options(2, false), ChannelMode::Luma);
+    assert_eq!(computed, expected);
+}
+
+#[test]
+fn window_span_doubles_the_radius_with_a_pinned_sigma() {
+    let client = make_client();
+    let pinned = Nl4dOptions {
+        sigma: Some(0.03),
+        ..options(2, false)
+    };
+    let geometry = geometry(ChannelMode::Luma);
+    let engine = Nl4d::new(&client, pinned, geometry).expect("build");
+    let span = engine.window_span();
+    assert_eq!((span.behind, span.ahead), (4, 4));
+
+    let held = engine.max_held_frames();
     assert_eq!(held, 4);
+
+    let computed = Nl4d::held_frames_for(&pinned, ChannelMode::Luma);
+    assert_eq!(computed, 4);
+}
+
+/// Pushes `frames` through `engine` and returns the derived luma sigma after each push in `sampled`.
+fn push_and_sample(
+    engine: &mut Nl4d,
+    client: &Client,
+    frames: &[(usize, &Vec<f32>)],
+    sampled: &RangeInclusive<usize>,
+    outputs: &mut Vec<Vec<f32>>,
+) -> Vec<f32> {
+    let mut sigmas = Vec::new();
+
+    for &(index, frame) in frames {
+        push_and_emit(engine, client, frame, 1, outputs);
+
+        if sampled.contains(&index) {
+            let snapshot = engine.noise_snapshot_for_test();
+            let snapshot = snapshot.expect("the noise state reads back");
+            sigmas.push(snapshot.derived.sigma[0]);
+        }
+    }
+
+    sigmas
+}
+
+#[test]
+fn a_seeked_frame_reads_close_to_sequential() {
+    let radius = 2u32;
+    let client = make_client();
+    let mut sequential = build_engine(&client, radius, ChannelMode::Luma);
+    let span = sequential.window_span();
+    let target = span.behind + 6;
+    let last = target + span.ahead;
+    let start = target - span.behind;
+    let frames = noisy_frames(WIDTH, HEIGHT, 1, last + 1);
+    let indexed: Vec<_> = frames.iter().enumerate().collect();
+
+    // The pushes whose passes are centred within `radius` of the target, the passes that scatter
+    // into its region.
+    let first_scatter = last - 2 * radius as usize;
+    let scattering = first_scatter..=last;
+
+    let mut streamed = Vec::new();
+    let sequential_sigmas = push_and_sample(&mut sequential, &client, &indexed, &scattering, &mut streamed);
+
+    // The seek mirrors a planar reseed, pushing the frames behind the target as context.
+    let mut seeked = build_engine(&client, radius, ChannelMode::Luma);
+    for frame in &frames[start..target] {
+        push_context_frame(&mut seeked, &client, frame, 1);
+    }
+
+    let mut seeked_outputs = Vec::new();
+    let seeked_sigmas = push_and_sample(
+        &mut seeked,
+        &client,
+        &indexed[target..],
+        &scattering,
+        &mut seeked_outputs,
+    );
+
+    assert_eq!(seeked_sigmas.len(), 2 * radius as usize + 1);
+    for (seeked_sigma, sequential_sigma) in seeked_sigmas.iter().zip(&sequential_sigmas) {
+        assert!(*sequential_sigma > 0.0, "a scattering pass has read the noise");
+
+        let relative = (seeked_sigma - sequential_sigma).abs() / sequential_sigma;
+        assert!(
+            relative <= 0.05,
+            "the seeked sigma {seeked_sigma} is {relative} from the sequential {sequential_sigma}"
+        );
+    }
+
+    let target_output = seeked_outputs.last().expect("the seek emits its target");
+    assert_eq!(target_output, &streamed[target]);
 }
 
 #[test]

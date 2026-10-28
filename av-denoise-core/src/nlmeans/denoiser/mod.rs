@@ -8,8 +8,8 @@ mod stages;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-pub(crate) use self::lookahead::LOOKAHEAD_FRAMES;
 use self::lookahead::LookAhead;
+pub(crate) use self::lookahead::{LOOKAHEAD_FRAMES, lookahead_depth_for};
 pub(crate) use self::machinery::RingView;
 use self::noise::{measures_noise, noise_shape};
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};

@@ -1,6 +1,8 @@
 use std::thread;
 use std::time::Duration;
 
+use av_denoise::{ChannelMode, Nl4d, Nl4dOptions, Preset, nl4d_temporal_radius_for};
+
 use super::{tiny_layout, tiny_planes};
 use crate::pipeline::decode::PREFETCH_FRAMES;
 use crate::pipeline::scenes::LOOKAHEAD_DISTANCE;
@@ -150,7 +152,7 @@ fn frame_permits_applies_the_floor_when_the_budget_is_too_small() {
 fn a_budget_below_the_floor_is_rejected() {
     // A 4K 10-bit frame is 24,883,200 bytes, so 1 MB affords none.
     let err = checked_frame_permits(1_000_000, 24_883_200, 4, 8)
-        .expect_err("1 MB cannot feed 4 workers at radius 8");
+        .expect_err("1 MB cannot feed 4 workers holding 8 frames");
     let message = err.to_string();
 
     let floor = 4 * (8 + av_denoise::MAX_PENDING + 2) + IN_TRANSIT_FRAMES;
@@ -173,20 +175,62 @@ fn a_budget_that_clears_the_floor_is_accepted() {
 }
 
 #[test]
-fn the_floor_covers_a_workers_first_output_at_every_radius() {
+fn the_floor_covers_a_workers_first_output_at_every_held_count() {
     // A budget far too small for any real frame, so the floor decides.
-    for radius in [0u32, 1, 4, 8] {
-        let permits = frame_permits(1, 199_065_600, 1, radius);
+    for held_frames in [0usize, 1, 4, 12, 24] {
+        let permits = frame_permits(1, 199_065_600, 1, held_frames);
 
         // Pushes a worker needs before `push` first returns QueueFull, which is the first point
         // it can emit and return a permit.
-        let first_output = radius as usize + av_denoise::MAX_PENDING + 1;
+        let first_output = held_frames + av_denoise::MAX_PENDING + 1;
 
         assert!(
             permits >= first_output,
-            "radius {radius} needs {first_output} permits before a worker emits, got {permits}",
+            "holding {held_frames} needs {first_output} permits before a worker emits, got {permits}",
         );
     }
+}
+
+/// A 4K 10-bit 4:2:0 frame in bytes.
+const UHD_10_BIT_FRAME_BYTES: usize = 24_883_200;
+
+/// The frames an nl4d luma plane holds at `preset`.
+fn nl4d_held_frames(preset: Preset) -> usize {
+    let options = Nl4dOptions {
+        temporal_radius: nl4d_temporal_radius_for(preset),
+        ..Nl4dOptions::default()
+    };
+
+    Nl4d::held_frames_for(&options, ChannelMode::Luma)
+}
+
+#[test]
+fn the_default_budget_feeds_the_default_workers_at_4k_10_bit() {
+    for preset in [Preset::Base, Preset::Slow] {
+        let held_frames = nl4d_held_frames(preset);
+        let permits = checked_frame_permits(
+            crate::DEFAULT_FRAME_BUDGET_BYTES,
+            UHD_10_BIT_FRAME_BYTES,
+            crate::DEFAULT_WORKERS,
+            held_frames,
+        );
+
+        assert!(permits.is_ok(), "{preset:?} holding {held_frames}: {permits:?}");
+    }
+}
+
+#[test]
+fn an_explicit_budget_below_the_floor_is_still_rejected_at_4k_10_bit() {
+    // 1 GiB affords 43 frames here, below the floor of 44 for nl4d base.
+    let held_frames = nl4d_held_frames(Preset::Base);
+    let permits = checked_frame_permits(
+        1 << 30,
+        UHD_10_BIT_FRAME_BYTES,
+        crate::DEFAULT_WORKERS,
+        held_frames,
+    );
+
+    assert!(permits.is_err(), "got {permits:?}");
 }
 
 #[test]

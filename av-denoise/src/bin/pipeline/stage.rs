@@ -9,12 +9,12 @@ use super::scenes::LOOKAHEAD_DISTANCE;
 /// thread's hand while it waits to send.
 pub const IN_TRANSIT_FRAMES: usize = LOOKAHEAD_DISTANCE + 2 + PREFETCH_FRAMES + 1;
 
-/// Frames in flight this run allows.
-pub fn frame_permits(budget_bytes: u64, frame_bytes: usize, workers: usize, radius: u32) -> usize {
+/// Frames in flight this run allows, for workers whose denoisers hold `held_frames` each.
+pub fn frame_permits(budget_bytes: u64, frame_bytes: usize, workers: usize, held_frames: usize) -> usize {
     // A worker emits nothing until `push` first returns QueueFull, which takes
-    // `radius + MAX_PENDING + 1` pushes, and the frames upstream of the workers hold permits too.
-    // Fewer permits than that and the dispatcher waits on a permit nothing can release.
-    let per_worker = radius as usize + av_denoise::MAX_PENDING + 2;
+    // `held_frames + MAX_PENDING + 1` pushes, and the frames upstream of the workers hold permits
+    // too. Fewer permits than that and the dispatcher waits on a permit nothing can release.
+    let per_worker = held_frames + av_denoise::MAX_PENDING + 2;
     let floor = workers * per_worker + IN_TRANSIT_FRAMES;
     let afforded = frames_afforded(budget_bytes, frame_bytes);
 
@@ -63,10 +63,10 @@ pub fn checked_frame_permits(
     budget_bytes: u64,
     frame_bytes: usize,
     workers: usize,
-    radius: u32,
+    held_frames: usize,
 ) -> Result<usize, anyhow::Error> {
     let afforded = frames_afforded(budget_bytes, frame_bytes);
-    let permits = frame_permits(budget_bytes, frame_bytes, workers, radius);
+    let permits = frame_permits(budget_bytes, frame_bytes, workers, held_frames);
 
     if permits > afforded {
         let required_bytes = permits as u64 * frame_bytes as u64;
@@ -75,7 +75,7 @@ pub fn checked_frame_permits(
 
         anyhow::bail!(
             "--frame-budget {budget} affords {afforded} frames at {frame_bytes} bytes per frame, \
-             but {workers} workers at temporal radius {radius} need at least {permits}. Pass at \
+             but {workers} workers holding {held_frames} frames each need at least {permits}. Pass at \
              least --frame-budget {suggestion}.",
         );
     }

@@ -2,9 +2,11 @@
 
 use std::io::{Cursor, Read};
 
+use av_denoise::{Algorithm, DenoisingMode, Depth, FrameLayout, Nl4dOptions, PlaneOptions, Subsampling};
+
 use super::{SCENE_CLIP_SIZE, SharedBuffer, frame_count, multi_scene_clip, temporal_opts};
 use crate::pipeline::source::open_y4m;
-use crate::pipeline::stage::frame_permits;
+use crate::pipeline::stage::{IN_TRANSIT_FRAMES, frame_permits};
 use crate::pipeline::{RunSettings, run_with};
 
 fn run_over(
@@ -13,9 +15,19 @@ fn run_over(
     budget: u64,
     shared_device: bool,
 ) -> Result<Vec<u8>, anyhow::Error> {
+    let options = temporal_opts();
+    run_over_with(&options, bytes, workers, budget, shared_device)
+}
+
+fn run_over_with(
+    options: &PlaneOptions,
+    bytes: Vec<u8>,
+    workers: usize,
+    budget: u64,
+    shared_device: bool,
+) -> Result<Vec<u8>, anyhow::Error> {
     let output = SharedBuffer::default();
     let writer = output.clone();
-    let options = temporal_opts();
     let opener = move || {
         let cursor = Cursor::new(bytes);
         let reader: Box<dyn Read> = Box::new(cursor);
@@ -31,7 +43,7 @@ fn run_over(
         shared_device,
     };
 
-    run_with(&options, opener, settings, writer)?;
+    run_with(options, opener, settings, writer)?;
 
     let written = output.0.lock().expect("buffer lock").clone();
 
@@ -93,11 +105,21 @@ fn an_empty_pipe_is_rejected() {
     assert!(err.to_string().contains("no decodable frames"), "got {err}");
 }
 
+fn scene_clip_layout() -> FrameLayout {
+    FrameLayout {
+        width: SCENE_CLIP_SIZE as u32,
+        height: SCENE_CLIP_SIZE as u32,
+        subsampling: Subsampling::Yuv420,
+        depth: Depth::Eight,
+    }
+}
+
 /// Runs at the smallest budget `checked_frame_permits` accepts, so the floor decides frames in flight.
 #[test]
 fn a_run_at_the_permit_floor_finishes() {
     let frame_bytes = SCENE_CLIP_SIZE * SCENE_CLIP_SIZE * 3 / 2;
-    let floor = frame_permits(0, frame_bytes, 2, 1);
+    let held_frames = temporal_opts().max_held_frames(scene_clip_layout());
+    let floor = frame_permits(0, frame_bytes, 2, held_frames);
     let budget = floor as u64 * frame_bytes as u64;
 
     let clip = multi_scene_clip(40);
@@ -105,6 +127,27 @@ fn a_run_at_the_permit_floor_finishes() {
     let frames = frame_count(&output);
 
     assert_eq!(frames, 40);
+}
+
+#[test]
+fn the_cli_frame_budget_covers_the_lookahead() {
+    let options = PlaneOptions {
+        algorithm: Algorithm::Nl4d(Nl4dOptions::default()),
+        mode: DenoisingMode::Temporal { radius: 2 },
+        ..temporal_opts()
+    };
+    let held_frames = options.max_held_frames(scene_clip_layout());
+
+    // Twice the radius, plus the 8 frames the noise look-ahead holds.
+    assert_eq!(held_frames, 12);
+
+    let clip = multi_scene_clip(10);
+    let err = run_over_with(&options, clip, 1, 1, false).expect_err("one byte affords no frames");
+    let message = err.to_string();
+
+    let floor = held_frames + av_denoise::MAX_PENDING + 2 + IN_TRANSIT_FRAMES;
+    let floor_text = format!("holding {held_frames} frames each need at least {floor}");
+    assert!(message.contains(&floor_text), "got {message}");
 }
 
 #[test]
