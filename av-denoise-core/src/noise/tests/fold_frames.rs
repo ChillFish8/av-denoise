@@ -1,11 +1,11 @@
 use super::fold_reference::{COEFFICIENTS, CONSUMER, SnapshotGap, curve_gap, host_snapshot, largest_gap};
 use super::frames::{
     Agreement,
-    BRICK,
     MAX_RELATIVE,
     Plane,
     RADIUS,
     ReadingHarness,
+    TEXTURE,
     chroma_map,
     flat_boost,
     luma_map,
@@ -403,15 +403,14 @@ fn a_one_sided_flip_recovers_under_the_flip_bound() {
 }
 
 #[test]
-#[ignore = "reads data/host_stalls_2026_10/brick48.y4m, which is not in the repository"]
-fn brick_folds_track_the_host_fold() {
-    let clip = read_y4m(BRICK).expect("the clip reads");
+fn texture_folds_track_the_host_fold() {
+    let clip = read_y4m(TEXTURE).expect("the clip reads");
     let luma = Plane::luma(clip.width, clip.height);
     let (chroma_width, chroma_height) = clip.chroma_dims();
     let chroma = Plane::chroma(chroma_width, chroma_height);
     let cases = [
-        (luma, luma_map(), "brick luma"),
-        (chroma, chroma_map(), "brick chroma"),
+        (luma, luma_map(), "texture luma"),
+        (chroma, chroma_map(), "texture chroma"),
     ];
 
     for (plane, reading, what) in cases {
@@ -424,7 +423,7 @@ fn brick_folds_track_the_host_fold() {
         let summary = check_fold_stream(plane, settings, frames, None, what);
         println!("{what}: {summary:?}");
 
-        // Decision agreement of 0.999 over 45 folds allows no flip.
+        // Decision agreement of 0.999 over 21 folds allows no flip.
         let folds = summary.folds;
         let flips = summary.flips;
         assert!(folds > 0, "{what}: nothing folded");

@@ -31,14 +31,14 @@ const MIN_AGREEMENT: f64 = 0.999;
 pub(crate) const MAX_RELATIVE: f32 = 1.0e-5;
 pub(super) const RADIUS: u32 = 2;
 const SYNTHETIC_FRAMES: u32 = 12;
-pub(super) const BRICK: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../data/host_stalls_2026_10/brick48.y4m"
-);
-const EDGES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../data/host_stalls_2026_10/edges63.y4m"
-);
+/// 24 grained frames of tree bark and grass from Big Buck Bunny.
+///
+/// (c) Blender Foundation, CC BY 3.0, peach.blender.org.
+pub(super) const TEXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/noise/tests/clips/texture.y4m");
+/// 24 grained frames of flowers against the sky from Big Buck Bunny.
+///
+/// (c) Blender Foundation, CC BY 3.0, peach.blender.org.
+const EDGES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/noise/tests/clips/edges.y4m");
 
 /// The geometry of one plane a stream runs on.
 #[derive(Debug, Clone, Copy)]
@@ -750,13 +750,11 @@ fn check_clip(path: &str, name: &str) {
 }
 
 #[test]
-#[ignore = "reads data/host_stalls_2026_10/brick48.y4m, which is not in the repository"]
-fn brick_agrees_with_the_host_reading() {
-    check_clip(BRICK, "brick");
+fn texture_agrees_with_the_host_reading() {
+    check_clip(TEXTURE, "texture");
 }
 
 #[test]
-#[ignore = "reads data/host_stalls_2026_10/edges63.y4m, which is not in the repository"]
 fn edges_agrees_with_the_host_reading() {
     check_clip(EDGES, "edges");
 }

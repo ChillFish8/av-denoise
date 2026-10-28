@@ -14,7 +14,8 @@ exclude = [
     "cubecl.toml",
     "docker/",
     ".github/",
-    "Justfile"
+    "Justfile",
+    "src/noise/tests/clips/"
 ]
 
 [package.metadata.docs.rs]
