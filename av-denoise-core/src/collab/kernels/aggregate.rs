@@ -1,6 +1,5 @@
 use cubecl::prelude::*;
 
-use super::packed::pack_accum;
 use super::transforms::RECIPROCAL_FLOOR;
 use crate::collab::{MAX_K, PATCH_AREA, PATCH_SIZE, STEP};
 
@@ -159,20 +158,6 @@ pub fn to_fixed_weight(weight: f32, scale: f32) -> i32 {
     f32::round(clamped * scale * WEIGHT_GAIN) as i32
 }
 
-/// Host mirror of `to_fixed`.
-#[cfg(test)]
-pub(crate) fn to_fixed_host(value: f32, scale: f32) -> i32 {
-    let clamped = value.clamp(-ACCUM_CLAMP, ACCUM_CLAMP);
-    (clamped * scale).round() as i32
-}
-
-/// Host mirror of `to_fixed_weight`.
-#[cfg(test)]
-pub(crate) fn to_fixed_weight_host(weight: f32, scale: f32) -> i32 {
-    let clamped = weight.clamp(0.0, WEIGHT_CLAMP);
-    (clamped * scale * WEIGHT_GAIN).round() as i32
-}
-
 /// Adds this thread's pixel of one filtered patch to the accumulators.
 ///
 /// Each of the cube's 64 threads owns the patch pixel `tid` picks, so one call per member scatters
@@ -183,17 +168,14 @@ pub(crate) fn to_fixed_weight_host(weight: f32, scale: f32) -> i32 {
 /// `write_weight` adds the weight to `wsum`, and only the first channel's pass sets it because
 /// aggregation needs one weight per patch. `accum_scale` is [ACCUM_SCALE] or a
 /// [cross_frame_accum_scale] result, and `wsum` counts at [WEIGHT_GAIN] times it.
-///
-/// With `packed`, channel 0 and the weight add as one 64-bit word into `wsum`, and `accum` holds
-/// the other channels.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
-pub fn scatter_patch<W: Int>(
+pub fn scatter_patch(
     accum: &mut [Atomic<i32>],
-    wsum: &mut [Atomic<W>],
+    wsum: &mut [Atomic<i32>],
     kaiser: &[f32],
     value: f32,
     weight: f32,
@@ -207,7 +189,6 @@ pub fn scatter_patch<W: Int>(
     frame_slot: u32,
     #[comptime] frame_pixels: u32,
     accum_scale: f32,
-    #[comptime] packed: bool,
 ) {
     let row = tid / PATCH_SIZE;
     let col = tid % PATCH_SIZE;
@@ -220,35 +201,12 @@ pub fn scatter_patch<W: Int>(
     let weight = weight * window;
     let accum_fixed = to_fixed(value * weight, accum_scale);
 
-    if comptime!(packed) {
-        let first_channel = channel == 0u32;
+    let accum_index = pixel * stored_ch + channel;
+    Atomic::fetch_add(&accum[accum_index as usize], accum_fixed);
 
-        if first_channel {
-            let weight_fixed = to_fixed_weight(weight, accum_scale);
-            let word = pack_accum::<W>(accum_fixed, weight_fixed);
-            Atomic::fetch_add(&wsum[pixel as usize], word);
-        }
-
-        #[expect(
-            clippy::collapsible_if,
-            reason = "the outer condition is comptime, so luma compiles no access to the other channels"
-        )]
-        if comptime!(stored_ch > 1) {
-            if !first_channel {
-                let rest_channels = comptime!(stored_ch - 1);
-                let rest_index = pixel * rest_channels + channel - 1u32;
-                Atomic::fetch_add(&accum[rest_index as usize], accum_fixed);
-            }
-        }
-    } else {
-        let accum_index = pixel * stored_ch + channel;
-        Atomic::fetch_add(&accum[accum_index as usize], accum_fixed);
-
-        if write_weight {
-            let weight_fixed = to_fixed_weight(weight, accum_scale);
-            let weight_word = W::cast_from(weight_fixed);
-            Atomic::fetch_add(&wsum[pixel as usize], weight_word);
-        }
+    if write_weight {
+        let weight_fixed = to_fixed_weight(weight, accum_scale);
+        Atomic::fetch_add(&wsum[pixel as usize], weight_fixed);
     }
 }
 

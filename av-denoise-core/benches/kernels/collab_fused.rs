@@ -67,24 +67,16 @@ pub struct CollabFusedBench {
     pub strength_map: bool,
     /// Launches with the pooled threshold on.
     pub pooled: bool,
-    /// Scatters into the packed 64-bit accumulator layout.
-    pub packed: bool,
     pub candidate: CollabVariant,
 }
 
-/// The element counts of `accum` and `wsum` over the bench ring, in the packed layout or the split
-/// one.
-fn accumulator_lens(stored_ch: u32, packed: bool) -> (usize, usize) {
+/// The element counts of `accum` and `wsum` over the bench ring.
+fn accumulator_lens(stored_ch: u32) -> (usize, usize) {
     let pixels = (WIDTH * HEIGHT) as usize;
     let frames = N_FRAMES as usize;
     let wsum_len = pixels * frames;
-
-    if packed {
-        let rest_len = pixels * (stored_ch as usize - 1) * frames;
-        return (rest_len.max(1), wsum_len);
-    }
-
     let accum_len = pixels * stored_ch as usize * frames;
+
     (accum_len, wsum_len)
 }
 
@@ -98,7 +90,6 @@ pub fn fitted_variants(client: &Client, channels: u32, channel_name: &'static st
         noise_curve: false,
         strength_map: false,
         pooled: false,
-        packed: false,
         candidate: CollabVariant::BASELINE,
     };
     let input = bench.prepare();
@@ -153,7 +144,7 @@ impl CollabFusedBench {
     /// The tunable site over `args`, with the library's default search geometry.
     pub fn site(&self, args: &CollabFusedInput) -> CollabSite<f32> {
         let stored_ch = stored_channels(self.channels);
-        let (accum_len, wsum_len) = accumulator_lens(stored_ch, self.packed);
+        let (accum_len, wsum_len) = accumulator_lens(stored_ch);
         let refs = ref_count(WIDTH, HEIGHT);
         let refs_x = refs_along(WIDTH);
         let refs_y = refs_along(HEIGHT);
@@ -217,7 +208,6 @@ impl CollabFusedBench {
             map_rows,
             pooled: self.pooled,
             uniform_walk_only,
-            packed: self.packed,
         };
         let outputs = CollabOutputs {
             accum: args.accum.clone(),
@@ -226,7 +216,6 @@ impl CollabFusedBench {
             accum_len,
             wsum_len,
             refs,
-            packed: self.packed,
         };
         CollabSite::<f32> {
             client: self.client.clone(),
@@ -311,14 +300,9 @@ impl Benchmark for CollabFusedBench {
 
         // One accumulator region per ring slot, the same shape `Nl4dDenoiser` allocates, so the
         // scatter crosses the same address range it does in the pipeline.
-        let (accum_len, wsum_len) = accumulator_lens(stored_ch, self.packed);
-        let wsum_element_bytes = if self.packed {
-            size_of::<i64>()
-        } else {
-            size_of::<i32>()
-        };
+        let (accum_len, wsum_len) = accumulator_lens(stored_ch);
         let accum = self.client.empty(accum_len * size_of::<i32>());
-        let wsum = self.client.empty(wsum_len * wsum_element_bytes);
+        let wsum = self.client.empty(wsum_len * size_of::<i32>());
         let refs = ref_count(WIDTH, HEIGHT);
         let group_weight = self.client.empty(refs * size_of::<f32>());
         let curve_host = if self.noise_curve {
@@ -373,10 +357,9 @@ impl Benchmark for CollabFusedBench {
         let curve = if self.noise_curve { "_noise_curve" } else { "" };
         let map = if self.strength_map { "_strength_map" } else { "" };
         let pool = if self.pooled { "_pooled" } else { "" };
-        let packed = if self.packed { "_packed" } else { "" };
 
         format!(
-            "{}/{}/1080p_{}{field}{curve}{map}{pool}{packed}",
+            "{}/{}/1080p_{}{field}{curve}{map}{pool}",
             CollabVariant::SITE,
             self.candidate.name(),
             self.channel_name,

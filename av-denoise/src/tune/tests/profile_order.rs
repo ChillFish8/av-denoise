@@ -20,14 +20,13 @@ use crate::tune::driver::{
     time_profiles,
 };
 
-const PACKED_FIRST: PriorityTable = PriorityTable {
+const F32_FIRST: PriorityTable = PriorityTable {
     sites: &[],
     profiles_basis: Basis::Expected,
     profiles: &[
-        PipelineProfile::PackedAtomics,
+        PipelineProfile::F32Search,
         PipelineProfile::Baseline,
         PipelineProfile::SplitSearch,
-        PipelineProfile::F32Search,
     ],
 };
 
@@ -36,24 +35,18 @@ const BASELINE_LAST: PriorityTable = PriorityTable {
     profiles_basis: Basis::Expected,
     profiles: &[
         PipelineProfile::SplitSearch,
-        PipelineProfile::PackedAtomics,
         PipelineProfile::F32Search,
         PipelineProfile::Baseline,
     ],
 };
 
-const ORDER: [PipelineProfile; 3] = [
-    PipelineProfile::SplitSearch,
-    PipelineProfile::PackedAtomics,
-    PipelineProfile::F32Search,
-];
+const ORDER: [PipelineProfile; 2] = [PipelineProfile::SplitSearch, PipelineProfile::F32Search];
 
 /// Frame times in milliseconds, with the baseline at 100.
-fn frame_millis(profile: PipelineProfile, split: u64, packed: u64, f32_search: u64) -> u64 {
+fn frame_millis(profile: PipelineProfile, split: u64, f32_search: u64) -> u64 {
     match profile {
         PipelineProfile::Baseline => 100,
         PipelineProfile::SplitSearch => split,
-        PipelineProfile::PackedAtomics => packed,
         PipelineProfile::F32Search => f32_search,
     }
 }
@@ -127,46 +120,53 @@ fn winner_of(run: &ProfileRun<PipelineProfile>) -> Option<PipelineProfile> {
 fn profiles_follow_the_device_table_order() {
     let device = r9700_profile();
 
-    let packed_first = alternative_profiles_for(true, &device, &PACKED_FIRST);
+    let f32_first = alternative_profiles_for(true, &device, &F32_FIRST);
     let baseline_last = alternative_profiles_for(true, &device, &BASELINE_LAST);
 
-    let expected_packed_first = vec![
-        PipelineProfile::PackedAtomics,
-        PipelineProfile::SplitSearch,
-        PipelineProfile::F32Search,
-    ];
-    assert_eq!(packed_first, expected_packed_first);
+    let expected_f32_first = vec![PipelineProfile::F32Search, PipelineProfile::SplitSearch];
+    assert_eq!(f32_first, expected_f32_first);
     assert_eq!(baseline_last, ORDER);
 }
 
 #[test]
 fn profile_timing_stops_at_the_first_profile_that_does_not_win() {
     let (run, tried) = run_profiles(&ORDER, SearchMode::Families, |profile| {
-        frame_millis(profile, 90, 89, 50)
+        frame_millis(profile, 99, 50)
     });
 
     let records = compared_records(&run);
     let recorded = record_profiles(records);
 
-    let reached = [PipelineProfile::SplitSearch, PipelineProfile::PackedAtomics];
-    assert_eq!(tried, reached);
+    assert_eq!(tried, [PipelineProfile::SplitSearch]);
     assert_eq!(
         recorded,
-        [
-            PipelineProfile::Baseline,
-            PipelineProfile::SplitSearch,
-            PipelineProfile::PackedAtomics,
-        ]
+        [PipelineProfile::Baseline, PipelineProfile::SplitSearch]
     );
 
     let winner = winner_of(&run);
-    assert_eq!(winner, Some(PipelineProfile::PackedAtomics));
+    assert_eq!(winner, None);
+}
+
+#[test]
+fn a_profile_within_the_margin_of_the_best_still_wins_when_faster() {
+    let (run, tried) = run_profiles(&ORDER, SearchMode::Families, |profile| {
+        frame_millis(profile, 90, 89)
+    });
+
+    let records = compared_records(&run);
+    let recorded = record_profiles(records);
+
+    assert_eq!(tried, ORDER);
+    assert_eq!(recorded[1..], ORDER);
+
+    let winner = winner_of(&run);
+    assert_eq!(winner, Some(PipelineProfile::F32Search));
 }
 
 #[test]
 fn exhaustive_mode_times_every_legal_profile() {
     let (run, tried) = run_profiles(&ORDER, SearchMode::Exhaustive, |profile| {
-        frame_millis(profile, 90, 89, 50)
+        frame_millis(profile, 99, 50)
     });
 
     let records = compared_records(&run);
@@ -185,7 +185,7 @@ fn the_baseline_profile_is_always_timed() {
     let order = alternative_profiles_for(true, &device, &BASELINE_LAST);
 
     let (run, tried) = run_profiles(&order, SearchMode::Families, |profile| {
-        frame_millis(profile, 120, 50, 50)
+        frame_millis(profile, 120, 50)
     });
 
     let records = compared_records(&run);
@@ -204,15 +204,14 @@ fn the_baseline_profile_is_always_timed() {
 
 #[test]
 fn a_profile_that_does_not_build_or_compare_is_not_a_loss() {
-    let order = [PipelineProfile::SplitSearch, PipelineProfile::PackedAtomics];
-    let millis = |profile| frame_millis(profile, 90, 90, 90);
-    let reached = order.to_vec();
+    let millis = |profile| frame_millis(profile, 90, 90);
+    let reached = ORDER.to_vec();
 
-    let (unbuilt_run, unbuilt_tried) = run_with_faults(&order, SearchMode::Families, millis, |profile| {
+    let (unbuilt_run, unbuilt_tried) = run_with_faults(&ORDER, SearchMode::Families, millis, |profile| {
         let unbuilt = profile == PipelineProfile::SplitSearch;
         unbuilt.then_some(ProfileTrial::Unbuilt)
     });
-    let (failed_run, failed_tried) = run_with_faults(&order, SearchMode::Families, millis, |profile| {
+    let (failed_run, failed_tried) = run_with_faults(&ORDER, SearchMode::Families, millis, |profile| {
         let failed = profile == PipelineProfile::SplitSearch;
         failed.then_some(ProfileTrial::Failed)
     });
@@ -225,11 +224,11 @@ fn a_profile_that_does_not_build_or_compare_is_not_a_loss() {
     assert_eq!(unbuilt_tried, reached);
     assert_eq!(
         unbuilt_recorded,
-        [PipelineProfile::Baseline, PipelineProfile::PackedAtomics]
+        [PipelineProfile::Baseline, PipelineProfile::F32Search]
     );
-    assert_eq!(unbuilt_winner, Some(PipelineProfile::PackedAtomics));
+    assert_eq!(unbuilt_winner, Some(PipelineProfile::F32Search));
 
     assert_eq!(failed_tried, reached);
     assert_eq!(failed_run.phase, ProfilePhase::Unfinished);
-    assert_eq!(failed_winner, Some(PipelineProfile::PackedAtomics));
+    assert_eq!(failed_winner, Some(PipelineProfile::F32Search));
 }

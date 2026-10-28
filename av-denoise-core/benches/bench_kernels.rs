@@ -9,7 +9,7 @@ use av_denoise_core::bench_api::tune_sites::{
     WindowCandidate,
 };
 use av_denoise_core::testing;
-use av_denoise_core::tune::{DeviceLimits, SiteCandidate};
+use av_denoise_core::tune::SiteCandidate;
 use clap::Parser;
 use cubecl::prelude::*;
 use kernels::accumulate::AccumulateBench;
@@ -363,32 +363,21 @@ fn run_all(backend: &str, client: Client) {
         });
     }
 
-    // A clipped walk deadlocks on CUDA, so only the variants the device fits are launched. The
-    // packed rows run only where the device adds 64-bit atomics.
-    let limits = DeviceLimits::from_client(&client);
-    let layouts: &[bool] = if limits.int64_atomic_add {
-        &[false, true]
-    } else {
-        &[false]
-    };
+    // A clipped walk deadlocks on CUDA, so only the variants the device fits are launched.
+    for &(channels, channel_name) in CHANNELS {
+        let variants = fitted_variants(&client, channels, channel_name);
 
-    for &packed in layouts {
-        for &(channels, channel_name) in CHANNELS {
-            let variants = fitted_variants(&client, channels, channel_name);
-
-            for candidate in variants {
-                run(CollabFusedBench {
-                    client: client.clone(),
-                    channels,
-                    channel_name,
-                    split_mv: false,
-                    noise_curve: false,
-                    strength_map: false,
-                    pooled: false,
-                    packed,
-                    candidate,
-                });
-            }
+        for candidate in variants {
+            run(CollabFusedBench {
+                client: client.clone(),
+                channels,
+                channel_name,
+                split_mv: false,
+                noise_curve: false,
+                strength_map: false,
+                pooled: false,
+                candidate,
+            });
         }
     }
 
@@ -415,7 +404,6 @@ fn run_all(backend: &str, client: Client) {
         noise_curve: true,
         strength_map: false,
         pooled: false,
-        packed: false,
         candidate: collab_baseline,
     });
     run(CollabFusedBench {
@@ -426,7 +414,6 @@ fn run_all(backend: &str, client: Client) {
         noise_curve: true,
         strength_map: true,
         pooled: false,
-        packed: false,
         candidate: collab_baseline,
     });
     run(CollabFusedBench {
@@ -437,7 +424,6 @@ fn run_all(backend: &str, client: Client) {
         noise_curve: true,
         strength_map: true,
         pooled: true,
-        packed: false,
         candidate: collab_baseline,
     });
 
@@ -450,7 +436,6 @@ fn run_all(backend: &str, client: Client) {
             noise_curve: false,
             strength_map: false,
             pooled: false,
-            packed: false,
             candidate: collab_baseline,
         });
     }

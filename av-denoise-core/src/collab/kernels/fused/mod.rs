@@ -166,15 +166,12 @@ const _: () = assert!(
 /// stack reads each value as a single float from `ring_scalar`. With `f16_search` unset
 /// `search_ring` is never read and can be the f32 `ring`, which keeps every f16 type out of the
 /// kernel.
-///
-/// With `packed`, `wsum` holds one `i64` word per pixel with channel 0 and the weight, and `accum`
-/// holds the other channels, as [scatter_patch] writes them. Otherwise `W` is `i32`.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
-pub fn collab_fused<S: Float, N: Size, W: Int>(
+pub fn collab_fused<S: Float, N: Size>(
     ring: &[Vector<f32, N>],
     ring_scalar: &[f32],
     search_ring: &[Vector<S, N>],
@@ -187,7 +184,7 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
     dct_profile: &[f32],
     kaiser: &[f32],
     accum: &mut [Atomic<i32>],
-    wsum: &mut [Atomic<W>],
+    wsum: &mut [Atomic<i32>],
     group_weight: &mut [f32],
     centre_slot: u32,
     c_min: f32,
@@ -215,7 +212,6 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
     pool_ratio: f32,
     #[comptime] pooled: bool,
     #[comptime] variant: CollabVariant,
-    #[comptime] packed: bool,
 ) {
     let thread_id = UNIT_POS_X;
     let group = thread_id / 8u32;
@@ -321,7 +317,7 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
     let use_grid = (group_word & GROUP_USES_GRID) != 0u32;
     let column_luma = column_luma_of(current.as_slice(), channels);
 
-    filter_group::<W>(
+    filter_group(
         ring_scalar,
         neighbour_slots,
         noise,
@@ -355,7 +351,6 @@ pub fn collab_fused<S: Float, N: Size, W: Int>(
         map_cols,
         map_rows,
         pooled,
-        packed,
     );
 }
 
@@ -568,7 +563,7 @@ pub(crate) fn search_group<S: Float, N: Size>(
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the filter binds"
 )]
-pub(crate) fn filter_group<W: Int>(
+pub(crate) fn filter_group(
     ring_scalar: &[f32],
     neighbour_slots: &[u32],
     noise: &[f32],
@@ -577,7 +572,7 @@ pub(crate) fn filter_group<W: Int>(
     dct_profile: &[f32],
     kaiser: &[f32],
     accum: &mut [Atomic<i32>],
-    wsum: &mut [Atomic<W>],
+    wsum: &mut [Atomic<i32>],
     group_weight: &mut [f32],
     transpose_buf: &mut Shared<[f32]>,
     member_pos: &[u32],
@@ -602,7 +597,6 @@ pub(crate) fn filter_group<W: Int>(
     #[comptime] map_cols: u32,
     #[comptime] map_rows: u32,
     #[comptime] pooled: bool,
-    #[comptime] packed: bool,
 ) {
     let mut member_slot = Array::<u32>::new(MAX_K as usize);
     #[unroll]
@@ -809,7 +803,7 @@ pub(crate) fn filter_group<W: Int>(
                 let dst_slot = member_slot[m as usize];
                 #[unroll]
                 for r in 0..PATCH_SIZE {
-                    scatter_patch::<W>(
+                    scatter_patch(
                         accum,
                         wsum,
                         kaiser,
@@ -825,7 +819,6 @@ pub(crate) fn filter_group<W: Int>(
                         dst_slot,
                         comptime!(width * height),
                         accum_scale,
-                        packed,
                     );
                 }
             }

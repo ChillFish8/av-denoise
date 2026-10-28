@@ -153,8 +153,6 @@ pub struct Legality {
     pub uniform_walk_only: bool,
     /// The f16 search ring may run.
     pub f16_search: bool,
-    /// Packed 64-bit accumulators may run.
-    pub packed_atomics: bool,
 }
 
 impl Default for Legality {
@@ -162,7 +160,6 @@ impl Default for Legality {
         Self {
             uniform_walk_only: false,
             f16_search: true,
-            packed_atomics: false,
         }
     }
 }
@@ -172,13 +169,10 @@ impl Legality {
         let class = DeviceClass::of(&device.identity);
         let pre_volta = matches!(class, DeviceClass::NvidiaPreVolta { .. });
         let slow_f16 = class == DeviceClass::NvidiaPreVolta { fast_f16: false };
-        let is_apple = class == DeviceClass::Apple;
-        let packed_atomics = device.limits.int64_atomic_add && !is_apple;
 
         Self {
             uniform_walk_only: pre_volta,
             f16_search: !slow_f16,
-            packed_atomics,
         }
     }
 }

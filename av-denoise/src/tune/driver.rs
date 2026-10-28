@@ -710,13 +710,10 @@ pub(crate) fn alternative_profiles_for(
 
 /// Whether nl4d running `profile` on `device` builds a different pipeline from the baseline.
 fn differs_from_baseline(profile: PipelineProfile, device: &DeviceProfile) -> bool {
-    let legality = Legality::for_device(device);
-
     match profile {
         PipelineProfile::Baseline => false,
         PipelineProfile::F32Search => f32_profile_applies(true, device),
         PipelineProfile::SplitSearch => true,
-        PipelineProfile::PackedAtomics => legality.packed_atomics,
     }
 }
 

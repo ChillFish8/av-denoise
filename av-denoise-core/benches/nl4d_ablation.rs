@@ -291,7 +291,7 @@ impl Rig {
 
         unsafe {
             let ring_scalar = BufferArg::from_raw_parts(self.ring.clone(), self.ring_len);
-            collab_fused::launch_unchecked::<S, i32>(
+            collab_fused::launch_unchecked::<S>(
                 &self.client,
                 CubeCount::new_2d(cubes_x, refs_y),
                 cube_dim,
@@ -336,7 +336,6 @@ impl Rig {
                 POOL_RATIO,
                 pooled,
                 variant,
-                false,
             );
         }
     }

@@ -453,7 +453,7 @@ fn run_spatial_only(
         );
 
         let ring_scalar = BufferArg::from_raw_parts(ring_buf.clone(), noisy_centre.len());
-        collab_fused::launch_unchecked::<f32, i32>(
+        collab_fused::launch_unchecked::<f32>(
             client,
             fused_grid,
             fused_dim,
@@ -498,7 +498,6 @@ fn run_spatial_only(
             0.0f32,
             false,
             variant,
-            false,
         );
 
         collab_normalise::launch_unchecked(
@@ -709,7 +708,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
 
         unsafe {
             let ring_scalar = BufferArg::from_raw_parts(view.input.clone(), ring_len);
-            collab_fused::launch_unchecked::<f32, i32>(
+            collab_fused::launch_unchecked::<f32>(
                 &client,
                 fused_grid,
                 fused_dim,
@@ -754,7 +753,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 0.0f32,
                 false,
                 variant,
-                false,
             );
 
             collab_normalise::launch_unchecked(

@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use crate::collab::needs_warp_uniform_search;
-use crate::tune::{DeviceLimits, Legality};
+use crate::tune::Legality;
 
 /// Keeps the items it wraps only when the tests run on the wgpu runtime.
 macro_rules! wgpu_only {
@@ -83,24 +83,15 @@ pub(crate) fn test_client() -> Client {
     crate::testing::test_client()
 }
 
-pub(crate) fn packed_supported() -> bool {
-    let client = test_client();
-    let limits = DeviceLimits::from_client(&client);
-
-    limits.int64_atomic_add
-}
-
 /// Every rule relaxed except what the test backend needs for correct output.
 ///
 /// Equivalence tests run every candidate the device can execute, including those a real device
 /// class is not offered.
 pub(crate) fn test_legality(client: &Client) -> Legality {
-    let limits = DeviceLimits::from_client(client);
     let on_cuda = needs_warp_uniform_search(client);
 
     Legality {
         uniform_walk_only: on_cuda,
         f16_search: true,
-        packed_atomics: limits.int64_atomic_add,
     }
 }

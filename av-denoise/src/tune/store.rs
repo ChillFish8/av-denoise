@@ -139,9 +139,10 @@ impl TuneStore {
     /// Loads the result stored for `identity`.
     ///
     /// A missing file loads empty. An unreadable or corrupt file, or one of another format version
-    /// or device, is logged and loads empty. Keys naming a candidate, fidelity or profile this build
-    /// does not have are dropped, and every profile ranking is then marked incomplete so the next
-    /// run tunes them again.
+    /// or device, is logged and loads empty. Profile records naming a profile this build does not
+    /// have are skipped. Keys naming a candidate or fidelity this build does not have are dropped,
+    /// as is a profile key left without its baseline record, and every profile ranking is then
+    /// marked incomplete so the next run tunes them again.
     pub fn load(&self, identity: &DeviceIdentity) -> TuneResult {
         let path = self.path_for(identity);
         let read = std::fs::read_to_string(&path);
@@ -402,12 +403,19 @@ fn decode(text: &str, identity: &DeviceIdentity) -> Result<(TuneResult, usize), 
     }
 
     for (profile_key, stored_profiles) in stored.profiles {
-        let records: Option<Vec<ProfileRecord>> =
-            stored_profiles.ranking.into_iter().map(decode_profile).collect();
-        let Some(profiles) = records else {
+        // A record naming a profile this build lacks is skipped, since it can never be chosen.
+        let profiles: Vec<ProfileRecord> = stored_profiles
+            .ranking
+            .into_iter()
+            .filter_map(decode_profile)
+            .collect();
+        let has_baseline = profiles
+            .iter()
+            .any(|record| record.profile == PipelineProfile::Baseline);
+        if !has_baseline {
             dropped += 1;
             continue;
-        };
+        }
 
         let sites: Option<Vec<SiteKey>> = stored_profiles
             .sites

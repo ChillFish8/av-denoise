@@ -86,7 +86,6 @@ impl CollabSplitBench {
             noise_curve: false,
             strength_map: false,
             pooled: false,
-            packed: false,
             candidate: CollabVariant::BASELINE,
         }
     }

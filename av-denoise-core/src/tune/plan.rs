@@ -82,16 +82,13 @@ pub enum PipelineProfile {
     F32Search,
     /// The collab search and filter as two kernels joined by a member buffer.
     SplitSearch,
-    /// One 64-bit atomic per member pixel for the first channel and the weight.
-    PackedAtomics,
 }
 
 impl PipelineProfile {
-    pub const ALL: [PipelineProfile; 4] = [
+    pub const ALL: [PipelineProfile; 3] = [
         PipelineProfile::Baseline,
         PipelineProfile::F32Search,
         PipelineProfile::SplitSearch,
-        PipelineProfile::PackedAtomics,
     ];
 
     /// The name the store writes.
@@ -100,7 +97,6 @@ impl PipelineProfile {
             PipelineProfile::Baseline => "baseline",
             PipelineProfile::F32Search => "f32_search",
             PipelineProfile::SplitSearch => "split_search",
-            PipelineProfile::PackedAtomics => "packed_atomics",
         }
     }
 

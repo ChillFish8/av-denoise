@@ -502,7 +502,7 @@ impl VariantSite for CollabFilterSite {
     fn on_client(&self, client: &Client) -> Option<Self> {
         let inputs = blank_collab_inputs(client);
         let members = zeroed_words(client, MEMBER_WORDS as usize);
-        let outputs = blank_collab_outputs(client, false);
+        let outputs = blank_collab_outputs(client);
 
         Some(Self {
             client: client.clone(),
@@ -548,7 +548,7 @@ impl CollabFilterSite {
         let group_weight = bind(&outputs.group_weight, outputs.refs);
 
         unsafe {
-            collab_filter::launch_unchecked::<i32>(
+            collab_filter::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
@@ -580,7 +580,6 @@ impl CollabFilterSite {
                 shape.k_max,
                 shape.pooled,
                 groups,
-                false,
             );
         }
     }

@@ -148,7 +148,7 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
 
     unsafe {
         let ring_scalar = BufferArg::from_raw_parts(ring_buf.clone(), fixture.ring.len());
-        collab_fused::launch_unchecked::<f32, i32>(
+        collab_fused::launch_unchecked::<f32>(
             &client,
             grid,
             dim,
@@ -193,7 +193,6 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             0.0f32,
             false,
             variant,
-            false,
         );
     }
 

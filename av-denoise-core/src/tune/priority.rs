@@ -110,11 +110,10 @@ const AMD_VULKAN: PriorityTable = PriorityTable {
             skip: &[],
         },
     ],
-    // split -7%, packed -3%, baseline 0%, f32 +3%
+    // split -7%, baseline 0%, f32 +3%
     profiles_basis: Basis::Measured,
     profiles: &[
         PipelineProfile::SplitSearch,
-        PipelineProfile::PackedAtomics,
         PipelineProfile::Baseline,
         PipelineProfile::F32Search,
     ],
@@ -188,7 +187,6 @@ const AMD_ROCM: PriorityTable = PriorityTable {
     profiles_basis: Basis::Expected,
     profiles: &[
         PipelineProfile::SplitSearch,
-        PipelineProfile::PackedAtomics,
         PipelineProfile::Baseline,
         PipelineProfile::F32Search,
     ],
@@ -241,11 +239,10 @@ const NVIDIA: PriorityTable = PriorityTable {
         NVIDIA_ACCUMULATE,
         NVIDIA_REGULARISE,
     ],
-    // split_search fastest, then packed_atomics, then f32_search
+    // split_search fastest, then f32_search
     profiles_basis: Basis::Measured,
     profiles: &[
         PipelineProfile::SplitSearch,
-        PipelineProfile::PackedAtomics,
         PipelineProfile::Baseline,
         PipelineProfile::F32Search,
     ],
@@ -298,11 +295,10 @@ const NVIDIA_CUDA: PriorityTable = PriorityTable {
         NVIDIA_ACCUMULATE,
         NVIDIA_REGULARISE,
     ],
-    // split_search fastest, then packed_atomics, then f32_search
+    // split_search fastest, then f32_search
     profiles_basis: Basis::Measured,
     profiles: &[
         PipelineProfile::SplitSearch,
-        PipelineProfile::PackedAtomics,
         PipelineProfile::Baseline,
         PipelineProfile::F32Search,
     ],
@@ -396,7 +392,6 @@ const NVIDIA_PRE_VOLTA: PriorityTable = PriorityTable {
     profiles_basis: Basis::Expected,
     profiles: &[
         PipelineProfile::SplitSearch,
-        PipelineProfile::PackedAtomics,
         PipelineProfile::Baseline,
         PipelineProfile::F32Search,
     ],
@@ -473,7 +468,6 @@ const APPLE: PriorityTable = PriorityTable {
         PipelineProfile::SplitSearch,
         PipelineProfile::Baseline,
         PipelineProfile::F32Search,
-        PipelineProfile::PackedAtomics,
     ],
 };
 
@@ -544,7 +538,6 @@ const INTEL: PriorityTable = PriorityTable {
     profiles: &[
         PipelineProfile::SplitSearch,
         PipelineProfile::Baseline,
-        PipelineProfile::PackedAtomics,
         PipelineProfile::F32Search,
     ],
 };

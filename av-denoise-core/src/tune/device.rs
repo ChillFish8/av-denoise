@@ -1,6 +1,6 @@
 use cubecl::hash::StableHasher;
-use cubecl::ir::features::{AtomicUsage, TypeUsage};
-use cubecl::ir::{ElemType, FloatKind, IntKind, Type};
+use cubecl::ir::features::TypeUsage;
+use cubecl::ir::{ElemType, FloatKind};
 use cubecl::prelude::*;
 
 /// Which physical device and driver a tuning result was measured on.
@@ -50,8 +50,6 @@ pub struct DeviceLimits {
     pub compute_units: Option<u32>,
     pub f16_buffer: bool,
     pub f16_arithmetic: bool,
-    /// Whether 64-bit integer atomic adds work on storage buffers.
-    pub int64_atomic_add: bool,
 }
 
 impl DeviceLimits {
@@ -62,13 +60,6 @@ impl DeviceLimits {
         let f16_elem = ElemType::Float(FloatKind::F16);
         let f16_usage = properties.type_usage(f16_elem);
 
-        let i64_elem = ElemType::Int(IntKind::I64);
-        let i64_usage = properties.type_usage(i64_elem);
-        let i64_atomic_type = Type::atomic(i64_elem);
-        let i64_atomic_usage = properties.atomic_type_usage(i64_atomic_type);
-        let i64_arithmetic = i64_usage.contains(TypeUsage::Arithmetic);
-        let i64_atomic_add = i64_atomic_usage.contains(AtomicUsage::Add);
-
         Self {
             plane_size_min: hardware.plane_size_min,
             plane_size_max: hardware.plane_size_max,
@@ -78,7 +69,6 @@ impl DeviceLimits {
             compute_units: hardware.num_streaming_multiprocessors,
             f16_buffer: f16_usage.contains(TypeUsage::Buffer),
             f16_arithmetic: f16_usage.contains(TypeUsage::Arithmetic),
-            int64_atomic_add: i64_arithmetic && i64_atomic_add,
         }
     }
 

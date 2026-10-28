@@ -15,7 +15,6 @@ mod helpers;
 mod key;
 mod ledger;
 mod legality;
-mod packed;
 mod plan;
 mod precompile;
 mod priority;

@@ -5,7 +5,6 @@ use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::sync;
 use crate::tune::sites::{CollabVariant, Walk};
 use crate::tune::{
-    APPLE_VENDOR_ID,
     DeviceClass,
     DeviceIdentity,
     DeviceLimits,
@@ -52,7 +51,6 @@ pub(crate) fn faked_profile(
     limits.max_shared_bytes = 48 * 1024;
     limits.f16_buffer = true;
     limits.f16_arithmetic = true;
-    limits.int64_atomic_add = true;
 
     DeviceProfile { identity, limits }
 }
@@ -141,24 +139,11 @@ fn intel_and_unknown_vendors_get_their_own_classes() {
 }
 
 #[test]
-fn packed_atomics_need_64_bit_atomics_and_never_run_on_metal() {
-    let capable = faked_profile("vulkan", INTEL_VENDOR_ID, 0xE20B, None);
-    let mut incapable = capable.clone();
-    incapable.limits.int64_atomic_add = false;
-    let metal = faked_profile("metal", APPLE_VENDOR_ID, 0, None);
-
-    assert!(Legality::for_device(&capable).packed_atomics);
-    assert!(!Legality::for_device(&incapable).packed_atomics);
-    assert!(!Legality::for_device(&metal).packed_atomics);
-}
-
-#[test]
 fn defaults_are_todays_behaviour() {
     let defaults = Legality::default();
 
     assert!(!defaults.uniform_walk_only);
     assert!(defaults.f16_search);
-    assert!(!defaults.packed_atomics);
 }
 
 #[test]

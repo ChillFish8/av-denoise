@@ -63,7 +63,6 @@ const FORWARD: PriorityTable = PriorityTable {
     profiles_basis: Basis::Expected,
     profiles: &[
         PipelineProfile::SplitSearch,
-        PipelineProfile::PackedAtomics,
         PipelineProfile::Baseline,
         PipelineProfile::F32Search,
     ],
@@ -300,12 +299,11 @@ fn profile(profile: PipelineProfile, micros: u64) -> ProfileRecord {
     }
 }
 
-/// Split wins, packed does not beat it by the margin, and f32 is the fastest of all.
+/// Split does not beat the baseline by the margin, and f32 is the fastest of all.
 fn profile_timings() -> Vec<ProfileRecord> {
     vec![
         profile(PipelineProfile::Baseline, 100),
-        profile(PipelineProfile::SplitSearch, 90),
-        profile(PipelineProfile::PackedAtomics, 89),
+        profile(PipelineProfile::SplitSearch, 99),
         profile(PipelineProfile::F32Search, 50),
     ]
 }
@@ -316,28 +314,17 @@ fn replay_profiles_follows_the_early_stop() {
 
     let replayed = replay_profiles(&timings, &FORWARD).expect("there are profiles to replay");
 
-    assert_eq!(
-        replayed.timed,
-        vec![PipelineProfile::SplitSearch, PipelineProfile::PackedAtomics]
-    );
-    assert_eq!(replayed.pruned.name, PipelineProfile::PackedAtomics.name());
+    assert_eq!(replayed.timed, vec![PipelineProfile::SplitSearch]);
+    assert_eq!(replayed.pruned.name, PipelineProfile::Baseline.name());
     assert_eq!(replayed.full.name, PipelineProfile::F32Search.name());
     assert!(!replayed.matches());
     assert_eq!(
         replayed.table_order,
-        vec![
-            PipelineProfile::SplitSearch,
-            PipelineProfile::PackedAtomics,
-            PipelineProfile::F32Search,
-        ]
+        vec![PipelineProfile::SplitSearch, PipelineProfile::F32Search]
     );
     assert_eq!(
         replayed.measured_order,
-        vec![
-            PipelineProfile::F32Search,
-            PipelineProfile::PackedAtomics,
-            PipelineProfile::SplitSearch,
-        ]
+        vec![PipelineProfile::F32Search, PipelineProfile::SplitSearch]
     );
 }
 

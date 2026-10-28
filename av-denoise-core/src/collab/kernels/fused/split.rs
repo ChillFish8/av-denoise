@@ -179,7 +179,7 @@ pub fn collab_search<S: Float, N: Size>(
     clippy::too_many_arguments,
     reason = "every argument is a buffer or comptime shape the kernel binds"
 )]
-pub fn collab_filter<N: Size, W: Int>(
+pub fn collab_filter<N: Size>(
     ring: &[Vector<f32, N>],
     ring_scalar: &[f32],
     members: &[u32],
@@ -190,7 +190,7 @@ pub fn collab_filter<N: Size, W: Int>(
     dct_profile: &[f32],
     kaiser: &[f32],
     accum: &mut [Atomic<i32>],
-    wsum: &mut [Atomic<W>],
+    wsum: &mut [Atomic<i32>],
     group_weight: &mut [f32],
     centre_slot: u32,
     lambda_ht: f32,
@@ -207,7 +207,6 @@ pub fn collab_filter<N: Size, W: Int>(
     #[comptime] k_max: u32,
     #[comptime] pooled: bool,
     #[comptime] groups: u32,
-    #[comptime] packed: bool,
 ) {
     let thread_id = UNIT_POS_X;
     let group = thread_id / 8u32;
@@ -245,7 +244,7 @@ pub fn collab_filter<N: Size, W: Int>(
     let current = load_reference_column(ring, ref_x, ref_y, centre_slot, sub, width, height, channels);
     let column_luma = column_luma_of(current.as_slice(), channels);
 
-    filter_group::<W>(
+    filter_group(
         ring_scalar,
         neighbour_slots,
         noise,
@@ -279,6 +278,5 @@ pub fn collab_filter<N: Size, W: Int>(
         map_cols,
         map_rows,
         pooled,
-        packed,
     );
 }

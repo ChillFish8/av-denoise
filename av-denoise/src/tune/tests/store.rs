@@ -382,7 +382,7 @@ fn a_file_for_another_identity_loads_empty() {
 }
 
 #[test]
-fn an_unknown_profile_name_drops_its_profile_key() {
+fn a_profile_key_without_its_baseline_record_is_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let store = TuneStore::at(dir.path());
     let device = identity();
@@ -399,6 +399,67 @@ fn an_unknown_profile_name_drops_its_profile_key() {
         sample_result().sites,
         "the rest of the file still decodes"
     );
+}
+
+/// A stored profile ranking with a split record at `split_millis`, beside a baseline at 100 ms.
+fn profile_result(split_millis: u64) -> TuneResult {
+    let mut result = sample_result();
+    let split = ProfileRecord {
+        profile: PipelineProfile::SplitSearch,
+        median_frame_ns: split_millis * 1_000_000,
+        blocks: 3,
+    };
+    let ranking = result.profiles.get_mut("luma").unwrap();
+    ranking.profiles[0].median_frame_ns = 100_000_000;
+    ranking.profiles.push(split);
+
+    result
+}
+
+/// Saves `result` with a `packed_atomics` record at `packed_millis` added to its luma ranking.
+fn save_with_packed_record(
+    store: &TuneStore,
+    device: &DeviceIdentity,
+    result: &TuneResult,
+    packed_millis: u64,
+) {
+    let path = store.save(device, result).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut document: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let packed = serde_json::json!({
+        "profile": "packed_atomics",
+        "median_frame_ns": packed_millis * 1_000_000,
+        "blocks": 3,
+    });
+    let ranking = document["profiles"]["luma"]["ranking"].as_array_mut().unwrap();
+    ranking.push(packed);
+
+    let edited = serde_json::to_string_pretty(&document).unwrap();
+    std::fs::write(&path, edited).unwrap();
+}
+
+#[test]
+fn a_stored_packed_atomics_profile_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let profile_keys = ["luma".to_string()];
+
+    let packed_lost = profile_result(85);
+    save_with_packed_record(&store, &device, &packed_lost, 90);
+    let loaded = store.load(&device);
+
+    assert_eq!(loaded, packed_lost, "only the packed record is skipped");
+    assert!(loaded.is_complete(&profile_keys));
+    assert_eq!(loaded.profile_for("luma", false), PipelineProfile::SplitSearch);
+
+    let packed_won = profile_result(99);
+    save_with_packed_record(&store, &device, &packed_won, 80);
+    let loaded = store.load(&device);
+
+    assert_eq!(loaded, packed_won, "only the packed record is skipped");
+    assert!(loaded.is_complete(&profile_keys));
+    assert_eq!(loaded.profile_for("luma", false), PipelineProfile::Baseline);
 }
 
 #[test]
