@@ -6,13 +6,17 @@ use crate::noise::{
     DerivedValues,
     Fold,
     FoldSettings,
+    NOISE_WINDOW_LEN,
+    NOISE_WINDOW_RADIUS,
     NoiseSettings,
     NoiseShape,
     NoiseState,
     QuarterSettings,
+    ReadingHistory,
     ReadingSettings,
     StrengthMapKind,
     StrengthMapParams,
+    WindowBounds,
 };
 
 /// One launch of a slot's reading.
@@ -51,9 +55,14 @@ pub struct ReadingOptions {
     pub offset_tables: Option<u32>,
 }
 
+/// The temporal radius the window fold's history is sized for.
+const WINDOW_TEMPORAL_RADIUS: u32 = 1;
+
 /// A two-slot noise state whose slot 1 holds the stats of `ring`'s second frame against its first.
 pub struct NoiseReading {
     state: NoiseState,
+    /// A full window of slot 1's reading, once [Self::record_window] has run.
+    history: Option<ReadingHistory>,
 }
 
 impl NoiseReading {
@@ -96,7 +105,7 @@ impl NoiseReading {
         let state = NoiseState::new(client, shape, noise_settings, DerivedValues::default());
         state.queue_stats(ring, 1, Some(0))?;
 
-        Ok(Self { state })
+        Ok(Self { state, history: None })
     }
 
     /// Queues every launch of the reading that runs before `stage`.
@@ -168,6 +177,27 @@ impl NoiseReading {
         };
 
         self.state.queue_fold(fold)
+    }
+
+    /// Fills a window history with copies of slot 1's reading, waiting for every queued launch.
+    pub fn record_window(&mut self) -> Result<(), anyhow::Error> {
+        let history = self.state.history_of_slot(1, WINDOW_TEMPORAL_RADIUS)?;
+        self.history = Some(history);
+
+        Ok(())
+    }
+
+    /// Queues a window fold over a full window of the recorded history.
+    ///
+    /// # Panics
+    ///
+    /// Panics before [Self::record_window] has run.
+    pub fn queue_window_fold(&self) -> Result<(), anyhow::Error> {
+        let history = self.history.as_ref().expect("the window history is recorded");
+        let newest = NOISE_WINDOW_LEN - 1;
+        let bounds = WindowBounds::around(NOISE_WINDOW_RADIUS, newest);
+
+        self.state.queue_window_fold(history, bounds)
     }
 
     /// Queues the reset of the stream state.

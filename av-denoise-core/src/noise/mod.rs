@@ -3,6 +3,7 @@ mod curve;
 mod derived;
 mod estimator;
 mod fold;
+mod history;
 #[cfg(test)]
 mod host;
 pub(crate) mod kernels;
@@ -45,6 +46,7 @@ pub(crate) use self::derived::{
     NoiseConsumer,
 };
 pub(crate) use self::fold::{Fold, FoldSettings, NoiseSettings};
+pub(crate) use self::history::{NOISE_WINDOW_LEN, NOISE_WINDOW_RADIUS, ReadingHistory, WindowBounds};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::snapshot::NoiseSnapshot;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]

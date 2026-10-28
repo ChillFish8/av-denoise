@@ -16,6 +16,7 @@ mod state;
 mod stats;
 mod tables;
 mod temporal;
+mod window;
 mod y4m;
 
 use cubecl::prelude::*;

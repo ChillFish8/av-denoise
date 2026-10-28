@@ -1,9 +1,11 @@
 use super::records::ulp_gap;
 use crate::collab::kernels::transforms::RECIPROCAL_FLOOR;
-use crate::noise::curve::NoiseCurve;
+use crate::noise::correlation::correlation_factor;
+use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
 use crate::noise::derived::{DerivedCoefficients, DerivedValues, NoiseConsumer};
-use crate::noise::estimator::NoiseEstimator;
+use crate::noise::estimator::{NoiseEstimator, SIGMA_FLOOR};
 use crate::noise::fold::NoiseSettings;
+use crate::noise::history::WindowBounds;
 use crate::noise::host::HostNoise;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::snapshot::NoiseSnapshot;
@@ -319,4 +321,187 @@ pub(crate) fn curve_gap(gpu: &NoiseSnapshot, host: &NoiseSnapshot) -> f32 {
         (None, None) => 0.0,
         _ => f32::INFINITY,
     }
+}
+
+/// One stream frame's reading as the host window model reads it.
+#[derive(Debug, Clone)]
+pub(crate) struct HostRecord {
+    pub(crate) reading: ReadingRecord,
+    /// The per-channel Immerkær sigma from the frame's abs sums.
+    pub(crate) immerkaer: [f32; 3],
+    /// The frame's strength map, empty without one.
+    pub(crate) map: Vec<f32>,
+}
+
+/// The chains, rho, curve, classes and map one window fold gives.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HostDerived {
+    pub(crate) median: [f32; 3],
+    pub(crate) low: [f32; 3],
+    pub(crate) low_unboosted: [f32; 3],
+    /// `None` when no frame of the window has a sample.
+    pub(crate) temporal_only: Option<[f32; 3]>,
+    pub(crate) rho: Option<f32>,
+    /// The curve's ratios and quarter median, present exactly when the classes are.
+    pub(crate) curve: Option<([f32; NOISE_CURVE_BINS], f32)>,
+    /// The elementwise median map, present when the window holds a curve.
+    pub(crate) map: Option<Vec<f32>>,
+}
+
+impl HostDerived {
+    /// The window as a GPU snapshot holds it, with channels past `channels` at 0 and the derived
+    /// values `derive_host` gives it.
+    pub(crate) fn snapshot(&self, settings: NoiseSettings, channels: u32) -> NoiseSnapshot {
+        let active = channels as usize;
+        let bare = NoiseSnapshot {
+            median: Some(active_channels(self.median, active)),
+            low: Some(active_channels(self.low, active)),
+            low_unboosted: Some(active_channels(self.low_unboosted, active)),
+            temporal_only: self.temporal_only.map(|chain| active_channels(chain, active)),
+            rho: self.rho,
+            curve: self.curve,
+            classes_present: self.curve.is_some(),
+            derived: DerivedValues::default(),
+        };
+        let fold = settings.fold;
+        let derived = fold
+            .coefficients
+            .derive_host(&bare, active, fold.consumer, settings.reading.map);
+
+        NoiseSnapshot { derived, ..bare }
+    }
+}
+
+fn active_channels(values: [f32; 3], channels: usize) -> [f32; 3] {
+    let mut active = [0.0f32; 3];
+    active[..channels].copy_from_slice(&values[..channels]);
+    active
+}
+
+/// The median of `values`, the mean of the two middle values for an even count.
+fn window_median(values: &mut [f32]) -> f32 {
+    values.sort_by(f32::total_cmp);
+
+    let count = values.len();
+    let lower = values[(count - 1) / 2];
+    let upper = values[count / 2];
+
+    (lower + upper) * 0.5
+}
+
+/// One frame's combined and scaled readings for the median, low and unboosted low chains.
+fn frame_readings(record: &HostRecord, sigma_scale: f32) -> [[f32; 3]; 3] {
+    let reading = &record.reading;
+    let mut raw = record.immerkaer;
+    let mut raw_low = reading.immerkaer_low;
+    let mut raw_unboosted = reading.immerkaer_low;
+
+    if let Some(sample) = reading.sample {
+        let factor = correlation_factor(sample.rho);
+        for channel in 0..3 {
+            raw[channel] = raw[channel].max(sample.sigma[channel] * factor);
+            raw_low[channel] = raw_low[channel].max(sample.sigma_low[channel] * factor);
+            raw_unboosted[channel] = raw_unboosted[channel].max(sample.sigma_low[channel]);
+        }
+    }
+
+    let scale = |values: [f32; 3]| values.map(|value| value * sigma_scale);
+
+    [scale(raw), scale(raw_low), scale(raw_unboosted)]
+}
+
+/// The per-channel floored median of `readings`, `None` for no readings.
+fn chain_median(readings: &[[f32; 3]]) -> Option<[f32; 3]> {
+    if readings.is_empty() {
+        return None;
+    }
+
+    let mut chain = [0.0f32; 3];
+    for (channel, value) in chain.iter_mut().enumerate() {
+        let mut values: Vec<f32> = readings.iter().map(|reading| reading[channel]).collect();
+        let median = window_median(&mut values);
+        *value = median.max(SIGMA_FLOOR);
+    }
+
+    Some(chain)
+}
+
+/// The host model of one window fold of `records`, indexed by stream frame, over `bounds`.
+pub(crate) fn fold_window(records: &[HostRecord], bounds: WindowBounds, sigma_scale: f32) -> HostDerived {
+    let first = bounds.first() as usize;
+    let last = bounds.last() as usize;
+    let window = &records[first..=last];
+    let sampled: Vec<&HostRecord> = window
+        .iter()
+        .filter(|record| record.reading.sample.is_some())
+        .collect();
+    let curved: Vec<&HostRecord> = sampled
+        .iter()
+        .copied()
+        .filter(|record| record.reading.curve.is_some())
+        .collect();
+
+    let readings: Vec<[[f32; 3]; 3]> = window
+        .iter()
+        .map(|record| frame_readings(record, sigma_scale))
+        .collect();
+    let medians: Vec<[f32; 3]> = readings.iter().map(|reading| reading[0]).collect();
+    let lows: Vec<[f32; 3]> = readings.iter().map(|reading| reading[1]).collect();
+    let unboosted: Vec<[f32; 3]> = readings.iter().map(|reading| reading[2]).collect();
+    let temporal: Vec<[f32; 3]> = sampled
+        .iter()
+        .map(|record| record.reading.sample.unwrap().sigma)
+        .map(|sigma| sigma.map(|value| value * sigma_scale))
+        .collect();
+
+    let mut rhos: Vec<f32> = sampled
+        .iter()
+        .map(|record| record.reading.sample.unwrap().rho)
+        .collect();
+    let rho = (!rhos.is_empty()).then(|| window_median(&mut rhos));
+
+    let curve_present = !sampled.is_empty() && 2 * curved.len() >= sampled.len();
+    let curve = curve_present.then(|| window_curve(&curved));
+    let map = curve_present.then(|| window_map(&curved));
+
+    HostDerived {
+        median: chain_median(&medians).expect("the window holds a frame"),
+        low: chain_median(&lows).expect("the window holds a frame"),
+        low_unboosted: chain_median(&unboosted).expect("the window holds a frame"),
+        temporal_only: chain_median(&temporal),
+        rho,
+        curve,
+        map,
+    }
+}
+
+/// The elementwise median ratios and quarter median of `curved`, which all hold a curve.
+fn window_curve(curved: &[&HostRecord]) -> ([f32; NOISE_CURVE_BINS], f32) {
+    let curves: Vec<NoiseCurve> = curved
+        .iter()
+        .map(|record| record.reading.curve.unwrap())
+        .collect();
+    let mut ratios = [0.0f32; NOISE_CURVE_BINS];
+
+    for (bin, ratio) in ratios.iter_mut().enumerate() {
+        let mut values: Vec<f32> = curves.iter().map(|curve| curve.ratios[bin]).collect();
+        *ratio = window_median(&mut values);
+    }
+
+    let mut quarter_medians: Vec<f32> = curves.iter().map(|curve| curve.sigma_quarter_median).collect();
+    let quarter_median = window_median(&mut quarter_medians);
+
+    (ratios, quarter_median)
+}
+
+/// The elementwise median map of `curved`.
+fn window_map(curved: &[&HostRecord]) -> Vec<f32> {
+    let quarters = curved[0].map.len();
+
+    (0..quarters)
+        .map(|quarter| {
+            let mut values: Vec<f32> = curved.iter().map(|record| record.map[quarter]).collect();
+            window_median(&mut values)
+        })
+        .collect()
 }

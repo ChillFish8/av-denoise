@@ -636,6 +636,8 @@ pub enum FoldStage {
     FoldWithMap,
     /// A fold that also writes the offset tables of a radius 2 search window, with no map.
     FoldWithTables,
+    /// A window fold over a full window of one reading, with a 1080p luma map.
+    Window,
     Reset,
 }
 
@@ -645,7 +647,8 @@ const FOLD_TABLE_RADIUS: u32 = 2;
 /// Times one launch of the stream state on a 1080p luma plane.
 ///
 /// `prepare` measures a reading of the smooth gradient into slot 1, which has a sample and a
-/// curve, and folds it once, so every timed fold adopts that reading.
+/// curve, and folds it once, so every timed fold adopts that reading. The window row folds a full
+/// window of copies of that reading.
 pub struct FoldBench {
     pub client: Client,
     pub stage: FoldStage,
@@ -657,6 +660,7 @@ impl FoldBench {
             FoldStage::Fold | FoldStage::FoldWithMap | FoldStage::FoldWithTables => {
                 reading.queue_fold().expect("the fold queues")
             },
+            FoldStage::Window => reading.queue_window_fold().expect("the window fold queues"),
             FoldStage::Reset => reading.queue_reset(),
         }
     }
@@ -674,7 +678,8 @@ impl Benchmark for FoldBench {
             curve: true,
         };
         let ring = gradient.ring();
-        let map = (self.stage == FoldStage::FoldWithMap).then_some(READING_MAP);
+        let has_map = matches!(self.stage, FoldStage::FoldWithMap | FoldStage::Window);
+        let map = has_map.then_some(READING_MAP);
         let offset_tables = (self.stage == FoldStage::FoldWithTables).then_some(FOLD_TABLE_RADIUS);
         let options = ReadingOptions {
             luma_fields: true,
@@ -682,11 +687,17 @@ impl Benchmark for FoldBench {
             offset_tables,
         };
         let stored_ch = stored_channels(1);
-        let reading = NoiseReading::new(&self.client, WIDTH, HEIGHT, 1, stored_ch, &ring, options)
+        let mut reading = NoiseReading::new(&self.client, WIDTH, HEIGHT, 1, stored_ch, &ring, options)
             .expect("the stats queue");
 
         reading.queue_reading();
         reading.queue_fold().expect("the fold queues");
+
+        if self.stage == FoldStage::Window {
+            reading.record_window().expect("the window history records");
+            reading.queue_window_fold().expect("the window fold queues");
+        }
+
         self.sync();
 
         Arc::new(reading)
@@ -710,6 +721,7 @@ impl Benchmark for FoldBench {
             FoldStage::Fold => "fold",
             FoldStage::FoldWithMap => "fold_with_map",
             FoldStage::FoldWithTables => "fold_with_tables",
+            FoldStage::Window => "window",
             FoldStage::Reset => "reset",
         };
 

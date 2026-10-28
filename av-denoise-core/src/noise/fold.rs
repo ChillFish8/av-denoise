@@ -4,7 +4,8 @@ use cubecl::server::Handle;
 
 use super::correlation::{CORRELATION_FACTOR_TABLE, build_spatial_offset_lut, spatial_offset_lut_len};
 use super::derived::{DERIVED_WORDS, DerivedCoefficients, DerivedValues, NoiseConsumer};
-use super::kernels::{noise_fold, noise_reset};
+use super::history::{NOISE_WINDOW_LEN, ReadingHistory, WindowBounds};
+use super::kernels::{noise_fold, noise_reset, noise_window_fold};
 use super::reading::READING_WORDS;
 use super::spatial::{RESULTS_PER_SLOT, immerkaer_sigma_scale};
 use super::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind, quarter_count};
@@ -229,6 +230,75 @@ impl NoiseState {
         Ok(())
     }
 
+    /// Queues one fold of the history frames `bounds` names into the stream state, the derived
+    /// values, the current curve, the current map and the offset tables, in one launch.
+    ///
+    /// With a map the launch spans one cube per 256 map quarters. A state that holds fixed values
+    /// queues nothing.
+    pub(crate) fn queue_window_fold(
+        &self,
+        history: &ReadingHistory,
+        bounds: WindowBounds,
+    ) -> Result<(), anyhow::Error> {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return Ok(());
+        };
+
+        let frames = bounds.len();
+        ensure!(
+            frames <= NOISE_WINDOW_LEN,
+            "a window of {frames} frames is past the {NOISE_WINDOW_LEN} a fold reads"
+        );
+
+        let capacity = history.capacity();
+        ensure!(
+            frames <= capacity,
+            "a window of {frames} frames is past the {capacity} history slots"
+        );
+
+        let map_len = self.current_map_len();
+        let history_map_len = history.map_len();
+        ensure!(
+            history_map_len == map_len,
+            "the history keeps {history_map_len} map quarters per frame, the state {map_len}"
+        );
+
+        let records_len = (capacity * READING_WORDS) as usize;
+        let results_len = capacity as usize * RESULTS_PER_SLOT;
+        let records = history.records();
+        let results = history.results();
+        let map_args = self.window_map_args(history);
+        let map_cubes = map_len.div_ceil(NOISE_BLOCK_1D);
+        let grid = map_cubes.clamp(1, MAX_GRID_1D);
+        let table_args = self.table_args();
+
+        unsafe {
+            noise_window_fold::launch_unchecked(
+                &self.client,
+                CubeCount::new_1d(grid),
+                CubeDim::new_1d(NOISE_BLOCK_1D),
+                bind(records, records_len),
+                bind(results, results_len),
+                map_args.slot_maps,
+                bind(&measurement.fold_settings, FOLD_WORDS as usize),
+                bind(&measurement.fold_state, STATE_WORDS as usize),
+                bind(&self.derived, DERIVED_WORDS as usize),
+                bind(&self.curve_ratios, NOISE_CURVE_BINS),
+                map_args.current_map,
+                table_args.spatial,
+                table_args.pilot,
+                bounds.first(),
+                bounds.last(),
+                capacity,
+                self.shape.channels,
+                map_len,
+                table_args.radius,
+            );
+        }
+
+        Ok(())
+    }
+
     /// Queues the clear of every validity flag of the stream state, in one launch.
     ///
     /// A state that holds fixed values queues nothing.
@@ -271,6 +341,26 @@ impl NoiseState {
         MapArgs {
             slot_maps: bind(slot_maps, slot_maps_len),
             current_map: bind(&self.current_map, map_len as usize),
+        }
+    }
+
+    /// The history's maps and the current map, bound over every history slot and one map.
+    ///
+    /// Without a map the kernel never touches them, so the derived buffer stands in.
+    fn window_map_args(&self, history: &ReadingHistory) -> MapArgs {
+        let Some(maps) = history.maps() else {
+            return MapArgs {
+                slot_maps: bind(&self.derived, DERIVED_WORDS as usize),
+                current_map: bind(&self.derived, DERIVED_WORDS as usize),
+            };
+        };
+
+        let map_len = history.map_len() as usize;
+        let maps_len = map_len * history.capacity() as usize;
+
+        MapArgs {
+            slot_maps: bind(maps, maps_len),
+            current_map: bind(&self.current_map, map_len),
         }
     }
 

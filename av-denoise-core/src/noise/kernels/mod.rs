@@ -1,9 +1,11 @@
 mod classes;
 mod curve;
+mod derive;
 mod fold;
 mod sample;
 mod select;
 mod stats;
+mod window;
 
 pub use self::classes::{noise_classify, noise_strength_map};
 pub use self::curve::noise_curve_bins;
@@ -18,3 +20,4 @@ pub use self::stats::{
     nlm_temporal_noise_stats,
     nlm_temporal_stats_zero,
 };
+pub use self::window::noise_window_fold;
