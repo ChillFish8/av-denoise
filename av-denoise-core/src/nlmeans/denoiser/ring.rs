@@ -139,6 +139,7 @@ impl NlmDenoiser {
             front.refresh_duplicated_slot(next_slot)
         })?;
 
+        self.slot_frames[next_slot] = self.slot_frames[last_slot];
         self.ring_head += 1;
 
         Ok(())

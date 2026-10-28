@@ -4,8 +4,6 @@ mod derived;
 mod estimator;
 mod fold;
 mod history;
-#[cfg(test)]
-mod host;
 pub(crate) mod kernels;
 mod line_ring;
 mod reading;
@@ -45,8 +43,8 @@ pub(crate) use self::derived::{
     DerivedCoefficients,
     NoiseConsumer,
 };
-pub(crate) use self::fold::{Fold, FoldSettings, NoiseSettings};
-pub(crate) use self::history::{NOISE_WINDOW_LEN, NOISE_WINDOW_RADIUS, ReadingHistory, WindowBounds};
+pub(crate) use self::fold::{FoldSettings, NoiseSettings};
+pub(crate) use self::history::{NOISE_WINDOW_LEN, NOISE_WINDOW_RADIUS, WindowBounds};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::snapshot::NoiseSnapshot;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]

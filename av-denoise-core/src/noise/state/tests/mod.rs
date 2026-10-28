@@ -23,6 +23,9 @@ use super::{
     BatchNames,
     CURRENT_MAP,
     CURVE_BATCH,
+    HISTORY_MAPS,
+    HISTORY_RECORDS,
+    HISTORY_RESULTS,
     IMMERKAER_BATCH,
     QUARTER_CLASSES,
     QUARTER_LUMAS,
@@ -373,6 +376,11 @@ impl NoiseState {
         buffers.push((CURRENT_MAP, Some(&self.current_map)));
         buffers.push((STREAM_STATE, Some(&measurement.fold_state)));
 
+        let history = &measurement.history;
+        buffers.push((HISTORY_RECORDS, Some(history.records())));
+        buffers.push((HISTORY_RESULTS, Some(history.results())));
+        buffers.push((HISTORY_MAPS, history.maps()));
+
         buffers
     }
 
@@ -448,6 +456,47 @@ impl NoiseState {
         let words = f32::from_bytes(&bytes);
 
         ReadingRecord::from_words(words)
+    }
+
+    /// Reads back what the history holds for stream frame `frame`.
+    ///
+    /// The map is empty without a strength map.
+    pub(crate) fn read_history_frame(&self, frame: u32) -> (ReadingRecord, [f32; 4], Vec<f32>) {
+        let history = &self.measurement().history;
+        let slot = (frame % history.capacity()) as usize;
+
+        let records = self.read_words(history.records());
+        let reading_words = READING_WORDS as usize;
+        let reading_start = slot * reading_words;
+        let reading_end = reading_start + reading_words;
+        let reading = ReadingRecord::from_words(&records[reading_start..reading_end]);
+
+        let results = self.read_words(history.results());
+        let results_start = slot * RESULTS_PER_SLOT;
+        let mut sums = [0.0f32; RESULTS_PER_SLOT];
+        sums.copy_from_slice(&results[results_start..results_start + RESULTS_PER_SLOT]);
+
+        let map_len = history.map_len() as usize;
+        let map = match history.maps() {
+            Some(maps) => {
+                let words = self.read_words(maps);
+                let map_start = slot * map_len;
+                words[map_start..map_start + map_len].to_vec()
+            },
+            None => Vec::new(),
+        };
+
+        (reading, sums, map)
+    }
+
+    fn read_words(&self, handle: &Handle) -> Vec<f32> {
+        let bytes = self
+            .client
+            .read_one(handle.clone())
+            .expect("the buffer reads back");
+        let words = f32::from_bytes(&bytes);
+
+        words.to_vec()
     }
 
     /// Reads the partials, the results row and the records of `slot` back.

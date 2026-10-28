@@ -630,15 +630,14 @@ impl Benchmark for ReadingBench {
 /// Which launch of the stream state a fold row times.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FoldStage {
-    /// A fold that takes a sample and a curve, with no map.
-    Fold,
-    /// A fold that also copies a 1080p luma map.
-    FoldWithMap,
-    /// A fold that also writes the offset tables of a radius 2 search window, with no map.
-    FoldWithTables,
-    /// A window fold over a full window of one reading, with a 1080p luma map.
+    /// A window fold over a full window of one reading with a sample and a curve, with no map.
+    WindowWithoutMap,
+    /// A window fold that also folds a 1080p luma map.
     Window,
-    Reset,
+    /// A window fold that also writes the offset tables of a radius 2 search window, with no map.
+    WindowWithTables,
+    /// The copy of one reading and its 1080p luma map into the history.
+    Record,
 }
 
 /// The search radius the offset table fold row writes tables for.
@@ -647,8 +646,7 @@ const FOLD_TABLE_RADIUS: u32 = 2;
 /// Times one launch of the stream state on a 1080p luma plane.
 ///
 /// `prepare` measures a reading of the smooth gradient into slot 1, which has a sample and a
-/// curve, and folds it once, so every timed fold adopts that reading. The window row folds a full
-/// window of copies of that reading.
+/// curve, records it as every frame of a full window and folds that window once.
 pub struct FoldBench {
     pub client: Client,
     pub stage: FoldStage,
@@ -657,11 +655,10 @@ pub struct FoldBench {
 impl FoldBench {
     fn queue_stage(&self, reading: &NoiseReading) {
         match self.stage {
-            FoldStage::Fold | FoldStage::FoldWithMap | FoldStage::FoldWithTables => {
-                reading.queue_fold().expect("the fold queues")
+            FoldStage::Record => reading.queue_record(),
+            FoldStage::WindowWithoutMap | FoldStage::Window | FoldStage::WindowWithTables => {
+                reading.queue_window_fold().expect("the window fold queues")
             },
-            FoldStage::Window => reading.queue_window_fold().expect("the window fold queues"),
-            FoldStage::Reset => reading.queue_reset(),
         }
     }
 }
@@ -678,25 +675,21 @@ impl Benchmark for FoldBench {
             curve: true,
         };
         let ring = gradient.ring();
-        let has_map = matches!(self.stage, FoldStage::FoldWithMap | FoldStage::Window);
+        let has_map = matches!(self.stage, FoldStage::Window | FoldStage::Record);
         let map = has_map.then_some(READING_MAP);
-        let offset_tables = (self.stage == FoldStage::FoldWithTables).then_some(FOLD_TABLE_RADIUS);
+        let offset_tables = (self.stage == FoldStage::WindowWithTables).then_some(FOLD_TABLE_RADIUS);
         let options = ReadingOptions {
             luma_fields: true,
             map,
             offset_tables,
         };
         let stored_ch = stored_channels(1);
-        let mut reading = NoiseReading::new(&self.client, WIDTH, HEIGHT, 1, stored_ch, &ring, options)
+        let reading = NoiseReading::new(&self.client, WIDTH, HEIGHT, 1, stored_ch, &ring, options)
             .expect("the stats queue");
 
         reading.queue_reading();
-        reading.queue_fold().expect("the fold queues");
-
-        if self.stage == FoldStage::Window {
-            reading.record_window().expect("the window history records");
-            reading.queue_window_fold().expect("the window fold queues");
-        }
+        reading.record_window();
+        reading.queue_window_fold().expect("the window fold queues");
 
         self.sync();
 
@@ -718,11 +711,10 @@ impl Benchmark for FoldBench {
 
     fn name(&self) -> String {
         let stage = match self.stage {
-            FoldStage::Fold => "fold",
-            FoldStage::FoldWithMap => "fold_with_map",
-            FoldStage::FoldWithTables => "fold_with_tables",
+            FoldStage::WindowWithoutMap => "window_without_map",
             FoldStage::Window => "window",
-            FoldStage::Reset => "reset",
+            FoldStage::WindowWithTables => "window_with_tables",
+            FoldStage::Record => "record",
         };
 
         format!("noise_fold/{stage}/1080p_luma")

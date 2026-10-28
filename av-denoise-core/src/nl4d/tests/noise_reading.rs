@@ -286,3 +286,100 @@ fn static_flat_noise_map_clip_reads_as_raw() {
     eprintln!("static flat clip searched non-zero vector share per centre: {searched_shares:?}");
     eprintln!("static flat clip followed share per centre: {followed_shares:?}");
 }
+
+/// The synthetic quiet stream reads about 5% above its true sigma once settled, so the first
+/// passes are held to the settled reading of the same stream run fresh.
+#[test]
+fn scene_start_reads_from_the_scene_itself() {
+    const LOUD_SIGMA: f32 = 6.0 / 255.0;
+    let loud = panning_frames(PAN_WIDTH, PAN_HEIGHT, 0, PAN_FRAMES, LOUD_SIGMA, PAN_SEED);
+    let quiet = panning_frames(PAN_WIDTH, PAN_HEIGHT, 0, PAN_FRAMES, PAN_SIGMA, 31);
+    let params = reading_params(ChannelMode::Luma, mvtools(16, 8));
+    let radius = params.temporal_radius as usize;
+
+    let fresh = run_stream(params.clone(), PAN_WIDTH, PAN_HEIGHT, &quiet, |_, _| {});
+    let settled = folded_temporal_sigma(&fresh);
+
+    let client = make_client();
+    let mut denoiser =
+        Nl4dDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT).expect("construction failed");
+
+    for frame in &loud {
+        denoiser.push_frame(frame);
+        denoiser.denoise().expect("denoise failed");
+    }
+
+    let loud_sigma = folded_temporal_sigma(&denoiser);
+    assert!(
+        loud_sigma > 2.0 * PAN_SIGMA,
+        "the first stream reads {loud_sigma}"
+    );
+
+    denoiser.reset_stream();
+
+    for frame in &quiet[..=2 * radius] {
+        denoiser.push_frame(frame);
+        denoiser.denoise().expect("denoise failed");
+    }
+
+    let sigma = folded_temporal_sigma(&denoiser);
+    let rel_err = (sigma - settled).abs() / settled;
+    assert!(
+        rel_err <= 0.05,
+        "the first passes after the reset read {sigma} vs the settled {settled} (rel err {rel_err:.3})"
+    );
+}
+
+/// The derived sigma of each of a panning continuation stream's first passes, beside the raw
+/// reading of frame 1 against frame 0.
+fn continuation_pass_sigmas(temporal_radius: u32) -> (Vec<f32>, f32) {
+    let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, PAN_SHIFT, PAN_FRAMES, PAN_SIGMA, PAN_SEED);
+    let mut params = reading_params(ChannelMode::Luma, mvtools(16, 8));
+    params.temporal_radius = temporal_radius;
+    let radius = temporal_radius as usize;
+    let client = make_client();
+    let mut denoiser =
+        Nl4dDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT).expect("construction failed");
+    denoiser.mark_continuation();
+
+    let mut sigmas = Vec::new();
+    for (index, frame) in frames.iter().enumerate() {
+        denoiser.push_frame(frame);
+        denoiser.denoise().expect("denoise failed");
+
+        let first_passes = 2 * radius..=3 * radius;
+        if !first_passes.contains(&index) {
+            continue;
+        }
+
+        let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
+        sigmas.push(snapshot.derived.sigma[0]);
+    }
+
+    let raw = raw_reading_sigma(&frames[0], &frames[1], PAN_WIDTH, PAN_HEIGHT, 1)
+        .expect("the raw reference has a sample");
+
+    (sigmas, raw[0])
+}
+
+#[test]
+fn a_panning_continuation_folds_only_compensated_samples() {
+    for temporal_radius in [2, 3] {
+        let (sigmas, raw) = continuation_pass_sigmas(temporal_radius);
+
+        assert!(!sigmas.is_empty(), "radius {temporal_radius}: no pass ran");
+        for (pass, sigma) in sigmas.iter().enumerate() {
+            let rel_err = (sigma - PAN_SIGMA).abs() / PAN_SIGMA;
+            assert!(
+                rel_err <= 0.10,
+                "radius {temporal_radius} pass {pass}: derived sigma {sigma} vs true {PAN_SIGMA} \
+                 (rel err {rel_err:.3})"
+            );
+            assert!(
+                *sigma <= 0.5 * raw,
+                "radius {temporal_radius} pass {pass}: derived sigma {sigma} is not well below the \
+                 uncompensated reading {raw}"
+            );
+        }
+    }
+}

@@ -45,6 +45,8 @@ pub struct NlmDenoiser {
     pub(super) real_pushes: usize,
     /// Whether each ring slot holds a copy of the frame before it rather than a pushed frame.
     pub(super) duplicate_slots: Vec<bool>,
+    /// The stream frame each ring slot holds, where a duplicate holds the frame it copies.
+    pub(super) slot_frames: Vec<u32>,
 
     /// The frame ring, one slot per frame in the window.
     pub(super) input_buf: Handle,
@@ -131,8 +133,7 @@ pub struct NlmDenoiser {
 
     /// Whether the stream's edges run off-centre passes instead of copied padding.
     ///
-    /// With it on, a stream gets no leading copies and a centre with no temporal reading
-    /// borrows the nearest one ahead.
+    /// With it on, a stream gets no leading copies.
     pub(super) shifted_edges: bool,
 }
 
@@ -319,6 +320,7 @@ impl NlmDenoiser {
         };
 
         let duplicate_slots = vec![false; total_frames as usize];
+        let slot_frames = vec![0u32; total_frames as usize];
 
         let mut device_timer = DeviceTimer::default();
         let ledger = kernels.ledger().cloned();
@@ -333,6 +335,7 @@ impl NlmDenoiser {
             frames_loaded: 0,
             real_pushes: 0,
             duplicate_slots,
+            slot_frames,
             input_buf,
             search_buf: None,
             reference_buf,
@@ -462,13 +465,13 @@ impl NlmDenoiser {
 
     /// Resets the stream state so the next push starts a fresh temporal stream.
     ///
-    /// The GPU noise state queues a reset. Every other GPU buffer is left alone, because a fresh
-    /// stream writes every slot before reading it.
+    /// The noise state starts a new stream of recorded frames. Every GPU buffer is left alone,
+    /// because a fresh stream writes every slot before reading it.
     pub fn reset_stream_state(&mut self) {
         self.ring_head = 0;
         self.frames_loaded = 0;
         self.next_output_slot = 0;
         self.real_pushes = 0;
-        self.queue_noise_reset();
+        self.noise.reset_stream();
     }
 }

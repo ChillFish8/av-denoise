@@ -18,7 +18,6 @@ use crate::noise::NoiseState;
 use crate::noise::{
     DerivedCoefficients,
     DerivedValues,
-    Fold,
     FoldSettings,
     NoiseConsumer,
     NoiseSettings,
@@ -28,6 +27,7 @@ use crate::noise::{
     StatsMotion,
     StrengthMapKind,
     TEMPORAL_QUARTER_SIZE,
+    WindowBounds,
 };
 
 /// The geometry the front's noise state measures.
@@ -89,16 +89,25 @@ impl NlmDenoiser {
         self.device_timer.set_every(every);
     }
 
-    /// Queues the noise statistics and the slot reading for the frame just written to `slot`.
+    /// Queues the noise statistics and the slot reading for stream frame `frame`, just written to
+    /// `slot`, and records the reading.
     ///
-    /// A stream's first frame has no predecessor, so its temporal record is zeroed instead.
-    pub(super) fn queue_noise_stats(&self, slot: u32) -> Result<(), anyhow::Error> {
+    /// A stream's first frame has no predecessor, so its temporal record is zeroed instead. With
+    /// motion compensation the record keeps only the Immerkær values, since only a pass's
+    /// compensated re-read may give the frame a temporal sample.
+    pub(super) fn queue_noise_stats(&self, slot: u32, frame: u32) -> Result<(), anyhow::Error> {
         let total_frames = self.params.total_frames();
         let slot_prev = (slot + total_frames - 1) % total_frames;
         let previous = (self.ring_head != 0).then_some(slot_prev);
 
         self.noise.queue_stats(&self.input_buf, slot, previous)?;
         self.noise.queue_reading(slot)?;
+
+        if self.mc_ctx.is_some() {
+            self.noise.record_spatial_reading(slot, frame);
+        } else {
+            self.noise.record_reading(slot, frame);
+        }
 
         Ok(())
     }
@@ -113,7 +122,7 @@ impl NlmDenoiser {
     }
 
     /// Re-measures the centre of a pass at `center_t` against an adjacent frame along the pass's
-    /// motion, then re-reads its slot.
+    /// motion, then re-reads and re-records its slot.
     ///
     /// It prefers the previous frame and falls back to the next one, which a scene's first frame
     /// needs. It needs a measured noise state, motion compensation and an adjacent frame in the
@@ -166,17 +175,10 @@ impl NlmDenoiser {
             .queue_compensated_stats(&self.input_buf, centre_slot, neighbour_slot, motion)?;
         self.noise.queue_reading(centre_slot)?;
 
+        let frame = self.slot_frames[centre_slot as usize];
+        self.noise.record_reading(centre_slot, frame);
+
         Ok(())
-    }
-
-    /// Queues `fold` into the GPU noise state when the noise is estimated automatically.
-    fn queue_noise_fold(&self, fold: Fold) -> Result<(), anyhow::Error> {
-        self.noise.queue_fold(fold)
-    }
-
-    /// Queues the reset of the GPU noise state when the noise is estimated automatically.
-    pub(super) fn queue_noise_reset(&self) {
-        self.noise.queue_reset();
     }
 
     /// Applies `change` to the noise settings and refreshes the fixed derived values to match.
@@ -200,11 +202,6 @@ impl NlmDenoiser {
     /// Sets what the consuming denoiser makes of the noise, before the first push.
     pub(crate) fn set_noise_consumer(&mut self, consumer: NoiseConsumer) {
         self.change_noise_settings(|settings| settings.fold.consumer = consumer);
-    }
-
-    /// Sets whether a fold whose centre has no sample borrows the first sample ahead.
-    pub(in crate::nlmeans) fn set_borrow_ahead(&mut self, on: bool) {
-        self.change_noise_settings(|settings| settings.fold.borrow_ahead = on);
     }
 
     /// Sets whether the noise state keeps the NLM offset tables of the search window, before the
@@ -278,35 +275,44 @@ impl NlmDenoiser {
         measured.then_some(&self.noise)
     }
 
-    /// Folds the first frame's noise estimate straight away so push-time work has a real sigma.
+    /// Folds the stream's first frame alone straight away so push-time work has a real sigma.
     ///
     /// Push-time stages such as the NLM pilot run before the first submit folds an estimate.
     ///
-    /// It must run after this push queues its reading and before `advance_ring` moves
-    /// `frames_loaded`, which the first-frame check reads. The first submit folds the same frame
-    /// again, which is harmless because it reproduces these values to within rounding.
-    pub(super) fn seed_noise_estimate_if_first_frame(&mut self, slot: u32) -> Result<(), anyhow::Error> {
+    /// It must run after this push records its reading and before `advance_ring` moves
+    /// `frames_loaded`, which the first-frame check reads.
+    pub(super) fn seed_noise_estimate_if_first_frame(&mut self) -> Result<(), anyhow::Error> {
         if self.frames_loaded != 0 || !self.noise.is_measured() {
             return Ok(());
         }
 
-        let seed = Fold::Seed { slot };
-        self.queue_noise_fold(seed)
+        let first_frame = WindowBounds::around(0, 0);
+        self.noise.queue_window_fold(first_frame)
     }
 
-    /// Folds the window centre's noise reading into the GPU noise state.
+    /// Folds the noise window around the stream frame at logical ring position `center_t`.
+    ///
+    /// With motion compensation, frames ahead of the centre hold readings their passes have not
+    /// re-measured yet, so the window stops at the centre. Otherwise it reaches every recorded
+    /// frame ahead, up to the window radius.
     pub(in crate::nlmeans) fn update_noise_estimate(&mut self, center_t: u32) -> Result<(), anyhow::Error> {
         debug_assert!(
             center_t < self.params.total_frames(),
             "center_t must be a logical ring position"
         );
 
-        let ring_start = self.ring_start();
-        let fold = Fold::Centre {
-            ring_start,
-            centre: center_t,
+        let centre_slot = self.phys_frame(center_t as i32);
+        let centre = self.slot_frames[centre_slot as usize];
+        let recorded = self.noise.stream_frame_count();
+        let newest_recorded = recorded.saturating_sub(1);
+        let newest = if self.mc_ctx.is_some() {
+            centre
+        } else {
+            newest_recorded
         };
-        self.queue_noise_fold(fold)
+        let bounds = WindowBounds::around(centre, newest);
+
+        self.noise.queue_window_fold(bounds)
     }
 
     /// The noise settings a new noise state starts from, with the default reading and consumer and
@@ -316,7 +322,6 @@ impl NlmDenoiser {
         let coefficients = self.derived_coefficients();
         let fold = FoldSettings {
             sigma_scale,
-            borrow_ahead: self.shifted_edges,
             consumer: NoiseConsumer::default(),
             coefficients,
             offset_tables: Some(self.params.search_radius),
@@ -328,10 +333,10 @@ impl NlmDenoiser {
         }
     }
 
-    /// The factors the GPU fold turns smoothed sigmas into derived values with.
+    /// The factors the GPU fold turns folded sigmas into derived values with.
     ///
     /// Each factor is a host formula evaluated at a sigma of 1, which the fold then scales by the
-    /// smoothed sigmas. A factor whose pass does not run is 0.
+    /// folded sigmas. A factor whose pass does not run is 0.
     fn derived_coefficients(&self) -> DerivedCoefficients {
         let params = &self.params;
         let auto_strength = params.hq.is_some_and(|hq| hq.auto_strength);
@@ -501,7 +506,7 @@ impl NlmDenoiser {
         Some(snapshot)
     }
 
-    /// The median chain's smoothed per-channel sigma.
+    /// The median chain's folded per-channel sigma.
     ///
     /// A fixed `sigma_override` is returned for every channel. Before the first estimate, and
     /// on the fast path, it is zero.
@@ -517,7 +522,7 @@ impl NlmDenoiser {
         leading_channels(median, channels)
     }
 
-    /// The low chain's smoothed per-channel sigma without the correlation boost.
+    /// The low chain's folded per-channel sigma without the correlation boost.
     ///
     /// A fixed `sigma_override` is returned for every channel. Before the first estimate, and
     /// on the fast path, it is zero.
@@ -533,7 +538,7 @@ impl NlmDenoiser {
         leading_channels(low_unboosted, channels)
     }
 
-    /// The temporal median's smoothed per-channel sigma.
+    /// The temporal median's folded per-channel sigma.
     ///
     /// A fixed `sigma_override` is returned for every channel. Until a trustworthy temporal
     /// reading lands, this falls back to the unboosted low chain, since zero would under-filter.

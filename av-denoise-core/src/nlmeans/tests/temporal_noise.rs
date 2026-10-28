@@ -827,62 +827,6 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
     );
 }
 
-/// On grain with true rho 2/3, blending from 0 with `EMA_ALPHA = 0.2` would read about 0.13 after
-/// the first sample, an 80% relative error. The 25% tolerance separates seeding from blending.
-#[test]
-fn rho_smoothed_seeds_from_first_sample_not_from_zero() {
-    let client = make_client();
-    let width = 128;
-    let height = 128;
-    let sigma_marginal = 8.0 / 255.0;
-    let sigma_pre = sigma_marginal / 0.375f32.sqrt();
-    let base = 0.5f32;
-    let true_rho = 2.0 / 3.0;
-
-    let params = NlmParams {
-        temporal_radius: 2,
-        search_radius: 2,
-        patch_radius: 2,
-        strength: 1.2,
-        self_weight: 1.0,
-        channels: ChannelMode::Luma,
-        prefilter: PrefilterMode::None,
-        motion_compensation: MotionCompensationMode::None,
-        hq: Some(HqParams {
-            auto_strength: true,
-            noise_floor: true,
-            sigma_override: None,
-            temporal_confidence: false,
-            thsad_scale: 1.0,
-            sigma_scale: 1.0,
-        }),
-    };
-
-    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
-    let mut first_seeded_rho = None;
-    for i in 0..(width.min(height)) {
-        let frame = correlated_noisy_frame(width, height, base, sigma_pre, 200 + i);
-        denoiser.push_frame(&frame);
-        let _ = denoiser.denoise().unwrap();
-
-        let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
-        if let Some(rho) = snapshot.rho {
-            first_seeded_rho = Some(rho);
-            break;
-        }
-    }
-
-    let first_seeded_rho =
-        first_seeded_rho.expect("estimator should hold a value after enough full-window submits");
-    let rel_err = (first_seeded_rho - true_rho).abs() / true_rho;
-    assert!(
-        rel_err <= 0.25,
-        "rho_smoothed after its first update was {first_seeded_rho} vs true rho {true_rho} \
-         (rel err {rel_err:.3}); a from-zero blend would read close to {}",
-        0.2 * true_rho
-    );
-}
-
 /// The top half is static flat content and the bottom half is fine texture panning a few pixels, both
 /// under the same noise.
 ///
@@ -1067,4 +1011,37 @@ fn held_centre_keeps_zeroed_record() {
         "a centre after a held frame is re-measured"
     );
     assert!(moved_blocks > 0, "the re-measured centre follows the pan");
+}
+
+#[test]
+fn copies_at_either_end_record_nothing() {
+    const PUSHES: usize = 6;
+    let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, PAN_SHIFT, PUSHES, PAN_SIGMA, PAN_SEED);
+    let motion_compensation = MotionCompensationMode::mvtools_default();
+    let params = hq_reading_params(motion_compensation);
+    let client = make_client();
+    let mut denoiser = NlmDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT);
+
+    for frame in &frames {
+        denoiser.push_frame(frame);
+        denoiser.denoise().expect("denoise failed");
+    }
+
+    // The steps of a flush without its closing reset.
+    let target = denoiser.flush_target();
+    for _ in 0..target {
+        denoiser.flush_step_gpu().expect("the flush step failed");
+    }
+
+    let noise = denoiser.measured_noise().expect("the noise is measured");
+    let recorded = noise.stream_frame_count();
+    assert_eq!(recorded, PUSHES as u32, "one recorded frame per real push");
+
+    // A copy recorded over the last real frame would drop the sample its pass re-measured.
+    let last = recorded - 1;
+    let (reading, _, _) = noise.read_history_frame(last);
+    assert!(
+        reading.sample.is_some(),
+        "the last real frame keeps its compensated sample"
+    );
 }

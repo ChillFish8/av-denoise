@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests;
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
@@ -10,6 +12,7 @@ use super::NOISE_BLOCK_1D;
 use super::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS};
 use super::derived::DerivedValues;
 use super::fold::{FoldSettings, NoiseSettings, OffsetTables, STATE_WORDS, fold_words};
+use super::history::{ReadingHistory, history_capacity};
 use super::reading::{
     CURVE_TAGS,
     IMMERKAER_SPATIAL_TAGS,
@@ -136,9 +139,13 @@ pub(super) struct Measurement {
     pub(super) min_accepted: u32,
     /// The [FOLD_WORDS](crate::noise::fold::FOLD_WORDS) settings the fold reads.
     pub(super) fold_settings: Handle,
-    /// The [STATE_WORDS](crate::noise::fold::STATE_WORDS) chains, rho, curve and classes flag of
-    /// the stream.
+    /// The [STATE_WORDS](crate::noise::fold::STATE_WORDS) chains, rho, curve and classes flag the
+    /// last fold wrote.
     pub(super) fold_state: Handle,
+    /// The readings of the latest stream frames, which every fold reads its window from.
+    pub(super) history: ReadingHistory,
+    /// The stream frames recorded since the last reset.
+    pub(super) recorded: AtomicU32,
 }
 
 /// The buffers one slot's temporal sample is built in.
@@ -320,6 +327,13 @@ impl NoiseState {
             measurement.classes = None;
         }
 
+        let map_len = map_quarters(shape, reading);
+        if measurement.history.map_len() != map_len {
+            let temporal_radius = ring_radius(shape);
+            measurement.history = ReadingHistory::new(&client, temporal_radius, map_len);
+            measurement.recorded.store(0, Ordering::Relaxed);
+        }
+
         measurement.fold_settings = fold_settings_buffer(&client, shape, settings);
     }
 
@@ -408,6 +422,10 @@ fn measurement_buffers(client: &Client, shape: NoiseShape, settings: NoiseSettin
     let state_bytes = f32::as_bytes(&state_zeros);
     let fold_state = client.create_from_slice(state_bytes);
 
+    let temporal_radius = ring_radius(shape);
+    let map_len = map_quarters(shape, reading);
+    let history = ReadingHistory::new(client, temporal_radius, map_len);
+
     Measurement {
         partials,
         results,
@@ -420,6 +438,8 @@ fn measurement_buffers(client: &Client, shape: NoiseShape, settings: NoiseSettin
         min_accepted,
         fold_settings,
         fold_state,
+        history,
+        recorded: AtomicU32::new(0),
     }
 }
 
@@ -439,6 +459,20 @@ pub(super) fn cube_count(shape: NoiseShape) -> u32 {
 pub(super) fn block_count(shape: NoiseShape) -> u32 {
     let (blocks_x, blocks_y) = temporal_stats_blocks(shape.width, shape.height);
     blocks_x * blocks_y
+}
+
+/// The temporal radius of a ring of `2r + 1` frames.
+fn ring_radius(shape: NoiseShape) -> u32 {
+    shape.frames / 2
+}
+
+/// The map quarters each history slot keeps, 0 when `settings` builds no strength map.
+fn map_quarters(shape: NoiseShape, settings: ReadingSettings) -> u32 {
+    if settings.map == StrengthMapKind::Off {
+        return 0;
+    }
+
+    quarter_count(shape)
 }
 
 /// Map quarters in one frame of `shape`.
@@ -512,6 +546,9 @@ const QUARTER_TENSORS: &str = "noise quarter tensors";
 const SLOT_MAPS: &str = "noise slot maps";
 const CURRENT_MAP: &str = "noise current map";
 const STREAM_STATE: &str = "noise stream state";
+const HISTORY_RECORDS: &str = "noise history records";
+const HISTORY_RESULTS: &str = "noise history results";
+const HISTORY_MAPS: &str = "noise history maps";
 
 /// The element count of every reading, map and stream buffer a noise state for `shape` holds.
 ///
@@ -569,6 +606,15 @@ pub(crate) fn reading_buffer_sizes(shape: NoiseShape) -> Vec<BufferSize> {
     buffers.push((CURRENT_MAP, Some(quarters)));
     let state_words = u64::from(STATE_WORDS);
     buffers.push((STREAM_STATE, Some(state_words)));
+
+    let radius = ring_radius(shape);
+    let history_slots = u64::from(history_capacity(radius));
+    let history_records = history_slots.checked_mul(u64::from(READING_WORDS));
+    let history_results = history_slots.checked_mul(RESULTS_PER_SLOT as u64);
+    let history_maps = quarters.checked_mul(history_slots);
+    buffers.push((HISTORY_RECORDS, history_records));
+    buffers.push((HISTORY_RESULTS, history_results));
+    buffers.push((HISTORY_MAPS, history_maps));
 
     buffers
 }

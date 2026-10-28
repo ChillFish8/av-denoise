@@ -293,14 +293,13 @@ fn run_all(backend: &str, client: Client) {
         });
     }
 
-    // The stream state's launches, a fold alone, with the map copy and with the offset tables, the
-    // window fold, and the reset.
+    // The stream state's launches, a window fold alone, with the map and with the offset tables,
+    // and the history record.
     let fold_stages = [
-        FoldStage::Fold,
-        FoldStage::FoldWithMap,
-        FoldStage::FoldWithTables,
+        FoldStage::WindowWithoutMap,
         FoldStage::Window,
-        FoldStage::Reset,
+        FoldStage::WindowWithTables,
+        FoldStage::Record,
     ];
     for stage in fold_stages {
         run(FoldBench {

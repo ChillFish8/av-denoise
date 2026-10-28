@@ -13,10 +13,14 @@ impl NlmDenoiser {
     pub(super) fn run_post_upload_stages(&mut self, slot: usize) -> Result<(), anyhow::Error> {
         let client = self.client.clone();
         let frame_slot = slot as u32;
+        let frame = self.real_pushes as u32;
 
-        timed(&client, self, move |front| front.queue_noise_stats(frame_slot))?;
+        timed(&client, self, move |front| {
+            front.queue_noise_stats(frame_slot, frame)
+        })?;
         self.duplicate_slots[slot] = false;
-        self.seed_noise_estimate_if_first_frame(frame_slot)?;
+        self.slot_frames[slot] = frame;
+        self.seed_noise_estimate_if_first_frame()?;
 
         timed(&client, self, move |front| front.run_reference_stages(slot))?;
 

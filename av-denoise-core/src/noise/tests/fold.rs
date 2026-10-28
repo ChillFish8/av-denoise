@@ -3,15 +3,11 @@ use cubecl::prelude::*;
 use super::fold_reference::{
     COEFFICIENTS,
     CONSUMER,
+    HostRecord,
     MAX_ULPS,
-    assert_ulps,
     derived_pairs,
-    host_from_snapshot,
-    host_reading,
-    host_snapshot,
+    fold_window,
     largest_relative,
-    largest_ulps,
-    relative_gap,
     state_pairs,
 };
 use super::records::{hashed_unit, ulp_gap};
@@ -21,8 +17,8 @@ use crate::noise::correlation::{CORRELATION_FACTOR_TABLE, correlation_factor};
 use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
 use crate::noise::derived::{DerivedCoefficients, DerivedValues, NoiseConsumer};
 use crate::noise::estimator::SIGMA_FLOOR;
-use crate::noise::fold::{Fold, FoldSettings, NoiseSettings};
-use crate::noise::host::HostNoise;
+use crate::noise::fold::{FoldSettings, NoiseSettings};
+use crate::noise::history::WindowBounds;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::snapshot::NoiseSnapshot;
 use crate::noise::spatial::{immerkaer_sigma_scale, sigma_from_abs_sum};
@@ -36,9 +32,9 @@ use crate::tune::tests::runtime::test_client;
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
 const FRAMES: u32 = 5;
-const CENTRE: u32 = 2;
+const RADIUS: u32 = 2;
 const MAX_RELATIVE: f32 = 1.0e-5;
-const STREAM_FOLDS: u32 = 30;
+const STREAM_FRAMES: u32 = 30;
 const LUMA_PARAMS: StrengthMapParams = StrengthMapParams {
     flat_boost: 1.5,
     shadow_soften: 0.65,
@@ -61,7 +57,7 @@ fn quarters() -> usize {
     (cols * rows) as usize
 }
 
-fn settings(map: StrengthMapKind, borrow_ahead: bool) -> NoiseSettings {
+fn settings(map: StrengthMapKind) -> NoiseSettings {
     let reading = ReadingSettings {
         luma_fields: true,
         map,
@@ -69,7 +65,6 @@ fn settings(map: StrengthMapKind, borrow_ahead: bool) -> NoiseSettings {
     };
     let fold = FoldSettings {
         sigma_scale: 1.0,
-        borrow_ahead,
         consumer: CONSUMER,
         coefficients: COEFFICIENTS,
         offset_tables: None,
@@ -86,18 +81,6 @@ fn luma_map() -> StrengthMapKind {
 fn abs_sum_for(sigma: f32) -> f32 {
     let interior = ((WIDTH - 2) * (HEIGHT - 2)) as f32;
     sigma * 6.0 * interior / immerkaer_sigma_scale()
-}
-
-/// Immerkær sums of between 1 and 5 codes on each active channel.
-fn hashed_sums(seed: u32, channels: u32) -> [f32; 4] {
-    let mut sums = [0.0f32; 4];
-    for channel in 0..channels {
-        let unit = hashed_unit(seed, 10 + channel);
-        let sigma = (1.0 + 4.0 * unit) / 255.0;
-        sums[channel as usize] = abs_sum_for(sigma);
-    }
-
-    sums
 }
 
 /// A sample with sigmas between 2 and 4 codes, lower quartiles at about 0.8 of them, and a
@@ -137,534 +120,351 @@ fn hashed_curve(seed: u32) -> NoiseCurve {
     }
 }
 
-/// A reading with a hashed Immerkær quartile and, when asked, a sample and a curve.
-fn hashed_reading(seed: u32, channels: u32, sampled: bool, curved: bool) -> ReadingRecord {
-    let mut immerkaer_low = [0.0f32; 3];
-    for channel in 0..channels {
-        let unit = hashed_unit(seed, channel);
-        immerkaer_low[channel as usize] = (1.0 + 2.0 * unit) / 255.0;
-    }
-
-    let sample = sampled.then(|| hashed_sample(seed, channels));
-    let curve = (sampled && curved).then(|| hashed_curve(seed));
-
-    ReadingRecord {
-        immerkaer_low,
-        sample,
-        accepted: 40,
-        curve,
-        populated_bins: if curve.is_some() { 6 } else { 0 },
-    }
-}
-
-/// A slot map whose every multiplier names the seed and the quarter.
-fn hashed_map(seed: u32) -> Vec<f32> {
-    hashed_map_of(seed, quarters())
-}
-
-/// A slot map of `quarters` multipliers that name the seed and the quarter.
+/// A map whose every multiplier names the seed and the quarter.
 fn hashed_map_of(seed: u32, quarters: usize) -> Vec<f32> {
     (0..quarters)
         .map(|quarter| 1.0 + 0.01 * seed as f32 + 1.0e-4 * quarter as f32)
         .collect()
 }
 
-/// A no-sample reading with no Immerkær response.
-fn empty_reading() -> ReadingRecord {
-    ReadingRecord {
+/// A record with hashed Immerkær sigmas of between 1 and 5 codes, a hashed quartile and, when
+/// asked, a sample and a curve.
+fn hashed_record(seed: u32, channels: u32, sampled: bool, curved: bool) -> HostRecord {
+    let mut immerkaer = [0.0f32; 3];
+    let mut immerkaer_low = [0.0f32; 3];
+    for channel in 0..channels {
+        let sigma_unit = hashed_unit(seed, 10 + channel);
+        let low_unit = hashed_unit(seed, channel);
+        immerkaer[channel as usize] = (1.0 + 4.0 * sigma_unit) / 255.0;
+        immerkaer_low[channel as usize] = (1.0 + 2.0 * low_unit) / 255.0;
+    }
+
+    let sample = sampled.then(|| hashed_sample(seed, channels));
+    let curve = (sampled && curved).then(|| hashed_curve(seed));
+    let reading = ReadingRecord {
+        immerkaer_low,
+        sample,
+        accepted: 40,
+        curve,
+        populated_bins: if curve.is_some() { 6 } else { 0 },
+    };
+
+    HostRecord {
+        reading,
+        immerkaer,
+        map: hashed_map_of(seed, quarters()),
+    }
+}
+
+/// A no-sample record with no Immerkær response and a map of ones.
+fn empty_record() -> HostRecord {
+    let reading = ReadingRecord {
         immerkaer_low: [0.0; 3],
         sample: None,
         accepted: 0,
         curve: None,
         populated_bins: 0,
-    }
-}
-
-/// What every slot of a ring holds.
-#[derive(Clone)]
-struct Slots {
-    readings: Vec<ReadingRecord>,
-    sums: Vec<[f32; 4]>,
-    maps: Vec<Vec<f32>>,
-}
-
-impl Slots {
-    fn empty() -> Self {
-        let frames = FRAMES as usize;
-
-        Self {
-            readings: vec![empty_reading(); frames],
-            sums: vec![[0.0; 4]; frames],
-            maps: vec![vec![1.0; quarters()]; frames],
-        }
-    }
-
-    /// Slot `slot` with a hashed reading, sums and map from `seed`.
-    fn set_hashed(&mut self, slot: u32, seed: u32, channels: u32, sampled: bool, curved: bool) {
-        let index = slot as usize;
-        self.readings[index] = hashed_reading(seed, channels, sampled, curved);
-        self.sums[index] = hashed_sums(seed, channels);
-        self.maps[index] = hashed_map(seed);
-    }
-
-    /// The maps a state with `settings` takes, none without a strength map.
-    fn maps_for(&self, settings: NoiseSettings) -> &[Vec<f32>] {
-        if settings.reading.map == StrengthMapKind::Off {
-            return &[];
-        }
-
-        &self.maps
-    }
-}
-
-/// The logical position whose sample a fold of `centre` takes, by the host's borrow rule.
-fn host_lender(readings: &[ReadingRecord], ring_start: u32, centre: u32, borrow: bool) -> u32 {
-    let centre_slot = ((ring_start + centre) % FRAMES) as usize;
-    let has_sample = readings[centre_slot].sample.is_some();
-    if has_sample || !borrow {
-        return centre;
-    }
-
-    for logical in centre + 1..FRAMES {
-        let slot = ((ring_start + logical) % FRAMES) as usize;
-        if readings[slot].sample.is_some() {
-            return logical;
-        }
-    }
-
-    centre
-}
-
-/// Folds `fold` of `slots` into `host` as the front does, returning the slot whose map the fold
-/// copies.
-fn host_fold(
-    host: &mut HostNoise,
-    slots: &Slots,
-    fold: Fold,
-    settings: NoiseSettings,
-    channels: u32,
-) -> Option<u32> {
-    let (ring_start, centre, seed) = match fold {
-        Fold::Seed { slot } => (slot, 0, true),
-        Fold::Centre { ring_start, centre } => (ring_start, centre, false),
     };
 
-    let centre_slot = (ring_start + centre) % FRAMES;
-    let centre_reading = &slots.readings[centre_slot as usize];
-    let sums = slots.sums[centre_slot as usize];
-    let mut immerkaer = [0.0f32; 3];
-    for channel in 0..channels as usize {
-        immerkaer[channel] = sigma_from_abs_sum(sums[channel], WIDTH, HEIGHT);
+    HostRecord {
+        reading,
+        immerkaer: [0.0; 3],
+        map: vec![1.0; quarters()],
     }
-
-    let sigma_scale = settings.fold.sigma_scale;
-    let active = channels as usize;
-    let immerkaer_low = centre_reading.immerkaer_low;
-
-    if seed {
-        host.fold(immerkaer, None, immerkaer_low, active, sigma_scale);
-        return None;
-    }
-
-    let borrow = settings.fold.borrow_ahead;
-    let lender = host_lender(&slots.readings, ring_start, centre, borrow);
-    let lender_slot = (ring_start + lender) % FRAMES;
-    let lender_reading = host_reading(&slots.readings[lender_slot as usize]);
-
-    host.adopt(&lender_reading);
-    host.fold(
-        immerkaer,
-        lender_reading.sample,
-        immerkaer_low,
-        active,
-        sigma_scale,
-    );
-
-    let copies = lender_reading.sample.is_some() && lender_reading.classes.is_some();
-    copies.then_some(lender_slot)
 }
 
-/// The largest gaps a stream showed.
-#[derive(Debug, Default, Clone, Copy)]
-struct StreamGaps {
-    /// Each fold against the host fold of the GPU's previous state.
-    step_ulps: u32,
-    /// The derived values against `derive_host` of the GPU's own state.
-    derived_ulps: u32,
-    /// The state and derived values against a host stream run alongside.
-    stream_ulps: u32,
-    stream_relative: f32,
+/// The Immerkær abs sums of `record`.
+fn record_sums(record: &HostRecord) -> [f32; 4] {
+    let mut sums = [0.0f32; 4];
+    for (sum, &sigma) in sums.iter_mut().zip(&record.immerkaer) {
+        *sum = abs_sum_for(sigma);
+    }
+
+    sums
 }
 
-/// A GPU noise state and the host reference beside it, over one ring.
+/// The stream record of `frame`, every third without a sample and every fourth sampled one
+/// without a curve.
+fn stream_record(frame: u32, channels: u32, seed: u32) -> HostRecord {
+    let sampled = frame % 3 != 1;
+    let curved = frame % 4 != 2;
+
+    hashed_record(seed + frame, channels, sampled, curved)
+}
+
+/// Everything one window fold writes.
+#[derive(Debug, Clone, PartialEq)]
+struct FoldRun {
+    snapshot: NoiseSnapshot,
+    curve: Vec<f32>,
+    map: Vec<f32>,
+}
+
+impl FoldRun {
+    fn bits(&self) -> Vec<u32> {
+        let derived = self.snapshot.derived.to_words();
+        let words = derived.iter().chain(&self.curve).chain(&self.map);
+
+        words.map(|word| word.to_bits()).collect()
+    }
+}
+
+/// A GPU noise state fed one frame per push through a ring of `FRAMES` slots, with the host
+/// records of every frame since the last reset beside it.
 struct Stream {
     client: Client,
     channels: u32,
     settings: NoiseSettings,
     state: NoiseState,
-    slots: Slots,
-    host: HostNoise,
-    /// The map the host expects the GPU to hold, ones until a lender with classes.
-    host_map: Vec<f32>,
-    previous: NoiseSnapshot,
-    gaps: StreamGaps,
+    readings: Vec<ReadingRecord>,
+    sums: Vec<[f32; 4]>,
+    maps: Vec<Vec<f32>>,
+    records: Vec<HostRecord>,
 }
 
 impl Stream {
-    fn new(channels: u32, settings: NoiseSettings, slots: Slots) -> Self {
+    fn new(channels: u32, settings: NoiseSettings) -> Self {
         let client = test_client();
         let shape = shape(&client, channels);
-        let maps = slots.maps_for(settings);
-        let state =
-            NoiseState::with_readings_for_test(&client, shape, settings, &slots.readings, &slots.sums, maps);
-        let previous = state.snapshot().expect("the snapshot reads back");
+        let frames = FRAMES as usize;
+        let empty = empty_record();
+        let readings = vec![empty.reading.clone(); frames];
+        let sums = vec![[0.0f32; 4]; frames];
+        let maps = vec![empty.map.clone(); frames];
+        let slot_maps = Self::maps_for(&maps, settings);
+        let state = NoiseState::with_readings_for_test(&client, shape, settings, &readings, &sums, slot_maps);
 
         Self {
             client,
             channels,
             settings,
             state,
-            slots,
-            host: HostNoise::default(),
-            host_map: vec![1.0; quarters()],
-            previous,
-            gaps: StreamGaps::default(),
+            readings,
+            sums,
+            maps,
+            records: Vec::new(),
         }
     }
 
-    /// Replaces the ring's slots on both sides.
-    fn write(&mut self, slots: Slots) {
-        let maps = slots.maps_for(self.settings);
-        self.state
-            .set_readings_for_test(&slots.readings, &slots.sums, maps);
-        self.slots = slots;
+    /// The maps a state with `settings` takes, none without a strength map.
+    fn maps_for(maps: &[Vec<f32>], settings: NoiseSettings) -> &[Vec<f32>] {
+        if settings.reading.map == StrengthMapKind::Off {
+            return &[];
+        }
+
+        maps
     }
 
-    /// Folds on both sides and checks the GPU against the host, returning the GPU snapshot.
-    ///
-    /// Each fold is within 2 ulp of the host fold of the GPU's previous state, and the derived
-    /// values within 2 ulp of `derive_host` of the GPU's state. The stream is within 1e-5 relative
-    /// of the host stream. The current map and the curve buffer are checked bit for bit.
-    fn fold(&mut self, fold: Fold) -> NoiseSnapshot {
+    /// Writes `record` into the next stream frame's ring slot and records it.
+    fn push(&mut self, record: HostRecord) {
+        let frame = self.records.len() as u32;
+        let slot = frame % FRAMES;
+        let index = slot as usize;
+        self.readings[index] = record.reading.clone();
+        self.sums[index] = record_sums(&record);
+        self.maps[index] = record.map.clone();
+
+        let slot_maps = Self::maps_for(&self.maps, self.settings);
+        self.state
+            .set_readings_for_test(&self.readings, &self.sums, slot_maps);
+        self.state.record_reading(slot, frame);
+        self.records.push(record);
+    }
+
+    /// Folds the window centred on `centre` over every recorded frame and checks it against the
+    /// host model.
+    fn fold(&mut self, centre: u32) -> FoldRun {
+        let newest = self.state.stream_frame_count() - 1;
+        let bounds = WindowBounds::around(centre, newest);
+        self.state
+            .queue_window_fold(bounds)
+            .expect("the window fold queues");
+
+        let run = FoldRun {
+            snapshot: self.state.snapshot().expect("the snapshot reads back"),
+            curve: self.state.read_curve(),
+            map: self.state.read_current_map(),
+        };
+        self.check(&run, bounds);
+
+        run
+    }
+
+    fn check(&self, run: &FoldRun, bounds: WindowBounds) {
         let channels = self.channels;
         let settings = self.settings;
-        self.state.queue_fold(fold).expect("the fold queues");
-        let gpu = self.state.snapshot().expect("the snapshot reads back");
+        let host = fold_window(&self.records, bounds, settings.fold.sigma_scale);
+        let expected = host.snapshot(settings, channels);
 
-        let mut stepped = host_from_snapshot(&self.previous, channels);
-        host_fold(&mut stepped, &self.slots, fold, settings, channels);
-        let step = host_snapshot(&stepped, settings, channels);
-        let step_pairs = state_pairs(&gpu, &step, channels);
-        assert_ulps(&step_pairs, "one fold");
+        let mut pairs = state_pairs(&run.snapshot, &expected, channels);
+        let derived = derived_pairs(&run.snapshot.derived, &expected.derived, channels);
+        pairs.extend(derived);
+        let relative = largest_relative(&pairs);
+        assert!(relative <= MAX_RELATIVE, "the window is {relative:e} apart");
 
-        let fold_settings = settings.fold;
-        let own_derived = fold_settings.coefficients.derive_host(
-            &gpu,
-            channels as usize,
-            fold_settings.consumer,
-            settings.reading.map,
-        );
-        let own_pairs = derived_pairs(&gpu.derived, &own_derived, channels);
-        assert_ulps(&own_pairs, "the derived values");
-
-        let copied = host_fold(&mut self.host, &self.slots, fold, settings, channels);
-        if let (Some(slot), true) = (copied, settings.reading.map != StrengthMapKind::Off) {
-            self.host_map = self.slots.maps[slot as usize].clone();
-        }
-
-        let expected = host_snapshot(&self.host, settings, channels);
-        let mut stream_pairs = state_pairs(&gpu, &expected, channels);
-        let stream_derived = derived_pairs(&gpu.derived, &expected.derived, channels);
-        stream_pairs.extend(stream_derived);
-        let stream_relative = largest_relative(&stream_pairs);
-        assert!(
-            stream_relative <= MAX_RELATIVE,
-            "the stream is {stream_relative:e} apart"
-        );
-
-        self.check_buffers(&gpu);
-
-        let step_ulps = largest_ulps(&step_pairs);
-        let derived_ulps = largest_ulps(&own_pairs);
-        let stream_ulps = largest_ulps(&stream_pairs);
-        self.gaps.step_ulps = self.gaps.step_ulps.max(step_ulps);
-        self.gaps.derived_ulps = self.gaps.derived_ulps.max(derived_ulps);
-        self.gaps.stream_ulps = self.gaps.stream_ulps.max(stream_ulps);
-        self.gaps.stream_relative = self.gaps.stream_relative.max(stream_relative);
-        self.previous = gpu.clone();
-
-        gpu
-    }
-
-    /// Checks the curve buffer against the snapshot and, with a map, the current map against the
-    /// host's.
-    fn check_buffers(&self, gpu: &NoiseSnapshot) {
-        let curve = self.state.read_curve();
-        let expected_curve = match gpu.curve {
-            Some((ratios, _)) if gpu.derived.curve_valid => ratios.to_vec(),
+        let expected_curve = match expected.curve {
+            Some((ratios, _)) if expected.derived.curve_valid => ratios.to_vec(),
             _ => vec![0.0; NOISE_CURVE_BINS],
         };
-        assert_eq!(curve, expected_curve, "the curve buffer");
+        assert_eq!(run.curve, expected_curve, "the curve buffer");
 
-        if self.settings.reading.map == StrengthMapKind::Off {
+        if settings.reading.map == StrengthMapKind::Off {
             return;
         }
 
-        let map = self.state.read_current_map();
-        assert_eq!(map, self.host_map, "the current map");
+        let ones = vec![1.0f32; quarters()];
+        let expected_map = host.map.unwrap_or(ones);
+        assert_eq!(run.map, expected_map, "the current map");
     }
 
-    fn finish(&self) -> StreamGaps {
+    fn reset(&mut self) {
+        self.state.reset_stream();
+        self.records.clear();
+    }
+
+    fn finish(&self) {
         sync(&self.client).expect("the device syncs");
-        self.gaps
     }
 }
 
-/// The slots after `fold` writes its new reading, every third without a sample and every fourth
-/// sampled one without a curve.
-fn stream_slots(slots: &mut Slots, fold: u32, channels: u32, seed: u32) {
-    let slot = fold % FRAMES;
-    let sampled = fold % 3 != 1;
-    let curved = fold % 4 != 2;
-    slots.set_hashed(slot, seed + fold, channels, sampled, curved);
-}
+/// Streams `STREAM_FRAMES` frames, folding the first frame alone and then the ring centre after
+/// every push from a full ring.
+fn run_stream(channels: u32, settings: NoiseSettings, seed: u32) -> Vec<FoldRun> {
+    let mut stream = Stream::new(channels, settings);
+    let mut runs = Vec::new();
 
-/// Runs a seed then a fold per new slot, writing one slot ahead of each fold as a stream does.
-fn run_stream(channels: u32, settings: NoiseSettings, seed: u32) -> (StreamGaps, Vec<NoiseSnapshot>) {
-    let mut slots = Slots::empty();
-    for fold in 0..FRAMES {
-        stream_slots(&mut slots, fold, channels, seed);
+    for frame in 0..STREAM_FRAMES {
+        let record = stream_record(frame, channels, seed);
+        stream.push(record);
+
+        let recorded = stream.state.stream_frame_count();
+        assert_eq!(recorded, frame + 1, "one recorded frame per push");
+
+        if frame == 0 {
+            let seeded = stream.fold(0);
+            runs.push(seeded);
+        }
+
+        if frame >= 2 * RADIUS {
+            let centred = stream.fold(frame - RADIUS);
+            runs.push(centred);
+        }
     }
 
-    let mut stream = Stream::new(channels, settings, slots.clone());
-    let mut snapshots = Vec::new();
-    let seeded = stream.fold(Fold::Seed { slot: 0 });
-    snapshots.push(seeded);
-
-    for fold in 0..STREAM_FOLDS {
-        let ring_start = fold % FRAMES;
-        let centre = Fold::Centre {
-            ring_start,
-            centre: CENTRE,
-        };
-        let snapshot = stream.fold(centre);
-        snapshots.push(snapshot);
-
-        // The oldest slot takes the next frame.
-        stream_slots(&mut slots, fold + FRAMES, channels, seed);
-        stream.write(slots.clone());
-    }
-
-    let gaps = stream.finish();
-    (gaps, snapshots)
+    stream.finish();
+    runs
 }
 
 #[test]
-fn the_fold_matches_the_host_fold_over_a_stream() {
+fn the_fold_matches_the_host_window_over_a_stream() {
     let cases = [
-        (1, settings(luma_map(), true), "luma, luma map, borrowing"),
+        (1, settings(luma_map()), "luma, luma map"),
         (
             2,
-            settings(StrengthMapKind::Chroma { flat_boost: 1.5 }, true),
+            settings(StrengthMapKind::Chroma { flat_boost: 1.5 }),
             "chroma, chroma map",
         ),
-        (3, settings(StrengthMapKind::Off, false), "three channels, no map"),
+        (3, settings(StrengthMapKind::Off), "three channels, no map"),
     ];
 
     for (channels, case_settings, what) in cases {
-        let (gaps, snapshots) = run_stream(channels, case_settings, 17);
-        let curved = snapshots
+        let runs = run_stream(channels, case_settings, 17);
+        let curved = runs.iter().filter(|run| run.snapshot.curve.is_some()).count();
+        let sampled = runs
             .iter()
-            .filter(|snapshot| snapshot.curve.is_some())
+            .filter(|run| run.snapshot.temporal_only.is_some())
             .count();
-        let missing = snapshots
-            .iter()
-            .filter(|snapshot| snapshot.curve.is_none())
-            .count();
-        println!("{what}: {gaps:?}");
 
         assert!(curved > 0, "{what}: no fold holds a curve");
-        assert!(missing > 0, "{what}: every fold holds a curve");
+        assert!(sampled > 0, "{what}: no fold holds a sample");
     }
 }
 
-/// A one-slot ring at `slot` of `slots`, with a hashed sampled and curved reading there.
-fn sampled_slots(slot: u32, channels: u32, seed: u32) -> Slots {
-    let mut slots = Slots::empty();
-    slots.set_hashed(slot, seed, channels, true, true);
-    slots
-}
-
 #[test]
-fn the_seed_folds_immerkaer_alone_and_keeps_the_curve() {
-    let slots = sampled_slots(1, 1, 3);
-    let mut stream = Stream::new(1, settings(luma_map(), false), slots);
-    let snapshot = stream.fold(Fold::Seed { slot: 1 });
-    let map = stream.state.read_current_map();
-    stream.finish();
+fn a_reset_clears_the_history() {
+    const CHANNELS: u32 = 2;
+    let stream_settings = settings(StrengthMapKind::Chroma { flat_boost: 1.5 });
+    let mut used = Stream::new(CHANNELS, stream_settings);
+    let mut fresh = Stream::new(CHANNELS, stream_settings);
 
-    let ones = vec![1.0f32; quarters()];
-    assert!(snapshot.median.is_some());
-    assert_eq!(snapshot.temporal_only, None);
-    assert_eq!(snapshot.rho, None);
-    assert_eq!(snapshot.curve, None);
-    assert!(!snapshot.classes_present);
-    assert_eq!(map, ones);
-}
-
-/// Logical 0 and 1 have no sample, 2 and 3 do, from a ring that starts in slot 3.
-fn borrowing_slots(channels: u32) -> Slots {
-    let ring_start = 3;
-    let mut slots = Slots::empty();
-    for logical in 0..FRAMES {
-        let slot = (ring_start + logical) % FRAMES;
-        let sampled = logical == 2 || logical == 3;
-        slots.set_hashed(slot, 100 + logical, channels, sampled, true);
+    for frame in 0..12 {
+        let record = hashed_record(300 + frame, CHANNELS, true, true);
+        used.push(record);
     }
 
-    slots
+    used.fold(8);
+    used.reset();
+
+    let recorded = used.state.stream_frame_count();
+    let early = WindowBounds::around(0, 0);
+    let refused = used.state.queue_window_fold(early);
+    assert_eq!(recorded, 0);
+    assert!(refused.is_err(), "a fold before any frame is recorded");
+
+    for frame in 0..3 {
+        let record = hashed_record(400 + frame, CHANNELS, frame != 1, true);
+        used.push(record.clone());
+        fresh.push(record);
+    }
+
+    let after_reset = used.fold(0);
+    let from_fresh = fresh.fold(0);
+    used.finish();
+
+    assert_eq!(after_reset.bits(), from_fresh.bits());
+    assert_eq!(after_reset.snapshot, from_fresh.snapshot);
 }
 
 #[test]
-fn the_fold_borrows_the_first_sample_ahead() {
-    let slots = borrowing_slots(1);
-    let lender_slot = (3 + 2) % FRAMES;
-    let lender = slots.readings[lender_slot as usize].clone();
-    let lender_map = slots.maps[lender_slot as usize].clone();
-    let mut stream = Stream::new(1, settings(luma_map(), true), slots);
+fn a_window_never_reaches_past_the_newest_recorded_frame() {
+    let mut stream = Stream::new(1, settings(StrengthMapKind::Off));
+    let record = hashed_record(5, 1, true, false);
+    stream.push(record);
 
-    let first = Fold::Centre {
-        ring_start: 3,
-        centre: 0,
-    };
-    let snapshot = stream.fold(first);
-    let map = stream.state.read_current_map();
+    let bounds = WindowBounds::around(1, 1);
+    let refused = stream.state.queue_window_fold(bounds);
     stream.finish();
 
-    let sample = lender.sample.expect("logical 2 has a sample");
-    let curve = lender.curve.expect("logical 2 has a curve");
-    let temporal = snapshot
-        .temporal_only
-        .expect("the borrowed sample seeds the temporal chain");
-    let expected_temporal = sample.sigma[0].max(SIGMA_FLOOR);
-    let held = snapshot.curve.expect("the borrowed curve is held");
-
-    assert_eq!(temporal[0], expected_temporal);
-    assert_eq!(held, (curve.ratios, curve.sigma_quarter_median));
-    assert_eq!(snapshot.rho, Some(sample.rho));
-    assert_eq!(map, lender_map);
+    assert!(refused.is_err(), "frame 1 is not recorded yet");
 }
 
 #[test]
-fn the_fold_falls_back_when_nothing_ahead_has_a_sample() {
-    // Logical 1 has no sample and only logical 0, behind it, has one.
-    let mut slots = Slots::empty();
-    slots.set_hashed(0, 7, 2, true, true);
-    slots.set_hashed(1, 8, 2, false, false);
-    let mut stream = Stream::new(2, settings(luma_map(), true), slots);
+fn a_perturbed_frame_leaves_the_derived_values_unmoved() {
+    const PERTURBED_FRAME: u32 = 10;
+    let channels = 1;
+    let stream_settings = settings(luma_map());
+    let mut clean = Stream::new(channels, stream_settings);
+    let mut perturbed = Stream::new(channels, stream_settings);
+    let mut compared = 0;
 
-    let centre = Fold::Centre {
-        ring_start: 0,
-        centre: 1,
-    };
-    let snapshot = stream.fold(centre);
-    stream.finish();
+    for frame in 0..STREAM_FRAMES {
+        let record = hashed_record(200, channels, true, true);
+        let mut changed = record.clone();
+        if frame == PERTURBED_FRAME {
+            let sample = changed.reading.sample.as_mut().expect("a sample");
+            sample.sigma[0] *= 3.0;
+            sample.sigma_low[0] *= 3.0;
+            changed.immerkaer[0] *= 3.0;
+        }
 
-    let unboosted = snapshot.low_unboosted.expect("the low chain updates");
-    assert_eq!(snapshot.temporal_only, None);
-    assert_eq!(snapshot.curve, None);
-    assert_eq!(snapshot.derived.sigma, unboosted);
-}
+        clean.push(record);
+        perturbed.push(changed);
 
-#[test]
-fn the_fold_never_borrows_without_shifted_edges() {
-    let slots = borrowing_slots(1);
-    let mut stream = Stream::new(1, settings(luma_map(), false), slots);
+        if frame < 2 * RADIUS {
+            continue;
+        }
 
-    let first = Fold::Centre {
-        ring_start: 3,
-        centre: 0,
-    };
-    let snapshot = stream.fold(first);
-    let map = stream.state.read_current_map();
-    stream.finish();
+        let centre = frame - RADIUS;
+        let clean_run = clean.fold(centre);
+        let perturbed_run = perturbed.fold(centre);
 
-    let ones = vec![1.0f32; quarters()];
-    assert_eq!(snapshot.temporal_only, None);
-    assert_eq!(snapshot.rho, None);
-    assert_eq!(snapshot.curve, None);
-    assert_eq!(map, ones);
-}
+        assert_eq!(perturbed_run.bits(), clean_run.bits(), "fold at {centre}");
+        assert_eq!(perturbed_run.snapshot, clean_run.snapshot, "fold at {centre}");
+        compared += 1;
+    }
 
-/// A stream that adopts slot 0's curve and map, then folds slot 1.
-fn adopt_then_fold(second_sampled: bool, second_curved: bool) -> (NoiseSnapshot, Vec<f32>, Vec<f32>) {
-    let mut slots = Slots::empty();
-    slots.set_hashed(0, 11, 1, true, true);
-    slots.set_hashed(1, 12, 1, second_sampled, second_curved);
-    let first_map = slots.maps[0].clone();
-    let mut stream = Stream::new(1, settings(luma_map(), false), slots);
-
-    let first = Fold::Centre {
-        ring_start: 0,
-        centre: 0,
-    };
-    stream.fold(first);
-
-    let second = Fold::Centre {
-        ring_start: 1,
-        centre: 0,
-    };
-    let snapshot = stream.fold(second);
-    let map = stream.state.read_current_map();
-    stream.finish();
-
-    (snapshot, map, first_map)
-}
-
-#[test]
-fn a_lender_without_a_curve_clears_the_curve_and_leaves_the_map() {
-    let (snapshot, map, first_map) = adopt_then_fold(true, false);
-
-    assert_eq!(snapshot.curve, None);
-    assert!(!snapshot.classes_present);
-    assert_eq!(snapshot.derived.map_mode, STRENGTH_MAP_OFF);
-    assert_eq!(map, first_map);
-}
-
-#[test]
-fn a_fold_without_a_sample_keeps_the_previous_curve_and_map() {
-    let (snapshot, map, first_map) = adopt_then_fold(false, false);
-
-    assert!(snapshot.curve.is_some());
-    assert!(snapshot.classes_present);
-    assert_eq!(snapshot.derived.map_mode, STRENGTH_MAP_LUMA);
-    assert_eq!(map, first_map);
-}
-
-#[test]
-fn the_first_temporal_sample_seeds_rho_directly() {
-    let mut slots = Slots::empty();
-    slots.set_hashed(0, 21, 1, true, false);
-    slots.set_hashed(1, 22, 1, true, false);
-    let first_rho = slots.readings[0].sample.map(|sample| sample.rho);
-    let mut stream = Stream::new(1, settings(StrengthMapKind::Off, false), slots);
-
-    let seeded = stream.fold(Fold::Seed { slot: 0 });
-    let first = Fold::Centre {
-        ring_start: 0,
-        centre: 0,
-    };
-    let after_first = stream.fold(first);
-    let second = Fold::Centre {
-        ring_start: 1,
-        centre: 0,
-    };
-    let after_second = stream.fold(second);
-    stream.finish();
-
-    assert_eq!(seeded.rho, None);
-    assert_eq!(after_first.rho, first_rho);
-    assert_ne!(after_second.rho, first_rho);
+    clean.finish();
+    assert!(compared > 0);
 }
 
 #[test]
@@ -681,22 +481,11 @@ fn the_correlation_factor_matches_the_host_table() {
         }
     }
 
-    // A unit sigma over no Immerkær response makes the first median the factor itself.
-    let mut slots = Slots::empty();
-    let mut stream_settings = settings(StrengthMapKind::Off, false);
+    // A unit sigma over no Immerkær response makes the median the factor itself.
+    let mut stream_settings = settings(StrengthMapKind::Off);
     stream_settings.fold.coefficients = DerivedCoefficients::default();
+    let mut stream = Stream::new(1, stream_settings);
     let mut gaps = Vec::new();
-
-    let client = test_client();
-    let shape = shape(&client, 1);
-    let mut state = NoiseState::with_readings_for_test(
-        &client,
-        shape,
-        stream_settings,
-        &slots.readings,
-        &slots.sums,
-        &[],
-    );
 
     for rho in rhos {
         let sample = TemporalNoiseSample {
@@ -705,17 +494,14 @@ fn the_correlation_factor_matches_the_host_table() {
             rho,
             static_fraction: 0.5,
         };
-        slots.readings[0].sample = Some(sample);
-        state.set_readings_for_test(&slots.readings, &slots.sums, &[]);
-        state.queue_reset();
+        let mut record = empty_record();
+        record.reading.sample = Some(sample);
 
-        let fold = Fold::Centre {
-            ring_start: 0,
-            centre: 0,
-        };
-        state.queue_fold(fold).expect("the fold queues");
-        let snapshot = state.snapshot().expect("the snapshot reads back");
-        let median = snapshot.median.expect("the median chain updates");
+        stream.reset();
+        stream.push(record);
+
+        let run = stream.fold(0);
+        let median = run.snapshot.median.expect("the median chain is written");
         let host = correlation_factor(rho);
         let gap = ulp_gap(median[0], host);
         gaps.push(gap);
@@ -727,201 +513,40 @@ fn the_correlation_factor_matches_the_host_table() {
         );
     }
 
-    sync(&client).expect("the device syncs");
-    let largest = gaps.iter().copied().max().unwrap_or(0);
-    println!("correlation factor largest gap {largest} ulp");
+    stream.finish();
 }
 
 #[test]
-fn sigma_scale_scales_before_smoothing() {
-    let mut slots = Slots::empty();
-    slots.set_hashed(0, 31, 1, true, false);
-    slots.set_hashed(1, 32, 1, true, false);
-    let first_reading = slots.readings[0].clone();
-    let mut scaled = settings(StrengthMapKind::Off, false);
+fn sigma_scale_scales_each_reading() {
+    let mut scaled = settings(StrengthMapKind::Off);
     scaled.fold.sigma_scale = 1.5;
-    let mut stream = Stream::new(1, scaled, slots);
+    let mut stream = Stream::new(1, scaled);
+    let record = hashed_record(31, 1, true, false);
+    let sample = record.reading.sample.expect("the record has a sample");
+    stream.push(record);
 
-    let first = Fold::Centre {
-        ring_start: 0,
-        centre: 0,
-    };
-    let after_first = stream.fold(first);
-    let second = Fold::Centre {
-        ring_start: 1,
-        centre: 0,
-    };
-    stream.fold(second);
+    let run = stream.fold(0);
     stream.finish();
 
-    let sample = first_reading.sample.expect("slot 0 has a sample");
-    let temporal = after_first
+    let temporal = run
+        .snapshot
         .temporal_only
-        .expect("the sample seeds the temporal chain");
+        .expect("the sample feeds the temporal chain");
     let expected = sample.sigma[0] * 1.5;
     assert_eq!(temporal[0], expected);
 }
 
-#[test]
-fn a_reset_starts_the_next_stream_from_the_seed() {
-    let mut slots = Slots::empty();
-    for slot in 0..FRAMES {
-        slots.set_hashed(slot, 40 + slot, 2, true, true);
-    }
-
-    let stream_settings = settings(StrengthMapKind::Chroma { flat_boost: 1.5 }, false);
-    let client = test_client();
-    let shape = shape(&client, 2);
-    let maps = slots.maps_for(stream_settings);
-    let used = NoiseState::with_readings_for_test(
-        &client,
-        shape,
-        stream_settings,
-        &slots.readings,
-        &slots.sums,
-        maps,
-    );
-    let fresh = NoiseState::with_readings_for_test(
-        &client,
-        shape,
-        stream_settings,
-        &slots.readings,
-        &slots.sums,
-        maps,
-    );
-
-    for ring_start in 0..FRAMES {
-        let fold = Fold::Centre {
-            ring_start,
-            centre: CENTRE,
-        };
-        used.queue_fold(fold).expect("the fold queues");
-    }
-
-    used.queue_reset();
-    used.queue_fold(Fold::Seed { slot: 3 }).expect("the seed queues");
-    fresh.queue_fold(Fold::Seed { slot: 3 }).expect("the seed queues");
-
-    let after_reset = used.snapshot().expect("the snapshot reads back");
-    let after_seed = fresh.snapshot().expect("the snapshot reads back");
-    sync(&client).expect("the device syncs");
-
-    assert_eq!(after_reset.rho, None);
-    assert_eq!(after_reset.curve, None);
-    assert!(!after_reset.classes_present);
-    assert_eq!(after_reset, after_seed);
-}
-
-/// The chains' values, active channels only, in a fixed order.
-fn chain_values(snapshot: &NoiseSnapshot, channels: usize) -> Vec<f32> {
-    let chains = [
-        snapshot.median,
-        snapshot.low,
-        snapshot.low_unboosted,
-        snapshot.temporal_only,
-    ];
-
-    chains
-        .iter()
-        .flat_map(|chain| chain.unwrap_or_default()[..channels].to_vec())
-        .collect()
-}
-
-#[test]
-fn a_perturbed_frame_recovers_within_15_folds() {
-    const PERTURBED_FOLD: u32 = 5;
-    const DELTA: f32 = 1.0e-3;
-    const RECOVERED_FOLD: u32 = 20;
-    let channels = 1;
-    let stream_settings = settings(StrengthMapKind::Off, false);
-    let client = test_client();
-    let shape = shape(&client, channels);
-
-    let mut slots = Slots::empty();
-    let mut clean = NoiseState::with_readings_for_test(
-        &client,
-        shape,
-        stream_settings,
-        &slots.readings,
-        &slots.sums,
-        &[],
-    );
-    let mut perturbed = NoiseState::with_readings_for_test(
-        &client,
-        shape,
-        stream_settings,
-        &slots.readings,
-        &slots.sums,
-        &[],
-    );
-
-    for fold in 0..STREAM_FOLDS {
-        // Every fold reads the same sample with no Immerkær response, so each chain holds the
-        // sample's value and a relative change in it moves the chain by the same relative step.
-        let slot = fold % FRAMES;
-        slots.set_hashed(slot, 200, channels, true, false);
-        slots.sums[slot as usize] = [0.0; 4];
-        slots.readings[slot as usize].immerkaer_low = [0.0; 3];
-        clean.set_readings_for_test(&slots.readings, &slots.sums, &[]);
-
-        let mut changed = slots.clone();
-        if fold == PERTURBED_FOLD {
-            let sample = changed.readings[slot as usize].sample.as_mut().expect("a sample");
-            sample.sigma[0] *= 1.0 + DELTA;
-            sample.sigma_low[0] *= 1.0 + DELTA;
-        }
-        perturbed.set_readings_for_test(&changed.readings, &changed.sums, &[]);
-
-        let centre = Fold::Centre {
-            ring_start: slot,
-            centre: 0,
-        };
-        clean.queue_fold(centre).expect("the fold queues");
-        perturbed.queue_fold(centre).expect("the fold queues");
-
-        let clean_snapshot = clean.snapshot().expect("the snapshot reads back");
-        let perturbed_snapshot = perturbed.snapshot().expect("the snapshot reads back");
-        let clean_values = chain_values(&clean_snapshot, channels as usize);
-        let perturbed_values = chain_values(&perturbed_snapshot, channels as usize);
-        let gap = clean_values
-            .iter()
-            .zip(&perturbed_values)
-            .map(|(&clean_value, &perturbed_value)| relative_gap(perturbed_value, clean_value))
-            .fold(0.0f32, f32::max);
-
-        if fold >= PERTURBED_FOLD {
-            let folds_since = (fold - PERTURBED_FOLD) as i32;
-            let bound = 0.2 * DELTA * 0.8f32.powi(folds_since) + MAX_RELATIVE;
-            assert!(gap <= bound, "fold {fold}: {gap:e} apart, bound {bound:e}");
-        }
-
-        if fold == PERTURBED_FOLD || fold == PERTURBED_FOLD + 1 {
-            assert!(gap > MAX_RELATIVE, "fold {fold}: the flip shows only {gap:e}");
-        }
-
-        let recovering = (PERTURBED_FOLD..RECOVERED_FOLD).contains(&fold);
-        if !recovering {
-            assert!(gap <= MAX_RELATIVE, "fold {fold}: {gap:e} apart");
-        }
-    }
-
-    sync(&client).expect("the device syncs");
-}
-
-/// The GPU's derived values for one fold of a sampled, curved slot 0 under `settings`.
+/// The GPU's derived values for a one-frame window of a sampled record under `settings`.
 fn derived_for(settings: NoiseSettings, curved: bool) -> (NoiseSnapshot, DerivedValues) {
     let channels = 2;
-    let mut slots = Slots::empty();
-    slots.set_hashed(0, 61, channels, true, curved);
-    let mut stream = Stream::new(channels, settings, slots);
+    let mut stream = Stream::new(channels, settings);
+    let record = hashed_record(61, channels, true, curved);
+    stream.push(record);
 
-    let fold = Fold::Centre {
-        ring_start: 0,
-        centre: 0,
-    };
-    let snapshot = stream.fold(fold);
+    let run = stream.fold(0);
     stream.finish();
 
+    let snapshot = run.snapshot;
     let fold_settings = settings.fold;
     let expected = fold_settings.coefficients.derive_host(
         &snapshot,
@@ -955,11 +580,11 @@ fn the_derived_values_follow_the_coefficients() {
     };
 
     for coefficients in [COEFFICIENTS, fixed, floor_off, pilot, no_motion] {
-        let mut case = settings(StrengthMapKind::Off, false);
+        let mut case = settings(StrengthMapKind::Off);
         case.fold.coefficients = coefficients;
         let (snapshot, expected) = derived_for(case, true);
         let derived = snapshot.derived;
-        let median = snapshot.median.expect("the median chain updates");
+        let median = snapshot.median.expect("the median chain is written");
 
         let pilot_h2 = derived.h2_inv_norm * coefficients.pilot_h2_factor;
         let main_offset = if coefficients.main_offset {
@@ -994,7 +619,7 @@ fn the_derived_values_follow_the_coefficients() {
     // The default consumer clamps at the same floor the host's weight scale does.
     let default_consumer = NoiseConsumer::default();
     for consumer in [unread, tiny_gain, default_consumer] {
-        let mut case = settings(StrengthMapKind::Off, false);
+        let mut case = settings(StrengthMapKind::Off);
         case.fold.consumer = consumer;
         let (snapshot, _) = derived_for(case, true);
 
@@ -1016,7 +641,7 @@ fn the_derived_values_follow_the_coefficients() {
         (chroma, CONSUMER, false, STRENGTH_MAP_OFF),
     ];
     for (map, consumer, curved, mode) in modes {
-        let mut case = settings(map, false);
+        let mut case = settings(map);
         case.fold.consumer = consumer;
         let (snapshot, _) = derived_for(case, curved);
         let curve_valid = curved && consumer.curve_applies;
@@ -1031,91 +656,71 @@ fn the_derived_values_follow_the_coefficients() {
 
 #[test]
 fn a_fold_on_a_letterboxed_stream_keeps_every_derived_value_finite() {
-    let slots = Slots::empty();
-    let mut stream = Stream::new(2, settings(luma_map(), true), slots);
-    let seeded = stream.fold(Fold::Seed { slot: 0 });
-    let mut snapshots = vec![seeded];
+    let mut stream = Stream::new(2, settings(luma_map()));
+    let mut runs = Vec::new();
 
-    for ring_start in 0..FRAMES {
-        let fold = Fold::Centre {
-            ring_start,
-            centre: CENTRE,
-        };
-        let snapshot = stream.fold(fold);
-        snapshots.push(snapshot);
+    for frame in 0..FRAMES {
+        stream.push(empty_record());
+
+        let centre = frame.saturating_sub(RADIUS);
+        let run = stream.fold(centre);
+        runs.push(run);
     }
 
     stream.finish();
 
-    for snapshot in snapshots {
-        let words = snapshot.derived.to_words();
+    for run in runs {
+        let words = run.snapshot.derived.to_words();
         let finite = words.iter().all(|word| word.is_finite());
-        let median = snapshot.median.expect("the median chain updates");
+        let median = run.snapshot.median.expect("the median chain is written");
 
         assert!(finite, "derived words {words:?}");
         assert_eq!(median, [SIGMA_FLOOR, SIGMA_FLOOR, 0.0]);
-        assert!(snapshot.derived.weight_scale > 0.0);
+        assert!(run.snapshot.derived.weight_scale > 0.0);
     }
 }
 
 #[test]
 fn the_fold_is_byte_identical_across_runs() {
-    let stream_settings = settings(luma_map(), true);
-    let (_, first) = run_stream(1, stream_settings, 5);
-    let (_, second) = run_stream(1, stream_settings, 5);
+    let stream_settings = settings(luma_map());
+    let first = run_stream(1, stream_settings, 5);
+    let second = run_stream(1, stream_settings, 5);
 
-    for (index, (first_snapshot, second_snapshot)) in first.iter().zip(&second).enumerate() {
-        let first_bits = snapshot_bits(first_snapshot);
-        let second_bits = snapshot_bits(second_snapshot);
-        assert_eq!(first_bits, second_bits, "fold {index}");
+    for (index, (first_run, second_run)) in first.iter().zip(&second).enumerate() {
+        assert_eq!(first_run.bits(), second_run.bits(), "fold {index}");
     }
 }
 
-fn snapshot_bits(snapshot: &NoiseSnapshot) -> Vec<u32> {
-    let mut values = chain_values(snapshot, 3);
-    let rho = snapshot.rho.unwrap_or(-1.0);
-    let derived = snapshot.derived.to_words();
-    values.push(rho);
-    values.extend(derived);
-
-    values.iter().map(|value| value.to_bits()).collect()
-}
-
 #[test]
-fn set_settings_rebuilds_the_fold_settings() {
-    let client = test_client();
-    let shape = shape(&client, 1);
-    let mut slots = Slots::empty();
-    slots.set_hashed(0, 81, 1, true, true);
-    let sample = slots.readings[0].sample.expect("slot 0 has a sample");
-    let before = settings(StrengthMapKind::Off, false);
-    let mut state =
-        NoiseState::with_readings_for_test(&client, shape, before, &slots.readings, &slots.sums, &[]);
-    let fold = Fold::Centre {
-        ring_start: 0,
-        centre: 0,
-    };
+fn set_settings_rebuilds_the_fold_settings_and_the_history() {
+    let mut stream = Stream::new(1, settings(StrengthMapKind::Off));
+    let record = hashed_record(81, 1, true, true);
+    let sample = record.reading.sample.expect("the record has a sample");
+    stream.push(record.clone());
+    let unmapped = stream.fold(0);
 
-    state.queue_fold(fold).expect("the fold queues");
-    let unmapped = state.snapshot().expect("the snapshot reads back");
-
-    let mut after = settings(luma_map(), false);
+    let mut after = settings(luma_map());
     after.fold.sigma_scale = 2.0;
-    state.set_settings(after);
-    state.queue_reset();
-    state.queue_fold(fold).expect("the fold queues");
-    let mapped = state.snapshot().expect("the snapshot reads back");
-    sync(&client).expect("the device syncs");
+    stream.state.set_settings(after);
+    stream.settings = after;
+    stream.reset();
+    stream.push(record.clone());
+    let mapped = stream.fold(0);
+    stream.finish();
 
-    let temporal = mapped.temporal_only.expect("the sample seeds the temporal chain");
+    let temporal = mapped
+        .snapshot
+        .temporal_only
+        .expect("the sample feeds the temporal chain");
     let scaled = sample.sigma[0] * 2.0;
-    assert_eq!(unmapped.derived.map_mode, STRENGTH_MAP_OFF);
-    assert_eq!(mapped.derived.map_mode, STRENGTH_MAP_LUMA);
+    assert_eq!(unmapped.snapshot.derived.map_mode, STRENGTH_MAP_OFF);
+    assert_eq!(mapped.snapshot.derived.map_mode, STRENGTH_MAP_LUMA);
     assert_eq!(temporal[0], scaled);
+    assert_eq!(mapped.map, record.map);
 }
 
 #[test]
-fn a_4k_luma_map_copies_across_the_grid() {
+fn a_4k_luma_map_folds_across_the_grid() {
     const WIDTH_4K: u32 = 3840;
     const HEIGHT_4K: u32 = 2160;
     let client = test_client();
@@ -1131,33 +736,71 @@ fn a_4k_luma_map_copies_across_the_grid() {
     let (cols, rows) = strength_map_dims(WIDTH_4K, HEIGHT_4K);
     let quarters = (cols * rows) as usize;
 
-    // Slot 0 lends a curve and its map, slot 1 has a sample without a curve, slot 2 no sample.
-    let mut readings = vec![empty_reading(); FRAMES as usize];
-    readings[0] = hashed_reading(91, 1, true, true);
-    readings[1] = hashed_reading(92, 1, true, false);
-    readings[2] = hashed_reading(93, 1, false, false);
+    // Frame 0 has a curve, frame 1 a sample without a curve and frame 2 no sample, so the
+    // window's map is frame 0's.
+    let first = hashed_record(91, 1, true, true);
+    let second = hashed_record(92, 1, true, false);
+    let third = hashed_record(93, 1, false, false);
+    let mut readings = vec![empty_record().reading; FRAMES as usize];
+    readings[0] = first.reading;
+    readings[1] = second.reading;
+    readings[2] = third.reading;
     let sums = vec![[0.0f32; 4]; FRAMES as usize];
     let maps: Vec<Vec<f32>> = (0..FRAMES).map(|slot| hashed_map_of(slot, quarters)).collect();
 
-    let map_settings = settings(luma_map(), false);
+    let map_settings = settings(luma_map());
     let state = NoiseState::with_readings_for_test(&client, shape, map_settings, &readings, &sums, &maps);
     let map_cubes = (quarters as u32).div_ceil(NOISE_BLOCK_1D);
     assert!(map_cubes > 1, "the map spans {map_cubes} cubes");
 
-    let mut copied_maps = Vec::new();
-    for ring_start in 0..3 {
-        let fold = Fold::Centre {
-            ring_start,
-            centre: 0,
-        };
-        state.queue_fold(fold).expect("the fold queues");
-        let map = state.read_current_map();
-        copied_maps.push(map);
+    for frame in 0..3 {
+        state.record_reading(frame, frame);
     }
 
+    let bounds = WindowBounds::around(1, 2);
+    state.queue_window_fold(bounds).expect("the window fold queues");
+    let map = state.read_current_map();
+    sync(&client).expect("the device syncs");
+
+    let bits: Vec<u32> = map.iter().map(|value| value.to_bits()).collect();
     let expected: Vec<u32> = maps[0].iter().map(|value| value.to_bits()).collect();
-    for (index, map) in copied_maps.iter().enumerate() {
-        let bits: Vec<u32> = map.iter().map(|value| value.to_bits()).collect();
-        assert_eq!(bits, expected, "the map after fold {index}");
-    }
+    assert_eq!(bits, expected);
+}
+
+#[test]
+fn recording_copies_a_slot_into_its_frame_slot() {
+    let mut stream = Stream::new(2, settings(luma_map()));
+    let record = hashed_record(77, 2, true, true);
+    stream.push(record.clone());
+    stream.state.record_reading(0, 21);
+
+    let (reading, results, map) = stream.state.read_history_frame(21);
+    let recorded = stream.state.stream_frame_count();
+    stream.finish();
+
+    let expected_sums = record_sums(&record);
+    assert_eq!(reading, record.reading);
+    assert_eq!(results, expected_sums);
+    assert_eq!(map, record.map);
+    assert_eq!(recorded, 22);
+
+    let immerkaer = sigma_from_abs_sum(results[0], WIDTH, HEIGHT);
+    assert!(immerkaer > 0.0);
+}
+
+#[test]
+fn a_spatial_record_keeps_only_the_immerkaer_values() {
+    let mut stream = Stream::new(1, settings(luma_map()));
+    let record = hashed_record(78, 1, true, true);
+    stream.push(record.clone());
+    stream.state.record_spatial_reading(0, 1);
+
+    let (reading, results, map) = stream.state.read_history_frame(1);
+    stream.finish();
+
+    let expected_sums = record_sums(&record);
+    assert_eq!(reading.sample, None);
+    assert_eq!(reading.immerkaer_low, record.reading.immerkaer_low);
+    assert_eq!(results, expected_sums);
+    assert_eq!(map, record.map);
 }

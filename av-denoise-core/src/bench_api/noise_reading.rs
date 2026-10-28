@@ -4,7 +4,6 @@ use cubecl::server::Handle;
 use crate::engine::align::StorageAlign;
 use crate::noise::{
     DerivedValues,
-    Fold,
     FoldSettings,
     NOISE_WINDOW_LEN,
     NOISE_WINDOW_RADIUS,
@@ -12,7 +11,6 @@ use crate::noise::{
     NoiseShape,
     NoiseState,
     QuarterSettings,
-    ReadingHistory,
     ReadingSettings,
     StrengthMapKind,
     StrengthMapParams,
@@ -55,14 +53,9 @@ pub struct ReadingOptions {
     pub offset_tables: Option<u32>,
 }
 
-/// The temporal radius the window fold's history is sized for.
-const WINDOW_TEMPORAL_RADIUS: u32 = 1;
-
 /// A two-slot noise state whose slot 1 holds the stats of `ring`'s second frame against its first.
 pub struct NoiseReading {
     state: NoiseState,
-    /// A full window of slot 1's reading, once [Self::record_window] has run.
-    history: Option<ReadingHistory>,
 }
 
 impl NoiseReading {
@@ -105,7 +98,7 @@ impl NoiseReading {
         let state = NoiseState::new(client, shape, noise_settings, DerivedValues::default());
         state.queue_stats(ring, 1, Some(0))?;
 
-        Ok(Self { state, history: None })
+        Ok(Self { state })
     }
 
     /// Queues every launch of the reading that runs before `stage`.
@@ -168,41 +161,28 @@ impl NoiseReading {
         self.queue_stage(ReadingStage::StrengthMap);
     }
 
-    /// Queues the fold of the reading in slot 1, which takes its sample, its curve and, with a
-    /// map, its map.
-    pub fn queue_fold(&self) -> Result<(), anyhow::Error> {
-        let fold = Fold::Centre {
-            ring_start: 1,
-            centre: 0,
-        };
-
-        self.state.queue_fold(fold)
+    /// Queues the copy of slot 1's reading into the history as stream frame 0.
+    pub fn queue_record(&self) {
+        self.state.record_reading(1, 0);
     }
 
-    /// Fills a window history with copies of slot 1's reading, waiting for every queued launch.
-    pub fn record_window(&mut self) -> Result<(), anyhow::Error> {
-        let history = self.state.history_of_slot(1, WINDOW_TEMPORAL_RADIUS)?;
-        self.history = Some(history);
-
-        Ok(())
+    /// Queues the copies of slot 1's reading into the history as every frame of a full window.
+    pub fn record_window(&self) {
+        for frame in 0..NOISE_WINDOW_LEN {
+            self.state.record_reading(1, frame);
+        }
     }
 
     /// Queues a window fold over a full window of the recorded history.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics before [Self::record_window] has run.
+    /// Returns an error before [Self::record_window] has run.
     pub fn queue_window_fold(&self) -> Result<(), anyhow::Error> {
-        let history = self.history.as_ref().expect("the window history is recorded");
         let newest = NOISE_WINDOW_LEN - 1;
         let bounds = WindowBounds::around(NOISE_WINDOW_RADIUS, newest);
 
-        self.state.queue_window_fold(history, bounds)
-    }
-
-    /// Queues the reset of the stream state.
-    pub fn queue_reset(&self) {
-        self.state.queue_reset();
+        self.state.queue_window_fold(bounds)
     }
 
     /// The curve batch's histogram and state with their lengths in words, which its passes add to.

@@ -285,11 +285,11 @@ fn hq_reset_clears_noise_state() {
 
     assert_eq!(
         reset.derived.h2_inv_norm, started.derived.h2_inv_norm,
-        "reset should clear the EMA so the next estimate starts fresh, not blended with stale state"
+        "reset should start a new window, not one that holds the previous stream's frames"
     );
     assert_eq!(
         reset.derived.noise_offset, started.derived.noise_offset,
-        "reset should clear the EMA so the next estimate starts fresh, not blended with stale state"
+        "reset should start a new window, not one that holds the previous stream's frames"
     );
 }
 
@@ -497,10 +497,10 @@ fn hq_temporal_mc_confidence_smoke() {
     run_temporal_smoke(params, 32, 32);
 }
 
-/// The EMA's first sample sets its state directly, so doubling `sigma_scale` exactly doubles the
-/// folded estimate and quadruples `noise_offset`.
+/// A one-frame window takes that frame's reading directly, so doubling `sigma_scale` exactly
+/// doubles the folded estimate and quadruples `noise_offset`.
 ///
-/// Checking both consumers from one fold shows the multiply sits before the blend feeds either.
+/// Checking both consumers from one fold shows the multiply sits before the median feeds either.
 #[test]
 fn hq_sigma_scale_multiplies_the_folded_estimate() {
     let client = make_client();

@@ -11,10 +11,9 @@ impl NlmDenoiser {
         self.phys_frame(logical as i32)
     }
 
-    /// Turns the shifted-edge stream layout on or off, and with it borrowing a sample ahead.
+    /// Turns the shifted-edge stream layout on or off.
     pub(crate) fn set_shifted_edges(&mut self, on: bool) {
         self.shifted_edges = on;
-        self.set_borrow_ahead(on);
     }
 
     /// Copies the last pushed frame forward until every ring slot holds a frame.

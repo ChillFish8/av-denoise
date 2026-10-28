@@ -8,7 +8,7 @@ use super::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use crate::collab::kernels::aggregate::weight_scale;
 use crate::collab::kernels::transforms::RECIPROCAL_FLOOR;
 
-/// The per-channel smoothed sigma, 3 words.
+/// The per-channel folded sigma, 3 words.
 ///
 /// It is the temporal-only chain, or the unboosted low chain until that has a sample. Channels
 /// past the count read 0.
@@ -28,7 +28,7 @@ pub(crate) const DERIVED_PILOT_H2_INV_NORM: u32 = 9;
 /// The main pass's noise offset, 0 under the NLM pilot.
 pub(crate) const DERIVED_NOISE_OFFSET: u32 = 10;
 pub(crate) const DERIVED_INPUT_NOISE_OFFSET: u32 = 11;
-/// The smoothed grain correlation, 0 while unset.
+/// The folded grain correlation, 0 while unset.
 pub(crate) const DERIVED_RHO: u32 = 12;
 /// The `f32` words of the derived buffer.
 pub(crate) const DERIVED_WORDS: u32 = 16;
@@ -118,7 +118,7 @@ impl Default for NoiseConsumer {
     }
 }
 
-/// The host-computed factors the fold turns smoothed sigmas into derived values with.
+/// The host-computed factors the fold turns folded sigmas into derived values with.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct DerivedCoefficients {
     /// `h2 = h2_per_inverse_variance * count / sum(sigma^2)`, or `None` for a fixed strength.

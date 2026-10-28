@@ -1,9 +1,9 @@
 use super::helpers::*;
 use crate::bench_api::HostIo;
 use crate::nlmeans::*;
-use crate::noise::NoiseSnapshot;
 use crate::noise::tests::fold_reference::relative_gap;
 use crate::noise::tests::frames::MAX_RELATIVE;
+use crate::noise::{NoiseSnapshot, sigma_from_abs_sum};
 
 fn snapshot(denoiser: &NlmDenoiser) -> NoiseSnapshot {
     denoiser.noise_snapshot().expect("the noise state reads back")
@@ -123,7 +123,7 @@ fn split_noise_offset_tracks_low_chain_strength_tracks_median() {
         "noise_offset {noise_offset} should track the low chain strictly below the median-based offset {expected_median_offset}"
     );
 
-    // The fold scales a host coefficient by the smoothed sigma, so it matches the host formula to
+    // The fold scales a host coefficient by the folded sigma, so it matches the host formula to
     // within rounding rather than bit for bit.
     let expected_h2 = denoiser.params.h2_inv_norm_with(Some(median));
     let h2_gap = relative_gap(h2_inv_norm, expected_h2);
@@ -133,14 +133,14 @@ fn split_noise_offset_tracks_low_chain_strength_tracks_median() {
     );
 }
 
-/// A slot's stage-1 partials must survive from its push until it reaches the centre and is folded.
+/// Each frame's reading must survive in the history from its push until every window that
+/// holds it has folded.
 ///
 /// At `temporal_radius = 2` the leading edge is primed with copies of the low-sigma frame 0, and two
-/// high-sigma pushes then fill the window. The first centre is a low-sigma copy, so a shared scratch
-/// buffer would hold the latest high-sigma partials by then and the low estimate would jump. One
-/// more high-sigma push centres the first high-sigma frame, and the low chain must rise with it.
+/// high-sigma pushes then fill the window. A shared scratch buffer would hold the latest high-sigma
+/// readings by the first fold, so frame 0's record would read high.
 #[test]
-fn partials_ring_isolates_slots_between_push_and_fold() {
+fn the_history_keeps_each_frame_reading_until_it_folds() {
     let client = make_client();
     let width = 128;
     let height = 128;
@@ -156,7 +156,6 @@ fn partials_ring_isolates_slots_between_push_and_fold() {
     let frame_low = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma_low]);
     let frame_high_1 = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma_high]);
     let frame_high_2 = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma_high]);
-    let frame_high_3 = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma_high]);
 
     denoiser.push_frame(&frame_low);
     assert!(denoiser.denoise().unwrap().is_none(), "window not full yet");
@@ -168,23 +167,24 @@ fn partials_ring_isolates_slots_between_push_and_fold() {
         "window should be full after the third push"
     );
 
-    let first = snapshot(&denoiser);
-    let low1 = first_channel(first.low).expect("folded by now");
+    let noise = denoiser.measured_noise().expect("the noise is measured");
+    let recorded = noise.stream_frame_count();
+    assert_eq!(recorded, 3, "the priming copies record nothing");
+
+    let sigmas: Vec<f32> = (0..recorded)
+        .map(|frame| {
+            let (_, sums, _) = noise.read_history_frame(frame);
+            sigma_from_abs_sum(sums[0], width, height)
+        })
+        .collect();
+
     assert!(
-        low1 < sigma_high * 0.15,
-        "the first centred slot duplicates the low-sigma frame and its own partials \
-         must still be intact, got low chain estimate {low1} (high sigma is {sigma_high})"
+        sigmas[0] < sigma_high * 0.15,
+        "frame 0's record must still hold the low-sigma reading, got {sigmas:?}"
     );
-
-    denoiser.push_frame(&frame_high_3);
-    assert!(denoiser.denoise().unwrap().is_some());
-
-    let second = snapshot(&denoiser);
-    let low2 = first_channel(second.low).expect("folded by now");
     assert!(
-        low2 > low1 * 1.5,
-        "the centre should now be the first high-sigma push, so the low chain must rise \
-         to reflect it (low1={low1}, low2={low2})"
+        sigmas[1] > sigma_high * 0.5 && sigmas[2] > sigma_high * 0.5,
+        "frames 1 and 2 hold the high-sigma readings, got {sigmas:?}"
     );
 }
 

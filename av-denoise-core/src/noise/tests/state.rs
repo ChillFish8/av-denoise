@@ -3,7 +3,8 @@ use cubecl::server::Handle;
 
 use crate::engine::align::StorageAlign;
 use crate::noise::derived::DerivedValues;
-use crate::noise::fold::{Fold, FoldSettings, NoiseSettings};
+use crate::noise::fold::{FoldSettings, NoiseSettings};
+use crate::noise::history::WindowBounds;
 use crate::noise::spatial::{NoiseCtx, noise_partials_slot_stride_bytes, run_noise_estimate};
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
 use crate::noise::strength_map::{QuarterSettings, StrengthMapParams};
@@ -196,7 +197,6 @@ fn set_settings_replaces_every_setting() {
     };
     let fold = FoldSettings {
         sigma_scale: 1.25,
-        borrow_ahead: true,
         ..FoldSettings::default()
     };
     let luma = NoiseSettings {
@@ -235,12 +235,14 @@ fn a_fixed_state_queues_nothing_and_snapshots_its_values() {
 
     state.queue_stats(&ring, 1, Some(0)).expect("the stats queue");
     let launches = state.queue_reading(1).expect("the reading queues");
-    let fold = Fold::Seed { slot: 1 };
-    state.queue_fold(fold).expect("the fold queues");
-    state.queue_reset();
+    state.record_reading(1, 0);
+    let bounds = WindowBounds::around(0, 0);
+    state.queue_window_fold(bounds).expect("the fold queues");
+    state.reset_stream();
 
     assert!(!state.is_measured());
     assert_eq!(launches, 0);
+    assert_eq!(state.stream_frame_count(), 0);
 
     let snapshot = state.snapshot().expect("the snapshot reads back");
     assert_eq!(snapshot.derived, fixed);

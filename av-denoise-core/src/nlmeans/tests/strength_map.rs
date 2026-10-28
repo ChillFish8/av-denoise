@@ -372,7 +372,11 @@ fn the_front_end_keeps_classes_beside_the_curve_and_resets_both() {
 
     assert!(classes_seen, "expected classes to form over the brightness ramp");
 
+    // The first frame after a reset folds alone, and it has no sample to give classes.
     denoiser.reset_stream_state();
+    let first = banded_noisy_frame(width, height, 200);
+    denoiser.push_frame(&first);
+
     let classes_after_reset = denoiser.current_classes_present();
     assert!(!classes_after_reset);
 }

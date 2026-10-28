@@ -8,8 +8,8 @@ use crate::noise::NOISE_BLOCK_1D;
 use crate::noise::correlation::{build_spatial_offset_lut, spatial_offset_index};
 use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
 use crate::noise::derived::{DerivedCoefficients, DerivedValues};
-use crate::noise::estimator::EMA_ALPHA;
-use crate::noise::fold::{Fold, FoldSettings, NoiseSettings};
+use crate::noise::fold::{FoldSettings, NoiseSettings};
+use crate::noise::history::WindowBounds;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
 use crate::noise::strength_map::StrengthMapParams;
@@ -26,16 +26,6 @@ const RHOS: [f32; 3] = [0.0, 0.3, 0.65];
 const LUMA_PARAMS: StrengthMapParams = StrengthMapParams {
     flat_boost: 1.5,
     shadow_soften: 0.65,
-};
-/// The fold the tests run, which takes slot 0's sample.
-const FIRST_FOLD: Fold = Fold::Centre {
-    ring_start: 0,
-    centre: 0,
-};
-/// The fold after it, which takes slot 1's sample.
-const SECOND_FOLD: Fold = Fold::Centre {
-    ring_start: 1,
-    centre: 0,
 };
 /// The derived values a test state starts from, whose host-built tables are nonzero off the
 /// centre.
@@ -73,7 +63,6 @@ fn settings(radius: u32, coefficients: DerivedCoefficients, map: StrengthMapKind
     };
     let fold = FoldSettings {
         sigma_scale: 1.0,
-        borrow_ahead: false,
         consumer: CONSUMER,
         coefficients,
         offset_tables: Some(radius),
@@ -133,9 +122,21 @@ fn folded_state(
     let rhos = [rho; FRAMES as usize];
     let state = ring_state(client, shape, settings, rhos, slot_maps);
 
-    state.queue_fold(FIRST_FOLD).expect("the fold queues");
+    fold_frames(&state, 1);
 
     state
+}
+
+/// Records ring slots `0..frames` as the stream frames of the same numbers, then folds the window
+/// of frame 0, which reaches every one of them.
+fn fold_frames(state: &NoiseState, frames: u32) {
+    for frame in 0..frames {
+        state.record_reading(frame, frame);
+    }
+
+    let newest = frames - 1;
+    let bounds = WindowBounds::around(0, newest);
+    state.queue_window_fold(bounds).expect("the window fold queues");
 }
 
 /// Whether every entry off the centre of the table is nonzero.
@@ -213,19 +214,20 @@ fn the_spatial_table_matches_the_host_table() {
             let rhos = [rho, second_rho, second_rho];
             let state = ring_state(&client, shape, table_settings, rhos, &[]);
 
-            state.queue_fold(FIRST_FOLD).expect("the fold queues");
+            fold_frames(&state, 1);
             let first = state.snapshot().expect("the snapshot reads back");
-            assert_eq!(first.derived.rho, rho, "the first sample seeds rho");
+            assert_eq!(first.derived.rho, rho, "a one-frame window takes its rho");
 
             let first_gap = check_spatial_table(&client, &state, radius, first.derived);
 
-            state.queue_fold(SECOND_FOLD).expect("the fold queues");
+            fold_frames(&state, 2);
             let second = state.snapshot().expect("the snapshot reads back");
             let derived = second.derived;
-            let smoothed = EMA_ALPHA * second_rho + (1.0 - EMA_ALPHA) * rho;
-            let rho_gap = relative_gap(derived.rho, smoothed);
-            assert_ne!(derived.rho, second_rho, "the second fold smooths rho");
-            assert!(rho_gap <= MAX_RELATIVE, "the smoothed rho is {rho_gap:e} apart");
+            let median = (rho + second_rho) * 0.5;
+            assert_eq!(
+                derived.rho, median,
+                "a two-frame window takes the mean of its rhos"
+            );
             assert!(derived.noise_offset > 0.0, "the noise offset is in use");
 
             let second_gap = check_spatial_table(&client, &state, radius, derived);
@@ -252,7 +254,7 @@ fn the_pilot_table_is_flat_with_a_zero_centre() {
         let state = ring_state(&client, shape, table_settings, rhos, &[]);
         check_nonzero_start(&client, &state, radius);
 
-        state.queue_fold(FIRST_FOLD).expect("the fold queues");
+        fold_frames(&state, 1);
         let snapshot = state.snapshot().expect("the snapshot reads back");
         let derived = snapshot.derived;
         assert!(derived.input_noise_offset > 0.0, "the input offset is in use");
@@ -287,7 +289,7 @@ fn a_zero_offset_gives_a_zero_table() {
         let state = ring_state(&client, shape, table_settings, rhos, &[]);
         check_nonzero_start(&client, &state, radius);
 
-        state.queue_fold(FIRST_FOLD).expect("the fold queues");
+        fold_frames(&state, 1);
         let spatial = read_table(&client, state.spatial_offsets());
         let pilot = read_table(&client, state.pilot_offsets());
         let spatial_bits = bits(&spatial);
@@ -309,7 +311,7 @@ fn slot_map(slot: u32, quarters: u32) -> Vec<f32> {
 }
 
 #[test]
-fn a_fold_with_a_map_writes_the_tables_and_copies_the_map() {
+fn a_fold_with_a_map_writes_the_tables_and_the_map() {
     const WIDTH_4K: u32 = 3840;
     const HEIGHT_4K: u32 = 2160;
     const RADIUS: u32 = 8;
@@ -328,8 +330,8 @@ fn a_fold_with_a_map_writes_the_tables_and_copies_the_map() {
 
     let current_map = state.read_current_map();
     let map_bits = bits(&current_map);
-    let lender_map_bits = bits(&slot_maps[0]);
-    assert_eq!(map_bits, lender_map_bits, "the current map");
+    let frame_map_bits = bits(&slot_maps[0]);
+    assert_eq!(map_bits, frame_map_bits, "the current map");
 
     let gap = check_spatial_table(&client, &state, RADIUS, snapshot.derived);
     println!("largest spatial table gap with a map {gap:e}");

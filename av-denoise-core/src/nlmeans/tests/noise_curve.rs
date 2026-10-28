@@ -560,8 +560,9 @@ pub(super) fn banded_noisy_frame(width: u32, height: u32, seed: u32) -> Vec<f32>
     noisy_field_over(&clean, width, height, 0.02, seed)
 }
 
+/// The first frame after a reset folds alone, and it has no sample to give a curve.
 #[test]
-fn reset_stream_state_clears_the_curve() {
+fn the_first_fold_after_a_reset_holds_no_curve() {
     let client = make_client();
     let width = 320;
     let height = 240;
@@ -602,5 +603,8 @@ fn reset_stream_state_clears_the_curve() {
     assert!(curve_seen, "expected a curve to form over the brightness ramp");
 
     denoiser.reset_stream_state();
+    let first = banded_noisy_frame(width, height, 200);
+    denoiser.push_frame(&first);
+
     assert!(denoiser.current_noise_curve().is_none());
 }

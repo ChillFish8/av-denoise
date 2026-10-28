@@ -65,7 +65,6 @@ fn settings(map: StrengthMapKind, sigma_scale: f32) -> NoiseSettings {
     };
     let fold = FoldSettings {
         sigma_scale,
-        borrow_ahead: false,
         consumer: CONSUMER,
         coefficients: COEFFICIENTS,
         offset_tables: Some(TABLE_RADIUS),
@@ -244,7 +243,7 @@ fn run_window(
     let history = upload_history(&client, records, newest, map_len);
 
     state
-        .queue_window_fold(&history, bounds)
+        .fold_history(&history, bounds)
         .expect("the window fold queues");
 
     let snapshot = state.snapshot().expect("the snapshot reads back");

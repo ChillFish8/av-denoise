@@ -1,12 +1,10 @@
 mod classes;
 mod correlation;
 mod curve;
-mod estimator;
 mod fold;
 mod fold_frames;
 pub(crate) mod fold_reference;
 pub(crate) mod frames;
-mod host;
 mod line_ring;
 mod records;
 mod sample;

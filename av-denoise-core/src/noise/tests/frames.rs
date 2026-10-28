@@ -153,7 +153,7 @@ pub(super) struct HostSlot {
     /// The bin counts, present when the curve is built and the slot has a sample.
     bin_counts: Option<[usize; NOISE_CURVE_BINS]>,
     /// Empty without a map.
-    map: Vec<f32>,
+    pub(super) map: Vec<f32>,
 }
 
 /// A noise state over a ring of `2 * radius + 1` slots that reads every pushed frame.
