@@ -16,6 +16,7 @@ use crate::collab::kernels::aggregate::weight_scale;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::motion::sad_noise_floor;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::{ChannelMode, HqParams, NlmDenoiser, mc_sad_noise_floor_sigma};
 use crate::noise::tests::fold_reference::{SnapshotGap, relative_gap};
@@ -30,6 +31,8 @@ use crate::noise::{
 };
 
 const SIZE: u32 = 64;
+/// Ten frames run as centres while the stream is pushed, after the noise look-ahead fills.
+const STREAM_FRAMES: usize = 10 + LOOKAHEAD_FRAMES as usize;
 
 fn run_frames(params: Nl4dParams, width: u32, height: u32, frames: &[Vec<f32>]) -> Nl4dDenoiser {
     let client = make_client();
@@ -106,7 +109,7 @@ fn read_words<T: CubeElement>(mirror: &MirroredBuffer) -> Vec<T> {
 #[test]
 fn a_pinned_sigma_binds_a_zero_curve_and_a_unit_map() {
     let params = static_clip_params(1);
-    let denoiser = run_stream(params, 10);
+    let denoiser = run_stream(params, STREAM_FRAMES);
     let front = denoiser.front_for_test();
 
     let curve_handle = front.noise_curve_handle();
@@ -127,7 +130,7 @@ fn a_pinned_sigma_binds_a_zero_curve_and_a_unit_map() {
 fn an_estimated_derived_buffer_holds_the_gpu_sigma_and_weight_scale() {
     let mut params = static_clip_params(1);
     params.nlm.hq = Some(HqParams::default());
-    let denoiser = run_stream(params, 10);
+    let denoiser = run_stream(params, STREAM_FRAMES);
     let front = denoiser.front_for_test();
 
     let sigmas = front.current_sigmas_temporal_only();
@@ -159,6 +162,11 @@ fn the_derived_buffer_follows_the_gpu_chains() {
         for (submit, frame) in frames.iter().enumerate() {
             denoiser.push_frame(frame);
             denoiser.denoise().expect("denoise");
+
+            // No pass, and so no fold, runs until the noise look-ahead has filled the ring.
+            if !denoiser.front_for_test().window_ready() {
+                continue;
+            }
 
             let snapshot = gpu_snapshot(&denoiser);
             if snapshot.temporal_only.is_some() {
@@ -208,6 +216,11 @@ fn the_curve_buffer_holds_the_gpu_curve() {
         denoiser.push_frame(frame);
         denoiser.denoise().expect("denoise");
 
+        // No pass, and so no fold, runs until the noise look-ahead has filled the ring.
+        if !denoiser.front_for_test().window_ready() {
+            continue;
+        }
+
         let snapshot = gpu_snapshot(&denoiser);
         let front = denoiser.front_for_test();
         let curve_handle = front.noise_curve_handle();
@@ -244,7 +257,7 @@ fn a_chroma_front_with_the_flat_boost_maps_every_channel_without_a_curve() {
 #[test]
 fn the_neighbour_table_follows_the_pass_centre() {
     let params = static_clip_params(1);
-    let denoiser = run_stream(params, 10);
+    let denoiser = run_stream(params, STREAM_FRAMES);
     let front = denoiser.front_for_test();
     let table = front
         .neighbour_slots_for_test()
@@ -261,7 +274,7 @@ fn a_pinned_sigma_derived_buffer_holds_the_host_values() {
     let pinned = params.nlm.hq.and_then(|hq| hq.sigma_override);
     let sigma = pinned.expect("the clip pins its sigma");
     let prefilter = params.nlm.prefilter;
-    let denoiser = run_stream(params, 10);
+    let denoiser = run_stream(params, STREAM_FRAMES);
     let front = denoiser.front_for_test();
 
     let blksize = front.motion_ctx().blksize;

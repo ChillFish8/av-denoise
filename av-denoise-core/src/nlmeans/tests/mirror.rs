@@ -99,6 +99,15 @@ fn run_frames(denoiser: &mut NlmDenoiser, count: usize) {
     }
 }
 
+/// [run_frames], then a flush that runs the passes the noise look-ahead holds back.
+///
+/// The flush leaves the last fold in place.
+fn run_and_flush(denoiser: &mut NlmDenoiser, count: usize) {
+    run_frames(denoiser, count);
+
+    denoiser.flush(|_| {}).expect("flush");
+}
+
 fn read_table(denoiser: &NlmDenoiser, handle: Handle) -> Vec<f32> {
     let bytes = denoiser.client.read_one(handle).expect("the table reads back");
     f32::from_bytes(&bytes).to_vec()
@@ -187,7 +196,7 @@ fn a_pinned_sigma_keeps_the_host_pilot_offset_table() {
 fn an_estimated_sigma_keeps_the_spatial_offset_table_current() {
     let mut denoiser = hq_denoiser(PrefilterMode::None, None);
     let before = spatial_table(&denoiser);
-    run_frames(&mut denoiser, 6);
+    run_and_flush(&mut denoiser, 6);
 
     let actual = spatial_table(&denoiser);
     let derived = derived_values(&denoiser);
@@ -225,6 +234,8 @@ fn a_measured_separable_front_binds_a_spatial_table_that_follows_rho() {
         denoiser.denoise().expect("denoise");
     }
 
+    denoiser.flush(|_| {}).expect("flush");
+
     let actual = spatial_table(&denoiser);
     let derived = derived_values(&denoiser);
     let search_radius = denoiser.params.search_radius;
@@ -249,7 +260,7 @@ fn an_estimated_sigma_keeps_the_pilot_offset_table_current() {
     let prefilter = pilot_prefilter();
     let mut denoiser = hq_denoiser(prefilter, None);
     let before = pilot_table(&denoiser);
-    run_frames(&mut denoiser, 6);
+    run_and_flush(&mut denoiser, 6);
 
     let actual = pilot_table(&denoiser);
     let derived = derived_values(&denoiser);

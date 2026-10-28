@@ -297,6 +297,9 @@ fn an_nl4d_pilot_strength_follows_the_gpu_state() {
         denoiser.denoise().expect("the submit runs");
     }
 
+    // The flush runs the passes the noise look-ahead holds back, and leaves their folds in place.
+    denoiser.flush(|_| {}).expect("the flush runs");
+
     let folded_front = denoiser.front_for_test();
     let folded = bound_derived(folded_front);
     let expected = pilot_h2_inv_norm(folded.h2_inv_norm, strength_scale);

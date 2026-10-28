@@ -24,7 +24,7 @@ impl NlmDenoiser {
     /// `dst` uses the ring layout of `input_buf` and `src` holds `src_slots` frames. Both handles
     /// are bound whole, because a slot's byte offset rarely meets the GPU's
     /// `min_storage_buffer_offset_alignment`.
-    fn copy_frame_into_slot(
+    pub(super) fn copy_frame_into_slot(
         &self,
         dst: &Handle,
         slot: usize,
@@ -165,7 +165,7 @@ impl NlmDenoiser {
     /// Refreshes every per-slot buffer of the duplicated `slot`.
     ///
     /// A later pass then never reads an older frame's state there.
-    fn refresh_duplicated_slot(&mut self, slot: usize) -> Result<(), anyhow::Error> {
+    fn refresh_duplicated_slot(&self, slot: usize) -> Result<(), anyhow::Error> {
         if let PrefilterMode::NlmSpatial { .. } = self.params.prefilter {
             self.run_nlm_spatial_pilot(slot as u32)
                 .context("nlm spatial pilot dispatch failed")?;
@@ -173,8 +173,6 @@ impl NlmDenoiser {
 
         self.build_pyramids_for_slot(slot as u32)?;
         self.build_confidence_pyramid_for_slot(slot as u32)?;
-        self.queue_duplicate_noise_stats(slot as u32)?;
-        self.duplicate_slots[slot] = true;
         // This runs before `ring_head` advances so `pair_slot(0)` matches the push-time slot.
         self.zero_pair_slot_for_duplicate();
 

@@ -1,12 +1,14 @@
 use super::helpers::make_client;
 use crate::bench_api::HostIo;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams, PsyParams};
+use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::seeded_unit_gaussian;
 use crate::nlmeans::{ChannelMode, HqParams, NlmParams, PrefilterMode};
 
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 360;
-const FRAMES: u32 = 12;
+/// Twelve frames run as centres while the clip is pushed, after the noise look-ahead fills.
+const FRAMES: u32 = 12 + LOOKAHEAD_FRAMES;
 /// Columns either side of the texture seam left out of each half's measurement.
 const SEAM_MARGIN: u32 = 48;
 

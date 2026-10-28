@@ -1,5 +1,6 @@
 use cubecl::prelude::*;
 
+use super::LOOKAHEAD_FRAMES;
 use super::noise::measured_noise_shape;
 pub(crate) use crate::engine::BufferSize;
 use crate::engine::align::StorageAlign;
@@ -70,12 +71,18 @@ pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32
     let mut buffers = Vec::new();
 
     let noise_shape = measured_noise_shape(params, width, height, align);
+    let lookahead_frames = u64::from(LOOKAHEAD_FRAMES);
     if noise_shape.is_some() {
+        let pixels = u64::from(width).checked_mul(u64::from(height));
+        let frame_len = times(pixels, u64::from(stored_ch));
+        let lookahead = times(frame_len, lookahead_frames);
+        buffers.push(("noise look-ahead ring", lookahead));
+
         let cubes_x = u64::from(width.div_ceil(IMMERKAER_BLOCK_X));
         let cubes_y = u64::from(height.div_ceil(IMMERKAER_BLOCK_Y));
         let partials = times(cubes_x.checked_mul(cubes_y), 4);
         let slot_bytes = padded_slot_bytes(partials, align);
-        let ring = slot_ring(slot_bytes, total_frames);
+        let ring = slot_ring(slot_bytes, lookahead_frames);
         buffers.push(("noise partials ring", ring));
     }
 
@@ -85,7 +92,7 @@ pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32
         let record_len = u64::from(temporal_stats_record_len(stored_ch));
         let slot_len = times(blocks, record_len);
         let slot_bytes = padded_slot_bytes(slot_len, align);
-        let ring = slot_ring(slot_bytes, total_frames);
+        let ring = slot_ring(slot_bytes, lookahead_frames);
         buffers.push(("temporal stats ring", ring));
     }
 
@@ -111,6 +118,16 @@ pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32
 
         let pyramid = pyramid_ring(width, height, motion_ctx.pyramid_levels, align, total_frames);
         buffers.push(("motion pyramid ring", pyramid));
+
+        if noise_shape.is_some() {
+            let levels = motion_ctx.pyramid_levels;
+            let lookahead_pyramid = pyramid_ring(width, height, levels, align, lookahead_frames);
+            buffers.push(("look-ahead pyramid ring", lookahead_pyramid));
+
+            let direction_bytes = padded_slot_bytes(field_len, align);
+            let pair_field = slot_ring(direction_bytes, 2);
+            buffers.push(("look-ahead pair field", pair_field));
+        }
     }
 
     let estimation = params

@@ -85,6 +85,17 @@ impl NoiseState {
         self.queue_temporal_stats(input, stats_buf, slot, slot_prev, None)
     }
 
+    /// Queues the Immerkær estimate alone for the frame in `slot` of `input`.
+    ///
+    /// A state that holds fixed values queues nothing.
+    pub(crate) fn queue_spatial_stats(&self, input: &Handle, slot: u32) -> Result<(), anyhow::Error> {
+        if self.measurement.is_none() {
+            return Ok(());
+        }
+
+        self.queue_immerkaer(input, slot)
+    }
+
     /// Queues the temporal statistics of `slot` against `neighbour` shifted along `motion`.
     ///
     /// It overwrites the records of `slot` and runs no Immerkær pass. A state that holds fixed

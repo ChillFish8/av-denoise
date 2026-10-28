@@ -905,18 +905,6 @@ fn hq_reading_params(motion_compensation: MotionCompensationMode) -> NlmParams {
     }
 }
 
-/// The ring slot of the centre the last submit ran.
-fn hq_centre_slot(denoiser: &NlmDenoiser, params: &NlmParams) -> u32 {
-    denoiser.ring_slot(params.temporal_radius)
-}
-
-fn hq_slot_records(denoiser: &NlmDenoiser, slot: u32) -> Vec<f32> {
-    let noise = denoiser.measured_noise().expect("the noise is measured");
-    let (_, _, records) = noise.read_slot_stats(slot);
-
-    records
-}
-
 #[test]
 fn pan_reading_tracks_true_noise_nlmeans_hq() {
     let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, PAN_SHIFT, PAN_FRAMES, PAN_SIGMA, PAN_SEED);
@@ -934,85 +922,6 @@ fn pan_reading_tracks_true_noise_nlmeans_hq() {
     assert_relative(sigmas[0], PAN_SIGMA, 0.10, "folded pan sigma");
 }
 
-/// The first submit's centre is a copy of the first frame, so the check starts one push later.
-#[test]
-fn motion_off_keeps_push_time_reading() {
-    let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, 0, PAN_FRAMES, PAN_SIGMA, PAN_SEED);
-    let params = hq_reading_params(MotionCompensationMode::None);
-    let client = make_client();
-    let mut denoiser = NlmDenoiser::new(&client, params.clone(), PAN_WIDTH, PAN_HEIGHT);
-
-    for (index, frame) in frames.iter().enumerate() {
-        denoiser.push_frame(frame);
-        denoiser.denoise().expect("denoise failed");
-
-        if index < 3 {
-            continue;
-        }
-
-        let centre = index - 2;
-        let slot = hq_centre_slot(&denoiser, &params);
-        let noise = denoiser.measured_noise().expect("the noise is measured");
-        let reading = noise.read_reading(slot);
-        let sample = reading.sample.expect("a static centre has a sample");
-        let reference = raw_reading_sigma(&frames[centre - 1], &frames[centre], PAN_WIDTH, PAN_HEIGHT, 1)
-            .expect("the raw reference has a sample");
-
-        assert_relative(sample.sigma[0], reference[0], 1e-5, "push-time reading");
-    }
-}
-
-/// The leading edge copies the first frame into slots 1 and 2. The centre in slot 2 keeps its
-/// zeroed record. The next centre pans against that copy, so its pass re-measures it along the
-/// motion.
-#[test]
-fn held_centre_keeps_zeroed_record() {
-    let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, PAN_SHIFT, 4, PAN_SIGMA, PAN_SEED);
-    let motion_compensation = MotionCompensationMode::mvtools_default();
-    let params = hq_reading_params(motion_compensation);
-    let client = make_client();
-    let mut denoiser = NlmDenoiser::new(&client, params.clone(), PAN_WIDTH, PAN_HEIGHT);
-
-    for frame in &frames[..3] {
-        denoiser.push_frame(frame);
-        denoiser.denoise().expect("denoise failed");
-    }
-
-    let held_slot = hq_centre_slot(&denoiser, &params);
-    assert_eq!(
-        held_slot, 2,
-        "the first centre is the second copy of the first frame"
-    );
-
-    let held_records = hq_slot_records(&denoiser, held_slot);
-    assert!(
-        held_records.iter().all(|&value| value == 0.0),
-        "the held centre's record was re-measured"
-    );
-
-    let next_slot = held_slot + 1;
-    let push_time_records = hq_slot_records(&denoiser, next_slot);
-
-    denoiser.push_frame(&frames[3]);
-    denoiser.denoise().expect("denoise failed");
-
-    let centre_slot = hq_centre_slot(&denoiser, &params);
-    assert_eq!(centre_slot, next_slot, "the next centre follows the held one");
-
-    let next_records = hq_slot_records(&denoiser, next_slot);
-    let moved_lane = 2 + BLOCK_MOVED_LANE as usize;
-    let record_len = temporal_stats_record_len(1) as usize;
-    let moved_blocks = next_records
-        .chunks_exact(record_len)
-        .filter(|record| record[moved_lane] != 0.0)
-        .count();
-    assert_ne!(
-        next_records, push_time_records,
-        "a centre after a held frame is re-measured"
-    );
-    assert!(moved_blocks > 0, "the re-measured centre follows the pan");
-}
-
 #[test]
 fn copies_at_either_end_record_nothing() {
     const PUSHES: usize = 6;
@@ -1027,17 +936,20 @@ fn copies_at_either_end_record_nothing() {
         denoiser.denoise().expect("denoise failed");
     }
 
-    // The steps of a flush without its closing reset.
+    // The steps of a flush without its closing reset, which release the held frames and then copy
+    // the last frame forward.
     let target = denoiser.flush_target();
-    for _ in 0..target {
-        denoiser.flush_step_gpu().expect("the flush step failed");
+    let mut emitted = 0;
+    while emitted < target {
+        let step = denoiser.flush_step_gpu().expect("the flush step failed");
+        emitted += usize::from(step.is_some());
     }
 
     let noise = denoiser.measured_noise().expect("the noise is measured");
     let recorded = noise.stream_frame_count();
     assert_eq!(recorded, PUSHES as u32, "one recorded frame per real push");
 
-    // A copy recorded over the last real frame would drop the sample its pass re-measured.
+    // A copy recorded over the last real frame would drop the sample the look-ahead read.
     let last = recorded - 1;
     let (reading, _, _) = noise.read_history_frame(last);
     assert!(

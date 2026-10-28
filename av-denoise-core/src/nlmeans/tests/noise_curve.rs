@@ -602,9 +602,11 @@ fn the_first_fold_after_a_reset_holds_no_curve() {
 
     assert!(curve_seen, "expected a curve to form over the brightness ramp");
 
+    // The flush runs the one-frame stream's pass, whose fold holds frame 0 alone.
     denoiser.reset_stream_state();
     let first = banded_noisy_frame(width, height, 200);
     denoiser.push_frame(&first);
+    denoiser.flush(|_| {}).unwrap();
 
     assert!(denoiser.current_noise_curve().is_none());
 }

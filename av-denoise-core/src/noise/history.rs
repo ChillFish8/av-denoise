@@ -162,18 +162,6 @@ impl NoiseState {
     /// The stream then counts every frame up to `frame` as recorded. A state that holds fixed
     /// values queues nothing.
     pub(crate) fn record_reading(&self, slot: u32, frame: u32) {
-        self.record(slot, frame, true);
-    }
-
-    /// Records ring slot `slot` as stream frame `frame` like [Self::record_reading], without its
-    /// temporal sample.
-    ///
-    /// The frame then feeds the window its Immerkær values alone, as a frame without a sample does.
-    pub(crate) fn record_spatial_reading(&self, slot: u32, frame: u32) {
-        self.record(slot, frame, false);
-    }
-
-    fn record(&self, slot: u32, frame: u32, keeps_sample: bool) {
         let Some(measurement) = self.measurement.as_ref() else {
             return;
         };
@@ -206,7 +194,6 @@ impl NoiseState {
                 maps.history_maps,
                 slot,
                 history_slot,
-                u32::from(keeps_sample),
                 map_len,
             );
         }

@@ -1,6 +1,6 @@
 use cubecl::server::Handle;
 
-use super::NlmDenoiser;
+use super::{LOOKAHEAD_FRAMES, NlmDenoiser};
 use crate::collab::kernels::aggregate::weight_scale_with_g_max;
 use crate::engine::EngineTiming;
 use crate::engine::align::StorageAlign;
@@ -24,7 +24,6 @@ use crate::noise::{
     NoiseShape,
     ReadingSettings,
     STRENGTH_MAP_OFF,
-    StatsMotion,
     StrengthMapKind,
     TEMPORAL_QUARTER_SIZE,
     WindowBounds,
@@ -59,7 +58,8 @@ pub(super) fn noise_shape(params: &NlmParams, width: u32, height: u32, align: St
         height,
         channels: params.channels.count(),
         stored_ch: params.channels.storage_count(),
-        frames: params.total_frames(),
+        frames: LOOKAHEAD_FRAMES,
+        ring_radius: params.temporal_radius,
         // The temporal estimator needs a neighbour frame to take a difference against.
         temporal: params.temporal_radius >= 1,
         align,
@@ -87,98 +87,6 @@ impl NlmDenoiser {
         let timing_method = self.client.properties().timing_method;
         self.device_timer.set_timing_method(timing_method);
         self.device_timer.set_every(every);
-    }
-
-    /// Queues the noise statistics and the slot reading for stream frame `frame`, just written to
-    /// `slot`, and records the reading.
-    ///
-    /// A stream's first frame has no predecessor, so its temporal record is zeroed instead. With
-    /// motion compensation the record keeps only the Immerkær values, since only a pass's
-    /// compensated re-read may give the frame a temporal sample.
-    pub(super) fn queue_noise_stats(&self, slot: u32, frame: u32) -> Result<(), anyhow::Error> {
-        let total_frames = self.params.total_frames();
-        let slot_prev = (slot + total_frames - 1) % total_frames;
-        let previous = (self.ring_head != 0).then_some(slot_prev);
-
-        self.noise.queue_stats(&self.input_buf, slot, previous)?;
-        self.noise.queue_reading(slot)?;
-
-        if self.mc_ctx.is_some() {
-            self.noise.record_spatial_reading(slot, frame);
-        } else {
-            self.noise.record_reading(slot, frame);
-        }
-
-        Ok(())
-    }
-
-    /// Queues the noise statistics and the slot reading for a duplicated `slot`, whose temporal
-    /// record is zeroed.
-    pub(super) fn queue_duplicate_noise_stats(&self, slot: u32) -> Result<(), anyhow::Error> {
-        self.noise.queue_stats(&self.input_buf, slot, None)?;
-        self.noise.queue_reading(slot)?;
-
-        Ok(())
-    }
-
-    /// Re-measures the centre of a pass at `center_t` against an adjacent frame along the pass's
-    /// motion, then re-reads and re-records its slot.
-    ///
-    /// It prefers the previous frame and falls back to the next one, which a scene's first frame
-    /// needs. It needs a measured noise state, motion compensation and an adjacent frame in the
-    /// window. A centre pushed as a duplicate keeps its zeroed record, and so does a centre whose
-    /// next frame is a copy of itself.
-    pub(in crate::nlmeans) fn queue_compensated_noise_reading(
-        &self,
-        center_t: u32,
-    ) -> Result<(), anyhow::Error> {
-        if !self.noise.is_measured() {
-            return Ok(());
-        }
-
-        let Some(motion_ctx) = self.mc_ctx.as_ref() else {
-            return Ok(());
-        };
-
-        let Some((offset, neighbour_idx)) = self.adjacent_neighbour(center_t) else {
-            return Ok(());
-        };
-
-        let centre_slot = self.phys_frame(center_t as i32);
-        if self.duplicate_slots[centre_slot as usize] {
-            return Ok(());
-        }
-
-        // A duplicated next frame is a copy of the centre, so it holds no residual to measure.
-        let neighbour_slot = self.phys_frame(center_t as i32 + offset);
-        let copies_centre = offset > 0 && self.duplicate_slots[neighbour_slot as usize];
-        if copies_centre {
-            return Ok(());
-        }
-
-        let mv_field = self
-            .mv_field_buf
-            .as_ref()
-            .expect("mv_field allocated when mc_ctx is Some");
-        let neighbours = self.params.total_frames() - 1;
-        let mv_stride = motion_ctx.mv_stride();
-        let motion = StatsMotion {
-            mv_field,
-            mv_len: (neighbours * mv_stride) as usize,
-            mv_offset: neighbour_idx * mv_stride,
-            step: motion_ctx.step,
-            blocks_x: motion_ctx.blocks_x,
-            blocks_y: motion_ctx.blocks_y,
-        };
-
-        self.noise
-            .queue_compensated_stats(&self.input_buf, centre_slot, neighbour_slot, motion)?;
-        self.noise.queue_reading(centre_slot)?;
-
-        let frame = self.slot_frames[centre_slot as usize];
-        self.noise.record_reading(centre_slot, frame);
-
-        Ok(())
     }
 
     /// Applies `change` to the noise settings and refreshes the fixed derived values to match.
@@ -275,26 +183,30 @@ impl NlmDenoiser {
         measured.then_some(&self.noise)
     }
 
-    /// Folds the stream's first frame alone straight away so push-time work has a real sigma.
+    /// Folds the window around the stream's first frame as it enters the ring, for the NLM pilot.
     ///
-    /// Push-time stages such as the NLM pilot run before the first submit folds an estimate.
+    /// The pilot runs on each frame entering the ring and reads the derived values, and the first
+    /// frame enters before any pass folds an estimate. The window reaches the frames the
+    /// look-ahead has read so far.
     ///
-    /// It must run after this push records its reading and before `advance_ring` moves
-    /// `frames_loaded`, which the first-frame check reads.
+    /// It must run before `advance_ring` moves `frames_loaded`, which the first-frame check reads.
     pub(super) fn seed_noise_estimate_if_first_frame(&mut self) -> Result<(), anyhow::Error> {
-        if self.frames_loaded != 0 || !self.noise.is_measured() {
+        let runs_pilot = matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. });
+        if !runs_pilot || self.frames_loaded != 0 || !self.noise.is_measured() {
             return Ok(());
         }
 
-        let first_frame = WindowBounds::around(0, 0);
+        let recorded = self.noise.stream_frame_count();
+        let newest = recorded.saturating_sub(1);
+        let first_frame = WindowBounds::around(0, newest);
         self.noise.queue_window_fold(first_frame)
     }
 
     /// Folds the noise window around the stream frame at logical ring position `center_t`.
     ///
-    /// With motion compensation, frames ahead of the centre hold readings their passes have not
-    /// re-measured yet, so the window stops at the centre. Otherwise it reaches every recorded
-    /// frame ahead, up to the window radius.
+    /// The window reaches every recorded frame ahead, up to the window radius. The look-ahead
+    /// records each frame [LOOKAHEAD_FRAMES] pushes before it enters the ring, so the window is
+    /// complete unless the stream ends sooner.
     pub(in crate::nlmeans) fn update_noise_estimate(&mut self, center_t: u32) -> Result<(), anyhow::Error> {
         debug_assert!(
             center_t < self.params.total_frames(),
@@ -304,12 +216,7 @@ impl NlmDenoiser {
         let centre_slot = self.phys_frame(center_t as i32);
         let centre = self.slot_frames[centre_slot as usize];
         let recorded = self.noise.stream_frame_count();
-        let newest_recorded = recorded.saturating_sub(1);
-        let newest = if self.mc_ctx.is_some() {
-            centre
-        } else {
-            newest_recorded
-        };
+        let newest = recorded.saturating_sub(1);
         let bounds = WindowBounds::around(centre, newest);
 
         self.noise.queue_window_fold(bounds)

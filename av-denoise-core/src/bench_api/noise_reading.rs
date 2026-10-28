@@ -77,6 +77,7 @@ impl NoiseReading {
             channels,
             stored_ch,
             frames: 2,
+            ring_radius: 1,
             temporal: true,
             align: StorageAlign::from_client(client),
         };

@@ -1,3 +1,4 @@
+mod lookahead;
 mod machinery;
 mod noise;
 mod ring;
@@ -7,6 +8,8 @@ mod stages;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+pub(crate) use self::lookahead::LOOKAHEAD_FRAMES;
+use self::lookahead::LookAhead;
 pub(crate) use self::machinery::RingView;
 use self::noise::{measures_noise, noise_shape};
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
@@ -41,15 +44,16 @@ pub struct NlmDenoiser {
     pub(super) ring_head: usize,
     /// Frames loaded so far, capped at the window size.
     pub(super) frames_loaded: usize,
-    /// Real pushes in the current stream, not counting the duplicates added at either end.
+    /// Real frames the ring has taken in the current stream, not counting the duplicates added at
+    /// either end.
     pub(super) real_pushes: usize,
-    /// Whether each ring slot holds a copy of the frame before it rather than a pushed frame.
-    pub(super) duplicate_slots: Vec<bool>,
     /// The stream frame each ring slot holds, where a duplicate holds the frame it copies.
     pub(super) slot_frames: Vec<u32>,
 
     /// The frame ring, one slot per frame in the window.
     pub(super) input_buf: Handle,
+    /// The pushed frames waiting to enter the frame ring, present when the noise is measured.
+    pub(super) lookahead: Option<LookAhead>,
     /// An f16 copy of `input_buf`, slot for slot, allocated by `enable_search_ring`.
     pub(super) search_buf: Option<Handle>,
     /// The prefiltered ring the `_ref` distance kernels read, shaped like `input_buf`.
@@ -92,8 +96,7 @@ pub struct NlmDenoiser {
     /// The noise state, which measures the noise when it is estimated automatically and holds
     /// fixed values otherwise.
     ///
-    /// Each slot keeps a frame's measurements intact until that frame reaches the centre and is
-    /// folded.
+    /// Its slots are the look-ahead's slots, and each frame's reading is recorded as it is pushed.
     pub(super) noise: NoiseState,
 
     pub(super) mc_ctx: Option<MotionCtx>,
@@ -319,7 +322,8 @@ impl NlmDenoiser {
             (None, None)
         };
 
-        let duplicate_slots = vec![false; total_frames as usize];
+        let lookahead =
+            auto_noise.then(|| LookAhead::new(client, frame_bytes, mc_ctx.as_ref(), width, height));
         let slot_frames = vec![0u32; total_frames as usize];
 
         let mut device_timer = DeviceTimer::default();
@@ -334,9 +338,9 @@ impl NlmDenoiser {
             ring_head: 0,
             frames_loaded: 0,
             real_pushes: 0,
-            duplicate_slots,
             slot_frames,
             input_buf,
+            lookahead,
             search_buf: None,
             reference_buf,
             placeholder,
@@ -382,12 +386,23 @@ impl NlmDenoiser {
         &self.placeholder
     }
 
-    /// Ingests `planes` into the next ring slot and runs every per-frame stage on it.
+    /// Takes in one pushed frame.
+    ///
+    /// A front that measures the noise reads the frame's noise in the look-ahead and releases the
+    /// frame pushed [LOOKAHEAD_FRAMES] pushes earlier into the ring. Otherwise the frame goes
+    /// straight into the next ring slot. Every per-frame stage runs on a frame as it enters the
+    /// ring.
     pub(crate) fn push_planes(
         &mut self,
         planes: &[DevicePlane<'_>],
         format: SampleFormat,
     ) -> Result<(), anyhow::Error> {
+        self.device_timer.begin_frame();
+
+        if self.lookahead.is_some() {
+            return self.push_into_lookahead(planes, format);
+        }
+
         let total_frames = self.params.total_frames() as usize;
         let slot = self.ring_head % total_frames;
         let pixels = self.width * self.height;
@@ -401,8 +416,6 @@ impl NlmDenoiser {
             channels: self.params.channels.count(),
             stored_ch,
         };
-
-        self.device_timer.begin_frame();
 
         ingest(&self.client, planes, format, &self.placeholder, target);
         self.mirror_search_slot(slot);
@@ -431,27 +444,34 @@ impl NlmDenoiser {
 
     /// How many tail frames the end-of-stream drain must emit.
     ///
-    /// It is zero in spatial mode and for a stream with no pushes.
+    /// It counts every frame the look-ahead holds, and with a temporal radius above 0 the frames
+    /// the ring still owes. It is zero for a stream with no pushes.
     pub(crate) fn flush_target(&self) -> usize {
+        let held = self.held_frames();
         let temporal_radius = self.params.temporal_radius as usize;
-        if temporal_radius == 0 || self.real_pushes == 0 {
-            0
-        } else {
-            self.real_pushes.min(temporal_radius)
-        }
+        let released = self.real_pushes;
+        let ring_tail = released.min(temporal_radius);
+
+        held + ring_tail
     }
 
     pub(crate) fn real_pushes(&self) -> usize {
         self.real_pushes
     }
 
-    /// Runs one end-of-stream drain step, duplicating the last frame forward and submitting.
+    /// Runs one end-of-stream drain step and submits.
     ///
-    /// Returns `Ok(None)` while the duplicates still fill a window that never filled during
-    /// pushing. Later steps always return `Some`, so callers stop after [Self::flush_target]
-    /// outputs. It needs at least one pushed frame and a temporal radius above 0.
+    /// A step releases the oldest frame the look-ahead holds. Once it holds none, a step duplicates
+    /// the last frame forward. Returns `Ok(None)` while the window has not filled yet, so callers
+    /// stop after [Self::flush_target] outputs. Duplicating needs at least one pushed frame and a
+    /// temporal radius above 0.
     pub(crate) fn flush_step_gpu(&mut self) -> Result<Option<GpuOutput>, anyhow::Error> {
         self.device_timer.stop_sampling();
+
+        let released = self.release_held_frame()?;
+        if released {
+            return self.denoise_submit_gpu();
+        }
 
         let total_frames = self.params.total_frames() as usize;
 
@@ -465,13 +485,18 @@ impl NlmDenoiser {
 
     /// Resets the stream state so the next push starts a fresh temporal stream.
     ///
-    /// The noise state starts a new stream of recorded frames. Every GPU buffer is left alone,
-    /// because a fresh stream writes every slot before reading it.
+    /// The look-ahead drops the frames it holds and the noise state starts a new stream of
+    /// recorded frames. Every GPU buffer is left alone, because a fresh stream writes every slot
+    /// before reading it.
     pub fn reset_stream_state(&mut self) {
         self.ring_head = 0;
         self.frames_loaded = 0;
         self.next_output_slot = 0;
         self.real_pushes = 0;
         self.noise.reset_stream();
+
+        if let Some(lookahead) = self.lookahead.as_mut() {
+            lookahead.reset();
+        }
     }
 }

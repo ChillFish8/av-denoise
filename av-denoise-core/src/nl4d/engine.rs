@@ -29,8 +29,8 @@ pub struct Nl4d {
     temporal_radius: u32,
     /// Regions finished but not yet emitted, oldest first.
     pending: VecDeque<CompletedRegion>,
-    /// Whether the regions in `pending` are a stream's tail.
-    finishing: bool,
+    /// The stream's tail frames still to emit after a finish.
+    tail_remaining: usize,
     /// Pushes since the last stream start, used to mark a context-led stream as a continuation.
     pushes: usize,
     /// Whether the current stream has had a real push, after which context frames are refused.
@@ -90,7 +90,7 @@ impl Nl4d {
             geometry,
             temporal_radius: options.temporal_radius,
             pending: VecDeque::new(),
-            finishing: false,
+            tail_remaining: 0,
             pushes: 0,
             pushed: false,
             poisoned: false,
@@ -106,7 +106,7 @@ impl Nl4d {
     }
 
     fn check_nothing_pending(&self) -> Result<(), Error> {
-        if !self.pending.is_empty() {
+        if !self.pending.is_empty() || self.tail_remaining > 0 {
             return Err(Error::OutputsPending);
         }
 
@@ -132,9 +132,27 @@ impl Nl4d {
 
     fn restart_stream(&mut self) {
         self.inner.reset_stream();
-        self.finishing = false;
+        self.tail_remaining = 0;
         self.pushes = 0;
         self.pushed = false;
+    }
+
+    /// Queues the stream's next tail regions, draining the look-ahead before the tail passes run.
+    fn queue_tail_regions(&mut self) -> Result<(), anyhow::Error> {
+        let drained = self.inner.drain_lookahead()?;
+        if let Some(region) = drained {
+            self.pending.push_back(region);
+            return Ok(());
+        }
+
+        let regions = self.inner.finish_passes()?;
+        let count = regions.len();
+        let owed = self.tail_remaining;
+        anyhow::ensure!(count == owed, "the tail completed {count} of {owed} owed regions");
+
+        self.pending.extend(regions);
+
+        Ok(())
     }
 
     fn write_out(&self, frame: &Handle, planes: &[DevicePlane<'_>]) {
@@ -204,6 +222,11 @@ impl Engine for Nl4d {
         self.check_usable()?;
         self.geometry.check_planes(planes, self.geometry.output)?;
 
+        if self.pending.is_empty() && self.tail_remaining > 0 {
+            let queued = self.queue_tail_regions();
+            self.guard(queued)?;
+        }
+
         let Some(region) = self.pending.pop_front() else {
             return Err(Error::NothingToEmit);
         };
@@ -211,8 +234,11 @@ impl Engine for Nl4d {
         let frame = self.inner.read_region(region);
         self.write_out(&frame, planes);
 
-        if self.finishing && self.pending.is_empty() {
-            self.restart_stream();
+        if self.tail_remaining > 0 {
+            self.tail_remaining -= 1;
+            if self.tail_remaining == 0 {
+                self.restart_stream();
+            }
         }
 
         Ok(())
@@ -222,16 +248,13 @@ impl Engine for Nl4d {
         self.check_usable()?;
         self.check_nothing_pending()?;
 
-        let finished = self.inner.finish_passes();
-        let regions = self.guard(finished)?;
-
-        let count = regions.len();
-        self.pending.extend(regions);
-
+        // The tail runs lazily, one region at a time while the look-ahead drains, since each
+        // release reuses the ring slot of the region before it.
+        let count = self.inner.finish_count();
         if count == 0 {
             self.restart_stream();
         } else {
-            self.finishing = true;
+            self.tail_remaining = count;
         }
 
         Ok(count)

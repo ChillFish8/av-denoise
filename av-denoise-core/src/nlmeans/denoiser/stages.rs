@@ -6,19 +6,15 @@ use crate::motion::{self, MotionEstimation, run_pyramid_build};
 use crate::nlmeans::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
 
 impl NlmDenoiser {
-    /// Runs every per-frame stage on a freshly pushed `slot`, through to the ring advance.
+    /// Runs every per-frame stage on the frame just written to ring `slot`, through to the ring
+    /// advance.
     ///
-    /// The GPU stages run in device spans when the frame is sampled. The first frame's noise seed
-    /// is queued between two spans.
+    /// The GPU stages run in a device span when the frame is sampled. The stream's first frame
+    /// seeds the noise estimate before them.
     pub(super) fn run_post_upload_stages(&mut self, slot: usize) -> Result<(), anyhow::Error> {
         let client = self.client.clone();
-        let frame_slot = slot as u32;
         let frame = self.real_pushes as u32;
 
-        timed(&client, self, move |front| {
-            front.queue_noise_stats(frame_slot, frame)
-        })?;
-        self.duplicate_slots[slot] = false;
         self.slot_frames[slot] = frame;
         self.seed_noise_estimate_if_first_frame()?;
 

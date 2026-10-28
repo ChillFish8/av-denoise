@@ -9,6 +9,7 @@ mod fill;
 mod gpu_noise;
 mod gpu_submit;
 mod hq;
+mod lookahead;
 mod machinery;
 mod mirror;
 mod motion_compensation;

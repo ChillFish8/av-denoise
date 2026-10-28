@@ -29,6 +29,7 @@ use crate::collab::kernels::fused::{CollabVariant, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_SIZE, grid_frames};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::noisy_field_over;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams};
 use crate::noise::tests::{CollabNoise, collab_noise_buffer};
@@ -953,7 +954,7 @@ fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
     let base = textured_base(width, height);
     let shipped_params = shipped_default_params();
     let radius = shipped_params.temporal_radius;
-    let frame_count = (3 * radius + 1) as usize;
+    let frame_count = (3 * radius + 1 + LOOKAHEAD_FRAMES) as usize;
 
     let clean_params = shipped_default_params();
     let mut clean_denoiser = Nl4dDenoiser::new(&client, clean_params, width, height)

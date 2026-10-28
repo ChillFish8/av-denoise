@@ -68,11 +68,12 @@ fn uniform_noise_low_chain_matches_median_chain() {
     let params = auto_params_k0();
     let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
-    denoiser.denoise().unwrap();
+    // The flush runs the pass the noise look-ahead holds back, and leaves its fold in place.
+    denoiser.flush(|_| {}).unwrap();
 
     let folded = snapshot(&denoiser);
-    let median = first_channel(folded.median).expect("seeded on first push");
-    let low = first_channel(folded.low).expect("seeded on first push");
+    let median = first_channel(folded.median).expect("the flush pass folds");
+    let low = first_channel(folded.low).expect("the flush pass folds");
     let noise_offset = folded.derived.noise_offset;
 
     let relative_error = (low - median).abs() / median;
@@ -104,11 +105,12 @@ fn split_noise_offset_tracks_low_chain_strength_tracks_median() {
     let params = auto_params_k0();
     let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
-    denoiser.denoise().unwrap();
+    // The flush runs the pass the noise look-ahead holds back, and leaves its fold in place.
+    denoiser.flush(|_| {}).unwrap();
 
     let folded = snapshot(&denoiser);
-    let median = first_channel(folded.median).expect("seeded on first push");
-    let low = first_channel(folded.low).expect("seeded on first push");
+    let median = first_channel(folded.median).expect("the flush pass folds");
+    let low = first_channel(folded.low).expect("the flush pass folds");
     let noise_offset = folded.derived.noise_offset;
     let h2_inv_norm = folded.derived.h2_inv_norm;
 
@@ -137,7 +139,7 @@ fn split_noise_offset_tracks_low_chain_strength_tracks_median() {
 /// holds it has folded.
 ///
 /// At `temporal_radius = 2` the leading edge is primed with copies of the low-sigma frame 0, and two
-/// high-sigma pushes then fill the window. A shared scratch buffer would hold the latest high-sigma
+/// high-sigma frames then fill the window. A shared scratch buffer would hold the latest high-sigma
 /// readings by the first fold, so frame 0's record would read high.
 #[test]
 fn the_history_keeps_each_frame_reading_until_it_folds() {
@@ -157,15 +159,16 @@ fn the_history_keeps_each_frame_reading_until_it_folds() {
     let frame_high_1 = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma_high]);
     let frame_high_2 = make_noisy_gaussian_frame(width, height, 1, 0.5, &[sigma_high]);
 
-    denoiser.push_frame(&frame_low);
-    assert!(denoiser.denoise().unwrap().is_none(), "window not full yet");
-    denoiser.push_frame(&frame_high_1);
-    assert!(denoiser.denoise().unwrap().is_none(), "window not full yet");
-    denoiser.push_frame(&frame_high_2);
-    assert!(
-        denoiser.denoise().unwrap().is_some(),
-        "window should be full after the third push"
-    );
+    for frame in [&frame_low, &frame_high_1, &frame_high_2] {
+        denoiser.push_frame(frame);
+        assert!(
+            denoiser.denoise().unwrap().is_none(),
+            "the look-ahead holds the frame"
+        );
+    }
+
+    // The first output's pass folds the window holding all three frames.
+    while denoiser.flush_step_gpu().unwrap().is_none() {}
 
     let noise = denoiser.measured_noise().expect("the noise is measured");
     let recorded = noise.stream_frame_count();
@@ -229,6 +232,8 @@ fn temporal_only_chain_reads_the_median_block_sigma() {
         denoiser.push_frame(&frame);
         let _ = denoiser.denoise().unwrap();
     }
+
+    denoiser.flush(|_| {}).unwrap();
 
     let folded = snapshot(&denoiser);
     let temporal_only =

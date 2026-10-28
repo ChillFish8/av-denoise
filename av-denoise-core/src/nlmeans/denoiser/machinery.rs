@@ -2,7 +2,6 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NlmDenoiser;
-use crate::engine::timing::timed;
 use crate::motion::{self, MotionCtx};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::nlmeans::mirror::MirroredBuffer;
@@ -65,17 +64,13 @@ impl NlmDenoiser {
         let neighbour_slots = self.window_neighbour_slots(center_t);
         self.update_neighbour_slots(&neighbour_slots);
 
-        // The match scores confidence against the previous fold's derived values, and the centre is
-        // then re-measured along the vectors it found.
-        let client = self.client.clone();
-        self.run_motion_machinery(center_t)?;
-        timed(&client, self, move |front| {
-            front.queue_compensated_noise_reading(center_t)
-        })?;
-
+        // The look-ahead has read every frame the window reaches, so the fold runs first and the
+        // match scores confidence against this centre's own derived values.
         if self.noise.is_measured() {
             self.update_noise_estimate(center_t)?;
         }
+
+        self.run_motion_machinery(center_t)?;
 
         let motion_ctx = self
             .mc_ctx

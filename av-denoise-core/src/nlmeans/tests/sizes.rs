@@ -56,6 +56,12 @@ fn assert_sizes_match_allocations(params: NlmParams) {
     let mut pairs = front_pairs.to_vec();
     pairs.extend(reading_buffers);
 
+    let lookahead_buffers = denoiser
+        .lookahead
+        .as_ref()
+        .map(|lookahead| lookahead.buffers_for_test());
+    pairs.extend(lookahead_buffers.into_iter().flatten());
+
     for &(name, handle) in &pairs {
         let allocated = allocated_elements(handle);
         let expected = computed(&sizes.buffers, name);

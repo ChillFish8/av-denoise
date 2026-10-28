@@ -8,10 +8,13 @@ use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
 use crate::nl4d::{Nl4d, Nl4dDenoiser, Nl4dOptions, resolve_params};
 use crate::nlmeans::ChannelMode;
+use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::{make_client, normalise_with_ingest, read_interleaved, upload_planes};
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
+/// Enough frames for a radius 1 engine to report a frame ready through the noise look-ahead.
+const READY_FRAMES: usize = 4 + LOOKAHEAD_FRAMES as usize;
 
 fn geometry(channels: ChannelMode) -> Geometry {
     Geometry {
@@ -390,7 +393,7 @@ fn engine_with_a_ready_frame(client: &Client, frames: &[Vec<f32>]) -> (Nl4d, usi
 
 #[test]
 fn push_before_emitting_returns_outputs_pending_and_keeps_the_frame() {
-    let frames = noisy_frames(WIDTH, HEIGHT, 1, 10);
+    let frames = noisy_frames(WIDTH, HEIGHT, 1, READY_FRAMES);
     let client = make_client();
     let (mut engine, _ready, pushed) = engine_with_a_ready_frame(&client, &frames);
 
@@ -407,7 +410,7 @@ fn push_before_emitting_returns_outputs_pending_and_keeps_the_frame() {
 
 #[test]
 fn finish_while_a_frame_is_ready_returns_outputs_pending() {
-    let frames = noisy_frames(WIDTH, HEIGHT, 1, 10);
+    let frames = noisy_frames(WIDTH, HEIGHT, 1, READY_FRAMES);
     let client = make_client();
     let (mut engine, _ready, _pushed) = engine_with_a_ready_frame(&client, &frames);
 
@@ -468,7 +471,7 @@ fn emit_after_the_last_tail_frame_returns_nothing_to_emit() {
 
 #[test]
 fn misuse_errors_do_not_poison() {
-    let frames = noisy_frames(WIDTH, HEIGHT, 1, 4);
+    let frames = noisy_frames(WIDTH, HEIGHT, 1, READY_FRAMES);
     let client = make_client();
     let mut engine = build_engine(&client, 1, ChannelMode::Luma);
     let output = client.empty((WIDTH * HEIGHT * 4) as usize);
@@ -538,7 +541,7 @@ fn a_gpu_failure_poisons_until_reset() {
 
 #[test]
 fn reset_mid_stream_with_a_ready_frame_matches_a_fresh_engine() {
-    let frames = noisy_frames(WIDTH, HEIGHT, 1, 10);
+    let frames = noisy_frames(WIDTH, HEIGHT, 1, READY_FRAMES);
     let client = make_client();
     let (mut engine, ready, _pushed) = engine_with_a_ready_frame(&client, &frames);
     assert_eq!(ready, 1);
@@ -656,6 +659,8 @@ fn a_ring_past_u32_elements_is_invalid_geometry() {
 
 /// A 32768x24576 luma frame ring of five frames fits in `u32`, but its motion pyramid ring holds at
 /// least 1.25 times as many elements and does not.
+///
+/// The sigma is pinned, so no noise look-ahead ring is sized first.
 #[test]
 fn a_motion_pyramid_past_u32_elements_is_invalid_geometry() {
     let client = make_client();
@@ -665,7 +670,10 @@ fn a_motion_pyramid_past_u32_elements_is_invalid_geometry() {
         ..geometry(ChannelMode::Luma)
     };
 
-    let engine_options = options(2, false);
+    let engine_options = Nl4dOptions {
+        sigma: Some(4.0 / 255.0),
+        ..options(2, false)
+    };
     let built = Nl4d::new(&client, engine_options, oversized);
     let Err(Error::InvalidGeometry(message)) = built else {
         panic!("expected InvalidGeometry");

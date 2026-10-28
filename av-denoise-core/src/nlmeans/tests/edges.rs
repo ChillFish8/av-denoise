@@ -37,12 +37,30 @@ fn shifted_denoiser(client: &Client) -> NlmDenoiser {
     denoiser
 }
 
+/// Moves every frame the noise look-ahead holds into the ring, as a stream's end does.
+fn release_held(denoiser: &mut NlmDenoiser) {
+    while denoiser.release_held_frame().expect("release failed") {}
+}
+
+/// Pushes `count` grain frames and releases each into the ring.
 fn push_grain(denoiser: &mut NlmDenoiser, count: u32) {
     let base = textured_base(SIZE, SIZE);
     for seed in 0..count {
         let frame = noisy_field_over(&base, SIZE, SIZE, GRAIN, seed);
         denoiser.push_frame(&frame);
     }
+
+    release_held(denoiser);
+}
+
+fn push_frozen(denoiser: &mut NlmDenoiser, count: u32) {
+    let base = textured_base(SIZE, SIZE);
+    let frozen = noisy_field_over(&base, SIZE, SIZE, GRAIN, 0);
+    for _ in 0..count {
+        denoiser.push_frame(&frozen);
+    }
+
+    release_held(denoiser);
 }
 
 #[test]
@@ -71,9 +89,8 @@ fn centre_zero_reads_its_own_sample_against_the_next_frame() {
     push_grain(&mut at_one, total_frames);
     at_one.submit_machinery(1).unwrap().unwrap();
 
-    let centre_slot = at_zero.ring_slot(0);
     let noise = at_zero.measured_noise().expect("the noise is measured");
-    let reading = noise.read_reading(centre_slot);
+    let (reading, _, _) = noise.read_history_frame(0);
     assert!(reading.sample.is_some(), "centre 0 has its own sample");
 
     let from_next = at_zero.current_sigmas_temporal_only();
@@ -94,11 +111,7 @@ fn centre_zero_reads_its_own_sample_against_the_next_frame() {
 fn centre_zero_falls_back_when_every_reading_ahead_is_rejected() {
     let client = make_client();
     let mut denoiser = shifted_denoiser(&client);
-    let base = textured_base(SIZE, SIZE);
-    let frozen = noisy_field_over(&base, SIZE, SIZE, GRAIN, 0);
-    for _ in 0..(2 * RADIUS + 1) {
-        denoiser.push_frame(&frozen);
-    }
+    push_frozen(&mut denoiser, 2 * RADIUS + 1);
 
     denoiser.submit_machinery(0).unwrap().unwrap();
 
@@ -117,12 +130,7 @@ fn a_second_stream_never_reads_the_first_streams_f0_stats() {
     // stream's f0 lands in.
     push_grain(&mut denoiser, total_frames + 1);
     denoiser.reset_stream_state();
-
-    let base = textured_base(SIZE, SIZE);
-    let frozen = noisy_field_over(&base, SIZE, SIZE, GRAIN, 0);
-    for _ in 0..total_frames {
-        denoiser.push_frame(&frozen);
-    }
+    push_frozen(&mut denoiser, total_frames);
 
     denoiser.submit_machinery(0).unwrap().unwrap();
 

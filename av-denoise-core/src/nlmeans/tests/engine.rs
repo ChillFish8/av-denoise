@@ -11,9 +11,11 @@ use super::helpers::{
 use crate::bench_api::HostIo;
 use crate::engine::{DevicePlane, Engine, Geometry, SampleFormat};
 use crate::error::Error;
+use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::{
     ChannelMode,
     DenoisingMode,
+    HqParams,
     MotionCompensationMode,
     NlmDenoiser,
     Nlmeans,
@@ -25,6 +27,8 @@ use crate::nlmeans::{
 
 const WIDTH: u32 = 48;
 const HEIGHT: u32 = 40;
+/// The pushes an HQ engine holds in its noise look-ahead before a frame enters its ring.
+const LOOKAHEAD: usize = LOOKAHEAD_FRAMES as usize;
 
 fn geometry(channels: ChannelMode) -> Geometry {
     Geometry {
@@ -72,6 +76,18 @@ fn emit(engine: &mut Nlmeans, client: &Client, channel_count: usize) -> Vec<f32>
     engine.emit_into(&planes).expect("emit");
 
     read_interleaved(client, &outputs)
+}
+
+/// Pushes `frames` in order until one is ready, leaving it unemitted, and returns the pushes made.
+fn push_until_ready(engine: &mut Nlmeans, client: &Client, frames: &[Vec<f32>]) -> usize {
+    for (index, frame) in frames.iter().enumerate() {
+        let ready = push_frame(engine, client, frame, 1);
+        if ready == 1 {
+            return index + 1;
+        }
+    }
+
+    panic!("no frame was ready after {} pushes", frames.len());
 }
 
 /// Pushes one frame and returns how many frames the engine reports ready.
@@ -217,7 +233,7 @@ fn a_second_stream_after_finish_matches_a_fresh_engine() {
 #[test]
 fn push_context_then_one_push_matches_the_streaming_centre() {
     let radius = 2u32;
-    let context = 2 * radius as usize;
+    let context = 2 * radius as usize + LOOKAHEAD;
     let window = context + 1;
     let frames = frames(window, 1);
     let client = make_client();
@@ -298,31 +314,31 @@ fn push_context_is_allowed_again_after_a_finish_with_no_tail() {
 
 #[test]
 fn push_before_emitting_returns_outputs_pending_and_keeps_the_frame() {
-    let frames = frames(3, 1);
+    let frames = frames(LOOKAHEAD + 1, 1);
     let client = make_client();
     let mut engine = build_engine(&client, 0, ChannelMode::Luma);
+
+    let ready = push_until_ready(&mut engine, &client, &frames);
+    assert_eq!(ready, LOOKAHEAD + 1);
+
     let handles = upload_planes(&client, &frames[0], 1);
     let planes = [DevicePlane::new(&handles[0], WIDTH, HEIGHT)];
-
-    let ready = engine.push(&planes).expect("push");
-    assert_eq!(ready, 1);
-
     let second = engine.push(&planes);
     assert!(matches!(second, Err(Error::OutputsPending)));
 
     let output = emit(&mut engine, &client, 1);
-    let expected = run_oracle(0, ChannelMode::Luma, &frames[..1]);
+    let expected = run_oracle(0, ChannelMode::Luma, &frames);
     assert_eq!(output, expected[0]);
 }
 
 #[test]
 fn finish_while_a_frame_is_ready_returns_outputs_pending() {
-    let frames = frames(1, 1);
+    let frames = frames(LOOKAHEAD + 1, 1);
     let client = make_client();
     let mut engine = build_engine(&client, 0, ChannelMode::Luma);
 
-    let ready = push_frame(&mut engine, &client, &frames[0], 1);
-    assert_eq!(ready, 1);
+    let ready = push_until_ready(&mut engine, &client, &frames);
+    assert_eq!(ready, LOOKAHEAD + 1);
 
     let finished = engine.finish();
     assert!(matches!(finished, Err(Error::OutputsPending)));
@@ -383,9 +399,9 @@ fn misuse_errors_do_not_poison() {
     let wrong_count = engine.push(&[]);
     assert!(matches!(wrong_count, Err(Error::PlaneMismatch(_))));
 
-    let frame = frames(1, 1);
-    let ready = push_frame(&mut engine, &client, &frame[0], 1);
-    assert_eq!(ready, 1);
+    let frames = frames(LOOKAHEAD + 1, 1);
+    let ready = push_until_ready(&mut engine, &client, &frames);
+    assert_eq!(ready, LOOKAHEAD + 1);
 }
 
 #[test]
@@ -418,29 +434,25 @@ fn a_gpu_failure_poisons_until_reset() {
     let failure = engine.fail_through_guard_for_test();
     assert!(matches!(failure, Err(Error::Gpu(_))));
 
-    let frame = frames(1, 1);
-    let handles = upload_planes(&client, &frame[0], 1);
+    let frames = frames(LOOKAHEAD + 1, 1);
+    let handles = upload_planes(&client, &frames[0], 1);
     let input = [DevicePlane::new(&handles[0], WIDTH, HEIGHT)];
     let pushed = engine.push(&input);
     assert!(matches!(pushed, Err(Error::NeedsReset)));
 
     engine.reset();
-    let ready = engine.push(&input).expect("push after reset");
-    assert_eq!(ready, 1);
+    let ready = push_until_ready(&mut engine, &client, &frames);
+    assert_eq!(ready, LOOKAHEAD + 1);
 }
 
 #[test]
 fn reset_mid_stream_with_a_ready_frame_matches_a_fresh_engine() {
-    let frames = frames(6, 1);
+    let frames = frames(6 + LOOKAHEAD, 1);
     let client = make_client();
     let mut engine = build_engine(&client, 2, ChannelMode::Luma);
 
-    let mut ready = 0;
-    for frame in &frames[..3] {
-        ready = push_frame(&mut engine, &client, frame, 1);
-    }
-
-    assert_eq!(ready, 1);
+    let ready = push_until_ready(&mut engine, &client, &frames);
+    assert_eq!(ready, 3 + LOOKAHEAD);
 
     engine.reset();
     let second = drive(&mut engine, &client, &frames, 1);
@@ -559,6 +571,8 @@ fn a_ring_past_u32_elements_is_invalid_geometry() {
 
 /// A 32768x24576 luma frame ring of five frames fits in `u32`, but its two-level pyramid ring holds
 /// 1.25 times as many elements and does not.
+///
+/// The sigma is pinned, so no noise look-ahead ring is sized first.
 #[test]
 fn a_motion_pyramid_past_u32_elements_is_invalid_geometry() {
     let client = make_client();
@@ -572,10 +586,11 @@ fn a_motion_pyramid_past_u32_elements_is_invalid_geometry() {
         motion_compensation: MotionCompensationMode::mvtools_default(),
         ..NlmeansOptions::default()
     };
-    let algorithm = NlmeansAlgorithm::Hq(NlmeansHqOptions {
-        nlm: nlm_options,
-        ..NlmeansHqOptions::default()
-    });
+    let hq = HqParams {
+        sigma_override: Some(4.0 / 255.0),
+        ..HqParams::default()
+    };
+    let algorithm = NlmeansAlgorithm::Hq(NlmeansHqOptions { nlm: nlm_options, hq });
 
     let built = Nlmeans::new(&client, algorithm, oversized);
     let Err(Error::InvalidGeometry(message)) = built else {

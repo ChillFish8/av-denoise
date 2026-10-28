@@ -633,18 +633,15 @@ impl NlmDenoiser {
             self.update_neighbour_slots(&neighbour_slots);
         }
 
-        // Both run before any NLM dispatch so the temporal kernels read aligned neighbours.
-        // `confidence_ctx` only exists with motion compensation off, so at most one does work. The
-        // fold lands between them, since the confidence pass reads the derived values.
-        self.run_motion_compensation(center_t)?;
-        timed(&client, self, move |front| {
-            front.queue_compensated_noise_reading(center_t)
-        })?;
-
+        // The look-ahead has read every frame the window reaches, so the fold runs first and both
+        // confidence scores read this centre's own derived values.
         if self.noise.is_measured() {
             self.update_noise_estimate(center_t)?;
         }
 
+        // Both run before any NLM dispatch so the temporal kernels read aligned neighbours.
+        // `confidence_ctx` only exists with motion compensation off, so at most one does work.
+        self.run_motion_compensation(center_t)?;
         timed(&client, self, move |front| front.run_confidence_pass(center_t))?;
 
         if self.use_separable {

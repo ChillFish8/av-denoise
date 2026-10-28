@@ -186,6 +186,7 @@ impl ReadingHarness {
             channels: plane.channels,
             stored_ch: plane.stored_ch,
             frames,
+            ring_radius: frames / 2,
             temporal: true,
             align: StorageAlign::from_client(&client),
         };

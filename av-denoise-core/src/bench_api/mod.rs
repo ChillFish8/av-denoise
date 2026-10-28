@@ -191,6 +191,12 @@ impl HostIo for Nl4dDenoiser {
     }
 
     fn flush(&mut self, mut sink: impl FnMut(&[f32])) -> Result<(), anyhow::Error> {
+        while let Some(region) = self.drain_lookahead()? {
+            let handle = self.read_region(region);
+            let frame = self.read_back(&handle)?;
+            sink(&frame);
+        }
+
         let regions = self.finish_passes()?;
 
         for region in regions {

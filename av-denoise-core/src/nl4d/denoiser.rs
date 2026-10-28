@@ -54,7 +54,8 @@ enum StreamStart {
 /// accumulator ring, which `collab_normalise` turns into finished frames.
 ///
 /// A pass scatters each member into the frame it came from, so a frame finishes only once every
-/// pass that can reach it has run. Latency is `2 * temporal_radius` pushes.
+/// pass that can reach it has run. Latency is `2 * temporal_radius` pushes, plus the front end's
+/// look-ahead when it measures the noise.
 pub struct Nl4dDenoiser {
     pub(super) front: NlmDenoiser,
     pub(super) width: u32,
@@ -460,14 +461,75 @@ impl Nl4dDenoiser {
         Ok(view)
     }
 
+    /// Releases the frames the look-ahead holds, running their passes, until one completes a region.
+    ///
+    /// Returns `None` once the look-ahead holds nothing. A stream's end reads out each region before
+    /// the next call, since the next release reuses its ring slot, and then runs
+    /// [Self::finish_passes].
+    pub(crate) fn drain_lookahead(&mut self) -> Result<Option<CompletedRegion>, anyhow::Error> {
+        self.front.device_timer.stop_sampling();
+
+        while self.front.release_held_frame()? {
+            let region = self.submit_passes()?;
+            if region.is_some() {
+                return Ok(region);
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// How many regions a stream's end owes, through [Self::drain_lookahead] and then
+    /// [Self::finish_passes].
+    pub(crate) fn finish_count(&self) -> usize {
+        let held = self.front.held_frames();
+        let released = self.front.real_pushes();
+        let drained = self.drained_region_count(released, held);
+        let tail = self.tail_region_count(released + held);
+
+        drained + tail
+    }
+
+    /// The regions the passes of `held` more frames complete, in a ring that has taken `released`.
+    ///
+    /// It follows the pass count [Self::submit_passes] keeps, one middle pass per frame once the
+    /// ring is full and the head passes before a scene's first.
+    fn drained_region_count(&self, released: usize, held: usize) -> usize {
+        let radius = self.temporal_radius;
+        let total_frames = 1 + 2 * radius as usize;
+        let opens_scene = self.stream_start == StreamStart::SceneStart;
+        let mut passes = self.passes_run;
+        let mut regions = 0;
+
+        for taken in released + 1..=released + held {
+            if taken < total_frames {
+                continue;
+            }
+
+            if passes == 0 && opens_scene {
+                passes += radius;
+            }
+
+            passes += 1;
+            if passes > radius {
+                regions += 1;
+            }
+        }
+
+        regions
+    }
+
     /// Runs the passes a stream's end owes and returns the regions to read out, in emit order.
     ///
-    /// A stream that filled its ring runs tail passes centred on its last `temporal_radius`
-    /// frames, then reads out the last `2 * temporal_radius` regions. A shorter stream pads the
-    /// ring with copies of its last frame, runs every real frame as a centre and reads out every
-    /// real frame.
+    /// The look-ahead must be drained first. A stream that filled its ring runs tail passes centred
+    /// on its last `temporal_radius` frames, then reads out the last `2 * temporal_radius` regions.
+    /// A shorter stream pads the ring with copies of its last frame, runs every real frame as a
+    /// centre and reads out every real frame.
     pub(crate) fn finish_passes(&mut self) -> Result<Vec<CompletedRegion>, anyhow::Error> {
         self.front.device_timer.stop_sampling();
+
+        let held = self.front.held_frames();
+        debug_assert_eq!(held, 0, "the look-ahead is drained before the tail passes");
 
         let emit = self.flush_target() as u32;
         if emit == 0 {
@@ -606,16 +668,17 @@ impl Nl4dDenoiser {
     }
 
     /// How many tail frames [Self::finish_passes] must emit.
+    fn flush_target(&self) -> usize {
+        let real_pushes = self.front.real_pushes();
+        self.tail_region_count(real_pushes)
+    }
+
+    /// The tail regions of a stream whose ring took `pushes` frames.
     ///
     /// A stream that filled its ring holds `2 * temporal_radius` unread regions. A shorter stream
     /// holds every frame it pushed.
-    fn flush_target(&self) -> usize {
-        let real_pushes = self.front.real_pushes();
-        if real_pushes == 0 {
-            0
-        } else {
-            real_pushes.min(2 * self.temporal_radius as usize)
-        }
+    fn tail_region_count(&self, pushes: usize) -> usize {
+        pushes.min(2 * self.temporal_radius as usize)
     }
 
     /// Saves the last pass's vectors from the centre to the next frame for grain export.

@@ -151,8 +151,7 @@ fn hq_uniform_input_passthrough() {
     };
 
     let mut denoiser = NlmDenoiser::new(&client, params, width, height);
-    denoiser.push_frame(&frame);
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoise_alone(&mut denoiser, &frame);
 
     for (i, &value) in result.iter().enumerate() {
         assert!((value - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {value}");
@@ -168,6 +167,23 @@ fn hq_temporal_smoke() {
     };
 
     run_temporal_smoke(params, 16, 16);
+}
+
+/// Pushes `frame` as a one-frame stream and returns its output.
+///
+/// A front that measures the noise holds the frame in its look-ahead, so the flush releases it and
+/// leaves its fold in place.
+fn denoise_alone(denoiser: &mut NlmDenoiser, frame: &[f32]) -> Vec<f32> {
+    denoiser.push_frame(frame);
+    if let Some(output) = denoiser.denoise().unwrap() {
+        return output;
+    }
+
+    let mut outputs = Vec::new();
+    denoiser.flush(|output| outputs.push(output.to_vec())).unwrap();
+    assert_eq!(outputs.len(), 1, "one output for the one pushed frame");
+
+    outputs.remove(0)
 }
 
 /// Uses per-pixel Gaussian noise because the Immerkær estimator reads a solid block close to the
@@ -192,8 +208,7 @@ fn hq_auto_sigma_denoises() {
     };
 
     let mut denoiser = NlmDenoiser::new(&client, params, width, height);
-    denoiser.push_frame(&frame);
-    let result = denoiser.denoise().unwrap().unwrap();
+    let result = denoise_alone(&mut denoiser, &frame);
 
     let mut max_diff = 0.0f32;
     for (i, (&input, &output)) in frame.iter().zip(result.iter()).enumerate() {
@@ -336,13 +351,11 @@ fn hq_pilot_differs_from_unguided() {
 
     let unguided_params = hq_params(PrefilterMode::None);
     let mut unguided = NlmDenoiser::new(&client, unguided_params, width, height);
-    unguided.push_frame(&frame);
-    let unguided_out = unguided.denoise().unwrap().unwrap();
+    let unguided_out = denoise_alone(&mut unguided, &frame);
 
     let piloted_params = hq_params(PrefilterMode::NlmSpatial { strength_scale: 1.0 });
     let mut piloted = NlmDenoiser::new(&client, piloted_params, width, height);
-    piloted.push_frame(&frame);
-    let piloted_out = piloted.denoise().unwrap().unwrap();
+    let piloted_out = denoise_alone(&mut piloted, &frame);
 
     let mut max_diff = 0.0f32;
     let pairs = unguided_out.iter().zip(piloted_out.iter()).enumerate();
@@ -522,13 +535,12 @@ fn hq_sigma_scale_multiplies_the_folded_estimate() {
         };
 
         let mut denoiser = NlmDenoiser::new(&client, params, width, height);
-        denoiser.push_frame(&frame);
-        denoiser.denoise().unwrap();
+        denoise_alone(&mut denoiser, &frame);
 
         let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
         let median = snapshot
             .median
-            .expect("estimator should hold a value after one push");
+            .expect("estimator should hold a value after one frame");
         (median[0], snapshot.derived.noise_offset)
     };
 

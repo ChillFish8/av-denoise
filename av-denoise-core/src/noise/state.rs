@@ -38,8 +38,11 @@ pub(crate) struct NoiseShape {
     pub height: u32,
     pub channels: u32,
     pub stored_ch: u32,
-    /// Ring slots, one stats region and one reading each.
+    /// Look-ahead slots, one stats region and one reading each.
     pub frames: u32,
+    /// The temporal radius of the frame ring the readings feed, which sets how far past a window
+    /// the history reaches.
+    pub ring_radius: u32,
     /// Whether temporal statistics are measured, which needs a temporal radius of at least 1.
     pub temporal: bool,
     pub align: StorageAlign,
@@ -329,7 +332,7 @@ impl NoiseState {
 
         let map_len = map_quarters(shape, reading);
         if measurement.history.map_len() != map_len {
-            let temporal_radius = ring_radius(shape);
+            let temporal_radius = shape.ring_radius;
             measurement.history = ReadingHistory::new(&client, temporal_radius, map_len);
             measurement.recorded.store(0, Ordering::Relaxed);
         }
@@ -422,7 +425,7 @@ fn measurement_buffers(client: &Client, shape: NoiseShape, settings: NoiseSettin
     let state_bytes = f32::as_bytes(&state_zeros);
     let fold_state = client.create_from_slice(state_bytes);
 
-    let temporal_radius = ring_radius(shape);
+    let temporal_radius = shape.ring_radius;
     let map_len = map_quarters(shape, reading);
     let history = ReadingHistory::new(client, temporal_radius, map_len);
 
@@ -459,11 +462,6 @@ pub(super) fn cube_count(shape: NoiseShape) -> u32 {
 pub(super) fn block_count(shape: NoiseShape) -> u32 {
     let (blocks_x, blocks_y) = temporal_stats_blocks(shape.width, shape.height);
     blocks_x * blocks_y
-}
-
-/// The temporal radius of a ring of `2r + 1` frames.
-fn ring_radius(shape: NoiseShape) -> u32 {
-    shape.frames / 2
 }
 
 /// The map quarters each history slot keeps, 0 when `settings` builds no strength map.
@@ -607,7 +605,7 @@ pub(crate) fn reading_buffer_sizes(shape: NoiseShape) -> Vec<BufferSize> {
     let state_words = u64::from(STATE_WORDS);
     buffers.push((STREAM_STATE, Some(state_words)));
 
-    let radius = ring_radius(shape);
+    let radius = shape.ring_radius;
     let history_slots = u64::from(history_capacity(radius));
     let history_records = history_slots.checked_mul(u64::from(READING_WORDS));
     let history_results = history_slots.checked_mul(RESULTS_PER_SLOT as u64);

@@ -24,6 +24,7 @@ fn luma_shape(client: &Client, temporal: bool) -> NoiseShape {
         channels: 1,
         stored_ch: 1,
         frames: FRAMES,
+        ring_radius: FRAMES / 2,
         temporal,
         align: StorageAlign::from_client(client),
     }

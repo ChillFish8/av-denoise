@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 
 use crate::motion::neighbour_idx_for_k;
 use crate::nl4d::{Nl4dParams, PsyParams};
+use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::{noisy_field_over, seeded_unit_gaussian};
 use crate::nlmeans::{
     ChannelMode,
@@ -26,7 +27,8 @@ pub(super) const BLK_STEP: u32 = 8;
 // no curve forms.
 pub(super) const RAMP_WIDTH: u32 = 640;
 pub(super) const RAMP_HEIGHT: u32 = 360;
-const RAMP_FRAMES: u32 = 12;
+/// Twelve frames run as centres while the clip is pushed, after the noise look-ahead fills.
+const RAMP_FRAMES: u32 = 12 + LOOKAHEAD_FRAMES;
 const RAMP_TOP: f32 = 0.15;
 const RAMP_BOTTOM: f32 = 0.85;
 

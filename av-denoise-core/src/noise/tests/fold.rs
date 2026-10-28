@@ -47,6 +47,7 @@ fn shape(client: &Client, channels: u32) -> NoiseShape {
         channels,
         stored_ch: channels,
         frames: FRAMES,
+        ring_radius: FRAMES / 2,
         temporal: true,
         align: StorageAlign::from_client(client),
     }
@@ -730,6 +731,7 @@ fn a_4k_luma_map_folds_across_the_grid() {
         channels: 1,
         stored_ch: 1,
         frames: FRAMES,
+        ring_radius: FRAMES / 2,
         temporal: true,
         align: StorageAlign::from_client(&client),
     };
@@ -786,21 +788,4 @@ fn recording_copies_a_slot_into_its_frame_slot() {
 
     let immerkaer = sigma_from_abs_sum(results[0], WIDTH, HEIGHT);
     assert!(immerkaer > 0.0);
-}
-
-#[test]
-fn a_spatial_record_keeps_only_the_immerkaer_values() {
-    let mut stream = Stream::new(1, settings(luma_map()));
-    let record = hashed_record(78, 1, true, true);
-    stream.push(record.clone());
-    stream.state.record_spatial_reading(0, 1);
-
-    let (reading, results, map) = stream.state.read_history_frame(1);
-    stream.finish();
-
-    let expected_sums = record_sums(&record);
-    assert_eq!(reading.sample, None);
-    assert_eq!(reading.immerkaer_low, record.reading.immerkaer_low);
-    assert_eq!(results, expected_sums);
-    assert_eq!(map, record.map);
 }

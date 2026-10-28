@@ -270,6 +270,7 @@ impl MapFrame {
             channels: self.plane.channels,
             stored_ch: self.plane.stored_ch,
             frames: 3,
+            ring_radius: 1,
             temporal: true,
             align: StorageAlign::from_client(client),
         }

@@ -128,6 +128,7 @@ fn shape_for(client: &Client, plane: Plane, temporal: bool) -> NoiseShape {
         channels: plane.channels,
         stored_ch: plane.stored_ch,
         frames: 3,
+        ring_radius: 1,
         temporal,
         align: StorageAlign::from_client(client),
     }

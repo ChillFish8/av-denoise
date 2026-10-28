@@ -322,10 +322,11 @@ fn current_sigmas_matches_the_median_estimator_once_it_folds() {
     };
     let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);
-    let _ = denoiser.denoise().expect("denoise failed");
+    // The flush runs the pass the noise look-ahead holds back, and leaves its fold in place.
+    denoiser.flush(|_| {}).expect("flush failed");
 
     let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
-    let median = snapshot.median.expect("seeded on first push");
+    let median = snapshot.median.expect("the flush pass folds");
     let expected = median[0];
     let current = denoiser.current_sigmas();
     assert_eq!(current[0], expected);

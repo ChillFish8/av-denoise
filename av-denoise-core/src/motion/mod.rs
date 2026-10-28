@@ -17,9 +17,7 @@ pub(crate) use self::analyse::{
     run_analyse,
     run_seeded_refine,
 };
-#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-pub(crate) use self::chain::pair_byte_offset;
-pub(crate) use self::chain::{neighbour_idx_for_k, run_pair_analyse, zero_pair_slot};
+pub(crate) use self::chain::{neighbour_idx_for_k, pair_byte_offset, run_pair_analyse, zero_pair_slot};
 pub(crate) use self::compensate::run_compensate;
 pub(crate) use self::confidence::{THSAD_PIXEL, run_confidence, sad_noise_floor, thsad};
 pub(crate) use self::context::{MotionCtx, pair_ring_slot_count};
