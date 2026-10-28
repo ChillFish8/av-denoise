@@ -173,6 +173,7 @@ impl NlmDenoiser {
         self.build_pyramids_for_slot(slot as u32)?;
         self.build_confidence_pyramid_for_slot(slot as u32)?;
         self.queue_duplicate_noise_stats(slot as u32)?;
+        self.duplicate_slots[slot] = true;
         // This runs before `ring_head` advances so `pair_slot(0)` matches the push-time slot.
         self.zero_pair_slot_for_duplicate();
 

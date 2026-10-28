@@ -12,7 +12,18 @@ use crate::nlmeans::{
     NlmeansOptions,
     resolve_params,
 };
+use crate::noise::tests::read_temporal_stats_slot;
+use crate::noise::{
+    QuarterSettings,
+    TemporalStatsCtx,
+    run_temporal_noise_stats,
+    temporal_noise_reading,
+    temporal_stats_buf_bytes,
+};
 pub(crate) use crate::tune::tests::fixtures::{noisy_copy, noisy_field_over, seeded_unit_gaussian};
+
+/// The sigma of the texture [panning_frames] slides.
+const PAN_TEXTURE_SIGMA: f32 = 24.0 / 255.0;
 
 pub(crate) fn make_client() -> Client {
     crate::tests::compilation_cache::install_test_compilation_cache();
@@ -283,4 +294,107 @@ pub(crate) fn normalise_with_ingest(client: &Client, codes: &[u8], width: u32, h
 
     let bytes = client.read_one(scratch).expect("read ingest");
     f32::from_bytes(&bytes).to_vec()
+}
+
+/// `count` frames of one seeded fine texture sliding `shift` pixels per frame, each with fresh
+/// white noise of `sigma`.
+///
+/// Pixel x of frame t shows texture column `x + shift * t`, so each frame is its predecessor moved
+/// `shift` pixels to the left.
+pub(crate) fn panning_frames(
+    width: u32,
+    height: u32,
+    shift: u32,
+    count: usize,
+    sigma: f32,
+    seed: u32,
+) -> Vec<Vec<f32>> {
+    let texture_width = width + shift * count as u32;
+    // The blur scales the variance by 0.375, as [correlated_noisy_frame] documents.
+    let texture_sigma_pre = PAN_TEXTURE_SIGMA / 0.375f32.sqrt();
+    let texture = correlated_noisy_frame(texture_width, height, 0.5, texture_sigma_pre, seed);
+
+    let mut frames = Vec::with_capacity(count);
+    for index in 0..count {
+        let start_x = shift * index as u32;
+        let mut clean = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            let row_start = (row * texture_width + start_x) as usize;
+            let row_end = row_start + width as usize;
+            clean.extend_from_slice(&texture[row_start..row_end]);
+        }
+
+        let noise_seed = seed * 1000 + index as u32;
+        let frame = noisy_field_over(&clean, width, height, sigma, noise_seed);
+        frames.push(frame);
+    }
+
+    frames
+}
+
+/// Interleaves equal-length planes into one frame, pixel by pixel.
+pub(crate) fn interleave_planes(planes: &[&[f32]]) -> Vec<f32> {
+    let pixels = planes[0].len();
+    let mut frame = Vec::with_capacity(pixels * planes.len());
+    for pixel in 0..pixels {
+        for plane in planes {
+            frame.push(plane[pixel]);
+        }
+    }
+
+    frame
+}
+
+/// The host reading's sigma over the uncompensated records of `new` against `previous`.
+///
+/// Both frames are interleaved with `channels` lanes per pixel. It is `None` when the reading has
+/// no sample.
+pub(crate) fn raw_reading_sigma(
+    previous: &[f32],
+    new: &[f32],
+    width: u32,
+    height: u32,
+    channels: u32,
+) -> Option<[f32; 3]> {
+    let client = make_client();
+    let frame_count = 2u32;
+    let align = StorageAlign::from_client(&client);
+
+    let mut ring = previous.to_vec();
+    ring.extend_from_slice(new);
+    let ring_bytes = f32::as_bytes(&ring);
+    let input_buf = client.create_from_slice(ring_bytes);
+
+    let stats_bytes = temporal_stats_buf_bytes(width, height, channels, frame_count, align);
+    let stats_buf = client.empty(stats_bytes);
+
+    let ctx = TemporalStatsCtx {
+        width,
+        height,
+        stored_ch: channels,
+        frame_count,
+        slot_new: 1,
+        slot_prev: 0,
+        input_buf: &input_buf,
+        stats_buf: &stats_buf,
+        align,
+        motion: None,
+    };
+    run_temporal_noise_stats(&client, &ctx, false).expect("temporal noise stats dispatch failed");
+
+    let records = read_temporal_stats_slot(
+        &client,
+        &stats_buf,
+        width,
+        height,
+        channels,
+        frame_count,
+        1,
+        align,
+    )
+    .expect("the records read back");
+    let settings = QuarterSettings::default();
+    let reading = temporal_noise_reading(&records, channels, channels, width, height, false, settings);
+
+    reading.sample.map(|sample| sample.sigma)
 }

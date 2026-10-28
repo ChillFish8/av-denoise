@@ -150,9 +150,12 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
     let record_len = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE + quarter_lanes);
     let scratch_len = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE + 1);
     let threads = comptime!(block * block);
+    let texture_lane = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE);
 
     let mut scratch = Shared::<[f32]>::new_slice(comptime!(threads * scratch_len) as usize);
     let mut d0_tile = Shared::<[f32]>::new_slice(threads as usize);
+    let mut luma_tile = Shared::<[f32]>::new_slice(threads as usize);
+    let mut cell_tile = Shared::<[f32]>::new_slice(16usize);
 
     let local_x = UNIT_POS_X;
     let local_y = UNIT_POS_Y;
@@ -182,24 +185,14 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
     max_seed -= 2.0e30f32;
 
     let mut residual = Vector::<f32, N>::empty();
-    let mut texture = 0.0f32;
+    let mut cell_luma = 0.0f32;
     if valid {
         let new_pixel = read_line(input, global_x, global_y, slot_new, width, height);
         let prev_pixel = read_line(input, global_x, global_y, slot_prev, width, height);
         residual = new_pixel - prev_pixel;
 
         let new_luma = new_pixel.extract(0usize);
-        if local_x + 1 < block_w {
-            let right_pixel = read_line(input, global_x + 1, global_y, slot_new, width, height);
-            let step_x = right_pixel.extract(0usize) - new_luma;
-            texture += step_x * step_x;
-        }
-
-        if local_y + 1 < block_h {
-            let below_pixel = read_line(input, global_x, global_y + 1, slot_new, width, height);
-            let step_y = below_pixel.extract(0usize) - new_luma;
-            texture += step_y * step_y;
-        }
+        cell_luma = new_luma;
 
         if comptime!(luma_fields) {
             let prev_luma = prev_pixel.extract(0usize);
@@ -212,6 +205,7 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
 
     let d0 = if valid { residual.extract(0usize) } else { 0.0f32 };
     d0_tile[thread_id as usize] = d0;
+    luma_tile[thread_id as usize] = cell_luma;
 
     #[unroll]
     for channel in 0..stored_ch {
@@ -223,8 +217,6 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
         scratch[(thread_id * scratch_len + channel) as usize] = lane_residual;
         scratch[(thread_id * scratch_len + stored_ch + channel) as usize] = lane_residual * lane_residual;
     }
-
-    scratch[(thread_id * scratch_len + 2 * stored_ch + BLOCK_TEXTURE_LANE) as usize] = texture;
 
     sync_cube();
 
@@ -243,7 +235,7 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
         let out_base = block_index * record_len;
 
         #[unroll]
-        for lane in 0..scratch_len {
+        for lane in 0..texture_lane {
             let mut total = 0.0f32;
             for t in 0..threads {
                 total += scratch[(t * scratch_len + lane) as usize];
@@ -251,6 +243,53 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
 
             stats[(out_base + lane) as usize] = total;
         }
+
+        for cell_index in 0..16u32 {
+            let cell_x = cell_index % 4u32;
+            let cell_y = cell_index / 4u32;
+            let mut cell = 0.0f32;
+
+            #[unroll]
+            for dy in 0..4u32 {
+                #[unroll]
+                for dx in 0..4u32 {
+                    let idx = (4u32 * cell_y + dy) * block + (4u32 * cell_x + dx);
+                    cell += luma_tile[idx as usize];
+                }
+            }
+
+            cell_tile[cell_index as usize] = cell / 16.0f32;
+        }
+
+        let full_cols = block_w / 4u32;
+        let full_rows = block_h / 4u32;
+        let mut energy = 0.0f32;
+        let mut pairs = 0u32;
+        for cell_y in 0..full_rows {
+            for cell_x in 0..full_cols {
+                let here = cell_tile[(cell_y * 4u32 + cell_x) as usize];
+                if cell_x + 1u32 < full_cols {
+                    let right_cell = cell_tile[(cell_y * 4u32 + cell_x + 1u32) as usize];
+                    let step_x = here - right_cell;
+                    energy += step_x * step_x;
+                    pairs += 1u32;
+                }
+
+                if cell_y + 1u32 < full_rows {
+                    let below_cell = cell_tile[((cell_y + 1u32) * 4u32 + cell_x) as usize];
+                    let step_y = here - below_cell;
+                    energy += step_y * step_y;
+                    pairs += 1u32;
+                }
+            }
+        }
+
+        let mut texture = 0.0f32;
+        if pairs > 0u32 {
+            texture = energy / pairs as f32;
+        }
+
+        stats[(out_base + texture_lane) as usize] = texture;
 
         stats[(out_base + 2 * stored_ch + BLOCK_MOVED_LANE) as usize] = 0.0f32;
 

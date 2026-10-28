@@ -6,6 +6,7 @@ use crate::noise::stats::lower_quartile;
 use crate::noise::temporal::{
     BLOCK_MOVED_LANE,
     BLOCK_TEXTURE_LANE,
+    COMPENSATION_GAIN_MAX,
     StatsMotion,
     TEMPORAL_NOISE_BLOCK,
     TemporalStatsCtx,
@@ -259,6 +260,54 @@ fn host_sum_d2(frames: &StatsFrames, block_x: u32, block_y: u32, vector: [i32; 2
     sum_d2
 }
 
+/// Channel 0's residual variance of one block over the pixels whose match by `vector` stays in
+/// the frame, or `None` when no match does.
+fn host_variance(frames: &StatsFrames, block_x: u32, block_y: u32, vector: [i32; 2]) -> Option<f32> {
+    let (block_width, block_height) = frames.block_extent(block_x, block_y);
+    let stride = frames.stored_ch as usize;
+
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    let mut count = 0u32;
+    for local_y in 0..block_height {
+        for local_x in 0..block_width {
+            let x = block_x * TEMPORAL_NOISE_BLOCK + local_x;
+            let y = block_y * TEMPORAL_NOISE_BLOCK + local_y;
+            let prev_x = x as i32 + vector[0];
+            let prev_y = y as i32 + vector[1];
+            let in_frame =
+                prev_x >= 0 && prev_x < frames.width as i32 && prev_y >= 0 && prev_y < frames.height as i32;
+            if !in_frame {
+                continue;
+            }
+
+            let new_index = (y * frames.width + x) as usize * stride;
+            let prev_index = (prev_y as u32 * frames.width + prev_x as u32) as usize * stride;
+            let residual = (frames.new[new_index] - frames.previous[prev_index]) as f64;
+            sum += residual;
+            sum_sq += residual * residual;
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return None;
+    }
+
+    let mean = sum / count as f64;
+    let variance = sum_sq / count as f64 - mean * mean;
+    Some(variance as f32)
+}
+
+/// The share of its zero-vector variance one block keeps along `vector`, or `None` when no match
+/// stays in the frame.
+fn host_gain(frames: &StatsFrames, block_x: u32, block_y: u32, vector: [i32; 2]) -> Option<f32> {
+    let zero_variance = host_variance(frames, block_x, block_y, [0, 0])?;
+    let vector_variance = host_variance(frames, block_x, block_y, vector)?;
+
+    Some(vector_variance / zero_variance)
+}
+
 #[test]
 fn compensated_stats_cancel_a_known_pan() {
     let (width, height) = (128u32, 96u32);
@@ -333,14 +382,14 @@ fn zero_vector_compensated_stats_equal_raw_stats() {
 #[test]
 fn off_frame_displacement_zeroes_the_record() {
     let (width, height) = (96u32, 48u32);
-    let ring = hashed_ring(width, height, 1, 2, 3);
-    let frame_len = (width * height) as usize;
+
+    // `new(x, y)` matches `previous(x + 20, y)`, so every block follows the vector.
     let frames = StatsFrames {
         width,
         height,
         stored_ch: 1,
-        previous: ring[..frame_len].to_vec(),
-        new: ring[frame_len..].to_vec(),
+        previous: texture_frame(width, height, 0, 0),
+        new: texture_frame(width, height, 20, 0),
     };
     let grid = MotionGrid::uniform(width, height, 8, [20, 0]);
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
@@ -363,8 +412,9 @@ fn off_frame_displacement_zeroes_the_record() {
 }
 
 #[test]
-fn texture_lane_reads_block_gradient_energy() {
-    let (width, height) = (48u32, 32u32);
+fn texture_lane_reads_mean_cell_energy() {
+    // The last block column is 8 pixels wide, so it holds 2 by 4 full cells and 10 pairs.
+    let (width, height) = (56u32, 32u32);
     let slope = 3.0f32 / 1024.0;
     let ramp: Vec<f32> = (0..width * height)
         .map(|index| (index % width) as f32 * slope)
@@ -377,7 +427,11 @@ fn texture_lane_reads_block_gradient_energy() {
         new: ramp,
     };
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
-    let expected = 16.0 * 15.0 * slope * slope;
+    // Horizontal cell pairs differ by `4 * slope` and vertical pairs by nothing. A full block holds
+    // 12 of each, and the ragged block 4 horizontal and 6 vertical.
+    let cell_step = 4.0 * slope;
+    let full_expected = 12.0 * cell_step * cell_step / 24.0;
+    let ragged_expected = 4.0 * cell_step * cell_step / 10.0;
     let texture_lane = 2 + BLOCK_TEXTURE_LANE as usize;
 
     for luma_fields in [false, true] {
@@ -387,9 +441,11 @@ fn texture_lane_reads_block_gradient_energy() {
             for block_x in 0..blocks_x {
                 let record = frames.record(&records, block_x, block_y);
                 let texture = record[texture_lane];
+                let ragged = block_x + 1 == blocks_x;
+                let expected = if ragged { ragged_expected } else { full_expected };
                 let relative_error = (texture - expected).abs() / expected;
                 assert!(
-                    relative_error <= 1e-6,
+                    relative_error <= 1e-5,
                     "block ({block_x}, {block_y}): texture {texture}, expected {expected}"
                 );
             }
@@ -400,15 +456,14 @@ fn texture_lane_reads_block_gradient_energy() {
 #[test]
 fn moved_lane_flags_non_zero_vectors() {
     // Five block columns leave the rightmost one even, so no shifted block leaves the frame.
+    // `new(x, y)` matches `previous(x + 1, y)`, so every odd column follows its vector.
     let (width, height) = (80u32, 32u32);
-    let ring = hashed_ring(width, height, 1, 2, 9);
-    let frame_len = (width * height) as usize;
     let frames = StatsFrames {
         width,
         height,
         stored_ch: 1,
-        previous: ring[..frame_len].to_vec(),
-        new: ring[frame_len..].to_vec(),
+        previous: texture_frame(width, height, 0, 0),
+        new: texture_frame(width, height, 1, 0),
     };
     let vector_at = |col: u32, _row: u32| if col.is_multiple_of(2) { [0, 0] } else { [1, 0] };
     let grid = MotionGrid::from_fn(width, height, TEMPORAL_NOISE_BLOCK, vector_at);
@@ -428,36 +483,63 @@ fn moved_lane_flags_non_zero_vectors() {
 
 #[test]
 fn covering_block_rule_picks_the_origin_block() {
+    for step in [4u32, 8, 32] {
+        assert_covering_block_rule(step);
+    }
+}
+
+/// Every noise block reads the vector of the motion block covering its origin, and every other
+/// motion block holds the decoy.
+///
+/// At step 32 each motion block covers some noise block's origin, so no decoy fits.
+fn assert_covering_block_rule(step: u32) {
     let (width, height) = (64u32, 64u32);
+    let motion_blocks_x = width.div_ceil(step);
+    let motion_blocks_y = height.div_ceil(step);
+    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
+    let covering_col = |block_x: u32| (block_x * TEMPORAL_NOISE_BLOCK / step).min(motion_blocks_x - 1);
+    let covering_row = |block_y: u32| (block_y * TEMPORAL_NOISE_BLOCK / step).min(motion_blocks_y - 1);
+
+    // Each motion block's own vector points inwards, so no noise block it covers leaves the frame.
+    let motion_vector = |col: u32, row: u32| {
+        let reach_x = 1 + ((col + 2 * row) % 3) as i32;
+        let reach_y = ((col * row) % 3) as i32;
+        let shift_x = if col * step < width / 2 { reach_x } else { -reach_x };
+        let shift_y = if row * step < height / 2 {
+            reach_y
+        } else {
+            -reach_y
+        };
+        [shift_x, shift_y]
+    };
+    let block_vector = |block_x: u32, block_y: u32| {
+        let col = covering_col(block_x);
+        let row = covering_row(block_y);
+        motion_vector(col, row)
+    };
+
     let ring = hashed_ring(width, height, 1, 2, 13);
     let frame_len = (width * height) as usize;
-    let frames = StatsFrames {
+    let mut frames = StatsFrames {
         width,
         height,
         stored_ch: 1,
         previous: ring[..frame_len].to_vec(),
         new: ring[frame_len..].to_vec(),
     };
+    plant_block_matches(&mut frames, block_vector);
+    frames.new = noisy_field_over(&frames.new, width, height, 0.01, 14);
 
-    // Each noise block's own vector points inwards, so it never leaves the frame.
-    let block_vector = |block_x: u32, block_y: u32| {
-        let reach_x = 1 + ((block_x + 2 * block_y) % 3) as i32;
-        let reach_y = ((block_x * block_y) % 3) as i32;
-        let shift_x = if block_x < 2 { reach_x } else { -reach_x };
-        let shift_y = if block_y < 2 { reach_y } else { -reach_y };
-        [shift_x, shift_y]
-    };
-
-    // Every motion block other than a noise block's origin holds the decoy.
     let vector_at = |col: u32, row: u32| {
-        if col.is_multiple_of(2) && row.is_multiple_of(2) {
-            block_vector(col / 2, row / 2)
+        let origin_col = (0..blocks_x).any(|block_x| covering_col(block_x) == col);
+        let origin_row = (0..blocks_y).any(|block_y| covering_row(block_y) == row);
+        if origin_col && origin_row {
+            motion_vector(col, row)
         } else {
             DECOY_VECTOR
         }
     };
-    let grid = MotionGrid::from_fn(width, height, 8, vector_at);
-    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
+    let grid = MotionGrid::from_fn(width, height, step, vector_at);
 
     let records = run_stats(&frames, Some(&grid), true);
 
@@ -465,13 +547,97 @@ fn covering_block_rule_picks_the_origin_block() {
         for block_x in 0..blocks_x {
             let record = frames.record(&records, block_x, block_y);
             let vector = block_vector(block_x, block_y);
+            let label = format!("step {step}, block ({block_x}, {block_y})");
+            let gain = host_gain(&frames, block_x, block_y, vector).expect("the match stays in the frame");
+            assert!(gain <= COMPENSATION_GAIN_MAX, "{label}: gain {gain}");
+
             let expected = host_sum_d2(&frames, block_x, block_y, vector);
             let relative_error = (record[1] - expected).abs() / expected;
             assert!(
                 relative_error <= 1e-4,
-                "block ({block_x}, {block_y}): sum_d2 {}, expected {expected}",
+                "{label}: sum_d2 {}, expected {expected}",
                 record[1]
             );
         }
+    }
+}
+
+/// Copies each block of `new` into `previous` at its shifted position, so a block matches along
+/// its own vector except where a neighbour's copy overlaps it.
+fn plant_block_matches(frames: &mut StatsFrames, vector_at: impl Fn(u32, u32) -> [i32; 2]) {
+    let (blocks_x, blocks_y) = temporal_stats_blocks(frames.width, frames.height);
+
+    for block_y in 0..blocks_y {
+        for block_x in 0..blocks_x {
+            let vector = vector_at(block_x, block_y);
+            let (block_width, block_height) = frames.block_extent(block_x, block_y);
+
+            for local_y in 0..block_height {
+                for local_x in 0..block_width {
+                    let x = block_x * TEMPORAL_NOISE_BLOCK + local_x;
+                    let y = block_y * TEMPORAL_NOISE_BLOCK + local_y;
+                    let prev_x = (x as i32 + vector[0]) as u32;
+                    let prev_y = (y as i32 + vector[1]) as u32;
+                    let new_index = (y * frames.width + x) as usize;
+                    let prev_index = (prev_y * frames.width + prev_x) as usize;
+                    frames.previous[prev_index] = frames.new[new_index];
+                }
+            }
+        }
+    }
+}
+
+/// On independent noise a forced vector explains nothing, so most blocks keep the zero-vector
+/// residual. A block whose gain still falls to the limit by chance follows the vector, as the host
+/// rule says.
+#[test]
+fn noise_fitted_vector_keeps_the_zero_vector_residual() {
+    let (width, height) = (64u32, 48u32);
+    let sigma = 2.0 / 255.0;
+    let clean = vec![0.5f32; (width * height) as usize];
+    let frames = StatsFrames {
+        width,
+        height,
+        stored_ch: 1,
+        previous: noisy_field_over(&clean, width, height, sigma, 31),
+        new: noisy_field_over(&clean, width, height, sigma, 32),
+    };
+    let vector = [1, 0];
+    let grid = MotionGrid::uniform(width, height, 8, vector);
+    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
+    let moved_lane = 2 + BLOCK_MOVED_LANE as usize;
+
+    for luma_fields in [false, true] {
+        let compensated = run_stats(&frames, Some(&grid), luma_fields);
+        let raw = run_stats(&frames, None, luma_fields);
+
+        let mut kept = 0;
+        for block_y in 0..blocks_y {
+            for block_x in 0..blocks_x {
+                let gain =
+                    host_gain(&frames, block_x, block_y, vector).expect("the match stays in the frame");
+                let follows = gain <= COMPENSATION_GAIN_MAX;
+                let record = frames.record(&compensated, block_x, block_y);
+                let label = format!("block ({block_x}, {block_y}) gain {gain}, luma_fields {luma_fields}");
+                let expected_moved = if follows { 1.0 } else { 0.0 };
+                assert_eq!(record[moved_lane], expected_moved, "{label}");
+
+                if follows {
+                    continue;
+                }
+
+                let raw_record = frames.record(&raw, block_x, block_y);
+                let record_bits: Vec<u32> = record.iter().map(|value| value.to_bits()).collect();
+                let raw_bits: Vec<u32> = raw_record.iter().map(|value| value.to_bits()).collect();
+                assert_eq!(record_bits, raw_bits, "{label}");
+                kept += 1;
+            }
+        }
+
+        let blocks = blocks_x * blocks_y;
+        assert!(
+            kept * 4 >= blocks * 3,
+            "only {kept} of {blocks} blocks kept the zero vector"
+        );
     }
 }

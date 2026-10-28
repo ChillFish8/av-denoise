@@ -19,11 +19,17 @@ pub(crate) const TEMPORAL_NOISE_BLOCK: u32 = 16;
 /// How many 8x8 quarters one block record holds.
 pub(crate) const TEMPORAL_QUARTERS: u32 = 4;
 pub(crate) const TEMPORAL_QUARTER_SIZE: u32 = TEMPORAL_NOISE_BLOCK / 2;
-/// The offset of the block's channel-0 gradient energy past `2 * stored_ch`.
+/// The offset of the block's channel-0 texture past `2 * stored_ch`.
 ///
-/// It sums the squared horizontal and vertical neighbour differences of the new frame over the
-/// pixel pairs inside the block.
+/// It is the mean squared difference between adjacent 4x4-cell means of the new frame, over the
+/// cells fully inside the frame. Averaging each cell first keeps the noise from reading as texture.
 pub(crate) const BLOCK_TEXTURE_LANE: u32 = 1;
+/// The largest share of the zero-vector residual variance a block's compensated residual may keep
+/// for the block to follow its motion vector.
+///
+/// The search picks the best of many candidates, so a vector fitted to the noise on still content
+/// routinely reaches a gain near 0.8. Real motion falls far below this.
+pub(crate) const COMPENSATION_GAIN_MAX: f32 = 0.5;
 /// The offset of the block's moved flag past `2 * stored_ch`.
 ///
 /// It reads 1.0 when the block was differenced along a non-zero motion vector, else 0.0.

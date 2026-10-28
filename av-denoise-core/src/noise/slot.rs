@@ -37,6 +37,7 @@ use super::state::{
     quarter_grid,
 };
 use super::temporal::{
+    StatsMotion,
     TemporalStatsCtx,
     run_temporal_noise_stats,
     temporal_stats_slot_len,
@@ -81,6 +82,40 @@ impl NoiseState {
             return Ok(());
         };
 
+        self.queue_temporal_stats(input, stats_buf, slot, slot_prev, None)
+    }
+
+    /// Queues the temporal statistics of `slot` against `neighbour` shifted along `motion`.
+    ///
+    /// It overwrites the records of `slot` and runs no Immerkær pass. A state that holds fixed
+    /// values or keeps no temporal stats queues nothing.
+    pub(crate) fn queue_compensated_stats(
+        &self,
+        input: &Handle,
+        slot: u32,
+        neighbour: u32,
+        motion: StatsMotion<'_>,
+    ) -> Result<(), anyhow::Error> {
+        let Some(measurement) = self.measurement.as_ref() else {
+            return Ok(());
+        };
+
+        let Some(stats_buf) = measurement.stats.as_ref() else {
+            return Ok(());
+        };
+
+        self.queue_temporal_stats(input, stats_buf, slot, neighbour, Some(motion))
+    }
+
+    fn queue_temporal_stats(
+        &self,
+        input: &Handle,
+        stats_buf: &Handle,
+        slot: u32,
+        slot_prev: u32,
+        motion: Option<StatsMotion<'_>>,
+    ) -> Result<(), anyhow::Error> {
+        let shape = self.shape;
         let stats_ctx = TemporalStatsCtx {
             width: shape.width,
             height: shape.height,
@@ -91,7 +126,7 @@ impl NoiseState {
             input_buf: input,
             stats_buf,
             align: shape.align,
-            motion: None,
+            motion,
         };
         let luma_fields = self.settings.reading.luma_fields;
 

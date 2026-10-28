@@ -68,6 +68,7 @@ pub(crate) use self::strength_map::{QuarterSettings, StrengthMapParams};
 pub(crate) use self::temporal::{
     BLOCK_MOVED_LANE,
     BLOCK_TEXTURE_LANE,
+    COMPENSATION_GAIN_MAX,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,
@@ -77,6 +78,7 @@ pub(crate) use self::temporal::{
     QUARTER_TENSOR_XX,
     QUARTER_TENSOR_XY,
     QUARTER_TENSOR_YY,
+    StatsMotion,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     TEMPORAL_QUARTER_SIZE,

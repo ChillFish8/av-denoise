@@ -160,26 +160,7 @@ fn reference_temporal_stats(
             out[base + 2 * channel_stride] = sum_lag;
 
             let luma_at = |x: u32, y: u32| new[(y * width + x) as usize * channel_stride];
-            let mut texture = 0.0f32;
-            for local_y in 0..block_height {
-                for local_x in 0..block_width {
-                    let x = origin_x + local_x;
-                    let y = origin_y + local_y;
-                    let here = luma_at(x, y);
-                    let mut pixel_texture = 0.0f32;
-                    if local_x + 1 < block_width {
-                        let step_x = luma_at(x + 1, y) - here;
-                        pixel_texture += step_x * step_x;
-                    }
-
-                    if local_y + 1 < block_height {
-                        let step_y = luma_at(x, y + 1) - here;
-                        pixel_texture += step_y * step_y;
-                    }
-
-                    texture += pixel_texture;
-                }
-            }
+            let texture = host_block_texture(luma_at, origin_x, origin_y, block_width, block_height);
 
             let lanes_base = base + 2 * channel_stride;
             out[lanes_base + BLOCK_TEXTURE_LANE as usize] = texture;
@@ -195,6 +176,58 @@ fn reference_temporal_stats(
     }
 
     out
+}
+
+/// The mean squared difference between adjacent 4x4-cell means of a block, over the cells fully
+/// inside the frame, or 0 with fewer than two such cells.
+fn host_block_texture(
+    luma_at: impl Fn(u32, u32) -> f32,
+    origin_x: u32,
+    origin_y: u32,
+    block_width: u32,
+    block_height: u32,
+) -> f32 {
+    let full_cols = block_width / 4;
+    let full_rows = block_height / 4;
+    let cell_mean = |cell_x: u32, cell_y: u32| {
+        let mut sum = 0.0f32;
+        for dy in 0..4 {
+            for dx in 0..4 {
+                let x = origin_x + 4 * cell_x + dx;
+                let y = origin_y + 4 * cell_y + dy;
+                sum += luma_at(x, y);
+            }
+        }
+
+        sum / 16.0
+    };
+
+    let mut energy = 0.0f32;
+    let mut pairs = 0u32;
+    for cell_y in 0..full_rows {
+        for cell_x in 0..full_cols {
+            let here = cell_mean(cell_x, cell_y);
+            if cell_x + 1 < full_cols {
+                let right = cell_mean(cell_x + 1, cell_y);
+                let step_x = here - right;
+                energy += step_x * step_x;
+                pairs += 1;
+            }
+
+            if cell_y + 1 < full_rows {
+                let below = cell_mean(cell_x, cell_y + 1);
+                let step_y = here - below;
+                energy += step_y * step_y;
+                pairs += 1;
+            }
+        }
+    }
+
+    if pairs == 0 {
+        return 0.0;
+    }
+
+    energy / pairs as f32
 }
 
 /// Where quarter `quarter`'s record starts within one block record.
@@ -905,4 +938,133 @@ fn moving_texture_pair_near_zero_mean_residual_recovers_true_sigma() {
         "estimated sigma {} vs true static-half sigma {true_sigma} (rel err {rel_err:.3})",
         sample.sigma[0]
     );
+}
+
+const PAN_WIDTH: u32 = 256;
+const PAN_HEIGHT: u32 = 192;
+const PAN_SHIFT: u32 = 3;
+const PAN_FRAMES: usize = 12;
+const PAN_SIGMA: f32 = 2.0 / 255.0;
+const PAN_SEED: u32 = 7;
+
+fn hq_reading_params(motion_compensation: MotionCompensationMode) -> NlmParams {
+    NlmParams {
+        temporal_radius: 2,
+        search_radius: 2,
+        patch_radius: 2,
+        strength: 1.2,
+        self_weight: 1.0,
+        channels: ChannelMode::Luma,
+        prefilter: PrefilterMode::None,
+        motion_compensation,
+        hq: Some(HqParams::default()),
+    }
+}
+
+/// The ring slot of the centre the last submit ran.
+fn hq_centre_slot(denoiser: &NlmDenoiser, params: &NlmParams) -> u32 {
+    denoiser.ring_slot(params.temporal_radius)
+}
+
+fn hq_slot_records(denoiser: &NlmDenoiser, slot: u32) -> Vec<f32> {
+    let noise = denoiser.measured_noise().expect("the noise is measured");
+    let (_, _, records) = noise.read_slot_stats(slot);
+
+    records
+}
+
+#[test]
+fn pan_reading_tracks_true_noise_nlmeans_hq() {
+    let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, PAN_SHIFT, PAN_FRAMES, PAN_SIGMA, PAN_SEED);
+    let motion_compensation = MotionCompensationMode::mvtools_default();
+    let params = hq_reading_params(motion_compensation);
+    let client = make_client();
+    let mut denoiser = NlmDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT);
+
+    for frame in &frames {
+        denoiser.push_frame(frame);
+        denoiser.denoise().expect("denoise failed");
+    }
+
+    let sigmas = denoiser.current_sigmas_temporal_only();
+    assert_relative(sigmas[0], PAN_SIGMA, 0.10, "folded pan sigma");
+}
+
+/// The first submit's centre is a copy of the first frame, so the check starts one push later.
+#[test]
+fn motion_off_keeps_push_time_reading() {
+    let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, 0, PAN_FRAMES, PAN_SIGMA, PAN_SEED);
+    let params = hq_reading_params(MotionCompensationMode::None);
+    let client = make_client();
+    let mut denoiser = NlmDenoiser::new(&client, params.clone(), PAN_WIDTH, PAN_HEIGHT);
+
+    for (index, frame) in frames.iter().enumerate() {
+        denoiser.push_frame(frame);
+        denoiser.denoise().expect("denoise failed");
+
+        if index < 3 {
+            continue;
+        }
+
+        let centre = index - 2;
+        let slot = hq_centre_slot(&denoiser, &params);
+        let noise = denoiser.measured_noise().expect("the noise is measured");
+        let reading = noise.read_reading(slot);
+        let sample = reading.sample.expect("a static centre has a sample");
+        let reference = raw_reading_sigma(&frames[centre - 1], &frames[centre], PAN_WIDTH, PAN_HEIGHT, 1)
+            .expect("the raw reference has a sample");
+
+        assert_relative(sample.sigma[0], reference[0], 1e-5, "push-time reading");
+    }
+}
+
+/// The leading edge copies the first frame into slots 1 and 2. The centre in slot 2 keeps its
+/// zeroed record. The next centre pans against that copy, so its pass re-measures it along the
+/// motion.
+#[test]
+fn held_centre_keeps_zeroed_record() {
+    let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, PAN_SHIFT, 4, PAN_SIGMA, PAN_SEED);
+    let motion_compensation = MotionCompensationMode::mvtools_default();
+    let params = hq_reading_params(motion_compensation);
+    let client = make_client();
+    let mut denoiser = NlmDenoiser::new(&client, params.clone(), PAN_WIDTH, PAN_HEIGHT);
+
+    for frame in &frames[..3] {
+        denoiser.push_frame(frame);
+        denoiser.denoise().expect("denoise failed");
+    }
+
+    let held_slot = hq_centre_slot(&denoiser, &params);
+    assert_eq!(
+        held_slot, 2,
+        "the first centre is the second copy of the first frame"
+    );
+
+    let held_records = hq_slot_records(&denoiser, held_slot);
+    assert!(
+        held_records.iter().all(|&value| value == 0.0),
+        "the held centre's record was re-measured"
+    );
+
+    let next_slot = held_slot + 1;
+    let push_time_records = hq_slot_records(&denoiser, next_slot);
+
+    denoiser.push_frame(&frames[3]);
+    denoiser.denoise().expect("denoise failed");
+
+    let centre_slot = hq_centre_slot(&denoiser, &params);
+    assert_eq!(centre_slot, next_slot, "the next centre follows the held one");
+
+    let next_records = hq_slot_records(&denoiser, next_slot);
+    let moved_lane = 2 + BLOCK_MOVED_LANE as usize;
+    let record_len = temporal_stats_record_len(1) as usize;
+    let moved_blocks = next_records
+        .chunks_exact(record_len)
+        .filter(|record| record[moved_lane] != 0.0)
+        .count();
+    assert_ne!(
+        next_records, push_time_records,
+        "a centre after a held frame is re-measured"
+    );
+    assert!(moved_blocks > 0, "the re-measured centre follows the pan");
 }

@@ -15,6 +15,7 @@ impl NlmDenoiser {
         let frame_slot = slot as u32;
 
         timed(&client, self, move |front| front.queue_noise_stats(frame_slot))?;
+        self.duplicate_slots[slot] = false;
         self.seed_noise_estimate_if_first_frame(frame_slot)?;
 
         timed(&client, self, move |front| front.run_reference_stages(slot))?;

@@ -43,6 +43,8 @@ pub struct NlmDenoiser {
     pub(super) frames_loaded: usize,
     /// Real pushes in the current stream, not counting the duplicates added at either end.
     pub(super) real_pushes: usize,
+    /// Whether each ring slot holds a copy of the frame before it rather than a pushed frame.
+    pub(super) duplicate_slots: Vec<bool>,
 
     /// The frame ring, one slot per frame in the window.
     pub(super) input_buf: Handle,
@@ -316,6 +318,8 @@ impl NlmDenoiser {
             (None, None)
         };
 
+        let duplicate_slots = vec![false; total_frames as usize];
+
         let mut device_timer = DeviceTimer::default();
         let ledger = kernels.ledger().cloned();
         device_timer.set_ledger(ledger);
@@ -328,6 +332,7 @@ impl NlmDenoiser {
             ring_head: 0,
             frames_loaded: 0,
             real_pushes: 0,
+            duplicate_slots,
             input_buf,
             search_buf: None,
             reference_buf,
@@ -408,10 +413,6 @@ impl NlmDenoiser {
         let total_frames = self.params.total_frames() as usize;
         if self.frames_loaded < total_frames {
             return Ok(None);
-        }
-
-        if self.noise.is_measured() {
-            self.update_noise_estimate(self.params.temporal_radius)?;
         }
 
         let slot = self.next_output_slot;

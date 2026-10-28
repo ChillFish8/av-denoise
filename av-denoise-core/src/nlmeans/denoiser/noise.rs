@@ -25,6 +25,7 @@ use crate::noise::{
     NoiseShape,
     ReadingSettings,
     STRENGTH_MAP_OFF,
+    StatsMotion,
     StrengthMapKind,
     TEMPORAL_QUARTER_SIZE,
 };
@@ -107,6 +108,63 @@ impl NlmDenoiser {
     pub(super) fn queue_duplicate_noise_stats(&self, slot: u32) -> Result<(), anyhow::Error> {
         self.noise.queue_stats(&self.input_buf, slot, None)?;
         self.noise.queue_reading(slot)?;
+
+        Ok(())
+    }
+
+    /// Re-measures the centre of a pass at `center_t` against an adjacent frame along the pass's
+    /// motion, then re-reads its slot.
+    ///
+    /// It prefers the previous frame and falls back to the next one, which a scene's first frame
+    /// needs. It needs a measured noise state, motion compensation and an adjacent frame in the
+    /// window. A centre pushed as a duplicate keeps its zeroed record, and so does a centre whose
+    /// next frame is a copy of itself.
+    pub(in crate::nlmeans) fn queue_compensated_noise_reading(
+        &self,
+        center_t: u32,
+    ) -> Result<(), anyhow::Error> {
+        if !self.noise.is_measured() {
+            return Ok(());
+        }
+
+        let Some(motion_ctx) = self.mc_ctx.as_ref() else {
+            return Ok(());
+        };
+
+        let Some((offset, neighbour_idx)) = self.adjacent_neighbour(center_t) else {
+            return Ok(());
+        };
+
+        let centre_slot = self.phys_frame(center_t as i32);
+        if self.duplicate_slots[centre_slot as usize] {
+            return Ok(());
+        }
+
+        // A duplicated next frame is a copy of the centre, so it holds no residual to measure.
+        let neighbour_slot = self.phys_frame(center_t as i32 + offset);
+        let copies_centre = offset > 0 && self.duplicate_slots[neighbour_slot as usize];
+        if copies_centre {
+            return Ok(());
+        }
+
+        let mv_field = self
+            .mv_field_buf
+            .as_ref()
+            .expect("mv_field allocated when mc_ctx is Some");
+        let neighbours = self.params.total_frames() - 1;
+        let mv_stride = motion_ctx.mv_stride();
+        let motion = StatsMotion {
+            mv_field,
+            mv_len: (neighbours * mv_stride) as usize,
+            mv_offset: neighbour_idx * mv_stride,
+            step: motion_ctx.step,
+            blocks_x: motion_ctx.blocks_x,
+            blocks_y: motion_ctx.blocks_y,
+        };
+
+        self.noise
+            .queue_compensated_stats(&self.input_buf, centre_slot, neighbour_slot, motion)?;
+        self.noise.queue_reading(centre_slot)?;
 
         Ok(())
     }
@@ -215,7 +273,7 @@ impl NlmDenoiser {
 
     /// The noise state, `None` unless it measures the noise.
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(in crate::nlmeans) fn measured_noise(&self) -> Option<&NoiseState> {
+    pub(crate) fn measured_noise(&self) -> Option<&NoiseState> {
         let measured = self.noise.is_measured();
         measured.then_some(&self.noise)
     }
@@ -237,7 +295,7 @@ impl NlmDenoiser {
     }
 
     /// Folds the window centre's noise reading into the GPU noise state.
-    pub(super) fn update_noise_estimate(&mut self, center_t: u32) -> Result<(), anyhow::Error> {
+    pub(in crate::nlmeans) fn update_noise_estimate(&mut self, center_t: u32) -> Result<(), anyhow::Error> {
         debug_assert!(
             center_t < self.params.total_frames(),
             "center_t must be a logical ring position"

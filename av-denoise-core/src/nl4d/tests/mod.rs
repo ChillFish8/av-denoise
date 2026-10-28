@@ -6,6 +6,7 @@ mod edges;
 mod engine;
 mod grouping;
 mod noise_map;
+mod noise_reading;
 mod options;
 mod pipeline;
 mod pooled;

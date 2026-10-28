@@ -56,8 +56,10 @@ fn shifted_edges_skip_the_leading_copies() {
     assert!(!denoiser.window_ready());
 }
 
+/// Centre 0 has no previous frame, so it is measured against the next one. Centre 1 measures the
+/// same pair the other way round.
 #[test]
-fn centre_zero_borrows_the_next_frames_reading() {
+fn centre_zero_reads_its_own_sample_against_the_next_frame() {
     let client = make_client();
     let total_frames = 2 * RADIUS + 1;
 
@@ -69,11 +71,22 @@ fn centre_zero_borrows_the_next_frames_reading() {
     push_grain(&mut at_one, total_frames);
     at_one.submit_machinery(1).unwrap().unwrap();
 
-    let borrowed = at_zero.current_sigmas_temporal_only();
-    let own = at_one.current_sigmas_temporal_only();
+    let centre_slot = at_zero.ring_slot(0);
+    let noise = at_zero.measured_noise().expect("the noise is measured");
+    let reading = noise.read_reading(centre_slot);
+    assert!(reading.sample.is_some(), "centre 0 has its own sample");
+
+    let from_next = at_zero.current_sigmas_temporal_only();
+    let from_previous = at_one.current_sigmas_temporal_only();
     let spatial = at_zero.current_sigmas_low_unboosted();
-    assert_eq!(borrowed, own);
-    assert_ne!(borrowed, spatial, "fell back to spatial");
+    let rel_err = (from_next[0] - from_previous[0]).abs() / from_previous[0];
+    assert!(
+        rel_err <= 0.05,
+        "the pair read {} forwards and {} backwards",
+        from_next[0],
+        from_previous[0]
+    );
+    assert_ne!(from_next, spatial, "fell back to spatial");
     assert!(at_zero.current_noise_curve().is_some());
 }
 
