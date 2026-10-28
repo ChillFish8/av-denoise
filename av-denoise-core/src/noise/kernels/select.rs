@@ -56,7 +56,8 @@ fn rule_rank(rule: u32, count: u32) -> u32 {
     rank = select(rule == 2u32, last / 2, rank);
     rank = select(rule == 3u32, count / 2, rank);
     rank = select(rule == 4u32, last / 4, rank);
-    select(rule == 5u32, (count + 2) / 4, rank)
+    rank = select(rule == 5u32, (count + 2) / 4, rank);
+    select(rule == 6u32, last * 2 / 5, rank)
 }
 
 /// Resolves one digit of every wanted query, leaving `[prefix, remaining rank, count, written]` per

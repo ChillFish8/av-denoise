@@ -126,30 +126,38 @@ fn set_triple(words: &mut [f32], start: u32, values: [f32; 3]) {
 pub(crate) const TAG_REFERENCE: u32 = 3;
 /// The immerkaer batch tag of a candidate block at or below the measurable-noise gate.
 pub(crate) const TAG_EXCLUDED: u32 = 4;
-/// The immerkaer batch's tags with temporal stats, three channels and the two block sets.
-pub(crate) const IMMERKAER_TAGS: u32 = 5;
+/// The immerkaer batch tag of a moved candidate block's texture, above the measurable-noise gate.
+pub(crate) const TAG_MOVED_TEXTURE: u32 = 5;
+/// The immerkaer batch's tags with temporal stats, three channels and the three block sets.
+pub(crate) const IMMERKAER_TAGS: u32 = 6;
 /// The immerkaer batch's tags without temporal stats, one per channel.
 pub(crate) const IMMERKAER_SPATIAL_TAGS: u32 = 3;
 /// The immerkaer batch's queries with temporal stats.
-pub(crate) const IMMERKAER_QUERIES: u32 = 11;
+pub(crate) const IMMERKAER_QUERIES: u32 = 12;
 /// The query of the reference set's lower quartile floor, followed by its ceiling, its first and
 /// its last element.
 pub(crate) const IMMERKAER_QUERY_REFERENCE: u32 = 6;
 /// The query whose count says how many candidates the reference set left out.
 pub(crate) const IMMERKAER_QUERY_EXCLUDED: u32 = 10;
+/// The query of the moved blocks' texture threshold.
+pub(crate) const IMMERKAER_QUERY_TEXTURE: u32 = 11;
 
 /// The sample batch tag of an accepted block's clamped correlation.
 pub(crate) const TAG_RHO: u32 = 3;
 /// The sample batch tag of a static quarter's sigma.
 pub(crate) const TAG_QUARTER: u32 = 4;
-/// The sample batch's tags, three channels, the correlation and the quarters.
-pub(crate) const SAMPLE_TAGS: u32 = 5;
+/// The sample batch tag every accepted block joins, so its count is the accepted count.
+pub(crate) const TAG_ACCEPTED: u32 = 5;
+/// The sample batch's tags, three channels, the correlation, the quarters and the accepted blocks.
+pub(crate) const SAMPLE_TAGS: u32 = 6;
 /// The sample batch's queries.
-pub(crate) const SAMPLE_QUERIES: u32 = 16;
+pub(crate) const SAMPLE_QUERIES: u32 = 17;
 /// The query of the correlation's lower median, followed by its upper median.
 pub(crate) const SAMPLE_QUERY_RHO: u32 = 12;
 /// The query of the static quarters' lower median, followed by its upper median.
 pub(crate) const SAMPLE_QUERY_QUARTER: u32 = 14;
+/// The query whose count says how many blocks were accepted.
+pub(crate) const SAMPLE_QUERY_ACCEPTED: u32 = 16;
 
 /// The curve batch's tags, one per luma bin.
 pub(crate) const CURVE_TAGS: u32 = NOISE_CURVE_BINS as u32;
@@ -157,7 +165,8 @@ pub(crate) const CURVE_TAGS: u32 = NOISE_CURVE_BINS as u32;
 pub(crate) const CURVE_QUERIES: u32 = 2 * CURVE_TAGS;
 
 /// The immerkaer batch's queries, a quartile pair per channel and, with temporal stats, the
-/// reference set's quartile pair, first and last element, then the excluded set's first.
+/// reference set's quartile pair, first and last element, the excluded set's first, then the moved
+/// texture set's 40th percentile.
 pub(crate) fn immerkaer_queries(temporal: bool) -> Vec<SelectQuery> {
     let mut queries = Vec::with_capacity(IMMERKAER_QUERIES as usize);
 
@@ -193,12 +202,16 @@ pub(crate) fn immerkaer_queries(temporal: bool) -> Vec<SelectQuery> {
         tag: TAG_EXCLUDED,
         rule: RankRule::First,
     });
+    queries.push(SelectQuery {
+        tag: TAG_MOVED_TEXTURE,
+        rule: RankRule::TextureShare,
+    });
 
     queries
 }
 
-/// The sample batch's queries, a median pair and a quartile pair per channel, then the median
-/// pairs of the correlation and the quarters.
+/// The sample batch's queries, a median pair and a quartile pair per channel, the median pairs of
+/// the correlation and the quarters, then the accepted set's first.
 pub(crate) fn sample_queries() -> Vec<SelectQuery> {
     let percentile_rules = [
         RankRule::MedianLow,
@@ -220,6 +233,11 @@ pub(crate) fn sample_queries() -> Vec<SelectQuery> {
             queries.push(SelectQuery { tag, rule });
         }
     }
+
+    queries.push(SelectQuery {
+        tag: TAG_ACCEPTED,
+        rule: RankRule::First,
+    });
 
     queries
 }

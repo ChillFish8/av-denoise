@@ -9,6 +9,7 @@ use crate::noise::reading::{
     CURVE_TAGS,
     IMMERKAER_QUERY_EXCLUDED,
     IMMERKAER_QUERY_REFERENCE,
+    IMMERKAER_QUERY_TEXTURE,
     READING_ACCEPTED,
     READING_CURVE_VALID,
     READING_IMMERKAER_LOW,
@@ -22,10 +23,13 @@ use crate::noise::reading::{
     READING_STATIC_FRACTION,
     READING_WORDS,
     SAMPLE_QUERIES,
+    SAMPLE_QUERY_ACCEPTED,
     SAMPLE_QUERY_QUARTER,
     SAMPLE_QUERY_RHO,
     SAMPLE_TAGS,
+    TAG_ACCEPTED,
     TAG_EXCLUDED,
+    TAG_MOVED_TEXTURE,
     TAG_QUARTER,
     TAG_REFERENCE,
     TAG_RHO,
@@ -42,6 +46,8 @@ use crate::noise::state::{
     BLOCK_VALUE_VAR0,
 };
 use crate::noise::temporal::{
+    BLOCK_MOVED_LANE,
+    BLOCK_TEXTURE_LANE,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
     RHO_SIGMA_GATE,
@@ -112,8 +118,9 @@ pub(crate) fn median_from_pair(low: f32, high: f32) -> f32 {
 /// derives block `i`'s per-channel sigma, mean residual, lag-1 mean, variance and pair count, flags
 /// it a candidate when its mean residual passes the static gate, and writes its channel-0 sigma at
 /// `3 * cubes + i`. A candidate above the measurable-noise gate joins the reference set and one at
-/// or below it the excluded set. Without `temporal`, `records`, `block_values` and `block_flags`
-/// are never touched.
+/// or below it the excluded set. Its texture is written at `3 * cubes + blocks + i`, and joins the
+/// moved texture set when the candidate is above the gate and moved. Without `temporal`, `records`,
+/// `block_values` and `block_flags` are never touched.
 ///
 /// The grid then clears the histogram and state of the immerkaer batch and, with `temporal` and
 /// `curve`, of the sample and curve batches, so each reading's passes start from zero. Bindings of a
@@ -151,6 +158,8 @@ pub fn noise_block_derive(
     let blocks_x = comptime!(width.div_ceil(TEMPORAL_NOISE_BLOCK));
     let blocks = comptime!(blocks_x * height.div_ceil(TEMPORAL_NOISE_BLOCK));
     let record_len = comptime!(temporal_stats_record_len(stored_ch));
+    let texture_offset = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE);
+    let moved_offset = comptime!(2 * stored_ch + BLOCK_MOVED_LANE);
 
     let index = ABSOLUTE_POS_X;
 
@@ -236,6 +245,14 @@ pub fn noise_block_derive(
         block_flags[index as usize] = select(candidate, BLOCK_CANDIDATE, 0u32);
         keys[lane as usize] = order_key(sigma0);
         tags[lane as usize] = select(candidate, set_tag, UNTAGGED);
+
+        let texture = records[(base + texture_offset) as usize];
+        let moved = records[(base + moved_offset) as usize] != 0.0f32;
+        let moved_measurable = candidate && measurable && moved;
+        let texture_lane = 3 * cubes + blocks + index;
+
+        keys[texture_lane as usize] = order_key(texture);
+        tags[texture_lane as usize] = select(moved_measurable, TAG_MOVED_TEXTURE, UNTAGGED);
     }
 
     let stride = CUBE_COUNT_X * CUBE_DIM_X;
@@ -274,16 +291,18 @@ pub fn noise_block_derive(
 
 /// Accepts the candidate blocks under the outlier ceiling and writes every lane of the sample batch.
 ///
-/// Each cube resolves the reference set's quartile pair, its first and last element, and the
-/// excluded count from the immerkaer batch. The ceiling is the reference's lower quartile times
-/// [SIGMA_OUTLIER_FACTOR](crate::noise::temporal::SIGMA_OUTLIER_FACTOR), or 0 for an empty
-/// reference. When candidates were excluded and the reference has no spread, the ceiling is not
-/// trusted and no block is accepted.
+/// Each cube resolves the reference set's quartile pair, its first and last element, the excluded
+/// count and the moved texture threshold from the immerkaer batch. The ceiling is the reference's
+/// lower quartile times [SIGMA_OUTLIER_FACTOR](crate::noise::temporal::SIGMA_OUTLIER_FACTOR), or 0
+/// for an empty reference. When candidates were excluded and the reference has no spread, the
+/// ceiling is not trusted and no block is accepted.
 ///
-/// Thread `b` then writes block `b`'s lanes. An accepted block's sigma joins its channel's set, its
-/// clamped correlation joins the correlation set when it has pixel pairs, and, with `luma_fields`,
-/// each quarter that passes the static gates joins the quarter set. Every other lane is `UNTAGGED`.
-/// Threads past the last block join the resolution and skip their writes.
+/// Thread `b` then writes block `b`'s lanes. An accepted block joins the accepted set, and its
+/// sigma joins its channel's set unless it moved with a texture above the threshold. An empty
+/// texture set sets no threshold. Its clamped correlation joins the correlation set when it has
+/// pixel pairs, and, with `luma_fields`, each quarter that passes the static gates joins the quarter
+/// set. Every other lane is `UNTAGGED`. Threads past the last block join the resolution and skip
+/// their writes.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -311,7 +330,9 @@ pub fn noise_block_accept(
     let blocks = comptime!(blocks_x * height.div_ceil(TEMPORAL_NOISE_BLOCK));
     let record_len = comptime!(temporal_stats_record_len(stored_ch));
     let quarters_base = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE);
-    let resolved = comptime!(IMMERKAER_QUERY_EXCLUDED + 1 - IMMERKAER_QUERY_REFERENCE);
+    let resolved = comptime!(IMMERKAER_QUERY_TEXTURE + 1 - IMMERKAER_QUERY_REFERENCE);
+    let texture_offset = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE);
+    let moved_offset = comptime!(2 * stored_ch + BLOCK_MOVED_LANE);
 
     let thread = UNIT_POS_X;
     let mut wanted = Shared::<[u32]>::new_slice(resolved as usize);
@@ -343,12 +364,14 @@ pub fn noise_block_accept(
     let (lowest, _) = select_result(&out, comptime!(IMMERKAER_QUERY_REFERENCE + 2));
     let (highest, _) = select_result(&out, comptime!(IMMERKAER_QUERY_REFERENCE + 3));
     let (_, excluded_count) = select_result(&out, IMMERKAER_QUERY_EXCLUDED);
+    let (texture_threshold, moved_count) = select_result(&out, IMMERKAER_QUERY_TEXTURE);
 
     let quartile = quartile_from_pair(quartile_low, quartile_high, reference_count);
     let has_reference = reference_count > 0u32;
     let ceiling = select(has_reference, quartile * SIGMA_OUTLIER_FACTOR, 0.0f32);
     let has_spread = has_reference && highest > lowest;
     let trusted = excluded_count == 0u32 || has_spread;
+    let has_threshold = moved_count > 0u32;
 
     let index = ABSOLUTE_POS_X;
 
@@ -367,12 +390,20 @@ pub fn noise_block_accept(
         let measurable = sigma0 > RHO_SIGMA_GATE;
         let accepted = trusted && candidate && under_ceiling && measurable;
 
+        let texture = records[(base + texture_offset) as usize];
+        let moved = records[(base + moved_offset) as usize] != 0.0f32;
+        let textured = has_threshold && texture > texture_threshold;
+        let sigma_kept = accepted && !(moved && textured);
+        let accepted_lane = 8 * blocks + index;
+
         block_flags[index as usize] = flags | select(accepted, BLOCK_ACCEPTED, 0u32);
+        keys[accepted_lane as usize] = 0u32;
+        tags[accepted_lane as usize] = select(accepted, TAG_ACCEPTED, UNTAGGED);
 
         #[unroll]
         for channel in 0..3u32 {
             let sigma = block_values[(value_base + channel) as usize];
-            let active = accepted && comptime!(channel < channels);
+            let active = sigma_kept && comptime!(channel < channels);
             let lane = channel * blocks + index;
 
             keys[lane as usize] = order_key(sigma);
@@ -422,9 +453,9 @@ pub fn noise_block_accept(
 ///
 /// The Immerkær words take each channel's lower quartile of its cube sigmas. With `temporal`, the
 /// sample is valid when the accepted blocks make up at least
-/// [STATIC_FRACTION_MIN](crate::noise::temporal::STATIC_FRACTION_MIN) of the frame and at least
-/// one of them has a correlation. It then holds each channel's median and lower quartile, the
-/// correlation median and the static fraction.
+/// [STATIC_FRACTION_MIN](crate::noise::temporal::STATIC_FRACTION_MIN) of the frame, at least
+/// one of them has a correlation and at least one sigma remains. It then holds each channel's
+/// median and lower quartile, the correlation median and the static fraction.
 ///
 /// With `curve`, each bin holding at least
 /// [MIN_QUARTERS_PER_BIN](crate::noise::curve::MIN_QUARTERS_PER_BIN) quarters takes their median.
@@ -532,16 +563,19 @@ pub fn noise_sample_finish(
     let base = slot * READING_WORDS;
     let mut accepted = 0u32;
     let mut correlated = 0u32;
+    let mut sigma_count = 0u32;
 
     if comptime!(temporal) {
-        let (_, accepted_count) = select_result(&sample_out, 0u32);
+        let (_, accepted_count) = select_result(&sample_out, SAMPLE_QUERY_ACCEPTED);
         let (_, rho_count) = select_result(&sample_out, SAMPLE_QUERY_RHO);
+        let (_, channel_count) = select_result(&sample_out, 0u32);
 
         accepted = accepted_count;
         correlated = rho_count;
+        sigma_count = channel_count;
     }
 
-    let valid = accepted >= min_accepted && correlated > 0u32;
+    let valid = accepted >= min_accepted && correlated > 0u32 && sigma_count > 0u32;
 
     if thread == 0 {
         #[unroll]

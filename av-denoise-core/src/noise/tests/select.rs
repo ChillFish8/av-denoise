@@ -735,3 +735,39 @@ fn a_batch_answers_identically_twice() {
     assert_eq!(first_bits, second_bits);
     assert_eq!(first_counts, second_counts);
 }
+
+#[test]
+fn texture_share_rank() {
+    let counts = [1u32, 5, 10, 11, 101];
+    let ranks = counts.map(|count| RankRule::TextureShare.rank(count));
+
+    assert_eq!(ranks, [0, 1, 3, 4, 40]);
+}
+
+#[test]
+fn the_texture_share_rule_matches_the_host_sort() {
+    let client = test_client();
+    let mut values = Vec::new();
+    let mut tags = Vec::new();
+
+    for tag in 0..12u32 {
+        let count = tag + 1;
+
+        for index in 0..count {
+            let value = hashed_unit(53 + tag, index);
+            values.push(value);
+            tags.push(tag);
+        }
+    }
+
+    for index in 0..10_000u32 {
+        let value = hashed_unit(67, index);
+        values.push(value);
+        tags.push(12);
+    }
+
+    let queries = queries_for(13, &[RankRule::TextureShare]);
+    let threads = resolve_cube_threads(&client);
+
+    assert_matches_host(&client, &values, &tags, &queries, threads);
+}

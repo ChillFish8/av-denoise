@@ -55,9 +55,9 @@ pub(crate) enum StrengthMapKind {
 
 /// The `f32` values block derive keeps per block, starting with the three channel sigmas.
 pub(crate) const BLOCK_FIELDS: u32 = 8;
-/// The sample batch's lanes per block, three channel sigmas, the correlation and four quarter
-/// sigmas.
-pub(crate) const SAMPLE_LANES_PER_BLOCK: u32 = 8;
+/// The sample batch's lanes per block, three channel sigmas, the correlation, four quarter sigmas
+/// and the accepted flag.
+pub(crate) const SAMPLE_LANES_PER_BLOCK: u32 = 9;
 /// The curve batch's lanes per block, one per static quarter.
 pub(crate) const CURVE_LANES_PER_BLOCK: u32 = 4;
 /// The block value of channel 0's mean residual.
@@ -122,7 +122,8 @@ pub(super) struct Measurement {
     pub(super) stats: Option<Handle>,
     /// One reading of [READING_WORDS](crate::noise::reading::READING_WORDS) values per slot.
     pub(super) readings: Handle,
-    /// Each Immerkær cube's sigmas and, with temporal stats, each candidate block's channel-0 sigma.
+    /// Each Immerkær cube's sigmas and, with temporal stats, each candidate block's channel-0 sigma
+    /// and texture.
     pub(super) immerkaer_batch: SelectBatch,
     /// The per-block scratch and the sample batch, when temporal stats are measured.
     pub(super) sample: Option<SampleScratch>,
@@ -146,7 +147,7 @@ pub(super) struct SampleScratch {
     pub(super) block_values: Handle,
     /// One flag word per block.
     pub(super) block_flags: Handle,
-    /// Each accepted block's sigmas, correlation and static quarter sigmas.
+    /// Each accepted block's sigmas, correlation, static quarter sigmas and accepted flag.
     pub(super) batch: SelectBatch,
 }
 
@@ -452,10 +453,10 @@ pub(super) fn quarter_grid(shape: NoiseShape) -> u32 {
     quarters.div_ceil(NOISE_BLOCK_1D)
 }
 
-/// The immerkaer batch's lanes, `3 * cubes` plus, with temporal stats, one per block.
+/// The immerkaer batch's lanes, `3 * cubes` plus, with temporal stats, two per block.
 fn immerkaer_lanes(shape: NoiseShape) -> u32 {
     let cubes = cube_count(shape);
-    let block_lanes = if shape.temporal { block_count(shape) } else { 0 };
+    let block_lanes = if shape.temporal { 2 * block_count(shape) } else { 0 };
 
     3 * cubes + block_lanes
 }

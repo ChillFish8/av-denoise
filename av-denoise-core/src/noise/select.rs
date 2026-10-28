@@ -68,6 +68,8 @@ pub enum RankRule {
     QuartileLow = 4,
     /// `(count + 2) / 4`, the ceiling of the quarter point.
     QuartileHigh = 5,
+    /// `(count - 1) * 2 / 5`, the 40th percentile.
+    TextureShare = 6,
 }
 
 #[cfg(test)]
@@ -83,6 +85,7 @@ impl RankRule {
             RankRule::MedianHigh => count / 2,
             RankRule::QuartileLow => (count - 1) / 4,
             RankRule::QuartileHigh => (count + 2) / 4,
+            RankRule::TextureShare => (count - 1) * 2 / 5,
         }
     }
 }

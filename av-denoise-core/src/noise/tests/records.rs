@@ -1,5 +1,7 @@
 use crate::noise::spatial::partials_len;
 use crate::noise::temporal::{
+    BLOCK_MOVED_LANE,
+    BLOCK_TEXTURE_LANE,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,
@@ -35,6 +37,8 @@ pub(crate) struct BlockSpec {
     pub mean: f32,
     pub sigma: [f32; 3],
     pub rho: f32,
+    pub texture: f32,
+    pub moved: bool,
     pub quarters: [QuarterSpec; 4],
 }
 
@@ -45,6 +49,8 @@ impl BlockSpec {
             mean,
             sigma: [sigma; 3],
             rho,
+            texture: 0.0,
+            moved: false,
             quarters: [QuarterSpec::default(); 4],
         }
     }
@@ -102,6 +108,8 @@ pub(crate) fn frame_records(width: u32, height: u32, stored_ch: u32, blocks: &[B
         let variance = 2.0 * spec.sigma[0] * spec.sigma[0];
         let mean_square = spec.mean * spec.mean;
         record[2 * stored] = (spec.rho * variance + mean_square) * pairs;
+        record[2 * stored + BLOCK_TEXTURE_LANE as usize] = spec.texture;
+        record[2 * stored + BLOCK_MOVED_LANE as usize] = if spec.moved { 1.0 } else { 0.0 };
 
         for quarter_index in 0..TEMPORAL_QUARTERS {
             let offset_x = (quarter_index % 2) * TEMPORAL_QUARTER_SIZE;

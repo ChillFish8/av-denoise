@@ -1,7 +1,10 @@
 use crate::noise::temporal::{
+    BLOCK_MOVED_LANE,
+    BLOCK_TEXTURE_LANE,
     RHO_SIGMA_GATE,
     STATIC_GATE,
     TEMPORAL_NOISE_BLOCK,
+    TemporalNoiseSample,
     aggregate_temporal_noise_stats,
     temporal_stats_blocks,
     temporal_stats_record_len,
@@ -618,4 +621,174 @@ fn aggregate_rho_estimate_stays_within_unit_range() {
         "the mismatched-denominator estimate must stay within 0.0..=1.0, got {}",
         sample.rho
     );
+}
+
+const LOW_TEXTURE: f32 = 10.0;
+const HIGH_TEXTURE: f32 = 100.0;
+
+/// A run of identical full blocks in a motion test frame.
+#[derive(Debug, Clone, Copy)]
+struct BlockRun {
+    count: usize,
+    sigma_255: f32,
+    rho: f32,
+    texture: f32,
+    moved: bool,
+}
+
+impl BlockRun {
+    fn unmoved(self) -> Self {
+        Self { moved: false, ..self }
+    }
+}
+
+/// One full block's record with a zero mean residual, its texture and its moved flag.
+fn motion_block_record(run: BlockRun) -> Vec<f32> {
+    let mut record = zero_mean_block_record(run.sigma_255, run.rho);
+    let texture_lane = 2 + BLOCK_TEXTURE_LANE as usize;
+    let moved_lane = 2 + BLOCK_MOVED_LANE as usize;
+
+    record[texture_lane] = run.texture;
+    record[moved_lane] = if run.moved { 1.0 } else { 0.0 };
+
+    record
+}
+
+/// The records of a one-block-high frame holding `runs` in order, with the frame's width.
+fn motion_frame(runs: &[BlockRun]) -> (Vec<f32>, u32) {
+    let mut records = Vec::new();
+    let mut blocks = 0u32;
+
+    for run in runs {
+        let record = motion_block_record(*run);
+
+        for _ in 0..run.count {
+            records.extend_from_slice(&record);
+            blocks += 1;
+        }
+    }
+
+    let width = blocks * TEMPORAL_NOISE_BLOCK;
+
+    (records, width)
+}
+
+/// 10 unmoved and 5 moved low-texture blocks, then 5 moved high-texture blocks at a higher sigma.
+const BRIEF_RUNS: [BlockRun; 3] = [
+    BlockRun {
+        count: 10,
+        sigma_255: 1.0,
+        rho: 0.1,
+        texture: LOW_TEXTURE,
+        moved: false,
+    },
+    BlockRun {
+        count: 5,
+        sigma_255: 1.0,
+        rho: 0.5,
+        texture: LOW_TEXTURE,
+        moved: true,
+    },
+    BlockRun {
+        count: 5,
+        sigma_255: 3.0,
+        rho: 0.5,
+        texture: HIGH_TEXTURE,
+        moved: true,
+    },
+];
+
+/// High-texture moved blocks make up half the frame, so they would carry the median.
+const MAJORITY_RUNS: [BlockRun; 3] = [
+    BlockRun {
+        count: 3,
+        sigma_255: 1.0,
+        rho: 0.1,
+        texture: LOW_TEXTURE,
+        moved: false,
+    },
+    BlockRun {
+        count: 7,
+        sigma_255: 1.0,
+        rho: 0.1,
+        texture: LOW_TEXTURE,
+        moved: true,
+    },
+    BlockRun {
+        count: 10,
+        sigma_255: 3.0,
+        rho: 0.5,
+        texture: HIGH_TEXTURE,
+        moved: true,
+    },
+];
+
+fn motion_sample(runs: &[BlockRun]) -> TemporalNoiseSample {
+    let (records, width) = motion_frame(runs);
+
+    aggregate_temporal_noise_stats(&records, 1, 1, width, TEMPORAL_NOISE_BLOCK)
+        .expect("every block is accepted, so the sample is trusted")
+}
+
+fn assert_near(actual: f32, expected: f32, what: &str) {
+    let gap = (actual - expected).abs();
+    assert!(gap < 1e-6, "{what}: {actual} vs {expected}");
+}
+
+#[test]
+fn moved_high_texture_blocks_leave_sigma_but_keep_rho_and_static_fraction() {
+    let sample = motion_sample(&BRIEF_RUNS);
+
+    assert_near(sample.sigma[0], 1.0 / 255.0, "sigma");
+    assert_near(sample.rho, 0.3, "rho over all 20 blocks");
+    assert_eq!(sample.static_fraction, 1.0);
+}
+
+#[test]
+fn moved_high_texture_majority_leaves_the_sigma_median() {
+    let sample = motion_sample(&MAJORITY_RUNS);
+
+    assert_near(sample.sigma[0], 1.0 / 255.0, "sigma");
+    assert_near(sample.sigma_low[0], 1.0 / 255.0, "sigma_low");
+    assert_near(sample.rho, 0.3, "rho over all 20 blocks");
+    assert_eq!(sample.static_fraction, 1.0);
+}
+
+#[test]
+fn unmoved_blocks_ignore_texture() {
+    let cases = [(BRIEF_RUNS, 1.0 / 255.0), (MAJORITY_RUNS, 2.0 / 255.0)];
+
+    for (runs, expected_sigma) in cases {
+        let unmoved = runs.map(BlockRun::unmoved);
+        let sample = motion_sample(&unmoved);
+
+        assert_near(sample.sigma[0], expected_sigma, "the median over all 20 blocks");
+        assert_eq!(sample.static_fraction, 1.0);
+    }
+}
+
+/// The low-texture share all sits above the outlier ceiling, so every accepted block leaves the
+/// sigma.
+#[test]
+fn a_sample_with_every_sigma_left_out_is_invalid() {
+    let runs = [
+        BlockRun {
+            count: 8,
+            sigma_255: 20.0,
+            rho: 0.1,
+            texture: LOW_TEXTURE,
+            moved: true,
+        },
+        BlockRun {
+            count: 12,
+            sigma_255: 1.0,
+            rho: 0.1,
+            texture: HIGH_TEXTURE,
+            moved: true,
+        },
+    ];
+    let (records, width) = motion_frame(&runs);
+    let sample = aggregate_temporal_noise_stats(&records, 1, 1, width, TEMPORAL_NOISE_BLOCK);
+
+    assert!(sample.is_none());
 }
