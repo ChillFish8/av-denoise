@@ -9,3 +9,4 @@ cubecl.log
 /.vcpkg/
 /vcpkg_installed/
 .env
+/.vulkan_icd/

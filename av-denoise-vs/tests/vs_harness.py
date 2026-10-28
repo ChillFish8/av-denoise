@@ -434,17 +434,12 @@ def _parity_source_filter():
     raise AssertionError("neither core.bs (BestSource) nor core.lsmas (LSMASHSource) is installed")
 
 
-PARITY_CLIP = pathlib.Path("data/parity-clip.y4m")
+# 12 frames of Big Buck Bunny at 360p. (c) Blender Foundation, CC BY 3.0, peach.blender.org.
+PARITY_CLIP = pathlib.Path(__file__).parent / "parity-clip.y4m"
 
 
 def _render_cli_to(out_file, cli_args):
     """Runs the CLI over the parity clip, writing its y4m output to `out_file`."""
-    if not PARITY_CLIP.exists():
-        raise AssertionError(
-            f"{PARITY_CLIP} is missing. Create it with: "
-            "ffmpeg -i data/bench-sample.mkv -frames:v 12 -pix_fmt yuv420p -y data/parity-clip.y4m"
-        )
-
     env = dict(os.environ, AV_DENOISE_COMPILATION_CACHE="off")
     command = [
         "cargo", "run", "--release",
