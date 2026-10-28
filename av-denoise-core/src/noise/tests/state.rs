@@ -102,6 +102,7 @@ fn launch_directly(
         input_buf: ring,
         stats_buf,
         align: shape.align,
+        motion: None,
     };
     run_temporal_noise_stats(client, &stats_ctx, luma_fields).expect("the stats queue");
 }

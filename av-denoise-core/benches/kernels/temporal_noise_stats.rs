@@ -11,33 +11,49 @@ const TEMPORAL_CHANNELS: u32 = 3;
 const TEMPORAL_STORED_CH: u32 = 4;
 /// Matches `noise::TEMPORAL_NOISE_BLOCK`.
 const TEMPORAL_BLOCK: u32 = 16;
+/// The motion grid step of the compensated row.
+const MOTION_STEP: u32 = 8;
+/// The whole-pixel vector every motion block of the compensated row holds.
+const MOTION_VECTOR: [i32; 2] = [3, -2];
 
 /// The temporal-residual noise-stats kernel over two 1080p YUV ring slots.
 ///
 /// It diffs the slots and reduces every `16 × 16` block into its stats record. `luma_fields`
-/// picks which of the kernel's two compiled variants this row times.
+/// and `compensated` pick which of the kernel's compiled variants this row times. The compensated
+/// row follows a uniform [MOTION_VECTOR] field on a [MOTION_STEP] grid.
 pub struct TemporalNoiseStatsBench {
     pub client: Client,
     pub luma_fields: bool,
+    pub compensated: bool,
 }
 
 #[derive(Clone)]
 pub struct TemporalNoiseStatsInput {
     pub input: Handle,
     pub stats: Handle,
+    pub mv_field: Handle,
 }
 
 fn blocks() -> (u32, u32) {
     (WIDTH.div_ceil(TEMPORAL_BLOCK), HEIGHT.div_ceil(TEMPORAL_BLOCK))
 }
 
+fn motion_blocks() -> (u32, u32) {
+    (WIDTH.div_ceil(MOTION_STEP), HEIGHT.div_ceil(MOTION_STEP))
+}
+
+fn mv_len() -> usize {
+    let (blocks_x, blocks_y) = motion_blocks();
+    (blocks_x * blocks_y * 2) as usize
+}
+
 /// The stats buffer length, one `noise::temporal_stats_record_len` record per block.
 ///
-/// A record is a sum and a sum of squares per stored channel, one lag-1 total, and four quarter
-/// records of nine fields each.
+/// A record is a sum and a sum of squares per stored channel, the lag-1, texture and moved lanes,
+/// and four quarter records of nine fields each.
 fn stats_len() -> usize {
     let (blocks_x, blocks_y) = blocks();
-    (blocks_x * blocks_y * (2 * TEMPORAL_STORED_CH + 37)) as usize
+    (blocks_x * blocks_y * (2 * TEMPORAL_STORED_CH + 39)) as usize
 }
 
 impl Benchmark for TemporalNoiseStatsBench {
@@ -57,13 +73,25 @@ impl Benchmark for TemporalNoiseStatsBench {
         let total_stats = stats_len();
         let stats = self.client.empty(total_stats * size_of::<f32>());
 
-        TemporalNoiseStatsInput { input, stats }
+        let total_mv = mv_len();
+        let block_count = total_mv / 2;
+        let vectors = MOTION_VECTOR.repeat(block_count);
+        let vector_bytes = i32::as_bytes(&vectors);
+        let mv_field = self.client.create_from_slice(vector_bytes);
+
+        TemporalNoiseStatsInput {
+            input,
+            stats,
+            mv_field,
+        }
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let total_input = (2 * WIDTH * HEIGHT * TEMPORAL_STORED_CH) as usize;
         let (blocks_x, blocks_y) = blocks();
         let total_stats = stats_len();
+        let total_mv = mv_len();
+        let (mv_blocks_x, mv_blocks_y) = motion_blocks();
 
         unsafe {
             nlm_temporal_noise_stats::launch_unchecked(
@@ -73,13 +101,19 @@ impl Benchmark for TemporalNoiseStatsBench {
                 TEMPORAL_STORED_CH as usize,
                 BufferArg::from_raw_parts(args.input.clone(), total_input),
                 BufferArg::from_raw_parts(args.stats.clone(), total_stats),
+                BufferArg::from_raw_parts(args.mv_field.clone(), total_mv),
                 1u32,
+                0u32,
                 0u32,
                 WIDTH,
                 HEIGHT,
                 TEMPORAL_STORED_CH,
                 TEMPORAL_BLOCK,
                 self.luma_fields,
+                self.compensated,
+                MOTION_STEP,
+                mv_blocks_x,
+                mv_blocks_y,
             );
         }
 
@@ -87,11 +121,9 @@ impl Benchmark for TemporalNoiseStatsBench {
     }
 
     fn name(&self) -> String {
-        if self.luma_fields {
-            "temporal_noise_stats_1080p_yuv_luma_fields_on".to_string()
-        } else {
-            "temporal_noise_stats_1080p_yuv".to_string()
-        }
+        let luma = if self.luma_fields { "_luma_fields_on" } else { "" };
+        let motion = if self.compensated { "_compensated" } else { "" };
+        format!("temporal_noise_stats_1080p_yuv{luma}{motion}")
     }
 
     fn sync(&self) {

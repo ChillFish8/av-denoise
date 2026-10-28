@@ -66,6 +66,8 @@ pub(crate) use self::strength_map::classify_quarters;
 pub(crate) use self::strength_map::{QuarterClass, QuarterTensor};
 pub(crate) use self::strength_map::{QuarterSettings, StrengthMapParams};
 pub(crate) use self::temporal::{
+    BLOCK_MOVED_LANE,
+    BLOCK_TEXTURE_LANE,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,

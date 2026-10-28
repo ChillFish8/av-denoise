@@ -225,14 +225,22 @@ fn run_all(backend: &str, client: Client) {
         client: client.clone(),
     });
 
-    // `luma_fields` off as nlmeans runs it, and on as nl4d runs it with the noise map.
+    // `luma_fields` off as nlmeans runs it, and on as nl4d runs it with the noise map. The
+    // compensated row follows a uniform pan, as a pass reading along its motion field does.
     run(TemporalNoiseStatsBench {
         client: client.clone(),
         luma_fields: false,
+        compensated: false,
     });
     run(TemporalNoiseStatsBench {
         client: client.clone(),
         luma_fields: true,
+        compensated: false,
+    });
+    run(TemporalNoiseStatsBench {
+        client: client.clone(),
+        luma_fields: true,
+        compensated: true,
     });
 
     // The radix select on the luma sample batch, and its last pass on the curve batch.

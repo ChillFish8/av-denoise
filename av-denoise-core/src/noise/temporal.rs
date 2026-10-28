@@ -17,11 +17,20 @@ pub(crate) const TEMPORAL_NOISE_BLOCK: u32 = 16;
 /// How many 8x8 quarters one block record holds.
 pub(crate) const TEMPORAL_QUARTERS: u32 = 4;
 pub(crate) const TEMPORAL_QUARTER_SIZE: u32 = TEMPORAL_NOISE_BLOCK / 2;
+/// The offset of the block's channel-0 gradient energy past `2 * stored_ch`.
+///
+/// It sums the squared horizontal and vertical neighbour differences of the new frame over the
+/// pixel pairs inside the block.
+pub(crate) const BLOCK_TEXTURE_LANE: u32 = 1;
+/// The offset of the block's moved flag past `2 * stored_ch`.
+///
+/// It reads 1.0 when the block was differenced along a non-zero motion vector, else 0.0.
+pub(crate) const BLOCK_MOVED_LANE: u32 = 2;
 /// The offset of the first quarter record past `2 * stored_ch`.
 ///
-/// Quarter `q` starts at `2 * stored_ch + 1 + 9 * q`, in top-left, top-right, bottom-left,
+/// Quarter `q` starts at `2 * stored_ch + 3 + 9 * q`, in top-left, top-right, bottom-left,
 /// bottom-right order.
-pub(crate) const TEMPORAL_QUARTER_BASE: u32 = 1;
+pub(crate) const TEMPORAL_QUARTER_BASE: u32 = 3;
 /// How many `f32`s one quarter record holds.
 pub(crate) const TEMPORAL_QUARTER_FIELDS: u32 = 9;
 /// The quarter-record offset of channel 0's summed residual.
@@ -100,8 +109,8 @@ pub(crate) const SIGMA_OUTLIER_FACTOR: f32 = 5.0;
 
 /// How many `f32`s one block's stats record holds.
 ///
-/// That is a sum and a sum of squares per stored channel, one lag-1 total, and the four quarter
-/// records.
+/// That is a sum and a sum of squares per stored channel, one lag-1 total, the texture and moved
+/// lanes, and the four quarter records.
 pub(crate) fn temporal_stats_record_len(stored_ch: u32) -> u32 {
     2 * stored_ch + TEMPORAL_QUARTER_BASE + TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS
 }
@@ -139,8 +148,25 @@ pub(crate) fn temporal_stats_buf_bytes(
     (temporal_stats_slot_stride_bytes(width, height, stored_ch, align) * frame_count as u64) as usize
 }
 
-/// The inputs one temporal residual statistics dispatch needs, comparing `slot_new` against
+/// The motion field a compensated temporal residual statistics dispatch reads.
+///
+/// Each noise block takes the vector of the motion block covering its origin. `mv_offset` is the
+/// `i32` index where the neighbour's slice of `mv_field` starts, and `mv_len` is the length of the
+/// whole field in `i32`s.
+pub(crate) struct StatsMotion<'a> {
+    pub mv_field: &'a Handle,
+    pub mv_len: usize,
+    pub mv_offset: u32,
+    pub step: u32,
+    pub blocks_x: u32,
+    pub blocks_y: u32,
+}
+
+/// The inputs one temporal residual statistics dispatch needs, measuring `slot_new` against
 /// `slot_prev`.
+///
+/// With `motion` set, each block of `slot_new` is differenced against `slot_prev` shifted by the
+/// block's motion vector.
 pub(crate) struct TemporalStatsCtx<'a> {
     pub width: u32,
     pub height: u32,
@@ -151,14 +177,17 @@ pub(crate) struct TemporalStatsCtx<'a> {
     pub input_buf: &'a Handle,
     pub stats_buf: &'a Handle,
     pub align: StorageAlign,
+    pub motion: Option<StatsMotion<'a>>,
 }
 
 /// Runs the temporal residual statistics kernel, writing one record per block into the new slot.
 ///
 /// Where nothing moved the residual is noise, so correlated grain shows in full, but motion and
-/// scene changes make the reading unreliable. The kernel addresses only its own slot's slice, so
-/// it needs nothing about the ring's other slots or the padding between them. With `luma_fields`
-/// off, the kernel's four luma-only lanes read 0 at no extra cost.
+/// scene changes make the reading unreliable. Following `ctx.motion` cancels whole-pixel motion,
+/// and a block whose shifted match leaves the frame writes an all-zero record. The kernel
+/// addresses only its own slot's slice, so it needs nothing about the ring's other slots or the
+/// padding between them. With `luma_fields` off, the kernel's quarter lanes read 0 at no extra
+/// cost.
 pub(crate) fn run_temporal_noise_stats(
     client: &Client,
     ctx: &TemporalStatsCtx<'_>,
@@ -170,6 +199,18 @@ pub(crate) fn run_temporal_noise_stats(
     let stride = temporal_stats_slot_stride_bytes(ctx.width, ctx.height, ctx.stored_ch, ctx.align);
     let stats_slot = ctx.stats_buf.clone().offset_start((ctx.slot_new as u64) * stride);
 
+    // Without motion the kernel never reads the field, so one element of the input ring stands in.
+    let placeholder = StatsMotion {
+        mv_field: ctx.input_buf,
+        mv_len: 1,
+        mv_offset: 0,
+        step: 1,
+        blocks_x: 1,
+        blocks_y: 1,
+    };
+    let motion = ctx.motion.as_ref().unwrap_or(&placeholder);
+    let compensated = ctx.motion.is_some();
+
     unsafe {
         nlm_temporal_noise_stats::launch_unchecked(
             client,
@@ -178,13 +219,19 @@ pub(crate) fn run_temporal_noise_stats(
             ctx.stored_ch as usize,
             BufferArg::from_raw_parts(ctx.input_buf.clone(), total_input),
             BufferArg::from_raw_parts(stats_slot, slot_len),
+            BufferArg::from_raw_parts(motion.mv_field.clone(), motion.mv_len),
             ctx.slot_new,
             ctx.slot_prev,
+            motion.mv_offset,
             ctx.width,
             ctx.height,
             ctx.stored_ch,
             TEMPORAL_NOISE_BLOCK,
             luma_fields,
+            compensated,
+            motion.step,
+            motion.blocks_x,
+            motion.blocks_y,
         );
     }
 

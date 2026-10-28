@@ -5,6 +5,8 @@ use crate::bench_api::HostIo;
 use crate::nlmeans::*;
 use crate::noise::tests::read_temporal_stats_slot;
 use crate::noise::{
+    BLOCK_MOVED_LANE,
+    BLOCK_TEXTURE_LANE,
     NoiseCtx,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -86,6 +88,7 @@ fn run_temporal_stats_prefilled(
         input_buf: &input_buf,
         stats_buf: &stats_buf,
         align,
+        motion: None,
     };
     run_temporal_noise_stats(&client, &ctx, luma_fields).expect("temporal noise stats dispatch failed");
 
@@ -155,6 +158,32 @@ fn reference_temporal_stats(
             out[base..base + channel_stride].copy_from_slice(&sum_d);
             out[base + channel_stride..base + 2 * channel_stride].copy_from_slice(&sum_d2);
             out[base + 2 * channel_stride] = sum_lag;
+
+            let luma_at = |x: u32, y: u32| new[(y * width + x) as usize * channel_stride];
+            let mut texture = 0.0f32;
+            for local_y in 0..block_height {
+                for local_x in 0..block_width {
+                    let x = origin_x + local_x;
+                    let y = origin_y + local_y;
+                    let here = luma_at(x, y);
+                    let mut pixel_texture = 0.0f32;
+                    if local_x + 1 < block_width {
+                        let step_x = luma_at(x + 1, y) - here;
+                        pixel_texture += step_x * step_x;
+                    }
+
+                    if local_y + 1 < block_height {
+                        let step_y = luma_at(x, y + 1) - here;
+                        pixel_texture += step_y * step_y;
+                    }
+
+                    texture += pixel_texture;
+                }
+            }
+
+            let lanes_base = base + 2 * channel_stride;
+            out[lanes_base + BLOCK_TEXTURE_LANE as usize] = texture;
+            out[lanes_base + BLOCK_MOVED_LANE as usize] = 0.0;
 
             for quarter in 0..TEMPORAL_QUARTERS {
                 let fields = quarter_fields_host(new, previous, width, height, block_x, block_y, quarter);
@@ -570,7 +599,7 @@ fn luma_fields_off_leaves_the_quarter_lanes_zero_and_the_rest_unchanged() {
     let without_luma = run_temporal_stats_prefilled(width, height, stored_ch, &previous, &new, false, 123.0);
 
     let record_len = temporal_stats_record_len(stored_ch) as usize;
-    let scalar_len = 2 * stored_ch as usize + 1;
+    let scalar_len = (2 * stored_ch + TEMPORAL_QUARTER_BASE) as usize;
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
 
     for block in 0..(blocks_x * blocks_y) as usize {
@@ -579,7 +608,7 @@ fn luma_fields_off_leaves_the_quarter_lanes_zero_and_the_rest_unchanged() {
         let without_record = &without_luma[base..base + scalar_len];
         assert_eq!(
             with_record, without_record,
-            "block {block}: sum_d/sum_d2/lag must not depend on luma_fields"
+            "block {block}: the scalar lanes must not depend on luma_fields"
         );
 
         let quarter_lanes = &without_luma[base + scalar_len..base + record_len];

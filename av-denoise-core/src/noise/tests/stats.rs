@@ -1,4 +1,22 @@
+use cubecl::prelude::*;
+use cubecl::server::Handle;
+
+use crate::engine::align::StorageAlign;
 use crate::noise::stats::lower_quartile;
+use crate::noise::temporal::{
+    BLOCK_MOVED_LANE,
+    BLOCK_TEXTURE_LANE,
+    StatsMotion,
+    TEMPORAL_NOISE_BLOCK,
+    TemporalStatsCtx,
+    run_temporal_noise_stats,
+    temporal_stats_blocks,
+    temporal_stats_buf_bytes,
+    temporal_stats_record_len,
+    temporal_stats_slot_view,
+};
+use crate::tune::tests::fixtures::{hashed_ring, hashed_unit, noisy_field_over, upload};
+use crate::tune::tests::runtime::test_client;
 
 #[test]
 fn lower_quartile_odd_count_exact_index() {
@@ -25,4 +43,435 @@ fn lower_quartile_interpolates_at_a_fractional_index() {
 fn lower_quartile_single_element_returns_it() {
     let got = lower_quartile(&[42.0]);
     assert_eq!(got, 42.0);
+}
+
+/// A whole-pixel motion grid in the per-neighbour layout a pass's `mv_field` holds.
+struct MotionGrid {
+    vectors: Vec<i32>,
+    step: u32,
+    blocks_x: u32,
+    blocks_y: u32,
+}
+
+impl MotionGrid {
+    fn from_fn(width: u32, height: u32, step: u32, vector_at: impl Fn(u32, u32) -> [i32; 2]) -> Self {
+        let blocks_x = width.div_ceil(step);
+        let blocks_y = height.div_ceil(step);
+
+        let mut vectors = Vec::with_capacity((blocks_x * blocks_y * 2) as usize);
+        for row in 0..blocks_y {
+            for col in 0..blocks_x {
+                let vector = vector_at(col, row);
+                vectors.extend_from_slice(&vector);
+            }
+        }
+
+        Self {
+            vectors,
+            step,
+            blocks_x,
+            blocks_y,
+        }
+    }
+
+    fn uniform(width: u32, height: u32, step: u32, vector: [i32; 2]) -> Self {
+        Self::from_fn(width, height, step, |_, _| vector)
+    }
+}
+
+/// A vector far outside any test frame, which zeroes every block that reads it.
+const DECOY_VECTOR: [i32; 2] = [1000, 1000];
+
+/// Two frames packed as `pixels * stored_ch`, `previous` in ring slot 0 and `new` in slot 1.
+struct StatsFrames {
+    width: u32,
+    height: u32,
+    stored_ch: u32,
+    previous: Vec<f32>,
+    new: Vec<f32>,
+}
+
+impl StatsFrames {
+    fn record_len(&self) -> usize {
+        temporal_stats_record_len(self.stored_ch) as usize
+    }
+
+    fn record<'a>(&self, records: &'a [f32], block_x: u32, block_y: u32) -> &'a [f32] {
+        let (blocks_x, _) = temporal_stats_blocks(self.width, self.height);
+        let record_len = self.record_len();
+        let start = (block_y * blocks_x + block_x) as usize * record_len;
+
+        &records[start..start + record_len]
+    }
+
+    fn block_extent(&self, block_x: u32, block_y: u32) -> (u32, u32) {
+        let block_width = TEMPORAL_NOISE_BLOCK.min(self.width - block_x * TEMPORAL_NOISE_BLOCK);
+        let block_height = TEMPORAL_NOISE_BLOCK.min(self.height - block_y * TEMPORAL_NOISE_BLOCK);
+        (block_width, block_height)
+    }
+}
+
+/// A motion grid uploaded behind a slice of [DECOY_VECTOR]s, so a launch that ignores `mv_offset`
+/// zeroes every record.
+struct UploadedField {
+    handle: Handle,
+    len: usize,
+    offset: u32,
+}
+
+fn upload_behind_decoys(client: &Client, grid: &MotionGrid) -> UploadedField {
+    let block_count = grid.vectors.len() / 2;
+    let mut field = DECOY_VECTOR.repeat(block_count);
+    let offset = field.len() as u32;
+    field.extend_from_slice(&grid.vectors);
+
+    let field_bytes = i32::as_bytes(&field);
+    let handle = client.create_from_slice(field_bytes);
+
+    UploadedField {
+        handle,
+        len: field.len(),
+        offset,
+    }
+}
+
+/// Runs the stats kernel on `frames` and reads slot 1's records back.
+fn run_stats(frames: &StatsFrames, motion: Option<&MotionGrid>, luma_fields: bool) -> Vec<f32> {
+    let client = test_client();
+    let frame_count = 2u32;
+    let align = StorageAlign::from_client(&client);
+
+    let mut ring = frames.previous.clone();
+    ring.extend_from_slice(&frames.new);
+    let input_buf = upload(&client, &ring);
+
+    let stats_bytes =
+        temporal_stats_buf_bytes(frames.width, frames.height, frames.stored_ch, frame_count, align);
+    let stats_fill = vec![-7.0f32; stats_bytes / size_of::<f32>()];
+    let stats_buf = upload(&client, &stats_fill);
+
+    let uploaded = motion.map(|grid| upload_behind_decoys(&client, grid));
+    let stats_motion = match (motion, uploaded.as_ref()) {
+        (Some(grid), Some(field)) => Some(StatsMotion {
+            mv_field: &field.handle,
+            mv_len: field.len,
+            mv_offset: field.offset,
+            step: grid.step,
+            blocks_x: grid.blocks_x,
+            blocks_y: grid.blocks_y,
+        }),
+        _ => None,
+    };
+
+    let ctx = TemporalStatsCtx {
+        width: frames.width,
+        height: frames.height,
+        stored_ch: frames.stored_ch,
+        frame_count,
+        slot_new: 1,
+        slot_prev: 0,
+        input_buf: &input_buf,
+        stats_buf: &stats_buf,
+        align,
+        motion: stats_motion,
+    };
+    run_temporal_noise_stats(&client, &ctx, luma_fields).expect("the stats queue");
+
+    let slot = temporal_stats_slot_view(
+        &stats_buf,
+        frames.width,
+        frames.height,
+        frames.stored_ch,
+        frame_count,
+        1,
+        align,
+    );
+    let bytes = client.read_one(slot).expect("the stats read back");
+
+    f32::from_bytes(&bytes).to_vec()
+}
+
+/// Hashed texture over a `width x height` frame, sampled at `(x + shift_x, y + shift_y)` of a
+/// larger field so a shifted copy stays defined at the edges.
+fn texture_frame(width: u32, height: u32, shift_x: u32, shift_y: u32) -> Vec<f32> {
+    let field_width = width + 16;
+    let mut frame = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let index = (y + shift_y) * field_width + x + shift_x;
+            let value = hashed_unit(index, 11);
+            frame.push(value);
+        }
+    }
+
+    frame
+}
+
+/// Channel 0's per-block sigma for every block with a non-zero record.
+fn block_sigmas(frames: &StatsFrames, records: &[f32]) -> Vec<f32> {
+    let (blocks_x, blocks_y) = temporal_stats_blocks(frames.width, frames.height);
+    let stored_ch = frames.stored_ch as usize;
+
+    let mut sigmas = Vec::new();
+    for block_y in 0..blocks_y {
+        for block_x in 0..blocks_x {
+            let record = frames.record(records, block_x, block_y);
+            if record[stored_ch] == 0.0 {
+                continue;
+            }
+
+            let (block_width, block_height) = frames.block_extent(block_x, block_y);
+            let pixels = (block_width * block_height) as f32;
+            let mean = record[0] / pixels;
+            let variance = record[stored_ch] / pixels - mean * mean;
+            let sigma = variance.max(0.0).sqrt() / std::f32::consts::SQRT_2;
+            sigmas.push(sigma);
+        }
+    }
+
+    sigmas
+}
+
+fn median_of(mut values: Vec<f32>) -> f32 {
+    values.sort_by(f32::total_cmp);
+    values[values.len() / 2]
+}
+
+/// Channel 0's summed squared residual of one block shifted by `vector`, computed on the host.
+fn host_sum_d2(frames: &StatsFrames, block_x: u32, block_y: u32, vector: [i32; 2]) -> f32 {
+    let (block_width, block_height) = frames.block_extent(block_x, block_y);
+    let stride = frames.stored_ch as usize;
+
+    let mut sum_d2 = 0.0f32;
+    for local_y in 0..block_height {
+        for local_x in 0..block_width {
+            let x = block_x * TEMPORAL_NOISE_BLOCK + local_x;
+            let y = block_y * TEMPORAL_NOISE_BLOCK + local_y;
+            let prev_x = (x as i32 + vector[0]) as u32;
+            let prev_y = (y as i32 + vector[1]) as u32;
+            let new_index = (y * frames.width + x) as usize * stride;
+            let prev_index = (prev_y * frames.width + prev_x) as usize * stride;
+            let residual = frames.new[new_index] - frames.previous[prev_index];
+            sum_d2 += residual * residual;
+        }
+    }
+
+    sum_d2
+}
+
+#[test]
+fn compensated_stats_cancel_a_known_pan() {
+    let (width, height) = (128u32, 96u32);
+    let sigma = 2.0 / 255.0;
+
+    // `previous` is `new` shifted by `(+3, -2)`, so `new(x, y)` matches `previous(x + 3, y - 2)`.
+    let new_clean = texture_frame(width, height, 3, 2);
+    let previous_clean = texture_frame(width, height, 0, 4);
+    let frames = StatsFrames {
+        width,
+        height,
+        stored_ch: 1,
+        previous: noisy_field_over(&previous_clean, width, height, sigma, 1),
+        new: noisy_field_over(&new_clean, width, height, sigma, 2),
+    };
+
+    let grid = MotionGrid::uniform(width, height, 8, [3, -2]);
+    let compensated = run_stats(&frames, Some(&grid), true);
+    let raw = run_stats(&frames, None, true);
+
+    let compensated_sigma = median_of(block_sigmas(&frames, &compensated));
+    let raw_sigma = median_of(block_sigmas(&frames, &raw));
+
+    let relative_error = (compensated_sigma - sigma).abs() / sigma;
+    assert!(
+        relative_error <= 0.05,
+        "compensated sigma {compensated_sigma} vs true {sigma} (rel err {relative_error:.3})"
+    );
+    assert!(
+        raw_sigma > 3.0 * sigma,
+        "raw sigma {raw_sigma} should read the pan, not the noise"
+    );
+}
+
+#[test]
+fn zero_vector_compensated_stats_equal_raw_stats() {
+    let (width, height) = (45u32, 29u32);
+
+    for stored_ch in [1u32, 4] {
+        let ring = hashed_ring(width, height, stored_ch, 2, 5);
+        let frame_len = (width * height * stored_ch) as usize;
+        let frames = StatsFrames {
+            width,
+            height,
+            stored_ch,
+            previous: ring[..frame_len].to_vec(),
+            new: ring[frame_len..].to_vec(),
+        };
+        let grid = MotionGrid::uniform(width, height, 8, [0, 0]);
+
+        for luma_fields in [false, true] {
+            let compensated = run_stats(&frames, Some(&grid), luma_fields);
+            let raw = run_stats(&frames, None, luma_fields);
+
+            let compensated_bits: Vec<u32> = compensated.iter().map(|value| value.to_bits()).collect();
+            let raw_bits: Vec<u32> = raw.iter().map(|value| value.to_bits()).collect();
+            assert_eq!(
+                compensated_bits, raw_bits,
+                "stored_ch {stored_ch}, luma_fields {luma_fields}"
+            );
+
+            let moved_lane = 2 * stored_ch as usize + BLOCK_MOVED_LANE as usize;
+            let record_len = frames.record_len();
+            let moved_flags = raw.chunks(record_len).map(|record| record[moved_lane]);
+            for moved in moved_flags {
+                assert_eq!(moved, 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn off_frame_displacement_zeroes_the_record() {
+    let (width, height) = (96u32, 48u32);
+    let ring = hashed_ring(width, height, 1, 2, 3);
+    let frame_len = (width * height) as usize;
+    let frames = StatsFrames {
+        width,
+        height,
+        stored_ch: 1,
+        previous: ring[..frame_len].to_vec(),
+        new: ring[frame_len..].to_vec(),
+    };
+    let grid = MotionGrid::uniform(width, height, 8, [20, 0]);
+    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
+
+    for luma_fields in [false, true] {
+        let records = run_stats(&frames, Some(&grid), luma_fields);
+
+        for block_y in 0..blocks_y {
+            for block_x in 0..blocks_x {
+                let record = frames.record(&records, block_x, block_y);
+                let zeroed = record.iter().all(|&value| value == 0.0);
+                let expect_zeroed = block_x + 2 >= blocks_x;
+                assert_eq!(
+                    zeroed, expect_zeroed,
+                    "block ({block_x}, {block_y}), luma_fields {luma_fields}: {record:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn texture_lane_reads_block_gradient_energy() {
+    let (width, height) = (48u32, 32u32);
+    let slope = 3.0f32 / 1024.0;
+    let ramp: Vec<f32> = (0..width * height)
+        .map(|index| (index % width) as f32 * slope)
+        .collect();
+    let frames = StatsFrames {
+        width,
+        height,
+        stored_ch: 1,
+        previous: vec![0.5; ramp.len()],
+        new: ramp,
+    };
+    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
+    let expected = 16.0 * 15.0 * slope * slope;
+    let texture_lane = 2 + BLOCK_TEXTURE_LANE as usize;
+
+    for luma_fields in [false, true] {
+        let records = run_stats(&frames, None, luma_fields);
+
+        for block_y in 0..blocks_y {
+            for block_x in 0..blocks_x {
+                let record = frames.record(&records, block_x, block_y);
+                let texture = record[texture_lane];
+                let relative_error = (texture - expected).abs() / expected;
+                assert!(
+                    relative_error <= 1e-6,
+                    "block ({block_x}, {block_y}): texture {texture}, expected {expected}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn moved_lane_flags_non_zero_vectors() {
+    // Five block columns leave the rightmost one even, so no shifted block leaves the frame.
+    let (width, height) = (80u32, 32u32);
+    let ring = hashed_ring(width, height, 1, 2, 9);
+    let frame_len = (width * height) as usize;
+    let frames = StatsFrames {
+        width,
+        height,
+        stored_ch: 1,
+        previous: ring[..frame_len].to_vec(),
+        new: ring[frame_len..].to_vec(),
+    };
+    let vector_at = |col: u32, _row: u32| if col.is_multiple_of(2) { [0, 0] } else { [1, 0] };
+    let grid = MotionGrid::from_fn(width, height, TEMPORAL_NOISE_BLOCK, vector_at);
+    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
+    let moved_lane = 2 + BLOCK_MOVED_LANE as usize;
+
+    let records = run_stats(&frames, Some(&grid), true);
+
+    for block_y in 0..blocks_y {
+        for block_x in 0..blocks_x {
+            let record = frames.record(&records, block_x, block_y);
+            let expected = (block_x % 2) as f32;
+            assert_eq!(record[moved_lane], expected, "block ({block_x}, {block_y})");
+        }
+    }
+}
+
+#[test]
+fn covering_block_rule_picks_the_origin_block() {
+    let (width, height) = (64u32, 64u32);
+    let ring = hashed_ring(width, height, 1, 2, 13);
+    let frame_len = (width * height) as usize;
+    let frames = StatsFrames {
+        width,
+        height,
+        stored_ch: 1,
+        previous: ring[..frame_len].to_vec(),
+        new: ring[frame_len..].to_vec(),
+    };
+
+    // Each noise block's own vector points inwards, so it never leaves the frame.
+    let block_vector = |block_x: u32, block_y: u32| {
+        let reach_x = 1 + ((block_x + 2 * block_y) % 3) as i32;
+        let reach_y = ((block_x * block_y) % 3) as i32;
+        let shift_x = if block_x < 2 { reach_x } else { -reach_x };
+        let shift_y = if block_y < 2 { reach_y } else { -reach_y };
+        [shift_x, shift_y]
+    };
+
+    // Every motion block other than a noise block's origin holds the decoy.
+    let vector_at = |col: u32, row: u32| {
+        if col.is_multiple_of(2) && row.is_multiple_of(2) {
+            block_vector(col / 2, row / 2)
+        } else {
+            DECOY_VECTOR
+        }
+    };
+    let grid = MotionGrid::from_fn(width, height, 8, vector_at);
+    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
+
+    let records = run_stats(&frames, Some(&grid), true);
+
+    for block_y in 0..blocks_y {
+        for block_x in 0..blocks_x {
+            let record = frames.record(&records, block_x, block_y);
+            let vector = block_vector(block_x, block_y);
+            let expected = host_sum_d2(&frames, block_x, block_y, vector);
+            let relative_error = (record[1] - expected).abs() / expected;
+            assert!(
+                relative_error <= 1e-4,
+                "block ({block_x}, {block_y}): sum_d2 {}, expected {expected}",
+                record[1]
+            );
+        }
+    }
 }

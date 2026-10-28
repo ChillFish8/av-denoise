@@ -2,6 +2,8 @@ use cubecl::prelude::*;
 
 use crate::engine::kernels::read_line;
 use crate::noise::{
+    BLOCK_MOVED_LANE,
+    BLOCK_TEXTURE_LANE,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,
@@ -143,10 +145,10 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
 ) {
     // The scratch is sized by `scratch_len`, not `record_len`, or its unwritten tail would enter
     // the reduction as uninitialised memory. The luma branch reuses it for three `threads`-long
-    // tensor runs, which fit because `scratch_len` is at least 3.
+    // tensor runs, which fit because `scratch_len` is at least 4.
     let quarter_lanes = comptime!(TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS);
     let record_len = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE + quarter_lanes);
-    let scratch_len = comptime!(2 * stored_ch + 1);
+    let scratch_len = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE + 1);
     let threads = comptime!(block * block);
 
     let mut scratch = Shared::<[f32]>::new_slice(comptime!(threads * scratch_len) as usize);
@@ -180,13 +182,26 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
     max_seed -= 2.0e30f32;
 
     let mut residual = Vector::<f32, N>::empty();
+    let mut texture = 0.0f32;
     if valid {
         let new_pixel = read_line(input, global_x, global_y, slot_new, width, height);
         let prev_pixel = read_line(input, global_x, global_y, slot_prev, width, height);
         residual = new_pixel - prev_pixel;
 
+        let new_luma = new_pixel.extract(0usize);
+        if local_x + 1 < block_w {
+            let right_pixel = read_line(input, global_x + 1, global_y, slot_new, width, height);
+            let step_x = right_pixel.extract(0usize) - new_luma;
+            texture += step_x * step_x;
+        }
+
+        if local_y + 1 < block_h {
+            let below_pixel = read_line(input, global_x, global_y + 1, slot_new, width, height);
+            let step_y = below_pixel.extract(0usize) - new_luma;
+            texture += step_y * step_y;
+        }
+
         if comptime!(luma_fields) {
-            let new_luma = new_pixel.extract(0usize);
             let prev_luma = prev_pixel.extract(0usize);
             new_luma_raw = new_luma;
             mean_luma_raw = 0.5f32 * (new_luma + prev_luma);
@@ -208,6 +223,8 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
         scratch[(thread_id * scratch_len + channel) as usize] = lane_residual;
         scratch[(thread_id * scratch_len + stored_ch + channel) as usize] = lane_residual * lane_residual;
     }
+
+    scratch[(thread_id * scratch_len + 2 * stored_ch + BLOCK_TEXTURE_LANE) as usize] = texture;
 
     sync_cube();
 
@@ -234,6 +251,8 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
 
             stats[(out_base + lane) as usize] = total;
         }
+
+        stats[(out_base + 2 * stored_ch + BLOCK_MOVED_LANE) as usize] = 0.0f32;
 
         // The quarter lanes are written explicitly so a reader never sees an earlier frame's data.
         if comptime!(!luma_fields) {

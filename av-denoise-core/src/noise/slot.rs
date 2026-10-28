@@ -91,6 +91,7 @@ impl NoiseState {
             input_buf: input,
             stats_buf,
             align: shape.align,
+            motion: None,
         };
         let luma_fields = self.settings.reading.luma_fields;
 
