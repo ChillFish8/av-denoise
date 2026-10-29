@@ -38,7 +38,7 @@ markers = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-vsavd = ["py.typed"]
+vsavd = ["py.typed", "cuda/nvvm/libdevice/libdevice.10.bc", "cuda/License.txt"]
 
 [tool.mypy]
 python_version = "3.12"

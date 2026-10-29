@@ -13,11 +13,15 @@ has no CPython ABI coupling. Combined with `py-limited-api = true` on the
 extension below, overriding `bdist_wheel.get_tag()` here retags the wheel
 as `py3-none-<platform>`, so one wheel serves every interpreter on a given
 platform.
+
+On every platform except macOS the matching `libdevice.10.bc` and its licence are copied into the
+package, because cubecl's CUDA backend reads it from `CUDA_PATH` and driver-only machines have no toolkit.
 """
 
 from __future__ import annotations
 
 import pathlib
+import shutil
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -38,6 +42,17 @@ else:
     _FEATURES = ["vulkan", "cuda"]
 
 
+def _bundle_libdevice() -> None:
+    vendor_dir = pathlib.Path(__file__).resolve().parents[2] / "av-denoise" / "vendor" / "nvidia"
+    platform_dir = "windows" if sys.platform == "win32" else "linux"
+    cuda_dir = pathlib.Path(__file__).resolve().parent / "src" / "vsavd" / "cuda"
+
+    libdevice_dir = cuda_dir / "nvvm" / "libdevice"
+    libdevice_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(vendor_dir / platform_dir / "libdevice.10.bc", libdevice_dir)
+    shutil.copy2(vendor_dir / "License.txt", cuda_dir)
+
+
 def _read_long_description() -> str:
     readme_path = pathlib.Path(__file__).resolve().parents[2] / "av-denoise-vs" / "README.md"
     if not readme_path.is_file():
@@ -54,6 +69,9 @@ class bdist_wheel(_bdist_wheel):
         super().finalize_options()
         self.root_is_pure = False
 
+
+if sys.platform != "darwin":
+    _bundle_libdevice()
 
 setup(
     version=package_version(),

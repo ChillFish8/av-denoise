@@ -10,3 +10,5 @@ cubecl.log
 /vcpkg_installed/
 .env
 /.vulkan_icd/
+
+/packages/vs-avd/src/vsavd/cuda/
