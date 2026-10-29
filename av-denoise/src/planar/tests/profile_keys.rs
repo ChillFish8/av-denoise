@@ -1,13 +1,7 @@
 use av_denoise_core::DenoisingMode;
+use av_denoise_core::tune::profile_key;
 
-use crate::planar::{
-    ChannelIntent,
-    FrameLayout,
-    PlanarDenoiser,
-    PlaneOptions,
-    Subsampling,
-    plane_profile_keys,
-};
+use crate::planar::{ChannelIntent, FrameLayout, PlanarDenoiser, PlaneOptions, Subsampling, plane_specs};
 use crate::tune::TuningMode;
 use crate::{Algorithm, Depth};
 
@@ -34,11 +28,15 @@ fn every_planar_host_reports_the_profile_key_its_options_predict() {
     };
 
     let planar = PlanarDenoiser::create(&options, layout).expect("the denoiser builds");
-    let expected = plane_profile_keys(&options, layout);
+    let specs = plane_specs(&options, layout);
+    let expected: Vec<String> = specs.iter().map(profile_key).collect();
     let reported: Vec<String> = planar
         .hosts()
         .iter()
-        .map(|host| host.profile_key().to_string())
+        .map(|host| {
+            let spec = host.spec();
+            profile_key(&spec)
+        })
         .collect();
 
     assert_eq!(reported, expected);

@@ -10,37 +10,32 @@ pub mod sniff;
 #[cfg(test)]
 mod tests;
 
-#[cfg(feature = "vulkan")]
-use av_denoise_core::tune::install_compile_helpers;
 use av_denoise_core::tune::{
     DeviceIdentity,
     DeviceLimits,
     DeviceProfile,
-    EngineKernels,
     TuningConfig,
+    TuningMode,
     build_engine as build_settled_engine,
     describe,
 };
-use av_denoise_core::{Engine, EngineSpec, Nl4d, Nlmeans};
+use av_denoise_core::{Engine, EngineSpec};
 use cubecl::prelude::Client;
 
 use self::accelerate::Accelerator;
 pub use self::device::Device;
 pub(crate) use self::placement::DevicePlacement;
 use self::resolve::resolve;
-#[cfg(feature = "vulkan")]
-use self::resolve::vulkan_device;
 use self::sniff::sniff_best_accelerator;
 use crate::host::DenoiserError;
 use crate::host::io::{ClientIo, PlaneIo};
-use crate::tune::{KernelRequest, default_store_dir, engine_kernels};
+use crate::tune::default_store_dir;
 
 /// An engine and the plane I/O for the runtime it was built on.
 pub(crate) struct BuiltEngine {
     pub engine: Box<dyn Engine>,
     pub io: Box<dyn PlaneIo>,
     pub accelerator: Accelerator,
-    pub device: DeviceProfile,
     /// The device the engine was asked for, which names its stored tuning results.
     pub selected: cubecl::Device,
     pub client: Client,
@@ -62,50 +57,32 @@ trait OnClient {
         accelerator: Accelerator,
         identity: DeviceIdentity,
     ) -> Result<Self::Output, DenoiserError>;
-
-    /// Runs before [OnClient::run] when the client is on Vulkan.
-    #[cfg(feature = "vulkan")]
-    fn on_vulkan(&self, _device: &cubecl::wgpu::WgpuDevice) {}
 }
 
-/// Builds an engine for `spec` on the client.
-struct BuildEngine<'a> {
+/// Builds an engine for `spec` on the client from the stored tuning results.
+struct BuildEngine {
     spec: EngineSpec,
-    request: &'a KernelRequest<'a>,
+    tuning: TuningMode,
+    deterministic: bool,
 }
 
-impl OnClient for BuildEngine<'_> {
+impl OnClient for BuildEngine {
     type Output = BuiltEngine;
-
-    #[cfg(feature = "vulkan")]
-    fn on_vulkan(&self, device: &cubecl::wgpu::WgpuDevice) {
-        if let Some(ledger) = &self.request.setup.ledger {
-            install_compile_helpers(ledger, device);
-        }
-    }
 
     fn run(
         self,
         selected: cubecl::Device,
         client: Client,
         accelerator: Accelerator,
-        identity: DeviceIdentity,
+        _identity: DeviceIdentity,
     ) -> Result<BuiltEngine, DenoiserError> {
-        let device = profile_of(&client, identity);
-        let setup = self.request.setup;
-
-        let engine = if setup.ledger.is_none() && setup.profile_override.is_none() {
-            let config = TuningConfig {
-                mode: self.request.tuning,
-                store: default_store_dir(),
-                deterministic: self.request.deterministic,
-                ..TuningConfig::default()
-            };
-            build_settled_engine(&selected, &client, self.spec, &config)?
-        } else {
-            let kernels = engine_kernels(self.request, &device);
-            build_tuned_engine(&client, self.spec, kernels)?
+        let config = TuningConfig {
+            mode: self.tuning,
+            store: default_store_dir(),
+            deterministic: self.deterministic,
+            ..TuningConfig::default()
         };
+        let engine = build_settled_engine(&selected, &client, self.spec, &config)?;
 
         let io = ClientIo::new(client.clone());
 
@@ -113,28 +90,26 @@ impl OnClient for BuildEngine<'_> {
             engine,
             io: Box::new(io),
             accelerator,
-            device,
             selected,
             client,
         })
     }
 }
 
-/// Builds `spec` with `kernels`, which carry a tuning ledger or a profile override.
-fn build_tuned_engine(
-    client: &Client,
-    spec: EngineSpec,
-    kernels: EngineKernels,
-) -> Result<Box<dyn Engine>, DenoiserError> {
-    match spec {
-        EngineSpec::Nlmeans { algorithm, geometry } => {
-            let engine = Nlmeans::with_kernels(client, algorithm, geometry, kernels)?;
-            Ok(Box::new(engine))
-        },
-        EngineSpec::Nl4d { options, geometry } => {
-            let engine = Nl4d::with_kernels(client, options, geometry, kernels)?;
-            Ok(Box::new(engine))
-        },
+/// Hands back the device and the client opened on it.
+struct OpenClient;
+
+impl OnClient for OpenClient {
+    type Output = (cubecl::Device, Client);
+
+    fn run(
+        self,
+        selected: cubecl::Device,
+        client: Client,
+        _accelerator: Accelerator,
+        _identity: DeviceIdentity,
+    ) -> Result<(cubecl::Device, Client), DenoiserError> {
+        Ok((selected, client))
     }
 }
 
@@ -179,11 +154,6 @@ fn run_on_best<T: OnClient>(
     let client = placed.client();
     let identity = describe(&selected, &client);
 
-    #[cfg(feature = "vulkan")]
-    if let Some(wgpu_device) = vulkan_device(&selected) {
-        task.on_vulkan(wgpu_device);
-    }
-
     task.run(selected, client, accelerator, identity)
 }
 
@@ -214,10 +184,24 @@ pub(crate) fn build_engine(
     device: &Device,
     placement: &DevicePlacement,
     spec: EngineSpec,
-    request: &KernelRequest<'_>,
+    tuning: TuningMode,
+    deterministic: bool,
 ) -> Result<BuiltEngine, DenoiserError> {
-    let task = BuildEngine { spec, request };
+    let task = BuildEngine {
+        spec,
+        tuning,
+        deterministic,
+    };
     run_on_best(accelerators, device, placement, task)
+}
+
+/// The device [build_engine] picks for `accelerators` and `device`, with its shared client.
+pub(crate) fn selected_client(
+    accelerators: &[Accelerator],
+    device: &Device,
+) -> Result<(cubecl::Device, Client), DenoiserError> {
+    let placement = DevicePlacement::shared();
+    run_on_best(accelerators, device, &placement, OpenClient)
 }
 
 /// The profile of the device [build_engine] picks for `accelerators` and `device`.

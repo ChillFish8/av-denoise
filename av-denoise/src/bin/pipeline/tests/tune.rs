@@ -190,12 +190,11 @@ fn tuning_an_input_with_tuning_off_decodes_it_and_skips() {
     let input = clip_file(dir.path(), 3);
     let options = temporal_opts();
     let request = TuneRequest {
-        budget: BudgetRequest::Full,
         force: false,
         mode: SearchMode::Families,
     };
 
-    let report = tune_input(&options, &input, &request).expect("the input decodes");
+    let report = tune_input(&options, &input, BudgetRequest::Full, &request).expect("the input decodes");
 
     let reason = "tuning is off".to_string();
     assert_eq!(report.outcome, TuneOutcome::Skipped(reason));
@@ -207,12 +206,11 @@ fn tuning_an_input_without_frames_is_an_error() {
     let input = clip_file(dir.path(), 0);
     let options = temporal_opts();
     let request = TuneRequest {
-        budget: BudgetRequest::Full,
         force: false,
         mode: SearchMode::Families,
     };
 
-    let result = tune_input(&options, &input, &request);
+    let result = tune_input(&options, &input, BudgetRequest::Full, &request);
 
     assert!(result.is_err());
 }

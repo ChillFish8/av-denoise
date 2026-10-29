@@ -439,7 +439,7 @@ fn decode(text: &str, identity: &DeviceIdentity) -> Result<(TuneResult, usize), 
 }
 
 /// Keeps `result` for `identity` in `store` for the rest of this process.
-pub fn remember(store: Option<&Path>, identity: &DeviceIdentity, result: &TuneResult) {
+pub(crate) fn remember(store: Option<&Path>, identity: &DeviceIdentity, result: &TuneResult) {
     let key = remembered_key(store, identity);
     let mut remembered = REMEMBERED.lock().unwrap_or_else(PoisonError::into_inner);
     remembered.insert(key, result.clone());
@@ -453,7 +453,7 @@ pub(crate) fn remembered(store: Option<&Path>, identity: &DeviceIdentity) -> Opt
 }
 
 /// The result engines build from, what this process already holds or else the store's file.
-pub fn resolve(store: Option<&Path>, identity: &DeviceIdentity) -> TuneResult {
+pub(crate) fn resolve(store: Option<&Path>, identity: &DeviceIdentity) -> TuneResult {
     if let Some(result) = remembered(store, identity) {
         return result;
     }
@@ -465,7 +465,7 @@ pub fn resolve(store: Option<&Path>, identity: &DeviceIdentity) -> TuneResult {
 ///
 /// With no store there is no file, so it returns what this process already holds, or an empty
 /// result.
-pub fn reload(store: Option<&Path>, identity: &DeviceIdentity) -> TuneResult {
+pub(crate) fn reload(store: Option<&Path>, identity: &DeviceIdentity) -> TuneResult {
     let Some(dir) = store else {
         let held = remembered(None, identity);
         return held.unwrap_or_default();

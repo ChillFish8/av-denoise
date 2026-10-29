@@ -20,14 +20,14 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Tuning times kernels, so two processes tuning at once would measure each other. The lock is
 /// released when this is dropped.
 #[derive(Debug)]
-pub struct TuneLock {
+pub(crate) struct TuneLock {
     lock: File,
 }
 
 /// What asking for the tune lock gave.
 #[derive(Debug)]
-pub enum TuneLockOutcome {
-    Held(TuneLock),
+pub(crate) enum TuneLockOutcome {
+    Held(#[expect(dead_code, reason = "only dropping it is needed, which releases the lock")] TuneLock),
     /// There is no store or its lock file cannot be opened, so the caller tunes without a lock.
     Unlocked,
     /// Another process held the lock for the whole wait, so the caller should use stored results.
@@ -38,7 +38,7 @@ impl TuneLock {
     /// Waits for the tune lock in the `store` directory, creating the directory if it is missing.
     ///
     /// Once the lock is held, `hook` is told [CachePhase::LockTaken].
-    pub fn acquire(store: Option<&Path>, hook: Option<&CacheHook>) -> TuneLockOutcome {
+    pub(crate) fn acquire(store: Option<&Path>, hook: Option<&CacheHook>) -> TuneLockOutcome {
         let Some(dir) = store else {
             return TuneLockOutcome::Unlocked;
         };

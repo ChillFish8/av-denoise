@@ -1,4 +1,4 @@
-use av_denoise_core::tune::profile_key as spec_profile_key;
+use av_denoise_core::tune::{bucket_dim, profile_key as spec_profile_key};
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
@@ -16,9 +16,9 @@ use av_denoise_core::{
 };
 
 use crate::backend::Device;
-use crate::host::{Algorithm, Depth};
+use crate::host::{Algorithm, DenoiserOptions, Depth};
 use crate::planar::{ChannelIntent, PlaneOptions};
-use crate::tune::{TuningMode, profile_key};
+use crate::tune::TuningMode;
 
 const PRESETS: [Preset; 5] = [
     Preset::Veryfast,
@@ -35,6 +35,20 @@ const CHANNELS: [ChannelMode; 3] = [ChannelMode::Luma, ChannelMode::Chroma, Chan
 const DEPTHS: [Depth; 3] = [Depth::Eight, Depth::Ten, Depth::Twelve];
 
 const SIZES: [(u32, u32); 2] = [(1920, 1080), (720, 480)];
+
+/// The legacy key for a plane's profile ranking.
+///
+/// It names the algorithm with its settings, the channels, the temporal mode, the depth and the
+/// plane size rounded up to powers of two.
+fn profile_key(options: &DenoiserOptions, width: u32, height: u32) -> String {
+    let width_bucket = bucket_dim(width);
+    let height_bucket = bucket_dim(height);
+
+    format!(
+        "{:?}|{:?}|{:?}|{:?}|w{width_bucket}|h{height_bucket}",
+        options.algorithm, options.channel_mode, options.mode, options.depth,
+    )
+}
 
 /// Which caller's option building a case follows.
 #[derive(Debug, Clone, Copy)]

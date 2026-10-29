@@ -7,9 +7,8 @@
 //! - [KernelPlan] maps site keys to the candidate to run
 //! - [PipelineProfile] names a set of pipeline switches compared on whole frames
 //! - [TuneResult] holds every timed ranking, so a plan can be rebuilt under different rules
-//! - [VariantSite] is one tunable launch point, and [KernelSelector] launches the planned candidate at each
+//! - [VariantSite] is one tunable launch point
 //! - [DeviceProfile] says which device a result belongs to and what launches fit on it
-//! - [TuneLedger] is the shared state a tuning pass uses to drive engines in place
 //! - [Legality] says what a device may run beyond the fit check
 //! - [Families] groups a site's candidates, each group with a representative member
 //! - [PriorityTable] orders each site's families and the pipeline profiles for one device class
@@ -72,8 +71,6 @@ pub use self::budget::{
     tuning_budget,
     tuning_order,
 };
-#[cfg(feature = "vulkan")]
-pub use self::compile_helpers::install_compile_helpers;
 pub use self::config::{CacheHook, CachePhase, TuningConfig, TuningMode};
 pub use self::consts::*;
 pub use self::decide::{
@@ -111,16 +108,26 @@ pub use self::fidelity::{
 };
 pub use self::frame::TuningFrame;
 pub use self::group::TunedGroup;
+#[cfg_attr(
+    not(any(test, feature = "vulkan")),
+    expect(unused_imports, reason = "only the Vulkan helpers and the tests name it")
+)]
+pub(crate) use self::helpers::CompileHelpers;
+pub use self::helpers::compilation_cache_enabled;
 #[cfg(feature = "vulkan")]
-pub use self::helpers::vulkan_compile_helpers;
-pub use self::helpers::{CompileHelpers, HelperFactory, compilation_cache_enabled};
+pub(crate) use self::helpers::vulkan_compile_helpers;
 #[cfg(feature = "cuda")]
 pub use self::identity::cuda_details;
 pub use self::identity::describe;
 #[cfg(feature = "vulkan")]
 pub use self::identity::find_adapter;
 pub use self::key::{SiteKey, SiteKeyBuilder, bucket_dim};
-pub use self::ledger::{CensusEntry, TuneLedger, TunePhase};
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "only the tests name it through this module")
+)]
+pub(crate) use self::ledger::CensusEntry;
+pub(crate) use self::ledger::{TuneLedger, TunePhase};
 pub use self::legality::{
     AMD_VENDOR_ID,
     APPLE_VENDOR_ID,
@@ -132,7 +139,7 @@ pub use self::legality::{
     PlaneSizeError,
     check_plane_size,
 };
-pub use self::lock::{POLL_INTERVAL, TuneLock, TuneLockOutcome, open_lock_file, wait_for_lock};
+pub use self::lock::{POLL_INTERVAL, open_lock_file, wait_for_lock};
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::precompile::Precompiled;
 pub use self::priority::{Basis, PriorityTable, SitePriority, family_order, priority_for, skipped};
@@ -160,7 +167,7 @@ pub use self::search::{
     opens_family,
     search_candidates,
 };
-pub use self::selector::{EngineKernels, KernelSelector};
+pub(crate) use self::selector::{EngineKernels, KernelSelector};
 pub(crate) use self::session::{calibrate, rewarm};
 pub use self::setup::build_engine;
 pub use self::site::{FitError, LaunchShape, SiteCandidate, VariantSite, fit_candidates, legal_candidates};
@@ -172,4 +179,4 @@ pub use self::site::{FitError, LaunchShape, SiteCandidate, VariantSite, fit_cand
     )
 )]
 pub(crate) use self::store::remembered;
-pub use self::store::{StoreError, TuneStore, reload, remember, resolve};
+pub use self::store::{StoreError, TuneStore};

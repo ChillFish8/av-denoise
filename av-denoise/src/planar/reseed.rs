@@ -65,6 +65,8 @@ impl PlanarDenoiser {
     /// counts that depth on both sides, so the window passed here is
     /// wider by it.
     pub fn reseed(&mut self, window: &[Planes]) -> Result<Planes, anyhow::Error> {
+        self.check_engines()?;
+
         let span = self.window_span();
         let expected = span.frame_count();
         if window.len() != expected {
@@ -122,6 +124,8 @@ impl PlanarDenoiser {
     /// passes match a stream. A window that ends at the clip's end
     /// flushes, so the tail passes match a stream.
     pub fn reseed_window(&mut self, window: ReseedWindow<'_>) -> Result<Vec<Planes>, anyhow::Error> {
+        self.check_engines()?;
+
         let span = self.window_span();
         if span.edges != EdgePadding::Shifted {
             anyhow::bail!("reseed_window needs an algorithm with shifted edges, use reseed");

@@ -9,8 +9,9 @@ use super::probe::{ProbeCandidate, ProbeSite};
 use super::runtime::test_client;
 use crate::nlmeans::ChannelMode;
 use crate::tune::gpu::sync;
+use crate::tune::helpers::HelperFactory;
 use crate::tune::precompile::precompile;
-use crate::tune::{CompileHelpers, HelperFactory, SiteCandidate, TuneLedger, VariantSite};
+use crate::tune::{CompileHelpers, SiteCandidate, TuneLedger, VariantSite};
 
 /// A compile allowance no test runs out of.
 const NO_CEILING: Duration = Duration::MAX;

@@ -90,8 +90,9 @@ pub fn run_tune(tune: &TuneArgs, globals: &Args) -> Result<(), anyhow::Error> {
         TuneAlgorithm::Nl4d(nl4d) => (nl4d.build_options(globals)?, &nl4d.common.input),
     };
 
-    let request = tune_request(tune, opts.tune_budget);
-    let report = tune_input(&opts.planes, input, &request)?;
+    let budget = tune_budget(tune, opts.tune_budget);
+    let request = tune_request(tune);
+    let report = tune_input(&opts.planes, input, budget, &request)?;
 
     if let Some(summary) = &report.summary {
         print!("{summary}");
@@ -115,20 +116,25 @@ pub fn run_tune(tune: &TuneArgs, globals: &Args) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// The request `tune` makes, where `--report` forces an exhaustive search on the full budget.
-fn tune_request(tune: &TuneArgs, tune_budget: Option<f64>) -> TuneRequest {
+/// The budget `tune` asks for, where `--report` always takes the full budget.
+fn tune_budget(tune: &TuneArgs, seconds: Option<f64>) -> BudgetRequest {
+    if tune.report {
+        return BudgetRequest::Full;
+    }
+
+    budget_request(seconds, BudgetRequest::Full)
+}
+
+/// The request `tune` makes, where `--report` forces an exhaustive search.
+fn tune_request(tune: &TuneArgs) -> TuneRequest {
     if tune.report {
         return TuneRequest {
-            budget: BudgetRequest::Full,
             force: true,
             mode: SearchMode::Exhaustive,
         };
     }
 
-    let budget = budget_request(tune_budget, BudgetRequest::Full);
-
     TuneRequest {
-        budget,
         force: tune.force,
         mode: SearchMode::Families,
     }
@@ -421,13 +427,14 @@ mod tests {
             panic!("expected tune");
         };
 
-        let request = tune_request(&tune, None);
+        let budget = tune_budget(&tune, None);
+        let request = tune_request(&tune);
 
         assert!(tune.report);
         assert!(tune.check_conflicts().is_ok());
         assert!(request.force);
         assert_eq!(request.mode, SearchMode::Exhaustive);
-        assert_eq!(request.budget, BudgetRequest::Full);
+        assert_eq!(budget, BudgetRequest::Full);
     }
 
     #[test]
@@ -462,7 +469,7 @@ mod tests {
             panic!("expected tune");
         };
 
-        let request = tune_request(&tune, None);
+        let request = tune_request(&tune);
 
         assert!(!request.force);
         assert_eq!(request.mode, SearchMode::Families);

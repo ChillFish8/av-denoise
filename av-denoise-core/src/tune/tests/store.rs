@@ -1,3 +1,4 @@
+use crate::tune::store::{remember, resolve};
 use crate::tune::{
     CandidateRecord,
     CompileProgress,
@@ -11,9 +12,7 @@ use crate::tune::{
     StoreError,
     TuneResult,
     TuneStore,
-    remember,
     remembered,
-    resolve,
 };
 
 fn identity() -> DeviceIdentity {

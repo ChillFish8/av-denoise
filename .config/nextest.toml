@@ -4,7 +4,7 @@ test-threads = "num-cpus"
 slow-timeout = { period = "120s", terminate-after = 4 }
 # Tuning tests run real tunes against wall-clock budgets, which a loaded machine runs out, so they
 # run on their own under the `tuning` profile. A name or filter on the command line still picks them.
-default-filter = 'not ((package(av-denoise) & test(/^(tune::tests::driver|pipeline::tests::tune)::/)) | binary_id(av-denoise::tuning) | (package(av-denoise-core) & test(/^tune::tests::(driver|group)::/)))'
+default-filter = 'not ((package(av-denoise) & test(/^pipeline::tests::tune::/)) | binary_id(av-denoise::tuning) | (package(av-denoise-core) & test(/^tune::tests::(driver|group)::/)))'
 
 [test-groups]
 # Tests that compile many kernel variants, which saturate the CPU on an empty kernel cache.
@@ -18,12 +18,7 @@ test-group = 'heavy-compile'
 [profile.tuning]
 test-threads = 2
 slow-timeout = { period = "120s", terminate-after = 10 }
-default-filter = '(package(av-denoise) & test(/^(tune::tests::driver|pipeline::tests::tune)::/)) | binary_id(av-denoise::tuning) | (package(av-denoise-core) & test(/^tune::tests::(driver|group)::/))'
-
-# Cold tuning passes for nl4d can be very slow.
-[[profile.tuning.overrides]]
-filter = 'binary_id(av-denoise) & test(=tune::tests::driver::an_nl4d_pass_records_a_ranking_for_every_plane)'
-slow-timeout = { period = "120s", terminate-after = 25 }
+default-filter = '(package(av-denoise) & test(/^pipeline::tests::tune::/)) | binary_id(av-denoise::tuning) | (package(av-denoise-core) & test(/^tune::tests::(driver|group)::/))'
 
 # Cold tuning passes for nl4d can be very slow.
 [[profile.tuning.overrides]]
@@ -32,7 +27,7 @@ slow-timeout = { period = "120s", terminate-after = 25 }
 
 # Cold tuning passes for nl4d can be very slow.
 [[profile.tuning.overrides]]
-filter = 'binary_id(av-denoise::tuning) & test(=deterministic_output_equals_baseline_output)'
+filter = 'binary_id(av-denoise::tuning) & test(/^(deterministic_output_equals_baseline_output|a_tuned_planar_denoiser_matches_a_fresh_cached_one)$/)'
 slow-timeout = { period = "120s", terminate-after = 15 }
 
 # Cold tuning passes for nl4d can be very slow.

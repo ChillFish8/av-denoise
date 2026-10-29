@@ -17,6 +17,9 @@ mod push_retry;
 // Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
 #[cfg(feature = "vulkan")]
 mod timing;
+// Gated on `vulkan` because only the Vulkan runtime opens an own device.
+#[cfg(feature = "vulkan")]
+mod tune_placement;
 
 use super::*;
 

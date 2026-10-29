@@ -7,10 +7,12 @@ use av_denoise::tune::{
     TuneRequest,
     TuneResult,
     TuneStore,
+    TuningConfig,
     default_store_dir,
     is_tuned,
     selected_device,
     tune_planes,
+    tuning_config,
 };
 use av_denoise::{
     Algorithm,
@@ -94,6 +96,10 @@ fn options(algorithm: Algorithm, tuning: TuningMode, deterministic: bool) -> Pla
 fn denoise(plane_options: &PlaneOptions, clip: &[Planes]) -> Vec<Planes> {
     let frame_layout = layout();
     let mut planar = PlanarDenoiser::create(plane_options, frame_layout).expect("the denoiser builds");
+    denoise_with(&mut planar, clip)
+}
+
+fn denoise_with(planar: &mut PlanarDenoiser, clip: &[Planes]) -> Vec<Planes> {
     let mut outputs = Vec::new();
 
     for frame in clip {
@@ -139,13 +145,13 @@ fn short_tunes_store_results_until_a_later_run_loads_them() {
     let plane_options = options(algorithm, TuningMode::Auto, false);
     let frame_layout = layout();
     let clip = frames(13);
+    let budget = BudgetRequest::Seconds(90.0);
     let request = TuneRequest {
-        budget: BudgetRequest::Seconds(90.0),
         force: false,
         mode: SearchMode::Families,
     };
 
-    let first = tune_planes(&plane_options, frame_layout, &clip, &request);
+    let first = tune_planes(&plane_options, frame_layout, &clip, budget, &request);
     assert_eq!(first.outcome, TuneOutcome::Tuned, "{first:?}");
     assert!(first.saved);
 
@@ -159,7 +165,7 @@ fn short_tunes_store_results_until_a_later_run_loads_them() {
 
     // A short budget can leave keys, or partial rankings, that later runs tune before the result is
     // complete.
-    let mut later = tune_planes(&plane_options, frame_layout, &clip, &request);
+    let mut later = tune_planes(&plane_options, frame_layout, &clip, budget, &request);
     let mut passes = 2;
     while later.outcome == TuneOutcome::Tuned {
         assert!(later.saved, "pass {passes} saved nothing");
@@ -182,7 +188,7 @@ fn short_tunes_store_results_until_a_later_run_loads_them() {
 
         ranked = now_ranked;
         settled = now_settled;
-        later = tune_planes(&plane_options, frame_layout, &clip, &request);
+        later = tune_planes(&plane_options, frame_layout, &clip, budget, &request);
         passes += 1;
     }
 
@@ -205,11 +211,10 @@ fn deterministic_output_equals_baseline_output() {
     let clip = frames(13);
     let tuned_options = options(algorithm, TuningMode::Auto, false);
     let request = TuneRequest {
-        budget: BudgetRequest::Full,
         force: false,
         mode: SearchMode::Families,
     };
-    let report = tune_planes(&tuned_options, frame_layout, &clip, &request);
+    let report = tune_planes(&tuned_options, frame_layout, &clip, BudgetRequest::Full, &request);
     assert_eq!(report.outcome, TuneOutcome::Tuned, "{report:?}");
 
     let deterministic_options = options(algorithm, TuningMode::Cached, true);
@@ -230,11 +235,10 @@ fn tuning_off_output_is_unchanged_by_a_stored_result() {
     let clip = frames(13);
     let tuned_options = options(Algorithm::default(), TuningMode::Auto, false);
     let request = TuneRequest {
-        budget: BudgetRequest::Full,
         force: false,
         mode: SearchMode::Families,
     };
-    tune_planes(&tuned_options, frame_layout, &clip, &request);
+    tune_planes(&tuned_options, frame_layout, &clip, BudgetRequest::Full, &request);
     assert!(is_tuned(&tuned_options, frame_layout));
 
     let cached_options = options(Algorithm::default(), TuningMode::Cached, false);
@@ -245,4 +249,37 @@ fn tuning_off_output_is_unchanged_by_a_stored_result() {
     // NLMeans has only bit-identical candidates, so a tuned plan cannot change its output.
     assert_eq!(cached.len(), clip.len());
     assert!(planes_equal(&cached, &off));
+}
+
+#[test]
+fn a_tuned_planar_denoiser_matches_a_fresh_cached_one() {
+    let cache = tempfile::tempdir().expect("a temporary directory");
+    install_compilation_cache_at(cache.path()).expect("the cache installs");
+
+    let algorithm = Algorithm::Nl4d(Nl4dOptions::default());
+    let frame_layout = layout();
+    let clip = frames(13);
+    let tuned_options = options(algorithm, TuningMode::Auto, false);
+    let defaults = tuning_config(&tuned_options);
+    let config = TuningConfig {
+        budget: BudgetRequest::Seconds(30.0),
+        ..defaults
+    };
+    let request = TuneRequest {
+        force: false,
+        mode: SearchMode::Families,
+    };
+
+    let mut planar = PlanarDenoiser::create(&tuned_options, frame_layout).expect("the denoiser builds");
+    let report = planar
+        .tune(&clip, &config, &request)
+        .expect("the denoiser rebuilds");
+    let tuned = denoise_with(&mut planar, &clip);
+
+    let cached_options = options(algorithm, TuningMode::Cached, false);
+    let cached = denoise(&cached_options, &clip);
+
+    assert_eq!(report.outcome, TuneOutcome::Tuned, "{report:?}");
+    assert_eq!(tuned.len(), clip.len());
+    assert!(planes_equal(&tuned, &cached));
 }

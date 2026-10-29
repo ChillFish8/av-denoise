@@ -146,7 +146,7 @@ pub fn tune_before_workers(
         return Vec::new();
     }
 
-    let needed = tuning_frame_count(planes);
+    let needed = tuning_frame_count(planes, info.layout);
     let wanted = needed.min(permits);
     let prefix = collect_prefix(frames, wanted);
     let ends_in_error = prefix.last().is_some_and(|message| message.is_err());
@@ -164,27 +164,28 @@ pub fn tune_before_workers(
 
     let budget = run_budget(tune_budget, info);
     let request = TuneRequest {
-        budget,
         force: false,
         mode: SearchMode::Families,
     };
-    let report = tune_planes(planes, info.layout, &decoded, &request);
+    let report = tune_planes(planes, info.layout, &decoded, budget, &request);
     log_report(&report);
 
     prefix
 }
 
-/// Decodes the frames tuning needs from `input` and tunes on them, without denoising anything.
+/// Decodes the frames tuning needs from `input` and tunes on them within `budget`, without denoising
+/// anything.
 pub fn tune_input(
     planes: &PlaneOptions,
     input: &InputSource,
+    budget: BudgetRequest,
     request: &TuneRequest,
 ) -> Result<TuneReport, anyhow::Error> {
     let owned_input = input.clone();
     let opener = move || source::open_source(&owned_input);
     let (decode_thread, info) = DecodeThread::spawn(opener)?;
 
-    let wanted = tuning_frame_count(planes);
+    let wanted = tuning_frame_count(planes, info.layout);
     let (give, take) = frame_permit_channel(wanted);
     let frames = decode_thread.start(take);
     let prefix = collect_prefix(&frames, wanted);
@@ -206,7 +207,7 @@ pub fn tune_input(
         anyhow::bail!("the input holds no decodable frames");
     }
 
-    let report = tune_planes(planes, info.layout, &decoded, request);
+    let report = tune_planes(planes, info.layout, &decoded, budget, request);
     log_report(&report);
 
     Ok(report)

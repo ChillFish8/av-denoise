@@ -10,7 +10,6 @@ mod tests;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use av_denoise_core::tune::{DeviceProfile, profile_key};
 use av_denoise_core::{DevicePlane, Engine, EngineSpec, GrainChunk, WindowSpan};
 use cubecl::prelude::Client;
 use cubecl::server::Handle;
@@ -22,7 +21,6 @@ pub(crate) use self::pending::{Pending, TryWait};
 pub use self::timing::PlaneTiming;
 use crate::backend::accelerate::Accelerator;
 use crate::backend::{Device, DevicePlacement, build_engine};
-use crate::tune::{KernelRequest, KernelSetup};
 
 /// How many readbacks a [HostDenoiser] keeps in flight at once.
 pub const MAX_PENDING: usize = 2;
@@ -112,13 +110,10 @@ pub struct HostDenoiser {
     engine: Box<dyn Engine>,
     io: Box<dyn PlaneIo>,
     accelerator: Accelerator,
-    device: DeviceProfile,
     /// The device the engine was asked for, which names its stored tuning results.
     selected: cubecl::Device,
     client: Client,
     spec: EngineSpec,
-    /// The key this denoiser's profile ranking is stored under.
-    profile_key: String,
     width: u32,
     height: u32,
     temporal_radius: u32,
@@ -160,13 +155,11 @@ impl HostDenoiser {
         height: u32,
         options: DenoiserOptions,
     ) -> Result<Self, DenoiserError> {
-        let setup = KernelSetup::default();
         let placement = DevicePlacement::shared();
-        Self::create_with(accelerators, device, &placement, width, height, options, &setup)
+        Self::create_with(accelerators, device, &placement, width, height, options)
     }
 
-    /// [Self::create] on the client `placement` gives, with the engine's tuning wired as `setup`
-    /// says.
+    /// [Self::create] on the client `placement` gives.
     pub(crate) fn create_with(
         accelerators: &[Accelerator],
         device: &Device,
@@ -174,7 +167,6 @@ impl HostDenoiser {
         width: u32,
         height: u32,
         options: DenoiserOptions,
-        setup: &KernelSetup,
     ) -> Result<Self, DenoiserError> {
         let temporal_radius = options.temporal_radius();
         let is_nl4d = matches!(options.algorithm, Algorithm::Nl4d(_));
@@ -187,14 +179,14 @@ impl HostDenoiser {
         }
 
         let spec = options.algorithm.engine_spec(&options, width, height);
-        let plane_key = profile_key(&spec);
-        let request = KernelRequest {
-            tuning: options.tuning,
-            deterministic: options.deterministic,
-            profile_key: &plane_key,
-            setup,
-        };
-        let built = build_engine(accelerators, device, placement, spec, &request)?;
+        let built = build_engine(
+            accelerators,
+            device,
+            placement,
+            spec,
+            options.tuning,
+            options.deterministic,
+        )?;
 
         let format = options.depth.sample_format();
         let pixels = width as usize * height as usize;
@@ -206,11 +198,9 @@ impl HostDenoiser {
             engine: built.engine,
             io: built.io,
             accelerator: built.accelerator,
-            device: built.device,
             selected: built.selected,
             client: built.client,
             spec,
-            profile_key: plane_key,
             width,
             height,
             temporal_radius,
@@ -232,34 +222,14 @@ impl HostDenoiser {
         self.accelerator
     }
 
-    pub(crate) fn device_profile(&self) -> &DeviceProfile {
-        &self.device
-    }
-
-    pub(crate) fn profile_key(&self) -> &str {
-        &self.profile_key
-    }
-
-    #[cfg_attr(
-        not(all(test, feature = "vulkan")),
-        expect(dead_code, reason = "only the tests read it so far")
-    )]
     pub(crate) fn selected(&self) -> &cubecl::Device {
         &self.selected
     }
 
-    #[cfg_attr(
-        not(all(test, feature = "vulkan")),
-        expect(dead_code, reason = "only the tests read it so far")
-    )]
     pub(crate) fn client(&self) -> &Client {
         &self.client
     }
 
-    #[cfg_attr(
-        not(all(test, feature = "vulkan")),
-        expect(dead_code, reason = "only the tests read it so far")
-    )]
     pub(crate) fn spec(&self) -> EngineSpec {
         self.spec
     }
@@ -302,7 +272,7 @@ impl HostDenoiser {
     }
 
     fn push_inner(&mut self, planes: &[&[u8]]) -> Result<(), DenoiserError> {
-        let handles = self.upload(planes);
+        let handles = self.upload_frame(planes);
         let device_planes = device_planes(&handles, self.width, self.height);
         let ready = self.engine.push(&device_planes)?;
 
@@ -341,7 +311,7 @@ impl HostDenoiser {
     }
 
     fn push_priming_inner(&mut self, planes: &[&[u8]]) -> Result<(), DenoiserError> {
-        let handles = self.upload(planes);
+        let handles = self.upload_frame(planes);
         let device_planes = device_planes(&handles, self.width, self.height);
         self.engine.push_context(&device_planes)?;
 
@@ -546,7 +516,7 @@ impl HostDenoiser {
     }
 
     /// Uploads each plane, padded to whole words.
-    fn upload(&self, planes: &[&[u8]]) -> Vec<Handle> {
+    pub(crate) fn upload_frame(&self, planes: &[&[u8]]) -> Vec<Handle> {
         let mut handles = Vec::with_capacity(planes.len());
 
         for plane in planes {

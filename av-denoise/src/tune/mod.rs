@@ -7,16 +7,16 @@
 //! - [default_store_dir] says where results are kept
 //! - [TuneStore] saves and loads results per device
 //! - [TuningMode] says whether a run tunes, uses stored results or runs every baseline
+//! - [tuning_config] gathers what a tuning pass is told
 //! - [tune_planes] runs a tuning pass, and [is_tuned] says whether one is needed
 
-mod driver;
 mod mode;
-mod report;
-mod setup;
 mod store;
 
 #[cfg(test)]
 mod tests;
+
+use std::time::{Duration, Instant};
 
 pub use av_denoise_core::tune::{
     BudgetRequest,
@@ -25,25 +25,111 @@ pub use av_denoise_core::tune::{
     PipelineProfile,
     SearchMode,
     StoreError,
+    TuneOutcome,
+    TuneReport,
+    TuneRequest,
     TuneResult,
     TuneStore,
+    TuningConfig,
     TuningMode,
 };
 
-pub(crate) use self::driver::tune_planar;
-pub use self::driver::{TuneOutcome, TuneReport, TuneRequest, is_tuned, tune_planes};
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "only the legacy key tests render the old keys")
-)]
-pub(crate) use self::mode::profile_key;
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "only the tests call it from outside its module")
-)]
+#[cfg(test)]
 pub(crate) use self::mode::resolve_mode;
 pub use self::mode::{TUNE_ENV, tuning_frame_count, tuning_mode_from_env};
-pub(crate) use self::setup::{KernelRequest, KernelSetup, engine_kernels};
 pub use self::store::default_store_dir;
-pub(crate) use self::store::{reload, remember, resolve};
+use crate::backend::selected_client;
 pub use crate::backend::selected_device;
+use crate::cache::kernel_cache_hook;
+use crate::planar::{FrameLayout, PlanarDenoiser, PlaneOptions, Planes, plane_specs};
+
+/// The tuning config for `options`, with the default budget.
+///
+/// [TUNE_ENV] overrides the mode, results go in the [default_store_dir], and the kernel cache is
+/// kept in step with other processes.
+pub fn tuning_config(options: &PlaneOptions) -> TuningConfig {
+    let mode = tuning_mode_from_env(options.tuning);
+    let store = default_store_dir();
+    let cache_hook = kernel_cache_hook();
+
+    TuningConfig {
+        mode,
+        store,
+        budget: BudgetRequest::default(),
+        deterministic: options.deterministic,
+        cache_hook: Some(cache_hook),
+    }
+}
+
+/// Tunes the planes `options` denoises at `layout` on `frames` within `budget`, and saves the result.
+///
+/// The frames are uploaded through a denoiser of its own, which is dropped before the pass runs.
+/// [TuningMode::Off] tunes nothing, and any other mode tunes.
+pub fn tune_planes(
+    options: &PlaneOptions,
+    layout: FrameLayout,
+    frames: &[Planes],
+    budget: BudgetRequest,
+    request: &TuneRequest,
+) -> TuneReport {
+    let started = Instant::now();
+    let defaults = tuning_config(options);
+    let config = TuningConfig { budget, ..defaults };
+
+    if config.mode == TuningMode::Off {
+        return skipped_report("tuning is off", started);
+    }
+
+    let untuned = PlaneOptions {
+        tuning: TuningMode::Off,
+        ..options.clone()
+    };
+    let created = PlanarDenoiser::create(&untuned, layout);
+    let planar = match created {
+        Ok(planar) => planar,
+        Err(error) => {
+            let reason = format!("{error:#}");
+            return skipped_report(reason, started);
+        },
+    };
+
+    planar.tune_and_drop(frames, &config, request)
+}
+
+/// Whether the store already holds a complete result for every plane `options` denoises at `layout`.
+///
+/// It opens the selected device without building any engines. Answers `true` when there is nothing
+/// to tune, because tuning is not [TuningMode::Auto] or no device can be opened.
+pub fn is_tuned(options: &PlaneOptions, layout: FrameLayout) -> bool {
+    let config = tuning_config(options);
+    if config.mode != TuningMode::Auto {
+        return true;
+    }
+
+    let opened = selected_client(&options.accelerators, &options.device);
+    let Ok((device, client)) = opened else {
+        return true;
+    };
+
+    let specs = plane_specs(options, layout);
+    av_denoise_core::tune::is_tuned(&device, &client, &specs, &config)
+}
+
+/// A report for a pass that tuned nothing, for `reason`.
+pub(crate) fn skipped_report(reason: impl Into<String>, started: Instant) -> TuneReport {
+    let reason = reason.into();
+    tracing::info!(
+        %reason,
+        "kernel tuning skipped, launch sites without stored results run their baseline"
+    );
+
+    TuneReport {
+        outcome: TuneOutcome::Skipped(reason),
+        tuned_keys: 0,
+        partial_keys: 0,
+        compile: Duration::ZERO,
+        elapsed: started.elapsed(),
+        saved: false,
+        summary: None,
+    }
+}
