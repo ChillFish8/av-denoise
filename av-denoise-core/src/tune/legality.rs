@@ -12,12 +12,6 @@ pub const APPLE_VENDOR_ID: u32 = 0x106B;
 /// The narrowest plane the 8-lane groups of the nl4d kernels work on.
 pub const MIN_PLANE_SIZE: u32 = 8;
 
-/// The first CUDA compute capability with independent thread scheduling.
-const VOLTA_COMPUTE_CAPABILITY: u32 = 70;
-
-/// Pre-Volta compute capabilities with full-rate f16. These are Tegra X1, GP100 and Tegra X2.
-const FAST_F16_PRE_VOLTA: [u32; 3] = [53, 60, 62];
-
 // NVIDIA device ids by chip, from the PCI ID database (https://pci-ids.ucw.cz), as shipped in
 // hwdata's `pci.ids` version 2026.09.03. Every entry under vendor 10de whose name starts with the
 // chip code is listed, except the audio functions.
@@ -87,29 +81,16 @@ pub enum DeviceClass {
 impl DeviceClass {
     /// The class of the device `identity` describes.
     ///
-    /// CUDA reads the compute capability, ROCm and Metal are known by backend, and every other
-    /// backend reads the PCI vendor and device ids.
+    /// CUDA, ROCm and Metal are known by backend, and every other backend reads the PCI vendor and
+    /// device ids.
     pub fn of(identity: &DeviceIdentity) -> Self {
         match identity.backend.as_str() {
-            "cuda" => cuda_class(identity.compute_capability),
+            "cuda" => DeviceClass::Nvidia,
             "rocm" => DeviceClass::Amd,
             "metal" => DeviceClass::Apple,
             _ => vendor_class(identity.vendor_id, identity.device_id),
         }
     }
-}
-
-fn cuda_class(compute_capability: Option<u32>) -> DeviceClass {
-    let Some(capability) = compute_capability else {
-        return DeviceClass::Nvidia;
-    };
-
-    if capability >= VOLTA_COMPUTE_CAPABILITY {
-        return DeviceClass::Nvidia;
-    }
-
-    let fast_f16 = FAST_F16_PRE_VOLTA.contains(&capability);
-    DeviceClass::NvidiaPreVolta { fast_f16 }
 }
 
 fn vendor_class(vendor_id: u32, device_id: u32) -> DeviceClass {

@@ -73,27 +73,25 @@ fn pascal_maxwell_and_kepler_under_vulkan_are_pre_volta_with_slow_f16() {
 }
 
 #[test]
-fn pascal_and_maxwell_under_cuda_are_pre_volta_with_slow_f16() {
-    for capability in [52, 61] {
-        let profile = faked_profile("cuda", NVIDIA_VENDOR_ID, 0, Some(capability));
-        let legality = Legality::for_device(&profile);
+fn every_cuda_device_is_nvidia() {
+    for capability in [Some(75), Some(120), None] {
+        let profile = faked_profile("cuda", NVIDIA_VENDOR_ID, 0, capability);
 
-        assert!(legality.uniform_walk_only, "sm_{capability}");
-        assert!(!legality.f16_search, "sm_{capability}");
+        assert_eq!(
+            DeviceClass::of(&profile.identity),
+            DeviceClass::Nvidia,
+            "{capability:?}"
+        );
     }
 }
 
 #[test]
 fn gp100_keeps_the_f16_search_but_walks_uniformly() {
-    let vulkan = faked_profile("vulkan", NVIDIA_VENDOR_ID, QUADRO_GP100, None);
-    let cuda = faked_profile("cuda", NVIDIA_VENDOR_ID, QUADRO_GP100, Some(60));
+    let profile = faked_profile("vulkan", NVIDIA_VENDOR_ID, QUADRO_GP100, None);
+    let legality = Legality::for_device(&profile);
 
-    for profile in [vulkan, cuda] {
-        let legality = Legality::for_device(&profile);
-
-        assert!(legality.uniform_walk_only, "{}", profile.identity.backend);
-        assert!(legality.f16_search, "{}", profile.identity.backend);
-    }
+    assert!(legality.uniform_walk_only);
+    assert!(legality.f16_search);
 }
 
 #[test]
@@ -189,8 +187,6 @@ fn pre_volta_devices_are_offered_only_uniform_walks() {
     let devices = [
         faked_profile("vulkan", NVIDIA_VENDOR_ID, GTX_1070, None),
         faked_profile("vulkan", NVIDIA_VENDOR_ID, GTX_970, None),
-        faked_profile("cuda", NVIDIA_VENDOR_ID, GTX_1070, Some(61)),
-        faked_profile("cuda", NVIDIA_VENDOR_ID, GTX_970, Some(52)),
     ];
 
     for device in devices {
@@ -215,10 +211,7 @@ fn pre_volta_devices_are_offered_only_uniform_walks() {
 fn uniform_only_devices_keep_the_combined_uniform_variants() {
     let client = test_client();
     let limits = DeviceLimits::from_client(&client);
-    let devices = [
-        faked_profile("vulkan", NVIDIA_VENDOR_ID, GTX_1070, None),
-        faked_profile("cuda", NVIDIA_VENDOR_ID, GTX_970, Some(52)),
-    ];
+    let devices = [faked_profile("vulkan", NVIDIA_VENDOR_ID, GTX_1070, None)];
     let uniform: Vec<CollabVariant> = CollabVariant::ALL
         .iter()
         .copied()
