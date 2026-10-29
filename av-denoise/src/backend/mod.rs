@@ -1,11 +1,8 @@
 pub mod accelerate;
 #[cfg(feature = "cuda")]
 mod cuda_check;
-mod describe;
 pub mod device;
 pub mod enumerate;
-#[cfg(feature = "vulkan")]
-mod helpers;
 mod placement;
 mod probe;
 mod resolve;
@@ -13,7 +10,9 @@ pub mod sniff;
 #[cfg(test)]
 mod tests;
 
-use av_denoise_core::tune::{DeviceIdentity, DeviceLimits, DeviceProfile};
+#[cfg(feature = "vulkan")]
+use av_denoise_core::tune::install_compile_helpers;
+use av_denoise_core::tune::{DeviceIdentity, DeviceLimits, DeviceProfile, describe};
 use av_denoise_core::{Engine, Geometry, Nl4d, Nl4dOptions, Nlmeans, NlmeansAlgorithm};
 use cubecl::prelude::Client;
 
@@ -94,7 +93,7 @@ impl OnClient for BuildEngine<'_> {
     #[cfg(feature = "vulkan")]
     fn on_vulkan(&self, device: &cubecl::wgpu::WgpuDevice) {
         if let Some(ledger) = &self.request.setup.ledger {
-            helpers::install_compile_helpers(ledger, device);
+            install_compile_helpers(ledger, device);
         }
     }
 
@@ -167,7 +166,7 @@ fn run_on_best<T: OnClient>(
 
     let placed = placement.place(&selected);
     let client = placed.client();
-    let identity = describe::describe(&selected, &client);
+    let identity = describe(&selected, &client);
 
     #[cfg(feature = "vulkan")]
     if let Some(wgpu_device) = vulkan_device(&selected) {

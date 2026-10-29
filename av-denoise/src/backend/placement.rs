@@ -4,12 +4,12 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(feature = "vulkan")]
+use av_denoise_core::tune::find_adapter;
+#[cfg(feature = "vulkan")]
 use cubecl::future::block_on;
 #[cfg(feature = "vulkan")]
 use cubecl::wgpu::{RuntimeOptions, WgpuDevice, WgpuSetup, init_device, vulkan};
 
-#[cfg(feature = "vulkan")]
-use super::describe::find_adapter;
 #[cfg(feature = "vulkan")]
 use super::resolve::vulkan_device;
 

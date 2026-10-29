@@ -8,13 +8,13 @@ use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+use av_denoise_core::tune::cuda_details;
 use cubecl::prelude::Client;
 
 use self::adapters::{NvidiaPresence, list_adapters, nvidia_presence};
 use self::capability::check_capability;
 use self::kernel::run_libdevice_probe;
 use self::libdevice::{CUDA_ROOTS, find_libdevice};
-use super::describe::cuda_details;
 use super::probe::quiet_panics;
 
 /// Why the CUDA backend cannot be used.

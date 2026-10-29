@@ -3,16 +3,16 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::thread::available_parallelism;
 
-use av_denoise_core::tune::{
+use cubecl::wgpu::WgpuDevice;
+
+use crate::tune::{
     CompileHelpers,
     PRECOMPILE_THREADS,
     TuneLedger,
     compilation_cache_enabled,
+    find_adapter,
     vulkan_compile_helpers,
 };
-use cubecl::wgpu::WgpuDevice;
-
-use super::describe::find_adapter;
 
 /// Compile helper sets by adapter, `None` where a set could not be made.
 type HelperSets = HashMap<String, Option<Arc<CompileHelpers>>>;
@@ -30,7 +30,7 @@ static SHARED_HELPERS: LazyLock<Mutex<HelperSets>> = LazyLock::new(|| Mutex::new
 ///
 /// Nothing is installed when the ledger already has a factory or the on-disk compilation cache is
 /// off. The clients are made, or found, only when the first stage that can use them compiles.
-pub(crate) fn install_compile_helpers(ledger: &TuneLedger, device: &WgpuDevice) {
+pub fn install_compile_helpers(ledger: &TuneLedger, device: &WgpuDevice) {
     if ledger.has_compile_helpers() || !compilation_cache_enabled() {
         return;
     }

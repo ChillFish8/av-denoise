@@ -16,6 +16,8 @@
 //! - [SearchMode] says how widely tuning searches a key, and [SiteSearch] records how it did
 
 mod budget;
+#[cfg(feature = "vulkan")]
+mod compile_helpers;
 mod consts;
 mod decide;
 mod device;
@@ -23,6 +25,7 @@ mod family;
 mod fidelity;
 pub(crate) mod gpu;
 mod helpers;
+mod identity;
 mod key;
 mod ledger;
 pub(crate) mod legality;
@@ -54,6 +57,8 @@ pub use self::budget::{
     tuning_budget,
     tuning_order,
 };
+#[cfg(feature = "vulkan")]
+pub use self::compile_helpers::install_compile_helpers;
 pub use self::consts::*;
 pub use self::decide::{
     CandidateStats,
@@ -90,6 +95,11 @@ pub use self::fidelity::{
 #[cfg(feature = "vulkan")]
 pub use self::helpers::vulkan_compile_helpers;
 pub use self::helpers::{CompileHelpers, HelperFactory, compilation_cache_enabled};
+#[cfg(feature = "cuda")]
+pub use self::identity::cuda_details;
+pub use self::identity::describe;
+#[cfg(feature = "vulkan")]
+pub use self::identity::find_adapter;
 pub use self::key::{SiteKey, SiteKeyBuilder, bucket_dim};
 pub use self::ledger::{CensusEntry, TuneLedger, TunePhase};
 pub use self::legality::{

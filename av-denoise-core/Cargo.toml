@@ -34,6 +34,8 @@ half = "2.7.1"
 cubecl = { version = "0.11.3", features = ["std"] }
 cubecl-environment = { version = "0.11.3", default-features = false, features = ["persistence"] }
 wgpu = { version = "30", optional = true }
+cudarc = { version = "0.19", optional = true, default-features = false, features = ["std", "driver"] }
+cubecl-hip-sys = { version = "7.1.5280200", optional = true }
 
 [dev-dependencies]
 futures = "0.3"
@@ -44,8 +46,8 @@ tempfile = "3"
 [features]
 vulkan = ["cubecl/vulkan", "dep:wgpu"]
 metal = ["cubecl/metal-native"]
-cuda = ["cubecl/cuda"]
-rocm = ["cubecl/hip"]
+cuda = ["cubecl/cuda", "dep:cudarc"]
+rocm = ["cubecl/hip", "dep:cubecl-hip-sys"]
 default = ["vulkan"]
 
 [[bench]]
