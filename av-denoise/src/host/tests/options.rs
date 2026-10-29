@@ -1,6 +1,7 @@
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
+    EngineSpec,
     Nl4dOptions,
     NlmeansAlgorithm,
     NlmeansHqOptions,
@@ -8,7 +9,6 @@ use av_denoise_core::{
     SampleFormat,
 };
 
-use crate::backend::EngineSpec;
 use crate::host::{Algorithm, DenoiserOptions, Depth};
 
 fn spec_for(options: &DenoiserOptions) -> EngineSpec {

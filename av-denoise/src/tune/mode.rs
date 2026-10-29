@@ -32,6 +32,10 @@ pub(crate) fn resolve_mode(flag: TuningMode, env: Option<&str>) -> TuningMode {
 ///
 /// It names the algorithm with its settings, the channels, the temporal mode, the depth and the
 /// plane size rounded up to powers of two. Tuning switches are left out, so they share rankings.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the legacy key tests render the old keys")
+)]
 pub(crate) fn profile_key(options: &DenoiserOptions, width: u32, height: u32) -> String {
     let width_bucket = bucket_dim(width);
     let height_bucket = bucket_dim(height);

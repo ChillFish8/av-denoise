@@ -6,7 +6,7 @@ mod tests;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use av_denoise_core::tune::TuneLedger;
+use av_denoise_core::tune::{TuneLedger, profile_key};
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
@@ -22,7 +22,7 @@ pub use self::reseed::ReseedWindow;
 use crate::backend::accelerate::Accelerator;
 use crate::backend::{Device, DevicePlacement};
 use crate::host::{Algorithm, DenoiserError, DenoiserOptions, Depth, HostDenoiser, PlaneTiming};
-use crate::tune::{KernelSetup, TuneReport, TuneRequest, TuningMode, profile_key, tune_planar};
+use crate::tune::{KernelSetup, TuneReport, TuneRequest, TuningMode, tune_planar};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subsampling {
@@ -299,7 +299,8 @@ pub(crate) fn plane_profile_keys(options: &PlaneOptions, layout: FrameLayout) ->
         .into_iter()
         .map(|(channels, width, height)| {
             let plane_options = options.denoiser_options(channels, layout.depth);
-            profile_key(&plane_options, width, height)
+            let spec = plane_options.algorithm.engine_spec(&plane_options, width, height);
+            profile_key(&spec)
         })
         .collect()
 }

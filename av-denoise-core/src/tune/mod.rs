@@ -15,6 +15,7 @@
 //! - [PriorityTable] orders each site's families and the pipeline profiles for one device class
 //! - [TuningMode] says whether a run tunes, uses stored results or runs every baseline
 //! - [TuneStore] saves and loads results per device
+//! - [build_engine] builds an engine from the stored results, keyed by [profile_key]
 //! - [SearchMode] says how widely tuning searches a key, and [SiteSearch] records how it did
 
 mod budget;
@@ -36,10 +37,12 @@ mod lock;
 mod plan;
 pub(crate) mod precompile;
 mod priority;
+mod profile_key;
 mod result;
 mod search;
 mod selector;
 mod session;
+mod setup;
 mod site;
 pub(crate) mod sites;
 mod store;
@@ -123,6 +126,7 @@ pub use self::lock::{POLL_INTERVAL, TuneLock, TuneLockOutcome, open_lock_file, w
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::precompile::Precompiled;
 pub use self::priority::{Basis, PriorityTable, SitePriority, family_order, priority_for, skipped};
+pub use self::profile_key::{profile_key, tuning_frame_count};
 pub use self::result::{
     CandidateRecord,
     CompileProgress,
@@ -148,6 +152,7 @@ pub use self::search::{
 };
 pub use self::selector::{EngineKernels, KernelSelector};
 pub(crate) use self::session::{calibrate, rewarm};
+pub use self::setup::build_engine;
 pub use self::site::{FitError, LaunchShape, SiteCandidate, VariantSite, fit_candidates, legal_candidates};
 #[cfg_attr(
     not(test),

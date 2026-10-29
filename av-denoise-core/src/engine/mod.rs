@@ -2,6 +2,7 @@ pub(crate) mod align;
 mod io;
 pub(crate) mod kernels;
 mod plane;
+mod spec;
 pub(crate) mod timing;
 
 #[cfg(test)]
@@ -9,6 +10,7 @@ mod tests;
 
 pub(crate) use self::io::{EgressSource, IngestTarget, egress, ingest};
 pub use self::plane::{DevicePlane, Geometry, SampleFormat};
+pub use self::spec::EngineSpec;
 pub use self::timing::EngineTiming;
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;

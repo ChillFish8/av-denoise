@@ -1,7 +1,6 @@
-use av_denoise_core::NlmeansAlgorithm;
+use av_denoise_core::{EngineSpec, NlmeansAlgorithm};
 
 use super::*;
-use crate::backend::EngineSpec;
 
 /// A `PlaneOptions` with every field other than the four arguments at a neutral default.
 fn base_options(

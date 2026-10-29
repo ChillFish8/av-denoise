@@ -1,6 +1,7 @@
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
+    EngineSpec,
     Geometry,
     Nl4dOptions,
     NlmeansAlgorithm,
@@ -9,7 +10,6 @@ use av_denoise_core::{
 };
 
 use super::Depth;
-use crate::backend::EngineSpec;
 use crate::tune::TuningMode;
 
 /// How a [HostDenoiser](crate::HostDenoiser) should be set up.

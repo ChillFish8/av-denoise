@@ -1,4 +1,5 @@
 mod census;
+mod legacy_keys;
 mod mode;
 mod profile_order;
 mod report;

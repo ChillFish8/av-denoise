@@ -32,6 +32,10 @@ pub use av_denoise_core::tune::{
 
 pub(crate) use self::driver::tune_planar;
 pub use self::driver::{TuneOutcome, TuneReport, TuneRequest, is_tuned, tune_planes};
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "only the legacy key tests render the old keys")
+)]
 pub(crate) use self::mode::profile_key;
 #[cfg_attr(
     not(test),

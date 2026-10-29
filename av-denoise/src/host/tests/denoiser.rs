@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use av_denoise_core::tune::{TuningConfig, TuningMode, build_engine, profile_key};
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
@@ -90,6 +91,25 @@ fn spatial_denoise_roundtrip() {
     let output_plane = luma_plane(planes);
 
     assert_eq!(output_plane.len(), 16 * 16);
+}
+
+#[test]
+fn a_host_keeps_what_core_needs_to_rebuild_its_engine() {
+    let options = luma_options(DenoisingMode::Temporal { radius: 1 });
+    let denoiser = create(16, 16, options).expect("denoiser construction failed");
+    let spec = denoiser.spec();
+    let config = TuningConfig {
+        mode: TuningMode::Off,
+        ..TuningConfig::default()
+    };
+
+    let rebuilt = build_engine(denoiser.selected(), denoiser.client(), spec, &config);
+    let rebuilt = rebuilt.expect("core rebuilds the engine");
+
+    assert_eq!(spec.geometry().width, 16);
+    assert_eq!(denoiser.profile_key(), profile_key(&spec));
+    assert_eq!(rebuilt.window_span(), denoiser.window_span());
+    assert_eq!(spec.window_span(), denoiser.window_span());
 }
 
 #[test]

@@ -21,7 +21,16 @@ pub mod testing;
 mod tests;
 pub mod tune;
 
-pub use self::engine::{DevicePlane, EdgePadding, Engine, EngineTiming, Geometry, SampleFormat, WindowSpan};
+pub use self::engine::{
+    DevicePlane,
+    EdgePadding,
+    Engine,
+    EngineSpec,
+    EngineTiming,
+    Geometry,
+    SampleFormat,
+    WindowSpan,
+};
 pub use self::error::Error;
 pub use self::kernel_cache::{
     PrivateKernelCache,

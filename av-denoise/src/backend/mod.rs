@@ -12,8 +12,16 @@ mod tests;
 
 #[cfg(feature = "vulkan")]
 use av_denoise_core::tune::install_compile_helpers;
-use av_denoise_core::tune::{DeviceIdentity, DeviceLimits, DeviceProfile, describe};
-use av_denoise_core::{Engine, Geometry, Nl4d, Nl4dOptions, Nlmeans, NlmeansAlgorithm};
+use av_denoise_core::tune::{
+    DeviceIdentity,
+    DeviceLimits,
+    DeviceProfile,
+    EngineKernels,
+    TuningConfig,
+    build_engine as build_settled_engine,
+    describe,
+};
+use av_denoise_core::{Engine, EngineSpec, Nl4d, Nlmeans};
 use cubecl::prelude::Client;
 
 use self::accelerate::Accelerator;
@@ -25,32 +33,7 @@ use self::resolve::vulkan_device;
 use self::sniff::sniff_best_accelerator;
 use crate::host::DenoiserError;
 use crate::host::io::{ClientIo, PlaneIo};
-use crate::tune::{KernelRequest, engine_kernels};
-
-/// Which engine to build, and for what planes.
-#[derive(Debug, Clone, Copy)]
-pub enum EngineSpec {
-    Nlmeans {
-        algorithm: NlmeansAlgorithm,
-        geometry: Geometry,
-    },
-    Nl4d {
-        options: Nl4dOptions,
-        geometry: Geometry,
-    },
-}
-
-impl EngineSpec {
-    /// The most frames the engine this describes holds before it emits one.
-    pub(crate) fn max_held_frames(&self) -> usize {
-        match self {
-            EngineSpec::Nlmeans { algorithm, geometry } => {
-                Nlmeans::held_frames_for(algorithm, geometry.channels)
-            },
-            EngineSpec::Nl4d { options, geometry } => Nl4d::held_frames_for(options, geometry.channels),
-        }
-    }
-}
+use crate::tune::{KernelRequest, default_store_dir, engine_kernels};
 
 /// An engine and the plane I/O for the runtime it was built on.
 pub(crate) struct BuiltEngine {
@@ -58,6 +41,9 @@ pub(crate) struct BuiltEngine {
     pub io: Box<dyn PlaneIo>,
     pub accelerator: Accelerator,
     pub device: DeviceProfile,
+    /// The device the engine was asked for, which names its stored tuning results.
+    pub selected: cubecl::Device,
+    pub client: Client,
 }
 
 fn profile_of(client: &Client, identity: DeviceIdentity) -> DeviceProfile {
@@ -71,6 +57,7 @@ trait OnClient {
 
     fn run(
         self,
+        selected: cubecl::Device,
         client: Client,
         accelerator: Accelerator,
         identity: DeviceIdentity,
@@ -99,32 +86,55 @@ impl OnClient for BuildEngine<'_> {
 
     fn run(
         self,
+        selected: cubecl::Device,
         client: Client,
         accelerator: Accelerator,
         identity: DeviceIdentity,
     ) -> Result<BuiltEngine, DenoiserError> {
         let device = profile_of(&client, identity);
-        let kernels = engine_kernels(self.request, &device);
+        let setup = self.request.setup;
 
-        let engine: Box<dyn Engine> = match self.spec {
-            EngineSpec::Nlmeans { algorithm, geometry } => {
-                let engine = Nlmeans::with_kernels(&client, algorithm, geometry, kernels)?;
-                Box::new(engine)
-            },
-            EngineSpec::Nl4d { options, geometry } => {
-                let engine = Nl4d::with_kernels(&client, options, geometry, kernels)?;
-                Box::new(engine)
-            },
+        let engine = if setup.ledger.is_none() && setup.profile_override.is_none() {
+            let config = TuningConfig {
+                mode: self.request.tuning,
+                store: default_store_dir(),
+                deterministic: self.request.deterministic,
+                ..TuningConfig::default()
+            };
+            build_settled_engine(&selected, &client, self.spec, &config)?
+        } else {
+            let kernels = engine_kernels(self.request, &device);
+            build_tuned_engine(&client, self.spec, kernels)?
         };
 
-        let io = ClientIo::new(client);
+        let io = ClientIo::new(client.clone());
 
         Ok(BuiltEngine {
             engine,
             io: Box::new(io),
             accelerator,
             device,
+            selected,
+            client,
         })
+    }
+}
+
+/// Builds `spec` with `kernels`, which carry a tuning ledger or a profile override.
+fn build_tuned_engine(
+    client: &Client,
+    spec: EngineSpec,
+    kernels: EngineKernels,
+) -> Result<Box<dyn Engine>, DenoiserError> {
+    match spec {
+        EngineSpec::Nlmeans { algorithm, geometry } => {
+            let engine = Nlmeans::with_kernels(client, algorithm, geometry, kernels)?;
+            Ok(Box::new(engine))
+        },
+        EngineSpec::Nl4d { options, geometry } => {
+            let engine = Nl4d::with_kernels(client, options, geometry, kernels)?;
+            Ok(Box::new(engine))
+        },
     }
 }
 
@@ -136,6 +146,7 @@ impl OnClient for DescribeDevice {
 
     fn run(
         self,
+        _selected: cubecl::Device,
         client: Client,
         _accelerator: Accelerator,
         identity: DeviceIdentity,
@@ -173,7 +184,7 @@ fn run_on_best<T: OnClient>(
         task.on_vulkan(wgpu_device);
     }
 
-    task.run(client, accelerator, identity)
+    task.run(selected, client, accelerator, identity)
 }
 
 /// Why no accelerator in `accelerators` runs on `device`.

@@ -10,8 +10,9 @@ mod tests;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use av_denoise_core::tune::DeviceProfile;
-use av_denoise_core::{DevicePlane, Engine, GrainChunk, WindowSpan};
+use av_denoise_core::tune::{DeviceProfile, profile_key};
+use av_denoise_core::{DevicePlane, Engine, EngineSpec, GrainChunk, WindowSpan};
+use cubecl::prelude::Client;
 use cubecl::server::Handle;
 
 pub use self::depth::{Depth, UnsupportedDepthError};
@@ -21,7 +22,7 @@ pub(crate) use self::pending::{Pending, TryWait};
 pub use self::timing::PlaneTiming;
 use crate::backend::accelerate::Accelerator;
 use crate::backend::{Device, DevicePlacement, build_engine};
-use crate::tune::{KernelRequest, KernelSetup, profile_key};
+use crate::tune::{KernelRequest, KernelSetup};
 
 /// How many readbacks a [HostDenoiser] keeps in flight at once.
 pub const MAX_PENDING: usize = 2;
@@ -112,6 +113,10 @@ pub struct HostDenoiser {
     io: Box<dyn PlaneIo>,
     accelerator: Accelerator,
     device: DeviceProfile,
+    /// The device the engine was asked for, which names its stored tuning results.
+    selected: cubecl::Device,
+    client: Client,
+    spec: EngineSpec,
     /// The key this denoiser's profile ranking is stored under.
     profile_key: String,
     width: u32,
@@ -182,7 +187,7 @@ impl HostDenoiser {
         }
 
         let spec = options.algorithm.engine_spec(&options, width, height);
-        let plane_key = profile_key(&options, width, height);
+        let plane_key = profile_key(&spec);
         let request = KernelRequest {
             tuning: options.tuning,
             deterministic: options.deterministic,
@@ -202,6 +207,9 @@ impl HostDenoiser {
             io: built.io,
             accelerator: built.accelerator,
             device: built.device,
+            selected: built.selected,
+            client: built.client,
+            spec,
             profile_key: plane_key,
             width,
             height,
@@ -230,6 +238,30 @@ impl HostDenoiser {
 
     pub(crate) fn profile_key(&self) -> &str {
         &self.profile_key
+    }
+
+    #[cfg_attr(
+        not(all(test, feature = "vulkan")),
+        expect(dead_code, reason = "only the tests read it so far")
+    )]
+    pub(crate) fn selected(&self) -> &cubecl::Device {
+        &self.selected
+    }
+
+    #[cfg_attr(
+        not(all(test, feature = "vulkan")),
+        expect(dead_code, reason = "only the tests read it so far")
+    )]
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+
+    #[cfg_attr(
+        not(all(test, feature = "vulkan")),
+        expect(dead_code, reason = "only the tests read it so far")
+    )]
+    pub(crate) fn spec(&self) -> EngineSpec {
+        self.spec
     }
 
     pub fn width(&self) -> u32 {
