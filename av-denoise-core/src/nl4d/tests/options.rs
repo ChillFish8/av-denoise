@@ -1,13 +1,5 @@
 use crate::error::Error;
-use crate::nl4d::{
-    Nl4dOptions,
-    Nl4dParams,
-    nl4d_default_lambda_ht,
-    nl4d_pool_ratio,
-    nl4d_spatial_radius_for,
-    nl4d_temporal_radius_for,
-    resolve_params,
-};
+use crate::nl4d::{Nl4dOptions, Nl4dParams, nl4d_default_lambda_ht, nl4d_pool_ratio, resolve_params};
 use crate::nlmeans::{
     ChannelMode,
     MotionCompensationMode,
@@ -16,7 +8,6 @@ use crate::nlmeans::{
     NlmParams,
     PrefilterMode,
 };
-use crate::options::Preset;
 
 const ALL_CHANNELS: [ChannelMode; 3] = [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv];
 
@@ -69,21 +60,10 @@ fn nl4d_options_default_to_pooling_on() {
 }
 
 #[test]
-fn nl4d_options_default_temporal_radius_is_the_base_preset_radius() {
+fn nl4d_options_default_temporal_radius_is_2() {
     let options = Nl4dOptions::default();
 
-    assert_eq!(options.temporal_radius, nl4d_temporal_radius_for(Preset::Base));
     assert_eq!(options.temporal_radius, 2);
-}
-
-#[test]
-fn nl4d_spatial_radius_for_veryfast_is_narrower_than_the_default() {
-    let veryfast = nl4d_spatial_radius_for(Preset::Veryfast);
-    let base = nl4d_spatial_radius_for(Preset::Base);
-    let options = Nl4dOptions::default();
-
-    assert_eq!(veryfast, 6);
-    assert_eq!(base, options.spatial_radius);
 }
 
 #[test]

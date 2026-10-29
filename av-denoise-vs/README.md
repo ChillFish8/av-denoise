@@ -84,7 +84,7 @@ clean.set_output()
 |-------------------|-----------------|-------------------------|------------------------|
 | `lambda_ht_scale` | float           | `--lambda-ht-scale`     | yes, the main dial     |
 | `sigma_scale`     | float           | `--sigma-scale`         | yes                    |
-| `preset`          | string          | `--preset`              | yes                    |
+| `preset`          | string          | `--preset`              | no, `base` only        |
 | `refine`          | int             | `--refine`              | yes                    |
 | `spatial_radius`  | int             | `--spatial-radius`      | yes, the speed dial    |
 | `lambda_ht`       | float           | `--lambda-ht`           | situational, see below |
@@ -99,8 +99,7 @@ fine detail with it. Try it in steps of about 0.05 before reaching for `lambda_h
 which pins luma and chroma's thresholds (4.158 and 3.234 by default, chosen by eye from
 rendered comparisons).
 
-`spatial_radius` is the speed dial. `preset` already resolves it, so setting
-`spatial_radius` explicitly overrides whatever the preset would have picked. The
+`spatial_radius` is the speed dial, and defaults to 9. The
 centre-frame search covers `(2 * radius + 1)^2` positions, so it dominates the work.
 Dropping it is the fastest way to speed a run up.
 
@@ -178,9 +177,10 @@ clean.set_output()
 
 ## Presets
 
-`preset` is the main quality-versus-speed dial. It takes one of five values, from
-fastest to slowest and best-quality: `veryfast`, `fast`, `base`, `slow`, `veryslow`.
+`preset` is the main quality-versus-speed dial for `Nlm` and `NlmHQ`. It takes one of five values,
+from fastest to slowest and best-quality: `veryfast`, `fast`, `base`, `slow`, `veryslow`.
 Each preset resolves every unset numeric and string parameter to a value tuned for that speed tier.
+`Nl4d` only runs `base`, and any other preset raises `vs.Error`.
 
 Any parameter you set explicitly overrides what the preset would have chosen for it,
 other fields still fall back to the preset's values. This lets you take a preset as a
@@ -216,7 +216,7 @@ provided, choosing the first accelerator which can work on the host hardware.
 > in an error.
 
 ```python
-clean = avd.Nl4d(clip, preset="slow", accelerators=["cuda", "vulkan"])
+clean = avd.NlmHQ(clip, preset="slow", accelerators=["cuda", "vulkan"])
 ```
 
 ## Shared conventions

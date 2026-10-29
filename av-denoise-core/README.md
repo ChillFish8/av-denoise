@@ -6,7 +6,7 @@ GPU denoising engines that read and write CubeCL plane handles.
 frames are ready, and every ready frame is written into planes you own with `Engine::emit_into` before the
 next push. At the end of a stream, `Engine::finish` returns the tail count.
 
-`Nl4dOptions::default()` uses the base preset's `temporal_radius` and calibrated defaults for the rest.
+`Nl4dOptions::default()` uses a `temporal_radius` of 2 and calibrated defaults for the rest.
 
 ```rust,no_run
 use av_denoise_core::{ChannelMode, DevicePlane, Engine, Geometry, Nl4d, Nl4dOptions, SampleFormat};

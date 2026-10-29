@@ -53,9 +53,9 @@ def test_nl4d_forwards_no_arguments_when_none_are_set(fake, monkeypatch):
 
 def test_set_parameters_are_forwarded(fake, monkeypatch):
     monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
-    Nl4d("clip", preset="slow", lambda_ht_scale=1.1)
+    Nl4d("clip", preset="base", lambda_ht_scale=1.1)
     _, kwargs = fake.calls[0]
-    assert kwargs == {"preset": "slow", "lambda_ht_scale": 1.1}
+    assert kwargs == {"preset": "base", "lambda_ht_scale": 1.1}
 
 
 def test_nl4d_forwards_noise_map_as_a_bool(fake, monkeypatch):

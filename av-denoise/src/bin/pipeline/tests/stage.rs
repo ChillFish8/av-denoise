@@ -1,7 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
-use av_denoise::{ChannelMode, Nl4d, Nl4dOptions, Preset, nl4d_temporal_radius_for};
+use av_denoise::{ChannelMode, Nl4d, Nl4dOptions};
 
 use super::{tiny_layout, tiny_planes};
 use crate::pipeline::decode::PREFETCH_FRAMES;
@@ -194,10 +194,10 @@ fn the_floor_covers_a_workers_first_output_at_every_held_count() {
 /// A 4K 10-bit 4:2:0 frame in bytes.
 const UHD_10_BIT_FRAME_BYTES: usize = 24_883_200;
 
-/// The frames an nl4d luma plane holds at `preset`.
-fn nl4d_held_frames(preset: Preset) -> usize {
+/// The frames an nl4d luma plane holds at `temporal_radius`.
+fn nl4d_held_frames(temporal_radius: u32) -> usize {
     let options = Nl4dOptions {
-        temporal_radius: nl4d_temporal_radius_for(preset),
+        temporal_radius,
         ..Nl4dOptions::default()
     };
 
@@ -206,8 +206,8 @@ fn nl4d_held_frames(preset: Preset) -> usize {
 
 #[test]
 fn the_default_budget_feeds_the_default_workers_at_4k_10_bit() {
-    for preset in [Preset::Base, Preset::Slow] {
-        let held_frames = nl4d_held_frames(preset);
+    for temporal_radius in [2, 4] {
+        let held_frames = nl4d_held_frames(temporal_radius);
         let permits = checked_frame_permits(
             crate::DEFAULT_FRAME_BUDGET_BYTES,
             UHD_10_BIT_FRAME_BYTES,
@@ -215,14 +215,17 @@ fn the_default_budget_feeds_the_default_workers_at_4k_10_bit() {
             held_frames,
         );
 
-        assert!(permits.is_ok(), "{preset:?} holding {held_frames}: {permits:?}");
+        assert!(
+            permits.is_ok(),
+            "radius {temporal_radius} holding {held_frames}: {permits:?}"
+        );
     }
 }
 
 #[test]
 fn an_explicit_budget_below_the_floor_is_still_rejected_at_4k_10_bit() {
-    // 1 GiB affords 43 frames here, below the floor of 44 for nl4d base.
-    let held_frames = nl4d_held_frames(Preset::Base);
+    // 1 GiB affords 43 frames here, below the floor of 44 for nl4d's default radius.
+    let held_frames = nl4d_held_frames(2);
     let permits = checked_frame_permits(
         1 << 30,
         UHD_10_BIT_FRAME_BYTES,

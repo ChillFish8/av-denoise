@@ -3,12 +3,11 @@ use av_denoise::{
     Depth,
     FrameLayout,
     MotionCompensationMode,
+    Nl4dOptions,
     NlmeansVariant,
     PrefilterMode,
     Preset,
     Subsampling,
-    nl4d_spatial_radius_for,
-    nl4d_temporal_radius_for,
     nlmeans_search_radius_for,
     nlmeans_temporal_radius_for,
     nlmeans_variant_for,
@@ -592,36 +591,41 @@ fn preset_resolves_the_same_dials_as_core_for_nlmeans() {
 }
 
 #[test]
-fn preset_resolves_the_same_dials_as_core_for_nl4d() {
-    for name in ["veryfast", "fast", "base", "slow", "veryslow"] {
-        let preset: Preset = name.parse().unwrap();
+fn nl4d_resolves_the_library_defaults() {
+    let raw = RawParams {
+        preset: Some("base".to_string()),
+        ..RawParams::default()
+    };
+    let layout = yuv420_layout();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+    let defaults = Nl4dOptions::default();
+
+    assert_eq!(
+        opts.mode,
+        DenoisingMode::Temporal {
+            radius: defaults.temporal_radius
+        }
+    );
+
+    match opts.algorithm {
+        av_denoise::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.spatial_radius, defaults.spatial_radius),
+        other => panic!("expected Nl4d algorithm, got {other:?}"),
+    }
+}
+
+#[test]
+fn nl4d_rejects_presets_other_than_base() {
+    for name in ["veryfast", "fast", "slow", "veryslow"] {
         let raw = RawParams {
             preset: Some(name.to_string()),
             ..RawParams::default()
         };
         let layout = yuv420_layout();
-        let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+        let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+            .unwrap_err()
+            .to_string();
 
-        let want_temporal_radius = nl4d_temporal_radius_for(preset);
-        let want_spatial_radius = nl4d_spatial_radius_for(preset);
-
-        assert_eq!(
-            opts.mode,
-            DenoisingMode::Temporal {
-                radius: want_temporal_radius
-            },
-            "preset {name} resolved the wrong temporal radius"
-        );
-
-        match opts.algorithm {
-            av_denoise::Algorithm::Nl4d(nl4d) => {
-                assert_eq!(
-                    nl4d.spatial_radius, want_spatial_radius,
-                    "preset {name} resolved the wrong spatial radius"
-                );
-            },
-            other => panic!("expected Nl4d algorithm, got {other:?}"),
-        }
+        assert!(err.contains("base preset"), "{name}: got {err}");
     }
 }
 
@@ -629,8 +633,8 @@ fn preset_resolves_the_same_dials_as_core_for_nl4d() {
 fn unset_preset_defaults_to_base() {
     let raw = RawParams::default();
     let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
-    let base_temporal_radius = nl4d_temporal_radius_for(Preset::Base);
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let base_temporal_radius = nlmeans_temporal_radius_for(Preset::Base);
 
     assert_eq!(
         opts.mode,
@@ -662,7 +666,7 @@ fn explicit_temporal_radius_overrides_the_preset() {
         ..RawParams::default()
     };
     let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
 
     assert_eq!(opts.mode, DenoisingMode::Temporal { radius: 3 });
 }
@@ -786,7 +790,7 @@ fn shared_lambda_ht_reaches_nl4d_options() {
 }
 
 #[test]
-fn spatial_radius_overrides_the_preset() {
+fn spatial_radius_overrides_the_default() {
     let from_preset = {
         let raw = RawParams {
             preset: Some("base".into()),

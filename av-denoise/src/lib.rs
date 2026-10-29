@@ -43,8 +43,6 @@ pub use av_denoise_core::{
     WindowSpan,
     build_table,
     nl4d_default_lambda_ht,
-    nl4d_spatial_radius_for,
-    nl4d_temporal_radius_for,
     nlmeans_search_radius_for,
     nlmeans_temporal_radius_for,
     nlmeans_variant_for,

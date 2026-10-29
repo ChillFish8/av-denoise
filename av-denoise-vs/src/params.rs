@@ -20,8 +20,6 @@ use av_denoise::{
     PsyParams,
     Subsampling,
     TuningMode,
-    nl4d_spatial_radius_for,
-    nl4d_temporal_radius_for,
     nlmeans_search_radius_for,
     nlmeans_temporal_radius_for,
     nlmeans_variant_for,
@@ -331,6 +329,13 @@ pub fn plane_options_from(
         Some(name) => parse_preset(name)?,
     };
 
+    if algorithm_kind == AlgorithmKind::Nl4d && preset != Preset::Base {
+        anyhow::bail!(
+            "Nl4d only runs the base preset, use temporal_radius and spatial_radius to trade \
+             speed for quality"
+        );
+    }
+
     // Only nlmeans reads `variant`, so nl4d never parses it and a set value fails as a mismatch below.
     let variant = match algorithm_kind {
         AlgorithmKind::Nlmeans => match raw.variant.as_deref() {
@@ -374,12 +379,11 @@ pub fn plane_options_from(
             .collect::<Result<Vec<_>, _>>()?,
     };
 
-    // An explicit `temporal_radius` overrides the preset's, the same way the CLI resolves it. nl4d has
-    // no spatial-only mode, and no nl4d preset resolves to 0, so only the nlmeans `veryfast` preset
-    // picks the spatial mode by default.
+    // An explicit `temporal_radius` overrides the default, the same way the CLI resolves it. nl4d has
+    // no spatial-only mode, so only the nlmeans `veryfast` preset picks the spatial mode by default.
     let preset_temporal_radius = match algorithm_kind {
         AlgorithmKind::Nlmeans => nlmeans_temporal_radius_for(preset),
-        AlgorithmKind::Nl4d => nl4d_temporal_radius_for(preset),
+        AlgorithmKind::Nl4d => Nl4dOptions::default().temporal_radius,
     };
 
     let mode = match raw.temporal_radius {
@@ -460,7 +464,7 @@ pub fn plane_options_from(
                     .unwrap_or_else(|| Nl4dOptions::default().lambda_ht_scale),
                 spatial_radius: match raw.spatial_radius {
                     Some(radius) => nonnegative(radius, "spatial_radius")?,
-                    None => nl4d_spatial_radius_for(preset),
+                    None => Nl4dOptions::default().spatial_radius,
                 },
                 refine: match raw.refine {
                     Some(radius) => nonnegative(radius, "refine")?,

@@ -13,8 +13,8 @@ denoising tools.
 
 ## Features
 
-- **Simple tuning presets** - the `--preset` ladder (`veryfast` → `veryslow`) automatically adjusts denoiser settings
-  without requiring you to modify many sets of parameters for every input.
+- **Simple tuning presets** - the NLMeans `--preset` ladder (`veryfast` → `veryslow`) automatically adjusts denoiser
+  settings without requiring you to modify many sets of parameters for every input.
 - **NL4D Algorithm** - Offers best in class noise removal and detail retention while being faster than more standard
   V-BM3D algorithms and without the artefacts.
 - **NLMeans-HQ Algorithm** - A smarter NLMeans denoiser able to process motion and detail extraction far better than

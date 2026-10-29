@@ -1,12 +1,10 @@
 /// Speed vs quality dial.
 ///
-/// Each denoising family reads the same dial and fills in its own knobs
-/// from it. For `nlmeans` that is
+/// `nlmeans` fills in its knobs from it with
 /// [nlmeans_variant_for](crate::nlmeans_variant_for),
 /// [nlmeans_temporal_radius_for](crate::nlmeans_temporal_radius_for), and
 /// [nlmeans_search_radius_for](crate::nlmeans_search_radius_for).
-/// For `nl4d` it is [nl4d_temporal_radius_for](crate::nl4d_temporal_radius_for) and
-/// [nl4d_spatial_radius_for](crate::nl4d_spatial_radius_for).
+/// `nl4d` only runs `base`, which is its library defaults.
 ///
 /// Both front ends parse the same names from this one type, so a preset
 /// resolves to the same dials everywhere it is used.

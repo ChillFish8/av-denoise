@@ -99,7 +99,7 @@ These are global, so they work on either side of the subcommand.
 
 | Flag                               | What it does                                                                                                     | Default       |
 |------------------------------------|------------------------------------------------------------------------------------------------------------------|---------------|
-| `--preset <veryfast..veryslow>`    | Speed vs quality. Each algorithm fills in its own knobs from it, see the ladders below.                          | `base`        |
+| `--preset <veryfast..veryslow>`    | Speed vs quality for `nlmeans`, see the ladder below. `nl4d` only runs `base`.                                   | `base`        |
 | `--channel-mode <luma,chroma,yuv>` | Which planes to clean. `yuv` is one fused pass and needs a YUV444 source.                                        | `luma,chroma` |
 | `-A, --accelerators <list>`        | Backends to try, in order. Comma-separated, for example `cuda,vulkan`.                                           | `vulkan`      |
 | `-d, --device <spec>`              | `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]`, or `cpu`.                                            | `default`     |
@@ -147,26 +147,19 @@ than filtering with non-local means first. Patches are searched both
 inside the centre frame and around where each neighbour frame's motion
 predicts they moved to.
 
-Motion tracking is always on, and every preset keeps a temporal window,
-which this algorithm needs. There is no NLMeans weighting pass, so none of
+Motion tracking is always on, and the temporal window always reaches at
+least one frame, which this algorithm needs. There is no NLMeans weighting pass, so none of
 the NLMeans knobs below exist here.
 
-What `--preset` fills in:
-
-| Preset     | Temporal radius | Spatial radius |
-|------------|-----------------|----------------|
-| `veryfast` | 1               | 6              |
-| `fast`     | 1               | 9              |
-| `base`     | 2               | 9              |
-| `slow`     | 4               | 9              |
-| `veryslow` | 8               | 9              |
+NL4D only runs the `base` preset. Trade speed for quality with `--temporal-radius` and
+`--spatial-radius` instead.
 
 | Flag                               | What it does                                                                                                                                                                                                                    | Default                  |
 |------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
-| `--temporal-radius <N>`            | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                                  | from `--preset`          |
+| `--temporal-radius <N>`            | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                                  | `2`                      |
 | `--lambda-ht <f>`                  | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                           | 4.158 luma, 3.234 chroma |
 | `--lambda-ht-scale <f>`            | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                                 | `1.0`                    |
-| `--spatial-radius <N>`             | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                                  | from `--preset`          |
+| `--spatial-radius <N>`             | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                                  | `9`                      |
 | `--sigma-scale <f>`                | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                               | `1.0`                    |
 | `--unstable-export-av1-fgs <PATH>` | Unstable, and may change between releases. Writes an AV1 film grain table to add with `grav1synth apply`. SVT-AV1 `--fgs-table` applies only its first entry, so it suits a single-scene table only. Needs luma to be denoised. | off                      |
 
@@ -265,8 +258,8 @@ For more information about how to adjust the algorithms to best fit your needs.
 ## Example commands
 
 Two dials do almost everything: a core scale parameter to nudge the result when your eye disagrees
-with it, and `--preset` for how hard to work. Reach for the scale first, in steps of 0.1, and only
-move up the preset ladder once the scale has stopped buying you anything. Each example below
+with it, and the temporal window for how hard to work. Reach for the scale first, in steps of 0.1, and only
+widen the window once the scale has stopped buying you anything. Each example below
 changes one thing from the defaults.
 
 **Clean up a noisy file.** NL4D measures the noise per scene and picks its own threshold.
@@ -293,12 +286,12 @@ av-denoise nl4d --lambda-ht-scale 1.1 --input noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
-**Still noisy once the scale has run out.** Go up the preset ladder. A deeper temporal window is
+**Still noisy once the scale has run out.** Raise `--temporal-radius`. A deeper temporal window is
 the strongest lever in the tool for either algorithm, and it is also the one that costs the most
 time, so it is worth trying the scale first.
 
 ```bash
-av-denoise nl4d --preset slow --input noisy.mkv \
+av-denoise nl4d --temporal-radius 4 --input noisy.mkv \
   | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 

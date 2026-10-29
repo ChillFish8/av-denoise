@@ -1,15 +1,6 @@
 use std::path::PathBuf;
 
-use av_denoise::{
-    Algorithm,
-    ChannelIntent,
-    DenoisingMode,
-    Nl4dOptions,
-    PlaneOptions,
-    PsyParams,
-    nl4d_spatial_radius_for,
-    nl4d_temporal_radius_for,
-};
+use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Nl4dOptions, PlaneOptions, PsyParams};
 
 use super::{Args, CommonArgs, MotionArgs, Preset, RunOptions, resolve_channel_intent};
 
@@ -30,7 +21,7 @@ pub struct Nl4dArgs {
     /// This is reset at every scene change, so raising it never causes
     /// blending across cuts.
     ///
-    /// Defaults to whatever `--preset` selects.
+    /// Defaults to `2`.
     #[arg(long)]
     pub temporal_radius: Option<u32>,
 
@@ -41,7 +32,7 @@ pub struct Nl4dArgs {
     /// covers `(2 * radius + 1)^2` positions. Larger values find more
     /// matches but cost quadratically more. Between `1` and `16`.
     ///
-    /// Defaults to whatever `--preset` selects.
+    /// Defaults to `9`.
     #[arg(long)]
     pub spatial_radius: Option<u32>,
 
@@ -227,15 +218,13 @@ pub struct Nl4dArgs {
 }
 
 impl Nl4dArgs {
-    /// How far the temporal window reaches, from the explicit flag or the active `--preset`.
+    /// How far the temporal window reaches, from the explicit flag or the library default.
     ///
     /// nl4d groups patches across neighbouring frames, so a radius of 0 leaves it nothing to do.
     /// Only an explicit `--temporal-radius 0` can ask for one, and it is rejected here rather
     /// than left to fail deep inside construction.
-    fn temporal_radius(&self, preset: Preset) -> Result<u32, anyhow::Error> {
-        let radius = self
-            .temporal_radius
-            .unwrap_or_else(|| nl4d_temporal_radius_for(preset));
+    fn temporal_radius(&self, defaults: &Nl4dOptions) -> Result<u32, anyhow::Error> {
+        let radius = self.temporal_radius.unwrap_or(defaults.temporal_radius);
 
         if radius == 0 {
             anyhow::bail!(
@@ -283,6 +272,13 @@ impl Nl4dArgs {
 
     /// Builds the run options from these flags and the global flags.
     pub fn build_options(&self, globals: &Args) -> Result<RunOptions, anyhow::Error> {
+        if globals.preset != Preset::Base {
+            anyhow::bail!(
+                "nl4d only runs the base preset, use --temporal-radius and --spatial-radius to \
+                 trade speed for quality"
+            );
+        }
+
         let defaults = Nl4dOptions::default();
         let intent = resolve_channel_intent(&globals.channel_mode)?;
 
@@ -314,12 +310,10 @@ impl Nl4dArgs {
 
         self.warn_on_dead_per_plane_flags(intent);
 
-        let temporal_radius = self.temporal_radius(globals.preset)?;
+        let temporal_radius = self.temporal_radius(&defaults)?;
         let psy = self.psy_options()?;
 
-        let spatial_radius = self
-            .spatial_radius
-            .unwrap_or_else(|| nl4d_spatial_radius_for(globals.preset));
+        let spatial_radius = self.spatial_radius.unwrap_or(defaults.spatial_radius);
         let nl4d_options = Nl4dOptions {
             motion: self.motion.to_motion_search(),
             temporal_radius,
@@ -662,66 +656,20 @@ mod tests {
     }
 
     #[test]
-    fn every_preset_resolves_to_a_usable_window() {
-        let ladder = [
-            ("veryfast", 1, 6),
-            ("fast", 1, 9),
-            ("base", 2, 9),
-            ("slow", 4, 9),
-            ("veryslow", 8, 9),
-        ];
-
-        for (preset, radius, spatial_radius) in ladder {
+    fn a_preset_other_than_base_is_rejected() {
+        for preset in ["veryfast", "fast", "slow", "veryslow"] {
             let (args, nl4d) = parse(&["--preset", preset]);
-            let opts = nl4d
+            let error = nl4d
                 .build_options(&args)
-                .unwrap_or_else(|error| panic!("preset {preset} should resolve: {error}"));
-            let nl4d_options = expect_nl4d(&opts);
+                .expect_err("nl4d must reject presets other than base");
 
-            assert_eq!(
-                opts.planes.mode,
-                DenoisingMode::Temporal { radius },
-                "preset {preset} resolved to the wrong temporal radius"
-            );
-            assert_eq!(
-                nl4d_options.spatial_radius, spatial_radius,
-                "preset {preset} resolved to the wrong spatial radius"
-            );
+            assert!(error.to_string().contains("base preset"), "{preset}: got {error}");
         }
     }
 
-    /// `veryfast` and `fast` share a temporal radius, so the spatial
-    /// search is the only thing separating them.
     #[test]
-    fn veryfast_searches_fewer_candidates_than_fast() {
-        let (fast_args, fast) = parse(&["--preset", "fast"]);
-        let (veryfast_args, veryfast) = parse(&["--preset", "veryfast"]);
-
-        let fast_opts = fast.build_options(&fast_args).expect("fast should resolve");
-        let veryfast_opts = veryfast
-            .build_options(&veryfast_args)
-            .expect("veryfast should resolve");
-        let fast_nl4d = expect_nl4d(&fast_opts);
-        let veryfast_nl4d = expect_nl4d(&veryfast_opts);
-
-        assert!(
-            veryfast_nl4d.spatial_radius < fast_nl4d.spatial_radius,
-            "veryfast ({}) should search a narrower window than fast ({})",
-            veryfast_nl4d.spatial_radius,
-            fast_nl4d.spatial_radius
-        );
-    }
-
-    #[test]
-    fn explicit_radii_outrank_the_preset() {
-        let (args, nl4d) = parse(&[
-            "--preset",
-            "veryfast",
-            "--temporal-radius",
-            "4",
-            "--spatial-radius",
-            "12",
-        ]);
+    fn explicit_radii_outrank_the_defaults() {
+        let (args, nl4d) = parse(&["--temporal-radius", "4", "--spatial-radius", "12"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         let nl4d_options = expect_nl4d(&opts);
 
@@ -741,7 +689,7 @@ mod tests {
         assert_eq!(
             opts.planes.mode,
             DenoisingMode::Temporal { radius: 2 },
-            "base preset resolves to temporal radius 2"
+            "nl4d defaults to temporal radius 2"
         );
         assert_eq!(nl4d_options.motion, defaults.motion);
         assert_eq!(nl4d_options.refine, defaults.refine);

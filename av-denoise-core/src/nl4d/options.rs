@@ -2,7 +2,6 @@ use super::Nl4dParams;
 use super::psy::PsyParams;
 use crate::error::Error;
 use crate::nlmeans::{ChannelMode, HqParams, MotionSearch, NlmParams};
-use crate::options::Preset;
 
 /// Settings for [Nl4d](crate::Nl4d).
 ///
@@ -88,7 +87,7 @@ impl Default for Nl4dOptions {
             psy: defaults.psy,
             pooled_threshold: defaults.pooled_threshold,
             grain_export: defaults.grain_export,
-            temporal_radius: nl4d_temporal_radius_for(Preset::Base),
+            temporal_radius: 2,
         }
     }
 }
@@ -133,34 +132,6 @@ fn resolve_lambda_ht(opts: &Nl4dOptions, channels: ChannelMode) -> Result<f32, S
     let lambda_ht = opts.lambda_ht.unwrap_or_else(|| nl4d_default_lambda_ht(channels));
 
     Ok(lambda_ht * opts.lambda_ht_scale)
-}
-
-/// How far the temporal window reaches at each preset.
-///
-/// `veryfast` keeps a 1-frame window, because nl4d has nothing to group without neighbouring
-/// frames.
-pub fn nl4d_temporal_radius_for(preset: Preset) -> u32 {
-    match preset {
-        Preset::Veryfast | Preset::Fast => 1,
-        Preset::Base => 2,
-        Preset::Slow => 4,
-        Preset::Veryslow => 8,
-    }
-}
-
-/// How wide the centre frame's candidate search is at each preset.
-///
-/// `veryfast` shares its temporal radius with `fast`, so this is what separates them. The window
-/// covers `(2 * radius + 1)^2` positions, so 6 searches a little under half the candidates 9 does.
-/// Wider windows cost quadratically and have not been measured to help, so the slower presets keep
-/// the default.
-pub fn nl4d_spatial_radius_for(preset: Preset) -> u32 {
-    match preset {
-        Preset::Veryfast => 6,
-        Preset::Fast | Preset::Base | Preset::Slow | Preset::Veryslow => {
-            Nl4dOptions::default().spatial_radius
-        },
-    }
 }
 
 /// The front end's HQ parameters for these options.

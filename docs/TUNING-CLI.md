@@ -24,16 +24,16 @@ you're following the guide for the algorithm you're using specifically.
 av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
-`--preset` sets how many neighbouring frames are searched, from a 3-frame window at `fast` to a
-17-frame one at `veryslow`. `veryfast` keeps the 3-frame window and narrows the spatial search
-instead, since NL4D has nothing to group without neighbours.
+NL4D only runs the `base` preset. `--temporal-radius` sets how many neighbouring frames are searched
+on each side, between 1 and 8, and defaults to 2. NL4D always needs at least 1, since it has nothing
+to group without neighbours.
 
 ### The NL4D dials
 
 **`--lambda-ht-scale` is the main dial.** The threshold it scales is how many standard deviations
 of estimated noise a transform coefficient has to clear to survive, so raising the scale removes
 more noise and takes more fine detail with it. Move in steps of **0.05 to 0.1** and judge by eye,
-before you consider going up a preset.
+before you consider raising `--temporal-radius`.
 You should try this parameter before touching the absolute values, since luma and chroma start
 from different defaults and the scale keeps that separation.
 
@@ -42,8 +42,7 @@ from different defaults and the scale keeps that separation.
 applies on top of whatever is pinned.
 
 **`--spatial-radius` is the speed dial.** The centre-frame search covers `(2 * radius + 1)^2`
-positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates, which
-is exactly what `--preset veryfast` does.
+positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates.
 
 **`--field-lambda` pulls each block's motion vector toward its neighbours.** `1.0` (the library
 default) is the shipped calibration and smooths the tracked field. Raise it further on noisy or

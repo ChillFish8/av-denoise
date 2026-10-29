@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from . import _plugin
-from ._types import Accelerators, ChannelMode, Preset, Tune
+from ._types import Accelerators, ChannelMode, Nl4dPreset, Preset, Tune
 
 if TYPE_CHECKING:
     # vapoursynth ships a vapoursynth.pyi stub but no py.typed marker, so mypy
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     # covers both that and the case where the package is absent entirely.
     import vapoursynth as vs
 
-__all__ = ["Nlm", "NlmHQ", "Nl4d", "Preset", "ChannelMode", "Tune"]
+__all__ = ["Nlm", "NlmHQ", "Nl4d", "Preset", "Nl4dPreset", "ChannelMode", "Tune"]
 
 
 def _nlmeans_filter() -> "vs.Function":
@@ -186,7 +186,7 @@ def NlmHQ(
 def Nl4d(
     clip: "vs.VideoNode",
     *,
-    preset: Preset | None = None,
+    preset: Nl4dPreset | None = None,
     channel_mode: ChannelMode | None = None,
     device: str | None = None,
     lambda_ht_scale: float | None = None,
@@ -215,7 +215,7 @@ def Nl4d(
 
     Args:
         clip: The input video node to denoise.
-        preset: Preset name. Unset dials fall back to whatever the av-denoise binary defaults to.
+        preset: Preset name. NL4D only runs `"base"`.
         channel_mode: Which planes to filter, one of `"luma"`, `"chroma"`, `"lumachroma"` or `"yuv"`.
         device: Compute device to run on. `"cpu"` selects a software device where the platform offers one,
             useful for testing, not for real encodes. Example: `"discrete:0"` for discrete GPU 0.
@@ -226,9 +226,8 @@ def Nl4d(
             their separate defaults, losing that separation. Prefer `lambda_ht_scale` first.
         sigma_scale: Multiplier nudging the measured noise level up or down, keeping the per-scene
             measurement rather than pinning it.
-        spatial_radius: The speed dial. `preset` already resolves it, so setting this explicitly overrides
-            whatever the preset picked. The centre-frame search covers `(2 * radius + 1)^2` positions,
-            so it dominates the work, lowering it is the fastest way to speed a run-up.
+        spatial_radius: The speed dial, 9 by default. The centre-frame search covers `(2 * radius + 1)^2`
+            positions, so it dominates the work, lowering it is the fastest way to speed a run-up.
         refine: Half-width of the window searched around each neighbour frame's motion-predicted position.
             Raise it when motion tracking lands close but not exact.
         noise_map: Whether to scale the luma threshold by how noisy each brightness level is.

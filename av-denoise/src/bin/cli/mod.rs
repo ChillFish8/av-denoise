@@ -87,19 +87,17 @@ pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<ChannelIntent,
 #[derive(Debug, Parser)]
 #[command(about = "Fast and efficient video denoising", long_about = None, version)]
 pub struct Args {
-    /// Speed vs quality dial.
+    /// Speed vs quality dial for `nlmeans`.
     ///
     /// `veryfast` is the fastest and lowest-quality end of the dial.
-    /// For `nlmeans` it runs the `fast` variant with no temporal window.
-    /// For `nl4d` it keeps a 1-frame temporal window, which that
-    /// algorithm needs, and narrows the spatial search instead.
+    /// It runs the `fast` variant with no temporal window.
     ///
     /// Going up the list widens the temporal window, from a 1-frame
     /// radius at `fast` to an 8-frame radius at `veryslow`. `fast` and
-    /// above also run the `hq` variant of `nlmeans`, and `slow` and
-    /// `veryslow` widen its search radius.
+    /// above also run the `hq` variant, and `slow` and `veryslow` widen
+    /// its search radius.
     ///
-    /// `base` is the default.
+    /// `nl4d` only runs `base`, the default.
     #[arg(long, env = "AVD_PRESET", default_value = "base", global = true)]
     pub preset: Preset,
 
@@ -193,8 +191,8 @@ pub enum Command {
     /// predicted to have moved, then the group's coefficients are shrunk
     /// jointly.
     ///
-    /// Motion tracking is always on, and every preset keeps a temporal
-    /// window, which this algorithm needs.
+    /// Motion tracking is always on, and the temporal window always
+    /// reaches at least one frame, which this algorithm needs.
     Nl4d(Nl4dArgs),
 
     /// Tune the kernels for this device ahead of a denoising run.

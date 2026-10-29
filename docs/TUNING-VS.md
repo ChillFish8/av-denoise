@@ -51,16 +51,16 @@ clean = avd.Nl4d(clip)
 clean.set_output()
 ```
 
-`preset` sets how many neighbouring frames are searched, from a 3-frame window at `fast` to a
-17-frame one at `veryslow`. `veryfast` keeps the 3-frame window and narrows the spatial search
-instead, since NL4D has nothing to group without neighbours.
+NL4D only runs the `base` preset. `temporal_radius` sets how many neighbouring frames are searched
+on each side, between 1 and 8, and defaults to 2. NL4D always needs at least 1, since it has nothing
+to group without neighbours.
 
 ### The NL4D dials
 
 **`lambda_ht_scale` is the main dial.** The threshold it scales is how many standard deviations
 of estimated noise a transform coefficient has to clear to survive, so raising the scale removes
 more noise and takes more fine detail with it. Move in steps of **0.05 to 0.1** and judge by eye,
-before you consider going up a preset. You should try this parameter before touching the absolute
+before you consider raising `temporal_radius`. You should try this parameter before touching the absolute
 values, since luma and chroma start from different defaults and the scale keeps that separation.
 
 ```python
@@ -77,8 +77,7 @@ clean = avd.Nl4d(clip, luma_lambda_ht=5.0, lambda_ht_scale=1.05)
 ```
 
 **`spatial_radius` is the speed dial.** The centre-frame search covers `(2 * radius + 1)^2`
-positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates, which
-is exactly what `preset="veryfast"` does.
+positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates.
 
 **`noise_map=False` turns off the luma noise map.** The noise map is on by default. It scales the
 luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
@@ -122,8 +121,6 @@ clean = avd.Nl4d(clip, enable_psy=True, psy_shadow_soften=0.8)
 - **`sigma`** pins the noise level to a fixed value and turns the per-frame measurement off
   entirely. `sigma_scale` keeps the measurement and nudges it, which is almost always what you
   actually want.
-- **`temporal_radius`** is what `preset` mostly exists to resolve. Setting it by hand is fine, but
-  it is the same lever the preset ladder pulls, so reach for the ladder first.
 - **`sigma_scale`**, and it does something different. The lambda dials decide how
   aggressive to be at a given noise level. `sigma_scale` corrects the noise level itself. That
   estimate also feeds the motion confidence scoring, so when the whole result reads uniformly

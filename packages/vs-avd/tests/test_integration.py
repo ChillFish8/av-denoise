@@ -6,7 +6,7 @@ from typing import get_args
 import pytest
 import vapoursynth as vs
 from vsavd import Nl4d, Nlm, NlmHQ
-from vsavd._types import ChannelMode, Preset
+from vsavd._types import ChannelMode, Nl4dPreset, Preset
 
 core = vs.core
 
@@ -75,7 +75,17 @@ def test_every_preset_literal_is_accepted():
     """_types.Preset duplicates strings the plugin owns. Prove they agree."""
     src = synthetic_clip()
     for preset in get_args(Preset):
+        NlmHQ(src, preset=preset).get_frame(0)
+    for preset in get_args(Nl4dPreset):
         Nl4d(src, preset=preset).get_frame(0)
+
+
+@pytest.mark.gpu
+def test_nl4d_rejects_presets_other_than_base():
+    src = synthetic_clip()
+    for preset in set(get_args(Preset)) - set(get_args(Nl4dPreset)):
+        with pytest.raises(vs.Error, match="base preset"):
+            Nl4d(src, preset=preset).get_frame(0)
 
 
 @pytest.mark.gpu
