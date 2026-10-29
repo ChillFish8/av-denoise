@@ -25,8 +25,10 @@ mod config;
 mod consts;
 mod decide;
 mod device;
+mod engine_set;
 mod family;
 mod fidelity;
+mod frame;
 pub(crate) mod gpu;
 mod helpers;
 mod identity;
@@ -101,6 +103,7 @@ pub use self::fidelity::{
     diff_integers,
     diff_plane,
 };
+pub use self::frame::TuningFrame;
 #[cfg(feature = "vulkan")]
 pub use self::helpers::vulkan_compile_helpers;
 pub use self::helpers::{CompileHelpers, HelperFactory, compilation_cache_enabled};

@@ -1,5 +1,17 @@
 use cubecl::prelude::*;
 
+/// Copies `words` 32-bit words from `src` into `dst`, bit for bit.
+///
+/// The loop is strided by `total_threads`, so a grid capped below the word count still covers it.
+#[cube(launch_unchecked)]
+pub fn copy_words(src: &[u32], dst: &mut [u32], #[comptime] words: u32, #[comptime] total_threads: u32) {
+    let mut idx = ABSOLUTE_POS_X;
+    while idx < words {
+        dst[idx as usize] = src[idx as usize];
+        idx += total_threads;
+    }
+}
+
 /// Normalises word-packed planes into one interleaved ring slot.
 ///
 /// `max` is the largest sample code, and `offset` is the slot's first element in `ring`. Threads

@@ -158,7 +158,15 @@ fn a_full_pass_tunes_and_saves_and_a_second_finds_it_done() {
 
     let store_dir = cache.path().join(crate::KERNEL_HASH).join("tune");
     let entries = std::fs::read_dir(store_dir).unwrap();
-    let files: Vec<_> = entries.flatten().collect();
+    let files: Vec<_> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
     assert_eq!(files.len(), 1, "one store file for one device");
 }
 

@@ -7,6 +7,7 @@ mod convergence;
 mod decide;
 mod device;
 mod engine;
+mod engine_set;
 pub(crate) mod equivalence;
 mod family;
 mod family_search;
