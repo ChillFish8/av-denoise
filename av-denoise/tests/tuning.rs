@@ -7,12 +7,10 @@ use av_denoise::tune::{
     TuneRequest,
     TuneResult,
     TuneStore,
-    TuningConfig,
     default_store_dir,
     is_tuned,
     selected_device,
     tune_planes,
-    tuning_config,
 };
 use av_denoise::{
     Algorithm,
@@ -260,11 +258,7 @@ fn a_tuned_planar_denoiser_matches_a_fresh_cached_one() {
     let frame_layout = layout();
     let clip = frames(13);
     let tuned_options = options(algorithm, TuningMode::Auto, false);
-    let defaults = tuning_config(&tuned_options);
-    let config = TuningConfig {
-        budget: BudgetRequest::Seconds(30.0),
-        ..defaults
-    };
+    let budget = BudgetRequest::Seconds(30.0);
     let request = TuneRequest {
         force: false,
         mode: SearchMode::Families,
@@ -272,7 +266,7 @@ fn a_tuned_planar_denoiser_matches_a_fresh_cached_one() {
 
     let mut planar = PlanarDenoiser::create(&tuned_options, frame_layout).expect("the denoiser builds");
     let report = planar
-        .tune(&clip, &config, &request)
+        .tune(&clip, budget, &request)
         .expect("the denoiser rebuilds");
     let tuned = denoise_with(&mut planar, &clip);
 
@@ -282,4 +276,37 @@ fn a_tuned_planar_denoiser_matches_a_fresh_cached_one() {
     assert_eq!(report.outcome, TuneOutcome::Tuned, "{report:?}");
     assert_eq!(tuned.len(), clip.len());
     assert!(planes_equal(&tuned, &cached));
+}
+
+#[test]
+fn a_rebuilt_planar_denoiser_reads_the_result_it_just_tuned() {
+    let cache = tempfile::tempdir().expect("a temporary directory");
+    install_compilation_cache_at(cache.path()).expect("the cache installs");
+
+    let plane_options = options(Algorithm::default(), TuningMode::Auto, true);
+    let frame_layout = layout();
+    let clip = frames(12);
+    let request = TuneRequest {
+        force: false,
+        mode: SearchMode::Families,
+    };
+
+    let mut planar = PlanarDenoiser::create(&plane_options, frame_layout).expect("the denoiser builds");
+    let first = planar
+        .tune(&clip, BudgetRequest::Full, &request)
+        .expect("the denoiser rebuilds");
+    let again = planar
+        .tune(&clip, BudgetRequest::Full, &request)
+        .expect("the denoiser rebuilds");
+
+    let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
+    let store_dir = default_store_dir().expect("caching is on");
+    let store = TuneStore::at(store_dir);
+    let stored = store.load(&device.identity);
+
+    assert_eq!(first.outcome, TuneOutcome::Tuned, "{first:?}");
+    assert!(first.saved);
+    assert!(ranked_count(&stored) > 0);
+    assert_eq!(again.outcome, TuneOutcome::AlreadyTuned, "{again:?}");
+    assert!(is_tuned(&plane_options, frame_layout));
 }

@@ -507,3 +507,16 @@ fn a_failed_rename_removes_the_temporary_file() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+#[test]
+fn an_older_layout_of_another_version_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let path = store.path_for(&device);
+    std::fs::write(&path, br#"{ "format_version": 1, "plans": {} }"#).unwrap();
+
+    let loaded = store.load(&device);
+
+    assert_eq!(loaded, TuneResult::default());
+}

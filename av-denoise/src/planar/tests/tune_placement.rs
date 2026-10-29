@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use av_denoise_core::DenoisingMode;
-use av_denoise_core::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest, TuningConfig};
+use av_denoise_core::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest};
 
 use crate::planar::{
     ChannelIntent,
@@ -59,7 +59,10 @@ fn families_request() -> TuneRequest {
 
 #[test]
 fn tuning_rebuilds_an_own_device_denoiser_on_its_device() {
-    let plane_options = options();
+    let plane_options = PlaneOptions {
+        tuning: TuningMode::Auto,
+        ..options()
+    };
     let frame_layout = layout();
     let mut planar =
         PlanarDenoiser::create_on_own_device(&plane_options, frame_layout).expect("the denoiser builds");
@@ -69,14 +72,10 @@ fn tuning_rebuilds_an_own_device_denoiser_on_its_device() {
     let built_hosts = placement.handed_out();
 
     let frames = vec![grey_frame(frame_layout)];
-    let config = TuningConfig {
-        mode: TuningMode::Auto,
-        budget: BudgetRequest::Seconds(0.0),
-        ..TuningConfig::default()
-    };
+    let budget = BudgetRequest::Seconds(0.0);
     let request = families_request();
     planar
-        .tune(&frames, &config, &request)
+        .tune(&frames, budget, &request)
         .expect("the denoiser rebuilds");
 
     let reopened = placement.opened().expect("the device is still open");
@@ -99,13 +98,9 @@ fn a_skipped_pass_keeps_the_hosts() {
     let built_hosts = placement.handed_out();
 
     let frames = vec![grey_frame(frame_layout)];
-    let config = TuningConfig {
-        mode: TuningMode::Off,
-        ..TuningConfig::default()
-    };
     let request = families_request();
     let report = planar
-        .tune(&frames, &config, &request)
+        .tune(&frames, BudgetRequest::Full, &request)
         .expect("a skip never fails");
 
     let handed_out = placement.handed_out();

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-use av_denoise_core::tune::{open_lock_file, wait_for_lock};
+use av_denoise_core::lockfile::{open_lock_file, wait_for_lock};
 use cubecl::hash::StableHasher;
 
 use crate::cache::{compilation_cache_dir, merge_compilation_cache};

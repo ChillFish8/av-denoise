@@ -535,6 +535,45 @@ fn a_tiny_budget_ends_the_warm_up_early() {
 }
 
 #[test]
+fn a_frame_with_a_short_handle_is_skipped() {
+    let store = tempfile::tempdir().unwrap();
+    let config = auto_config(store.path(), BudgetRequest::Full);
+    let device = crate::testing::test_device();
+    let client = device.client();
+    let specs = nlmeans_specs();
+    let mut planes = frame_planes(&client, &specs, 0);
+    planes[0][0] = client.create_from_slice(&[0u8; 16]);
+    let clip = vec![TuningFrame::new(planes)];
+
+    let report = tune_frames(&device, &client, &specs, &clip, &config, &request());
+
+    let TuneOutcome::Skipped(reason) = &report.outcome else {
+        panic!("a short handle never tunes, got {report:?}");
+    };
+    assert!(reason.contains("plane mismatch"), "{reason}");
+    assert!(!report.saved);
+}
+
+#[test]
+fn a_frame_for_too_few_engines_is_skipped() {
+    let store = tempfile::tempdir().unwrap();
+    let config = auto_config(store.path(), BudgetRequest::Full);
+    let device = crate::testing::test_device();
+    let client = device.client();
+    let specs = nlmeans_specs();
+    let mut planes = frame_planes(&client, &specs, 0);
+    planes.pop();
+    let clip = vec![TuningFrame::new(planes)];
+
+    let report = tune_frames(&device, &client, &specs, &clip, &config, &request());
+
+    let TuneOutcome::Skipped(reason) = &report.outcome else {
+        panic!("a frame missing an engine never tunes, got {report:?}");
+    };
+    assert!(reason.contains("plane mismatch"), "{reason}");
+}
+
+#[test]
 fn a_set_without_a_ledger_is_skipped() {
     let store = tempfile::tempdir().unwrap();
     let config = auto_config(store.path(), BudgetRequest::Full);

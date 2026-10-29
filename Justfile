@@ -121,6 +121,7 @@ test-rust backend="vulkan":
         threads=()
         if [ "{{backend}}" = rocm ]; then threads=(--test-threads 8); fi
         cargo nextest run --release -p av-denoise-core --no-default-features --features {{backend}} "${threads[@]}"
+        cargo nextest run --release -p av-denoise-core --no-default-features --features {{backend}} --profile tuning "${threads[@]}"
         exit 0
     fi
     cargo nextest run --release -p av-denoise-core --features vulkan

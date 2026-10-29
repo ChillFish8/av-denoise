@@ -5,7 +5,6 @@ mod tests;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::Context;
 use av_denoise_core::tune::{TuningConfig, TuningFrame, tune_frames};
@@ -26,7 +25,7 @@ pub use self::reseed::ReseedWindow;
 use crate::backend::accelerate::Accelerator;
 use crate::backend::{Device, DevicePlacement};
 use crate::host::{Algorithm, DenoiserError, DenoiserOptions, Depth, HostDenoiser, PlaneTiming};
-use crate::tune::{TuneReport, TuneRequest, TuningMode, skipped_report};
+use crate::tune::{BudgetRequest, TuneReport, TuneRequest, TuningMode, tuning_config};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subsampling {
@@ -187,7 +186,8 @@ pub struct PlaneOptions {
     pub chroma_lambda_ht: Option<f32>,
     /// Whether the planes run tuned kernels.
     ///
-    /// With [TuningMode::Auto], [PlanarDenoiser::tune] can also tune them in place.
+    /// With [TuningMode::Auto], [PlanarDenoiser::tune] runs a tuning pass and rebuilds them from its
+    /// result.
     pub tuning: TuningMode,
     /// Picks only bit-identical candidates and the baseline profile.
     pub deterministic: bool,
@@ -541,29 +541,32 @@ impl PlanarDenoiser {
         halves.into_iter().flatten().collect()
     }
 
-    /// Tunes this denoiser's engines on `frames` as `config` says, and saves the result.
+    /// Tunes this denoiser's engines on `frames` within `budget`, and saves the result.
     ///
-    /// The frames are looped as often as tuning needs and no output from them is returned. The
-    /// hosts' engines are freed while the pass runs, then rebuilt from the stored results on the same
-    /// device, ready for a fresh stream. A pass that is skipped up front leaves the hosts untouched.
+    /// The pass reads the [tuning_config](crate::tune::tuning_config) of this denoiser's options, so it
+    /// shares a store and the deterministic flag with the rebuild. The frames are looped as often as
+    /// tuning needs and no output from them is returned. The hosts' engines are freed while the pass
+    /// runs, then rebuilt from the stored results on the same device, ready for a fresh stream. A pass
+    /// that is skipped up front leaves the hosts untouched.
     ///
     /// A failed rebuild is an error, and the denoiser then rejects every push.
     pub fn tune(
         &mut self,
         frames: &[Planes],
-        config: &TuningConfig,
+        budget: BudgetRequest,
         request: &TuneRequest,
     ) -> Result<TuneReport, anyhow::Error> {
-        let started = Instant::now();
+        let defaults = tuning_config(&self.options);
+        let config = TuningConfig { budget, ..defaults };
 
-        let prepared = self.prepare_tuning(frames, config);
+        let prepared = self.prepare_tuning(frames, &config);
         let pass = match prepared {
             Ok(pass) => pass,
-            Err(reason) => return Ok(skipped_report(reason, started)),
+            Err(reason) => return Ok(TuneReport::skipped(reason)),
         };
 
         self.drop_hosts();
-        let report = pass.run(config, request);
+        let report = pass.run(&config, request);
         drop(pass);
 
         self.rebuild_settled()?;
@@ -577,12 +580,10 @@ impl PlanarDenoiser {
         config: &TuningConfig,
         request: &TuneRequest,
     ) -> TuneReport {
-        let started = Instant::now();
-
         let prepared = self.prepare_tuning(frames, config);
         let pass = match prepared {
             Ok(pass) => pass,
-            Err(reason) => return skipped_report(reason, started),
+            Err(reason) => return TuneReport::skipped(reason),
         };
 
         drop(self);

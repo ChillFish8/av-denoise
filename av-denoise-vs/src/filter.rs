@@ -3,16 +3,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Error, Result, anyhow, bail};
-use av_denoise::tune::{
-    BudgetRequest,
-    SearchMode,
-    TuneOutcome,
-    TuneRequest,
-    TuningConfig,
-    is_tuned,
-    tuning_config,
-    tuning_mode_from_env,
-};
+use av_denoise::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest, is_tuned, tuning_mode_from_env};
 use av_denoise::{
     EdgePadding,
     FrameLayout,
@@ -94,8 +85,8 @@ impl Drop for LiveFilter {
 pub struct Denoise<'core> {
     source: Node<'core>,
     layout: FrameLayout,
-    /// What the tuning pass on the first request is told, with a budget for the whole clip.
-    tuning: TuningConfig,
+    /// The budget for the tuning pass on the first request, sized for the whole clip.
+    tuning_budget: BudgetRequest,
     geometry: StreamGeometry,
     /// Requests `get_frame_initial` has registered, kept apart from [State] so registering one never
     /// waits on GPU work.
@@ -190,13 +181,8 @@ impl<'core> Denoise<'core> {
         };
 
         let clip_frames = last_frame as u64 + 1;
-        let budget = BudgetRequest::Automatic {
+        let tuning_budget = BudgetRequest::Automatic {
             frames: Some(clip_frames),
-        };
-        let tuning_defaults = tuning_config(&plane_options);
-        let tuning = TuningConfig {
-            budget,
-            ..tuning_defaults
         };
 
         let planner = StreamPlanner::new(geometry);
@@ -211,7 +197,7 @@ impl<'core> Denoise<'core> {
         Ok(Self {
             source,
             layout,
-            tuning,
+            tuning_budget,
             geometry,
             outstanding: Mutex::new(Outstanding::default()),
             state: Mutex::new(state),
@@ -304,7 +290,7 @@ impl<'core> Denoise<'core> {
             force: false,
             mode: SearchMode::Families,
         };
-        let report = state.denoiser.tune(&window, &self.tuning, &request)?;
+        let report = state.denoiser.tune(&window, self.tuning_budget, &request)?;
 
         match report.outcome {
             TuneOutcome::Tuned => tracing::warn!(

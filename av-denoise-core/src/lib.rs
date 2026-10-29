@@ -10,6 +10,7 @@ mod error;
 mod kernel_cache;
 #[cfg(test)]
 mod kernel_hash;
+pub mod lockfile;
 mod motion;
 pub mod nl4d;
 pub mod nlmeans;
@@ -63,12 +64,20 @@ pub use self::nlmeans::{
 };
 pub use self::options::Preset;
 pub use self::tune::{
+    BudgetRequest,
+    CacheHook,
+    CachePhase,
+    SearchMode,
+    TuneOutcome,
+    TuneReport,
+    TuneRequest,
     TunedGroup,
     TuningConfig,
     TuningFrame,
     TuningMode,
     build_engine,
     is_tuned,
+    profile_key,
     tune_frames,
 };
 

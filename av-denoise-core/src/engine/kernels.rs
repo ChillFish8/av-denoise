@@ -4,7 +4,7 @@ use cubecl::prelude::*;
 ///
 /// The loop is strided by `total_threads`, so a grid capped below the word count still covers it.
 #[cube(launch_unchecked)]
-pub fn copy_words(src: &[u32], dst: &mut [u32], #[comptime] words: u32, #[comptime] total_threads: u32) {
+pub fn copy_words(src: &[u32], dst: &mut [u32], words: u32, total_threads: u32) {
     let mut idx = ABSOLUTE_POS_X;
     while idx < words {
         dst[idx as usize] = src[idx as usize];

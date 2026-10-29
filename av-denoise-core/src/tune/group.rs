@@ -308,7 +308,7 @@ impl TunedGroup {
     fn settle(&mut self, frames: Vec<(TuningFrame, bool)>) -> Result<usize, Error> {
         self.tune(&frames);
 
-        let replayed = self.replay(&frames);
+        let replayed = self.replay(frames);
         match replayed {
             Ok(ready) if ready.is_empty() => {
                 self.state = State::Settled;
@@ -357,27 +357,18 @@ impl TunedGroup {
     }
 
     /// Builds the settled engines and pushes `frames` through them, keeping every ready frame.
-    fn replay(&mut self, frames: &[(TuningFrame, bool)]) -> Result<VecDeque<Vec<Handle>>, Error> {
+    ///
+    /// Each frame is dropped once it is pushed, so the buffer shrinks as the replay outputs grow.
+    fn replay(&mut self, frames: Vec<(TuningFrame, bool)>) -> Result<VecDeque<Vec<Handle>>, Error> {
         let mode = self.config.mode.after_tuning();
         self.engines = self.build_engines(mode)?;
 
         let mut ready = VecDeque::new();
 
         for (frame, context) in frames {
-            let lists: Vec<Vec<DevicePlane<'_>>> = self
-                .specs
-                .iter()
-                .enumerate()
-                .map(|(index, spec)| frame.planes_for(index, spec.geometry()))
-                .collect();
-            let planes: Vec<&[DevicePlane<'_>]> = lists.iter().map(Vec::as_slice).collect();
+            let count = self.push_buffered(&frame, context)?;
+            drop(frame);
 
-            if *context {
-                self.push_context_engines(&planes)?;
-                continue;
-            }
-
-            let count = self.push_engines(&planes)?;
             for _ in 0..count {
                 let owned = self.emit_owned()?;
                 ready.push_back(owned);
@@ -385,6 +376,24 @@ impl TunedGroup {
         }
 
         Ok(ready)
+    }
+
+    /// Pushes one buffered frame through the engines, returning how many frames are ready.
+    fn push_buffered(&mut self, frame: &TuningFrame, context: bool) -> Result<usize, Error> {
+        let lists: Vec<Vec<DevicePlane<'_>>> = self
+            .specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| frame.planes_for(index, spec.geometry()))
+            .collect();
+        let planes: Vec<&[DevicePlane<'_>]> = lists.iter().map(Vec::as_slice).collect();
+
+        if context {
+            self.push_context_engines(&planes)?;
+            return Ok(0);
+        }
+
+        self.push_engines(&planes)
     }
 
     /// Emits one frame from every engine into new handles, every engine's planes back to back.

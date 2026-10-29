@@ -13,6 +13,10 @@ pub struct TuningFrame {
 
 impl TuningFrame {
     /// A frame whose handles the caller has uploaded, one list per engine in group order.
+    ///
+    /// Each list holds one handle per channel of its engine, and each handle holds at least the
+    /// engine's input plane bytes. [tune_frames](crate::tune::tune_frames) skips a frame set that
+    /// breaks this.
     pub fn new(planes: Vec<Vec<Handle>>) -> Self {
         Self { planes }
     }
@@ -52,6 +56,26 @@ impl TuningFrame {
             .map(|handle| DevicePlane::new(handle, geometry.width, geometry.height))
             .collect()
     }
+}
+
+/// Checks every frame holds the planes each engine in `specs` reads, with handles large enough.
+pub(crate) fn check_frames(specs: &[EngineSpec], frames: &[TuningFrame]) -> Result<(), Error> {
+    for frame in frames {
+        let expected = specs.len();
+        let given = frame.planes.len();
+        if expected != given {
+            let message = format!("expected a tuning frame for {expected} engines, got {given}");
+            return Err(Error::PlaneMismatch(message));
+        }
+
+        for (index, spec) in specs.iter().enumerate() {
+            let geometry = spec.geometry();
+            let planes = frame.planes_for(index, geometry);
+            geometry.check_planes(&planes, geometry.input)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Checks there is one list of planes per engine in `specs`.

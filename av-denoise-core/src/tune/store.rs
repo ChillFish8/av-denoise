@@ -19,7 +19,7 @@ use super::result::{
     TuneResult,
 };
 
-/// The version of the file layout below. Any other version is ignored and tuned again.
+/// The version of the file layout below. A file of any other version is ignored.
 const FORMAT_VERSION: u32 = 2;
 
 /// Makes each temporary file name unique within this process.
@@ -31,6 +31,12 @@ type RememberedKey = (Option<PathBuf>, String);
 /// Results this process tuned or loaded.
 static REMEMBERED: LazyLock<Mutex<HashMap<RememberedKey, TuneResult>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Just the version of a stored file, which reads whatever layout the rest of the file has.
+#[derive(Debug, Deserialize)]
+struct StoredVersion {
+    format_version: u32,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredFile {
@@ -141,16 +147,29 @@ impl TuneStore {
             Ok(text) => text,
             Err(error) if error.kind() == ErrorKind::NotFound => return TuneResult::default(),
             Err(error) => {
-                tracing::warn!(?path, %error, "cannot read the tuning store, tuning again");
+                tracing::warn!(?path, %error, "cannot read the tuning store, ignoring its results");
                 return TuneResult::default();
             },
         };
+
+        let version = stored_version(&text);
+        if let Some(version) = version
+            && version != FORMAT_VERSION
+        {
+            tracing::info!(
+                ?path,
+                version,
+                "the tuning store has another format version, this build reads {FORMAT_VERSION}, ignoring \
+                 its results"
+            );
+            return TuneResult::default();
+        }
 
         let decoded = decode(&text, identity);
         let (mut result, undecoded) = match decoded {
             Ok(decoded) => decoded,
             Err(error) => {
-                tracing::warn!(?path, %error, "ignoring an unusable tuning store, tuning again");
+                tracing::warn!(?path, %error, "ignoring an unusable tuning store and its results");
                 return TuneResult::default();
             },
         };
@@ -160,7 +179,7 @@ impl TuneStore {
         if dropped > 0 {
             tracing::info!(
                 dropped,
-                "the tuning store names candidates this build lacks, tuning them again"
+                "the tuning store names candidates this build lacks, dropping their keys"
             );
             mark_incomplete(&mut result);
         }
@@ -347,16 +366,15 @@ fn mark_incomplete(result: &mut TuneResult) {
     }
 }
 
+/// The format version of the file in `text`, or `None` when it has none to read.
+fn stored_version(text: &str) -> Option<u32> {
+    let parsed = serde_json::from_str::<StoredVersion>(text);
+    parsed.ok().map(|stored| stored.format_version)
+}
+
 /// The result stored in `text`, with how many keys it dropped because this build cannot read them.
 fn decode(text: &str, identity: &DeviceIdentity) -> Result<(TuneResult, usize), anyhow::Error> {
     let stored: StoredFile = serde_json::from_str(text)?;
-
-    if stored.format_version != FORMAT_VERSION {
-        anyhow::bail!(
-            "the store has format version {}, this build reads {FORMAT_VERSION}",
-            stored.format_version
-        );
-    }
 
     let expected_identity = stored_identity(identity);
     if stored.identity != expected_identity {

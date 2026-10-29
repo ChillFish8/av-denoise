@@ -15,8 +15,6 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-use std::time::{Duration, Instant};
-
 pub use av_denoise_core::tune::{
     BudgetRequest,
     DeviceIdentity,
@@ -71,12 +69,11 @@ pub fn tune_planes(
     budget: BudgetRequest,
     request: &TuneRequest,
 ) -> TuneReport {
-    let started = Instant::now();
     let defaults = tuning_config(options);
     let config = TuningConfig { budget, ..defaults };
 
     if config.mode == TuningMode::Off {
-        return skipped_report("tuning is off", started);
+        return TuneReport::skipped("tuning is off");
     }
 
     let untuned = PlaneOptions {
@@ -88,7 +85,7 @@ pub fn tune_planes(
         Ok(planar) => planar,
         Err(error) => {
             let reason = format!("{error:#}");
-            return skipped_report(reason, started);
+            return TuneReport::skipped(reason);
         },
     };
 
@@ -112,23 +109,4 @@ pub fn is_tuned(options: &PlaneOptions, layout: FrameLayout) -> bool {
 
     let specs = plane_specs(options, layout);
     av_denoise_core::tune::is_tuned(&device, &client, &specs, &config)
-}
-
-/// A report for a pass that tuned nothing, for `reason`.
-pub(crate) fn skipped_report(reason: impl Into<String>, started: Instant) -> TuneReport {
-    let reason = reason.into();
-    tracing::info!(
-        %reason,
-        "kernel tuning skipped, launch sites without stored results run their baseline"
-    );
-
-    TuneReport {
-        outcome: TuneOutcome::Skipped(reason),
-        tuned_keys: 0,
-        partial_keys: 0,
-        compile: Duration::ZERO,
-        elapsed: started.elapsed(),
-        saved: false,
-        summary: None,
-    }
 }

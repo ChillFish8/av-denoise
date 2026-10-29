@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::tune::lock::{TuneLock, TuneLockOutcome, open_lock_file};
+use crate::lockfile::open_lock_file;
+use crate::tune::lock::{TuneLock, TuneLockOutcome};
 use crate::tune::{CacheHook, CachePhase};
 
 const BRIEFLY: Duration = Duration::from_millis(50);

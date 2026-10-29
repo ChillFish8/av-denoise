@@ -11,7 +11,7 @@ use self::pass::{PassInputs, run_pass};
 use super::config::{CachePhase, TuningConfig, TuningMode};
 use super::device::DeviceIdentity;
 use super::engine_set::EngineSet;
-use super::frame::TuningFrame;
+use super::frame::{TuningFrame, check_frames};
 use super::identity::describe;
 use super::ledger::{TuneLedger, TunePhase};
 use super::lock::{TuneLock, TuneLockOutcome};
@@ -77,21 +77,39 @@ impl TuneReport {
         }
     }
 
-    fn skipped(reason: impl Into<String>, started: Instant) -> Self {
+    /// A report for a pass that tuned nothing, for `reason`, with no time elapsed.
+    pub fn skipped(reason: impl Into<String>) -> Self {
         let reason = reason.into();
         tracing::info!(
             %reason,
             "kernel tuning skipped, launch sites without stored results run their baseline"
         );
 
-        Self::finished(TuneOutcome::Skipped(reason), started)
+        let outcome = TuneOutcome::Skipped(reason);
+        Self {
+            outcome,
+            tuned_keys: 0,
+            partial_keys: 0,
+            compile: Duration::ZERO,
+            elapsed: Duration::ZERO,
+            saved: false,
+            summary: None,
+        }
+    }
+
+    /// [Self::skipped], timed from `started`.
+    fn skipped_since(reason: impl Into<String>, started: Instant) -> Self {
+        let mut report = Self::skipped(reason);
+        report.elapsed = started.elapsed();
+        report
     }
 }
 
 /// Tunes the engines `specs` describe on `frames`, and stores the result.
 ///
 /// The pass builds its own engines and drops them afterwards. [TuningMode::Off] tunes nothing, and
-/// any other mode tunes.
+/// any other mode tunes. A frame that does not match `specs` skips the pass, with the mismatch as the
+/// reason.
 pub fn tune_frames(
     device: &cubecl::Device,
     client: &Client,
@@ -103,7 +121,13 @@ pub fn tune_frames(
     let started = Instant::now();
 
     if config.mode == TuningMode::Off {
-        return TuneReport::skipped("tuning is off", started);
+        return TuneReport::skipped_since("tuning is off", started);
+    }
+
+    let checked = check_frames(specs, frames);
+    if let Err(error) = checked {
+        let reason = error.to_string();
+        return TuneReport::skipped_since(reason, started);
     }
 
     let ledger = TuneLedger::new(config.deterministic);
@@ -116,7 +140,7 @@ pub fn tune_frames(
         Ok(set) => set,
         Err(error) => {
             let reason = format!("{error:#}");
-            return TuneReport::skipped(reason, started);
+            return TuneReport::skipped_since(reason, started);
         },
     };
 
@@ -169,11 +193,11 @@ pub(crate) fn tune_set(
     let started = Instant::now();
 
     let Some(ledger) = set.ledger().cloned() else {
-        return TuneReport::skipped("tuning is not on for this engine set", started);
+        return TuneReport::skipped_since("tuning is not on for this engine set", started);
     };
 
     if frames.is_empty() {
-        return TuneReport::skipped("there are no frames to tune on", started);
+        return TuneReport::skipped_since("there are no frames to tune on", started);
     }
 
     let store = config.store.as_deref();
@@ -190,7 +214,7 @@ pub(crate) fn tune_set(
     ledger.seed_compiled(&stored);
 
     if matches!(lock, TuneLockOutcome::TimedOut) {
-        return TuneReport::skipped("another process is still tuning", started);
+        return TuneReport::skipped_since("another process is still tuning", started);
     }
 
     if !request.force && stored.is_complete(&profile_keys) {
@@ -233,7 +257,7 @@ pub(crate) fn tune_set(
         },
         Err(error) => {
             let reason = format!("{error:#}");
-            TuneReport::skipped(reason, started)
+            TuneReport::skipped_since(reason, started)
         },
     };
 

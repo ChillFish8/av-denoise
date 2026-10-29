@@ -122,7 +122,8 @@ pub use self::identity::cuda_details;
 pub use self::identity::describe;
 #[cfg(feature = "vulkan")]
 pub use self::identity::find_adapter;
-pub use self::key::{SiteKey, SiteKeyBuilder};#[cfg_attr(
+pub use self::key::{SiteKey, SiteKeyBuilder};
+#[cfg_attr(
     not(test),
     expect(unused_imports, reason = "only the tests name it through this module")
 )]
@@ -139,7 +140,6 @@ pub use self::legality::{
     PlaneSizeError,
     check_plane_size,
 };
-pub use self::lock::{POLL_INTERVAL, open_lock_file, wait_for_lock};
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::precompile::Precompiled;
 pub use self::priority::{Basis, PriorityTable, SitePriority, family_order, priority_for, skipped};

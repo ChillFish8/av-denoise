@@ -12,6 +12,8 @@ use cubecl::config::cache::CacheConfig;
 use cubecl_environment::bytes::Bytes;
 use cubecl_environment::persistence::{Access, Database, Origin};
 
+use crate::lockfile::open_lock_file;
+
 /// The lock file that guards the shared cache file.
 const MERGE_LOCK_NAME: &str = "merge.lock";
 
@@ -631,23 +633,6 @@ fn warn_lock_failure(path: &Path, err: &std::io::Error) {
     }
 
     tracing::warn!(?path, %err, "cannot take the kernel cache lock, the shared cache is left alone");
-}
-
-fn open_lock_file(path: &Path) -> Option<File> {
-    let opened = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(path);
-
-    match opened {
-        Ok(file) => Some(file),
-        Err(err) => {
-            tracing::warn!(?path, %err, "cannot open the kernel cache lock file");
-            None
-        },
-    }
 }
 
 /// Deletes the private files in `dir` whose process has exited and that have gone unused for longer
