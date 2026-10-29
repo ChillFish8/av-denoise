@@ -616,7 +616,8 @@ fn window_span_doubles_the_radius_and_adds_the_lookahead() {
     let held = engine.max_held_frames();
     assert_eq!(held, expected);
 
-    let computed = Nl4d::held_frames_for(&options(2, false), ChannelMode::Luma);
+    let engine_options = options(2, false);
+    let computed = Nl4d::held_frames_for(&engine_options, ChannelMode::Luma);
     assert_eq!(computed, expected);
 }
 

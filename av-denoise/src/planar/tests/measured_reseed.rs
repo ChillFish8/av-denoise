@@ -50,7 +50,8 @@ fn every_intent(options: PlaneOptions) -> [PlaneOptions; 3] {
 fn a_measured_nl4d_reseed_matches_streaming_at_every_frame() {
     let frame_layout = layout();
 
-    for options in every_intent(nl4d_measured_options(2)) {
+    let base_options = nl4d_measured_options(2);
+    for options in every_intent(base_options) {
         for clip_len in [7usize, 30] {
             let frames = ramp_clip(&frame_layout, clip_len);
             let streamed = stream_all(&options, &frames);
@@ -84,7 +85,8 @@ fn a_measured_nl4d_reseed_matches_streaming_at_every_frame() {
 fn a_measured_nlmeans_hq_reseed_matches_the_streaming_output_mid_clip() {
     let frame_layout = layout();
 
-    for options in every_intent(nlmeans_hq_measured_options(2)) {
+    let base_options = nlmeans_hq_measured_options(2);
+    for options in every_intent(base_options) {
         let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
         let span = denoiser.window_span();
         let target_frame = span.behind + 2;

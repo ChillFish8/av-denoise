@@ -50,8 +50,8 @@ use crate::tune::gpu::bind;
 impl NoiseState {
     /// Queues the Immerkær estimate and the temporal statistics for the frame in `slot` of `input`.
     ///
-    /// `previous` is the slot the residual is taken against. `None`, for a stream's first frame
-    /// or a duplicated slot, zeroes the record. A state that holds fixed values queues nothing.
+    /// `previous` is the slot the residual is taken against. `None`, for a stream's first frame,
+    /// zeroes the record. A state that holds fixed values queues nothing.
     pub(crate) fn queue_stats(
         &self,
         input: &Handle,

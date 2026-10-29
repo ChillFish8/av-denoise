@@ -262,7 +262,8 @@ fn push_context_then_one_push_matches_the_streaming_centre() {
     let mut engine = build_engine(&client, radius, ChannelMode::Luma);
     let span = engine.window_span();
     let context = span.behind + span.ahead;
-    let frames = frames(span.frame_count(), 1);
+    let frame_count = span.frame_count();
+    let frames = frames(frame_count, 1);
 
     push_context_frames(&mut engine, &client, &frames[..context]);
 
@@ -671,7 +672,8 @@ fn window_span_and_held_frames_add_the_lookahead_to_the_radius() {
     let held = engine.max_held_frames();
     assert_eq!(held, expected);
 
-    let computed = Nlmeans::held_frames_for(&hq(3), ChannelMode::Luma);
+    let hq_options = hq(3);
+    let computed = Nlmeans::held_frames_for(&hq_options, ChannelMode::Luma);
     assert_eq!(computed, expected);
 }
 
@@ -687,6 +689,7 @@ fn window_span_and_held_frames_follow_the_radius_without_a_lookahead() {
     let held = engine.max_held_frames();
     assert_eq!(held, 3);
 
-    let computed = Nlmeans::held_frames_for(&pinned_hq(3), ChannelMode::Luma);
+    let pinned_options = pinned_hq(3);
+    let computed = Nlmeans::held_frames_for(&pinned_options, ChannelMode::Luma);
     assert_eq!(computed, 3);
 }

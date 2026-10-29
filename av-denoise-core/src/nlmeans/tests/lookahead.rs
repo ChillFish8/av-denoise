@@ -14,8 +14,8 @@ const PAN_FRAMES: usize = 12;
 const PAN_SIGMA: f32 = 2.0 / 255.0;
 const PAN_SEED: u32 = 7;
 
-/// Each pan frame's sigma read along its pass's own motion search, the reference the look-ahead
-/// readings match. `Direct` at radius 2 and `Chained` at radius 3 read the same values.
+/// Each pan frame's sigma read along its own motion, the reference the look-ahead readings match.
+/// `Direct` at radius 2 and `Chained` at radius 3 read the same values.
 const PASS_TIME_SIGMAS: [f32; PAN_FRAMES] = [
     0.007815467,
     0.007805687,
@@ -102,7 +102,8 @@ fn lookahead_readings_match_pass_time_readings() {
     let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, PAN_SHIFT, PAN_FRAMES, PAN_SIGMA, PAN_SEED);
 
     for (radius, label) in [(2, "direct"), (3, "chained")] {
-        let denoiser = run_nl4d(nl4d_pan_params(radius), &frames);
+        let params = nl4d_pan_params(radius);
+        let denoiser = run_nl4d(params, &frames);
         let front = denoiser.front_for_test();
         assert_eq!(front.is_chained(), radius == 3, "{label}: estimation");
 
@@ -123,11 +124,13 @@ fn scene_first_frame_reads_against_the_next_frame() {
         Nl4dDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT).expect("construction failed");
 
     denoiser.push_frame(&frames[0]);
-    let alone = history_sigma(denoiser.front_for_test(), 0);
+    let front = denoiser.front_for_test();
+    let alone = history_sigma(front, 0);
     assert_eq!(alone, None, "the first frame alone has nothing to read against");
 
     denoiser.push_frame(&frames[1]);
-    let first = history_sigma(denoiser.front_for_test(), 0).expect("the first frame has a sample");
+    let front = denoiser.front_for_test();
+    let first = history_sigma(front, 0).expect("the first frame has a sample");
     assert_within(first, PASS_TIME_SIGMAS[0], 0.02, "first frame");
 
     let raw = raw_reading_sigma(&frames[1], &frames[0], PAN_WIDTH, PAN_HEIGHT, 1)
@@ -151,8 +154,10 @@ fn held_frames_do_not_enter_the_window() {
         }
     }
 
-    let plain = run_nl4d(nl4d_pan_params(2), &frames);
-    let held = run_nl4d(nl4d_pan_params(2), &with_held);
+    let plain_params = nl4d_pan_params(2);
+    let held_params = nl4d_pan_params(2);
+    let plain = run_nl4d(plain_params, &frames);
+    let held = run_nl4d(held_params, &with_held);
 
     // Each held copy follows its frame, so it lands one stream frame later per earlier copy.
     let front = held.front_for_test();
@@ -212,7 +217,8 @@ fn released_frames_are_bit_identical_to_pushed_frames() {
     let pushes = LOOKAHEAD_FRAMES as usize + 4;
     let frames = panning_frames(PAN_WIDTH, PAN_HEIGHT, PAN_SHIFT, pushes, PAN_SIGMA, PAN_SEED);
     let client = make_client();
-    let params = hq_params(2, MotionCompensationMode::mvtools_default());
+    let motion = MotionCompensationMode::mvtools_default();
+    let params = hq_params(2, motion);
     let total_frames = params.total_frames();
     let mut denoiser = NlmDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT);
     let depth = denoiser.lookahead_depth();
@@ -249,7 +255,8 @@ fn released_frames_are_bit_identical_to_pushed_frames() {
 /// A measuring radius 2 front with motion compensation, at the pan size.
 fn scene_front() -> NlmDenoiser {
     let client = make_client();
-    let params = hq_params(2, MotionCompensationMode::mvtools_default());
+    let motion = MotionCompensationMode::mvtools_default();
+    let params = hq_params(2, motion);
 
     NlmDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT)
 }

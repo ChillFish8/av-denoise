@@ -348,7 +348,8 @@ fn a_window_without_samples_falls_back_to_immerkaer() {
         .map(|frame| hashed_record(frame + 3, 1, false, false))
         .collect();
     let bounds = WindowBounds::around(4, 8);
-    let run = run_window(1, settings(luma_map(), 1.0), &records, bounds, 8);
+    let case_settings = settings(luma_map(), 1.0);
+    let run = run_window(1, case_settings, &records, bounds, 8);
 
     let mut unboosted: Vec<f32> = records
         .iter()

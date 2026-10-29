@@ -118,7 +118,8 @@ fn scene_clip_layout() -> FrameLayout {
 #[test]
 fn a_run_at_the_permit_floor_finishes() {
     let frame_bytes = SCENE_CLIP_SIZE * SCENE_CLIP_SIZE * 3 / 2;
-    let held_frames = temporal_opts().max_held_frames(scene_clip_layout());
+    let layout = scene_clip_layout();
+    let held_frames = temporal_opts().max_held_frames(layout);
     let floor = frame_permits(0, frame_bytes, 2, held_frames);
     let budget = floor as u64 * frame_bytes as u64;
 
@@ -136,7 +137,8 @@ fn the_cli_frame_budget_covers_the_lookahead() {
         mode: DenoisingMode::Temporal { radius: 2 },
         ..temporal_opts()
     };
-    let held_frames = options.max_held_frames(scene_clip_layout());
+    let layout = scene_clip_layout();
+    let held_frames = options.max_held_frames(layout);
 
     // Twice the radius, plus the 8 frames the noise look-ahead holds.
     assert_eq!(held_frames, 12);

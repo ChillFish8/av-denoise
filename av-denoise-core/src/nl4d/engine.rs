@@ -261,6 +261,8 @@ impl Engine for Nl4d {
         if self.tail_remaining > 0 {
             self.tail_remaining -= 1;
             if self.tail_remaining == 0 {
+                let held_frames = self.inner.front.held_frames();
+                debug_assert_eq!(held_frames, 0, "the tail drained the look-ahead");
                 self.restart_stream();
             }
         }
