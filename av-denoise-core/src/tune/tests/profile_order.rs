@@ -1,0 +1,298 @@
+use std::time::Duration;
+
+use super::legality::faked_profile;
+use crate::tune::driver::profiles::{
+    ProfileComparison,
+    ProfilePhase,
+    ProfileRun,
+    ProfileTrial,
+    alternative_profiles_for,
+    f32_profile_applies,
+    time_profiles,
+};
+use crate::tune::{
+    AMD_VENDOR_ID,
+    Basis,
+    DeviceProfile,
+    NVIDIA_VENDOR_ID,
+    PROFILE_BLOCK_FRAMES,
+    PROFILE_MIN_BLOCKS,
+    PipelineProfile,
+    PriorityTable,
+    ProfileRecord,
+    SearchMode,
+};
+
+const F32_FIRST: PriorityTable = PriorityTable {
+    sites: &[],
+    profiles_basis: Basis::Expected,
+    profiles: &[
+        PipelineProfile::F32Search,
+        PipelineProfile::Baseline,
+        PipelineProfile::SplitSearch,
+    ],
+};
+
+const BASELINE_LAST: PriorityTable = PriorityTable {
+    sites: &[],
+    profiles_basis: Basis::Expected,
+    profiles: &[
+        PipelineProfile::SplitSearch,
+        PipelineProfile::F32Search,
+        PipelineProfile::Baseline,
+    ],
+};
+
+const ORDER: [PipelineProfile; 2] = [PipelineProfile::SplitSearch, PipelineProfile::F32Search];
+
+/// The GTX 1070, where f16 search is illegal.
+const GTX_1070: u32 = 0x1B81;
+
+/// The RTX 4090, where f16 search is legal.
+const RTX_4090: u32 = 0x2684;
+
+/// The AMD Radeon AI PRO R9700.
+const R9700: u32 = 0x7551;
+
+fn r9700_profile() -> DeviceProfile {
+    faked_profile("vulkan", AMD_VENDOR_ID, R9700, None)
+}
+
+fn pascal_vulkan_profile() -> DeviceProfile {
+    faked_profile("vulkan", NVIDIA_VENDOR_ID, GTX_1070, None)
+}
+
+/// Frame times in milliseconds, with the baseline at 100.
+fn frame_millis(profile: PipelineProfile, split: u64, f32_search: u64) -> u64 {
+    match profile {
+        PipelineProfile::Baseline => 100,
+        PipelineProfile::SplitSearch => split,
+        PipelineProfile::F32Search => f32_search,
+    }
+}
+
+fn block_times(millis: u64) -> Vec<Duration> {
+    let frame_time = Duration::from_millis(millis);
+    let frames = PROFILE_MIN_BLOCKS * PROFILE_BLOCK_FRAMES;
+
+    vec![frame_time; frames]
+}
+
+/// Times `order` with the frame times `millis` gives, returning the run and the profiles it tried.
+fn run_profiles(
+    order: &[PipelineProfile],
+    mode: SearchMode,
+    millis: impl Fn(PipelineProfile) -> u64,
+) -> (ProfileRun<PipelineProfile>, Vec<PipelineProfile>) {
+    run_with_faults(order, mode, millis, |_| None)
+}
+
+/// Like [run_profiles], but a profile `fault` answers for ends with that trial instead.
+fn run_with_faults(
+    order: &[PipelineProfile],
+    mode: SearchMode,
+    millis: impl Fn(PipelineProfile) -> u64,
+    fault: impl Fn(PipelineProfile) -> Option<ProfileTrial<PipelineProfile>>,
+) -> (ProfileRun<PipelineProfile>, Vec<PipelineProfile>) {
+    let mut tried = Vec::new();
+
+    let run = time_profiles(order, mode, |profile| {
+        tried.push(profile);
+
+        if let Some(trial) = fault(profile) {
+            return trial;
+        }
+
+        let baseline_millis = millis(PipelineProfile::Baseline);
+        let alternative_millis = millis(profile);
+        let comparison = ProfileComparison {
+            baseline_times: block_times(baseline_millis),
+            alternative_times: block_times(alternative_millis),
+            significant: Vec::new(),
+            finished: true,
+        };
+
+        ProfileTrial::Timed {
+            comparison,
+            built: profile,
+        }
+    });
+
+    (run, tried)
+}
+
+fn compared_records(run: &ProfileRun<PipelineProfile>) -> &[ProfileRecord] {
+    match &run.phase {
+        ProfilePhase::Compared { records, .. } => records,
+        other => panic!("the profiles were not compared: {other:?}"),
+    }
+}
+
+fn record_profiles(records: &[ProfileRecord]) -> Vec<PipelineProfile> {
+    records.iter().map(|record| record.profile).collect()
+}
+
+fn winner_of(run: &ProfileRun<PipelineProfile>) -> Option<PipelineProfile> {
+    run.winner.as_ref().map(|winner| winner.built)
+}
+
+#[test]
+fn profiles_follow_the_device_table_order() {
+    let device = r9700_profile();
+
+    let f32_first = alternative_profiles_for(true, &device, &F32_FIRST);
+    let baseline_last = alternative_profiles_for(true, &device, &BASELINE_LAST);
+
+    let expected_f32_first = vec![PipelineProfile::F32Search, PipelineProfile::SplitSearch];
+    assert_eq!(f32_first, expected_f32_first);
+    assert_eq!(baseline_last, ORDER);
+}
+
+#[test]
+fn profile_timing_stops_at_the_first_profile_that_does_not_win() {
+    let (run, tried) = run_profiles(&ORDER, SearchMode::Families, |profile| {
+        frame_millis(profile, 99, 50)
+    });
+
+    let records = compared_records(&run);
+    let recorded = record_profiles(records);
+
+    assert_eq!(tried, [PipelineProfile::SplitSearch]);
+    assert_eq!(
+        recorded,
+        [PipelineProfile::Baseline, PipelineProfile::SplitSearch]
+    );
+
+    let winner = winner_of(&run);
+    assert_eq!(winner, None);
+}
+
+#[test]
+fn a_profile_within_the_margin_of_the_best_still_wins_when_faster() {
+    let (run, tried) = run_profiles(&ORDER, SearchMode::Families, |profile| {
+        frame_millis(profile, 90, 89)
+    });
+
+    let records = compared_records(&run);
+    let recorded = record_profiles(records);
+
+    assert_eq!(tried, ORDER);
+    assert_eq!(recorded[1..], ORDER);
+
+    let winner = winner_of(&run);
+    assert_eq!(winner, Some(PipelineProfile::F32Search));
+}
+
+#[test]
+fn exhaustive_mode_times_every_legal_profile() {
+    let (run, tried) = run_profiles(&ORDER, SearchMode::Exhaustive, |profile| {
+        frame_millis(profile, 99, 50)
+    });
+
+    let records = compared_records(&run);
+    let recorded = record_profiles(records);
+
+    assert_eq!(tried, ORDER);
+    assert_eq!(recorded[1..], ORDER);
+
+    let winner = winner_of(&run);
+    assert_eq!(winner, Some(PipelineProfile::F32Search));
+}
+
+#[test]
+fn the_baseline_profile_is_always_timed() {
+    let device = r9700_profile();
+    let order = alternative_profiles_for(true, &device, &BASELINE_LAST);
+
+    let (run, tried) = run_profiles(&order, SearchMode::Families, |profile| {
+        frame_millis(profile, 120, 50)
+    });
+
+    let records = compared_records(&run);
+    let baseline = records[0];
+    let baseline_blocks = PROFILE_MIN_BLOCKS as u32;
+
+    assert!(!order.contains(&PipelineProfile::Baseline));
+    assert_eq!(tried, [PipelineProfile::SplitSearch]);
+    assert_eq!(baseline.profile, PipelineProfile::Baseline);
+    assert_eq!(baseline.blocks, baseline_blocks);
+    assert_eq!(baseline.median_frame_ns, 100_000_000);
+
+    let winner = winner_of(&run);
+    assert_eq!(winner, None);
+}
+
+#[test]
+fn a_profile_that_does_not_build_or_compare_is_not_a_loss() {
+    let millis = |profile| frame_millis(profile, 90, 90);
+    let reached = ORDER.to_vec();
+
+    let (unbuilt_run, unbuilt_tried) = run_with_faults(&ORDER, SearchMode::Families, millis, |profile| {
+        let unbuilt = profile == PipelineProfile::SplitSearch;
+        unbuilt.then_some(ProfileTrial::Unbuilt)
+    });
+    let (failed_run, failed_tried) = run_with_faults(&ORDER, SearchMode::Families, millis, |profile| {
+        let failed = profile == PipelineProfile::SplitSearch;
+        failed.then_some(ProfileTrial::Failed)
+    });
+
+    let unbuilt_records = compared_records(&unbuilt_run);
+    let unbuilt_recorded = record_profiles(unbuilt_records);
+    let unbuilt_winner = winner_of(&unbuilt_run);
+    let failed_winner = winner_of(&failed_run);
+
+    assert_eq!(unbuilt_tried, reached);
+    assert_eq!(
+        unbuilt_recorded,
+        [PipelineProfile::Baseline, PipelineProfile::F32Search]
+    );
+    assert_eq!(unbuilt_winner, Some(PipelineProfile::F32Search));
+
+    assert_eq!(failed_tried, reached);
+    assert_eq!(failed_run.phase, ProfilePhase::Unfinished);
+    assert_eq!(failed_winner, Some(PipelineProfile::F32Search));
+}
+
+#[test]
+fn the_f32_profile_does_not_apply_where_f16_is_illegal() {
+    let device = pascal_vulkan_profile();
+
+    let applies = f32_profile_applies(true, &device);
+
+    assert!(!applies);
+}
+
+#[test]
+fn the_f32_profile_applies_to_nl4d_where_f16_is_legal() {
+    let device = faked_profile("vulkan", NVIDIA_VENDOR_ID, RTX_4090, None);
+
+    let nl4d_applies = f32_profile_applies(true, &device);
+    let nlmeans_applies = f32_profile_applies(false, &device);
+
+    assert!(nl4d_applies);
+    assert!(!nlmeans_applies);
+}
+
+#[test]
+fn only_nl4d_has_alternative_profiles() {
+    let device = r9700_profile();
+    let table = PriorityTable::neutral();
+
+    let nlmeans = alternative_profiles_for(false, &device, table);
+    let nl4d = alternative_profiles_for(true, &device, table);
+
+    assert!(nlmeans.is_empty());
+    assert!(nl4d.contains(&PipelineProfile::SplitSearch));
+    assert!(nl4d.contains(&PipelineProfile::F32Search));
+}
+
+#[test]
+fn a_device_with_illegal_f16_is_not_offered_the_f32_profile() {
+    let device = pascal_vulkan_profile();
+    let table = PriorityTable::neutral();
+
+    let profiles = alternative_profiles_for(true, &device, table);
+
+    assert!(!profiles.contains(&PipelineProfile::F32Search));
+    assert!(profiles.contains(&PipelineProfile::SplitSearch));
+}

@@ -17,6 +17,7 @@
 //! - [TuneStore] saves and loads results per device
 //! - [build_engine] builds an engine from the stored results, keyed by [profile_key]
 //! - [SearchMode] says how widely tuning searches a key, and [SiteSearch] records how it did
+//! - [tune_frames] runs a tuning pass, and [is_tuned] says whether one is needed
 
 mod budget;
 #[cfg(feature = "vulkan")]
@@ -25,6 +26,7 @@ mod config;
 mod consts;
 mod decide;
 mod device;
+mod driver;
 mod engine_set;
 mod family;
 mod fidelity;
@@ -40,6 +42,7 @@ mod plan;
 pub(crate) mod precompile;
 mod priority;
 mod profile_key;
+mod report;
 mod result;
 mod search;
 mod selector;
@@ -83,6 +86,7 @@ pub use self::decide::{
     sample_until_settled,
 };
 pub use self::device::{DeviceIdentity, DeviceLimits, DeviceProfile};
+pub use self::driver::{TuneOutcome, TuneReport, TuneRequest, is_tuned, tune_frames};
 pub use self::family::{
     BASELINE_FAMILY,
     Dimension,

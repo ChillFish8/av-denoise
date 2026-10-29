@@ -27,7 +27,6 @@ pub(crate) struct EngineSet {
     ledger: Option<Arc<TuneLedger>>,
 }
 
-#[expect(dead_code, reason = "the tuning driver is the only caller")]
 impl EngineSet {
     /// Builds an engine per spec from the store's picks, wired to `setup`.
     ///
@@ -144,6 +143,15 @@ impl EngineSet {
                 tracing::warn!(%error, "cannot drop the grain measured while tuning");
             }
         }
+    }
+
+    pub(crate) fn specs(&self) -> &[EngineSpec] {
+        &self.specs
+    }
+
+    #[cfg(test)]
+    pub(crate) fn engines_mut(&mut self) -> &mut [Box<dyn Engine>] {
+        &mut self.engines
     }
 
     pub(crate) fn profile_keys(&self) -> Vec<String> {

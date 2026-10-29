@@ -124,6 +124,7 @@ test-rust backend="vulkan":
         exit 0
     fi
     cargo nextest run --release -p av-denoise-core --features vulkan
+    cargo nextest run --release -p av-denoise-core --features vulkan --profile tuning
     cargo nextest run --release -p av-denoise --features vulkan,binary
     cargo nextest run --release -p av-denoise --features vulkan,binary --profile tuning
     cargo nextest run --release -p av-denoise-vs --features vulkan

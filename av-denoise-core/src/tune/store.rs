@@ -463,12 +463,15 @@ pub fn resolve(store: Option<&Path>, identity: &DeviceIdentity) -> TuneResult {
 
 /// Reads the store's file for `identity` afresh and remembers it.
 ///
-/// With no store the result is empty.
+/// With no store there is no file, so it returns what this process already holds, or an empty
+/// result.
 pub fn reload(store: Option<&Path>, identity: &DeviceIdentity) -> TuneResult {
-    let loaded = store
-        .map(|dir| TuneStore::at(dir).load(identity))
-        .unwrap_or_default();
+    let Some(dir) = store else {
+        let held = remembered(None, identity);
+        return held.unwrap_or_default();
+    };
 
+    let loaded = TuneStore::at(dir).load(identity);
     remember(store, identity, &loaded);
     loaded
 }
