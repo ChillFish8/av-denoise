@@ -270,7 +270,7 @@ fn another_format_version_is_ignored() {
     let result = sample_result();
     let path = store.save(&device, &result).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    let bumped = text.replace("\"format_version\": 1", "\"format_version\": 999");
+    let bumped = text.replace("\"format_version\": 2", "\"format_version\": 999");
     std::fs::write(&path, bumped).unwrap();
 
     let loaded = store.load(&device);

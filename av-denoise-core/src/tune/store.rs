@@ -20,7 +20,7 @@ use super::result::{
 };
 
 /// The version of the file layout below. Any other version is ignored and tuned again.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// Makes each temporary file name unique within this process.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);

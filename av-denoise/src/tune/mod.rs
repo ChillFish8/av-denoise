@@ -1,11 +1,10 @@
-//! Kernel tuning for the device in use
+//! Kernel tuning for the planes av-denoise denoises
 //!
-//! av-denoise times several launch shapes and kernels for each launch site on real frames, keeps
-//! the fastest correct one, and saves the result next to the compiled kernel cache so later runs
-//! skip tuning.
+//! This module connects the tuner to the CLI and plugin settings. It reads the tuning mode override
+//! from the environment, picks the store directory, keeps the compiled kernel cache in step, and
+//! uploads planar frames for a tuning pass.
 //!
 //! - [default_store_dir] says where results are kept
-//! - [TuneStore] saves and loads results per device
 //! - [TuningMode] says whether a run tunes, uses stored results or runs every baseline
 //! - [tuning_config] gathers what a tuning pass is told
 //! - [tune_planes] runs a tuning pass, and [is_tuned] says whether one is needed

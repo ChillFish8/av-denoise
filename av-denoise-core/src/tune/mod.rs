@@ -1,7 +1,8 @@
 //! Picks the fastest correct kernel variant for each launch site on the device in use
 //!
 //! Each tunable launch point is a site, and each way of running it is a candidate. Every candidate
-//! declares a [Fidelity] class that says how closely its output matches the baseline's.
+//! declares a [Fidelity] class that says how closely its output matches the baseline's. Results are
+//! saved per device, and engines are built from them.
 //!
 //! - [SiteKey] names one site at one compiled geometry
 //! - [KernelPlan] maps site keys to the candidate to run
@@ -121,8 +122,7 @@ pub use self::identity::cuda_details;
 pub use self::identity::describe;
 #[cfg(feature = "vulkan")]
 pub use self::identity::find_adapter;
-pub use self::key::{SiteKey, SiteKeyBuilder, bucket_dim};
-#[cfg_attr(
+pub use self::key::{SiteKey, SiteKeyBuilder};#[cfg_attr(
     not(test),
     expect(unused_imports, reason = "only the tests name it through this module")
 )]

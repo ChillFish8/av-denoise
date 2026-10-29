@@ -1,32 +1,23 @@
 use super::consts::TUNE_EXTRA_FRAMES;
 use super::key::bucket_dim;
 use crate::engine::{EngineSpec, SampleFormat};
-use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm};
+use crate::nlmeans::DenoisingMode;
 
 /// The key a plane's profile ranking is stored under.
 ///
-/// It names the algorithm with its settings, the channels, the temporal mode, the depth and the
-/// plane size rounded up to powers of two. A plane whose output format differs from its input, or
-/// whose input is not 8, 10 or 12-bit, also names both formats.
+/// It names the algorithm with its settings, the channels, the input and output formats and the
+/// plane size rounded up to powers of two.
 pub fn profile_key(spec: &EngineSpec) -> String {
     let geometry = spec.geometry();
     let width_bucket = bucket_dim(geometry.width);
     let height_bucket = bucket_dim(geometry.height);
 
-    let (algorithm, mode) = algorithm_and_mode(spec);
+    let algorithm = algorithm_name(spec);
     let channels = geometry.channels;
-    let depth = depth_name(geometry.input);
-    let mut key = format!("{algorithm}|{channels:?}|{mode:?}|{depth}|w{width_bucket}|h{height_bucket}");
+    let input = format_name(geometry.input);
+    let output = format_name(geometry.output);
 
-    let has_legacy_depth = legacy_depth(geometry.input).is_some();
-    if geometry.input != geometry.output || !has_legacy_depth {
-        let input = format_name(geometry.input);
-        let output = format_name(geometry.output);
-        let suffix = format!("|in-{input}|out-{output}");
-        key.push_str(&suffix);
-    }
-
-    key
+    format!("{algorithm}|{channels:?}|in-{input}|out-{output}|w{width_bucket}|h{height_bucket}")
 }
 
 /// How many frames a tuning pass over `specs` needs.
@@ -53,42 +44,11 @@ fn temporal_span(spec: &EngineSpec) -> usize {
     }
 }
 
-/// The algorithm's name with its settings, and the temporal mode it runs in.
-fn algorithm_and_mode(spec: &EngineSpec) -> (String, DenoisingMode) {
+/// The algorithm's name with its settings.
+fn algorithm_name(spec: &EngineSpec) -> String {
     match spec {
-        EngineSpec::Nlmeans {
-            algorithm: NlmeansAlgorithm::Fast(options),
-            ..
-        } => (format!("Nlmeans({options:?})"), options.mode),
-        EngineSpec::Nlmeans {
-            algorithm: NlmeansAlgorithm::Hq(options),
-            ..
-        } => (format!("NlmeansHq({options:?})"), options.nlm.mode),
-        EngineSpec::Nl4d { options, .. } => {
-            let mode = match options.temporal_radius {
-                0 => DenoisingMode::Spacial,
-                radius => DenoisingMode::Temporal { radius },
-            };
-
-            (format!("Nl4d({options:?})"), mode)
-        },
-    }
-}
-
-/// The legacy depth name for the 8, 10 and 12-bit formats.
-fn legacy_depth(format: SampleFormat) -> Option<&'static str> {
-    match format {
-        SampleFormat::U8 => Some("Eight"),
-        SampleFormat::U16 { depth: 10 } => Some("Ten"),
-        SampleFormat::U16 { depth: 12 } => Some("Twelve"),
-        _ => None,
-    }
-}
-
-fn depth_name(format: SampleFormat) -> String {
-    match legacy_depth(format) {
-        Some(name) => name.to_string(),
-        None => format_name(format),
+        EngineSpec::Nlmeans { algorithm, .. } => format!("Nlmeans({algorithm:?})"),
+        EngineSpec::Nl4d { options, .. } => format!("Nl4d({options:?})"),
     }
 }
 

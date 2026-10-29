@@ -67,6 +67,6 @@ impl SiteKeyBuilder {
 }
 
 /// Rounds a frame dimension up to the next power of two.
-pub fn bucket_dim(dim: u32) -> u32 {
+pub(crate) fn bucket_dim(dim: u32) -> u32 {
     dim.next_power_of_two()
 }

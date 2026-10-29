@@ -58,7 +58,7 @@ fn temporal_nlm(radius: u32) -> NlmeansOptions {
 }
 
 #[test]
-fn an_eight_bit_nl4d_chroma_key_matches_the_stored_layout() {
+fn an_eight_bit_nl4d_chroma_key_has_the_uniform_layout() {
     let spec = nl4d_spec(
         ChannelMode::Chroma,
         2,
@@ -71,36 +71,7 @@ fn an_eight_bit_nl4d_chroma_key_matches_the_stored_layout() {
     let key = profile_key(&spec);
 
     assert!(key.starts_with("Nl4d(Nl4dOptions {"), "{key}");
-    assert!(
-        key.ends_with("|Chroma|Temporal { radius: 2 }|Eight|w1024|h1024"),
-        "{key}"
-    );
-}
-
-#[test]
-fn float_output_gets_a_format_suffix() {
-    let spec = nl4d_spec(
-        ChannelMode::Luma,
-        2,
-        SampleFormat::U8,
-        SampleFormat::F32,
-        1920,
-        1080,
-    );
-
-    let key = profile_key(&spec);
-
-    assert!(key.ends_with("|Eight|w2048|h2048|in-u8|out-f32"), "{key}");
-}
-
-#[test]
-fn a_depth_av_denoise_never_builds_gets_a_format_suffix() {
-    let sixteen_bit = SampleFormat::U16 { depth: 16 };
-    let spec = nl4d_spec(ChannelMode::Luma, 2, sixteen_bit, sixteen_bit, 64, 64);
-
-    let key = profile_key(&spec);
-
-    assert!(key.ends_with("|u16|w64|h64|in-u16|out-u16"), "{key}");
+    assert!(key.ends_with("})|Chroma|in-u8|out-u8|w1024|h1024"), "{key}");
 }
 
 #[test]
@@ -110,25 +81,22 @@ fn ten_bit_input_with_float_output_names_both_formats() {
 
     let key = profile_key(&spec);
 
-    assert!(key.ends_with("|Ten|w64|h64|in-u10|out-f32"), "{key}");
+    assert!(key.ends_with("|Luma|in-u10|out-f32|w64|h64"), "{key}");
 }
 
 #[test]
-fn ten_and_twelve_bit_keys_name_their_depth_without_a_suffix() {
-    let ten_bit = SampleFormat::U16 { depth: 10 };
-    let twelve_bit = SampleFormat::U16 { depth: 12 };
-    let ten_spec = nl4d_spec(ChannelMode::Yuv, 2, ten_bit, ten_bit, 64, 64);
-    let twelve_spec = nl4d_spec(ChannelMode::Yuv, 2, twelve_bit, twelve_bit, 64, 64);
+fn different_radii_give_different_keys() {
+    let radius_one = nl4d_spec(ChannelMode::Luma, 1, SampleFormat::U8, SampleFormat::U8, 64, 64);
+    let radius_two = nl4d_spec(ChannelMode::Luma, 2, SampleFormat::U8, SampleFormat::U8, 64, 64);
 
-    let ten_key = profile_key(&ten_spec);
-    let twelve_key = profile_key(&twelve_spec);
+    let key_one = profile_key(&radius_one);
+    let key_two = profile_key(&radius_two);
 
-    assert!(ten_key.ends_with("|Ten|w64|h64"), "{ten_key}");
-    assert!(twelve_key.ends_with("|Twelve|w64|h64"), "{twelve_key}");
+    assert_ne!(key_one, key_two);
 }
 
 #[test]
-fn fast_and_hq_nlmeans_keep_their_legacy_names() {
+fn fast_and_hq_nlmeans_give_different_keys() {
     let nlm = temporal_nlm(1);
     let fast = NlmeansAlgorithm::Fast(nlm);
     let hq_options = NlmeansHqOptions {
@@ -143,26 +111,11 @@ fn fast_and_hq_nlmeans_keep_their_legacy_names() {
     let fast_key = profile_key(&fast_spec);
     let hq_key = profile_key(&hq_spec);
 
-    assert!(fast_key.starts_with("Nlmeans(NlmeansOptions {"), "{fast_key}");
-    assert!(hq_key.starts_with("NlmeansHq(NlmeansHqOptions {"), "{hq_key}");
-    assert!(
-        fast_key.ends_with("|Luma|Temporal { radius: 1 }|Eight|w64|h64"),
-        "{fast_key}"
-    );
-    assert!(
-        hq_key.ends_with("|Luma|Temporal { radius: 1 }|Eight|w64|h64"),
-        "{hq_key}"
-    );
-}
-
-#[test]
-fn a_spatial_nlmeans_key_names_the_spatial_mode() {
-    let nlm = NlmeansOptions::default();
-    let spec = nlmeans_spec(NlmeansAlgorithm::Fast(nlm));
-
-    let key = profile_key(&spec);
-
-    assert!(key.ends_with("|Luma|Spacial|Eight|w64|h64"), "{key}");
+    assert!(fast_key.starts_with("Nlmeans(Fast("), "{fast_key}");
+    assert!(hq_key.starts_with("Nlmeans(Hq("), "{hq_key}");
+    assert!(fast_key.ends_with("|Luma|in-u8|out-u8|w64|h64"), "{fast_key}");
+    assert!(hq_key.ends_with("|Luma|in-u8|out-u8|w64|h64"), "{hq_key}");
+    assert_ne!(fast_key, hq_key);
 }
 
 #[test]

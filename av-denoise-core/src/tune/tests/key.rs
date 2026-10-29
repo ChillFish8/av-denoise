@@ -1,4 +1,5 @@
-use crate::tune::{SiteKey, bucket_dim};
+use crate::tune::SiteKey;
+use crate::tune::key::bucket_dim;
 
 #[test]
 fn dimensions_round_up_to_a_power_of_two() {
