@@ -2,6 +2,8 @@
 
 mod cli;
 mod frame_index;
+#[cfg(feature = "cuda")]
+mod libdevice;
 mod pipeline;
 mod progress;
 mod warm_start;
@@ -40,6 +42,10 @@ fn main() -> anyhow::Result<()> {
     // SAFETY: still single-threaded, no other thread can race the env mutation.
     unsafe { av_denoise::raise_codegen_stack_limit() };
 
+    // SAFETY: still single-threaded, no other thread can race the env mutation.
+    #[cfg(feature = "cuda")]
+    let libdevice_outcome = unsafe { self::libdevice::point_cuda_path_at_bundle() };
+
     let args = Args::parse();
 
     if let Command::Tune(tune) = &args.command
@@ -67,6 +73,11 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(env_filter)
         .with_writer(log_writer)
         .init();
+
+    #[cfg(feature = "cuda")]
+    if let Err(error) = libdevice_outcome {
+        tracing::debug!(%error, "cannot install the bundled libdevice");
+    }
 
     // Listing devices compiles no kernels, so it skips the kernel cache.
     if matches!(args.command, Command::ListDevices) {
