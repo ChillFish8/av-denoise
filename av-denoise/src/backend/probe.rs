@@ -4,18 +4,20 @@ use std::sync::Mutex;
 use cubecl::prelude::Client;
 
 use super::accelerate::Accelerator;
+#[cfg(feature = "cuda")]
+use super::cuda_check::open_checked;
 
 /// Backends already reported as unavailable, and the lock guarding the panic hook.
 ///
 /// The hook is process-wide, so two probes running at once would race to restore each other's.
 /// Holding this for the length of a probe keeps them in single file, and the list inside it stops a
 /// backend from warning again every time it is probed.
-static PROBED: Mutex<Vec<Accelerator>> = Mutex::new(Vec::new());
+pub(super) static PROBED: Mutex<Vec<Accelerator>> = Mutex::new(Vec::new());
 
 /// Opens a client for `accelerator` on `device`, or reports that the backend cannot run here.
 ///
-/// The client is synchronised before it is handed back. cubecl kernels are fully asynchronous, so a
-/// successful `sync()` proves the backend works and no test kernel is needed.
+/// The client is synchronised before it is handed back. CUDA also compiles and runs a test kernel
+/// first, as a driver that starts can still fail to compile. Other backends rely on `sync()` alone.
 ///
 /// Some backends report missing driver libraries by panicking. The CUDA runtime loads `libcuda` on
 /// its own worker thread and panics there, which reaches the caller as a second panic when cubecl
@@ -23,6 +25,11 @@ static PROBED: Mutex<Vec<Accelerator>> = Mutex::new(Vec::new());
 /// run on a machine that has only one of them.
 pub(crate) fn open_client(accelerator: Accelerator, device: &cubecl::Device) -> Option<Client> {
     let mut probed = PROBED.lock().unwrap_or_else(|err| err.into_inner());
+
+    #[cfg(feature = "cuda")]
+    if accelerator == Accelerator::Cuda {
+        return open_cuda(&mut probed, device);
+    }
 
     let opened = quiet_panics(|| {
         let client = device.client();
@@ -50,12 +57,32 @@ pub(crate) fn open_client(accelerator: Accelerator, device: &cubecl::Device) -> 
     }
 }
 
+#[cfg(feature = "cuda")]
+fn open_cuda(probed: &mut Vec<Accelerator>, device: &cubecl::Device) -> Option<Client> {
+    let reason = match open_checked(device) {
+        Ok(client) => return Some(client),
+        Err(reason) => reason,
+    };
+
+    if reason.is_quiet() {
+        tracing::debug!("could not use the cuda runtime: {reason}");
+        return None;
+    }
+
+    if !probed.contains(&Accelerator::Cuda) {
+        probed.push(Accelerator::Cuda);
+        tracing::warn!("CUDA is unavailable, falling back: {reason}");
+    }
+
+    None
+}
+
 /// Runs `work`, turning a panic into an `Err` and routing the panic message to the debug log.
 ///
 /// A failing backend prints its own panic from its worker thread before the caller sees one, so the
 /// hook is quietened while `work` runs and put back afterwards. Callers hold [PROBED] across this so
 /// two probes cannot race to restore each other's hook.
-fn quiet_panics<T>(work: impl FnOnce() -> T) -> std::thread::Result<T> {
+pub(super) fn quiet_panics<T>(work: impl FnOnce() -> T) -> std::thread::Result<T> {
     let previous = panic::take_hook();
     let quiet_hook = Box::new(|info: &PanicHookInfo<'_>| tracing::debug!("{info}"));
     panic::set_hook(quiet_hook);

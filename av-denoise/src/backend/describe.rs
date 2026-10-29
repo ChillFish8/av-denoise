@@ -305,7 +305,7 @@ fn describe_cuda(index: usize, client: &Client) -> DeviceIdentity {
 }
 
 #[cfg(feature = "cuda")]
-fn cuda_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
+pub(crate) fn cuda_details(index: usize) -> Result<DeviceIdentity, anyhow::Error> {
     use cudarc::driver::{result, sys};
 
     let ordinal = i32::try_from(index)?;

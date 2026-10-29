@@ -1,4 +1,6 @@
 pub mod accelerate;
+#[cfg(feature = "cuda")]
+mod cuda_check;
 mod describe;
 pub mod device;
 pub mod enumerate;
