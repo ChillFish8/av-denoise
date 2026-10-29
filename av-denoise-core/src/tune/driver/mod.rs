@@ -9,6 +9,7 @@ use cubecl::prelude::*;
 use self::keep::{keep_result, summarise};
 use self::pass::{PassInputs, run_pass};
 use super::config::{CachePhase, TuningConfig, TuningMode};
+use super::device::DeviceIdentity;
 use super::engine_set::EngineSet;
 use super::frame::TuningFrame;
 use super::identity::describe;
@@ -136,8 +137,21 @@ pub fn is_tuned(
     }
 
     let identity = describe(device, client);
+
+    is_tuned_on(&identity, specs, config)
+}
+
+/// Whether the store holds a complete result on the device `identity` names for every engine `specs`
+/// describe.
+///
+/// Answers `true` when tuning is not [TuningMode::Auto].
+pub(crate) fn is_tuned_on(identity: &DeviceIdentity, specs: &[EngineSpec], config: &TuningConfig) -> bool {
+    if config.mode != TuningMode::Auto {
+        return true;
+    }
+
     let profile_keys: Vec<String> = specs.iter().map(profile_key).collect();
-    let stored = resolve(config.store.as_deref(), &identity);
+    let stored = resolve(config.store.as_deref(), identity);
 
     stored.is_complete(&profile_keys)
 }

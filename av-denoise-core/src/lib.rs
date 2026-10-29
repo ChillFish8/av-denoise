@@ -62,6 +62,15 @@ pub use self::nlmeans::{
     parse_prefilter,
 };
 pub use self::options::Preset;
+pub use self::tune::{
+    TunedGroup,
+    TuningConfig,
+    TuningFrame,
+    TuningMode,
+    build_engine,
+    is_tuned,
+    tune_frames,
+};
 
 #[cfg(all(feature = "metal", not(target_vendor = "apple")))]
 compile_error!("the `metal` feature needs an Apple target, such as `aarch64-apple-darwin`");

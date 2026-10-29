@@ -15,6 +15,7 @@ mod family;
 mod family_search;
 mod fidelity;
 pub(crate) mod fixtures;
+mod group;
 mod helpers;
 mod identity;
 mod key;

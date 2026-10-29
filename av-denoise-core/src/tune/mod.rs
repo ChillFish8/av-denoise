@@ -18,6 +18,7 @@
 //! - [build_engine] builds an engine from the stored results, keyed by [profile_key]
 //! - [SearchMode] says how widely tuning searches a key, and [SiteSearch] records how it did
 //! - [tune_frames] runs a tuning pass, and [is_tuned] says whether one is needed
+//! - [TunedGroup] tunes on the first frames of a stream, then replays them through the tuned engines
 
 mod budget;
 #[cfg(feature = "vulkan")]
@@ -32,6 +33,7 @@ mod family;
 mod fidelity;
 mod frame;
 pub(crate) mod gpu;
+mod group;
 mod helpers;
 mod identity;
 mod key;
@@ -108,6 +110,7 @@ pub use self::fidelity::{
     diff_plane,
 };
 pub use self::frame::TuningFrame;
+pub use self::group::TunedGroup;
 #[cfg(feature = "vulkan")]
 pub use self::helpers::vulkan_compile_helpers;
 pub use self::helpers::{CompileHelpers, HelperFactory, compilation_cache_enabled};

@@ -26,14 +26,7 @@ impl TuningFrame {
         specs: &[EngineSpec],
         planes: &[&[DevicePlane<'_>]],
     ) -> Result<Self, Error> {
-        if specs.len() != planes.len() {
-            let message = format!(
-                "expected planes for {} engines, got {}",
-                specs.len(),
-                planes.len()
-            );
-            return Err(Error::PlaneMismatch(message));
-        }
+        check_engine_count(specs, planes)?;
 
         let mut copied = Vec::with_capacity(specs.len());
 
@@ -61,23 +54,40 @@ impl TuningFrame {
     }
 }
 
+/// Checks there is one list of planes per engine in `specs`.
+pub(crate) fn check_engine_count(specs: &[EngineSpec], planes: &[&[DevicePlane<'_>]]) -> Result<(), Error> {
+    let expected = specs.len();
+    let given = planes.len();
+    if expected == given {
+        return Ok(());
+    }
+
+    let message = format!("expected planes for {expected} engines, got {given}");
+    Err(Error::PlaneMismatch(message))
+}
+
 fn copy_plane(client: &Client, plane: &DevicePlane<'_>, bytes: usize) -> Handle {
     let words = bytes / 4;
+    let destination = client.empty(bytes);
+    copy_words_into(client, plane.handle(), &destination, words);
+
+    destination
+}
+
+/// Copies the first `words` 4-byte words of `source` into `destination` on the device.
+pub(crate) fn copy_words_into(client: &Client, source: &Handle, destination: &Handle, words: usize) {
     let groups = (words as u32).div_ceil(BLOCK_1D).clamp(1, MAX_GRID_1D);
     let total_threads = groups * BLOCK_1D;
-    let destination = client.empty(bytes);
 
     unsafe {
         copy_words::launch_unchecked(
             client,
             CubeCount::new_1d(groups),
             CubeDim::new_1d(BLOCK_1D),
-            BufferArg::from_raw_parts(plane.handle().clone(), words),
+            BufferArg::from_raw_parts(source.clone(), words),
             BufferArg::from_raw_parts(destination.clone(), words),
             words as u32,
             total_threads,
         );
     }
-
-    destination
 }
