@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Error, Result, anyhow, bail};
-use av_denoise::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest, is_tuned};
+use av_denoise::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest, is_tuned, tuning_mode_from_env};
 use av_denoise::{
     EdgePadding,
     FrameLayout,
@@ -139,7 +139,7 @@ impl<'core> Denoise<'core> {
 
         let layout = layout_from_format(raw_format, width, height)?;
         let mut plane_options = plane_options_from(raw, algorithm_kind, layout)?;
-        plane_options.tuning = plane_options.tuning.with_env_override();
+        plane_options.tuning = tuning_mode_from_env(plane_options.tuning);
 
         // Av1an runs one of these per chunk, so without a cache every chunk pays the ten seconds it
         // takes to compile the kernels. The queue keeps the first wave of chunks from all paying it at

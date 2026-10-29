@@ -6,24 +6,6 @@ use crate::planar::{ChannelIntent, PlaneOptions};
 use crate::tune::{TuningMode, profile_key, resolve_mode, tuning_frame_count};
 
 #[test]
-fn modes_parse_case_insensitively_and_print_back() {
-    for (text, mode) in [
-        ("auto", TuningMode::Auto),
-        ("CACHED", TuningMode::Cached),
-        ("Off", TuningMode::Off),
-    ] {
-        let parsed: TuningMode = text.parse().expect("a known mode");
-        assert_eq!(parsed, mode);
-
-        let printed = mode.to_string();
-        let reparsed: TuningMode = printed.parse().expect("a printed mode");
-        assert_eq!(reparsed, mode);
-    }
-
-    assert!("sometimes".parse::<TuningMode>().is_err());
-}
-
-#[test]
 fn the_environment_overrides_the_flag() {
     assert_eq!(resolve_mode(TuningMode::Auto, Some("off")), TuningMode::Off);
     assert_eq!(resolve_mode(TuningMode::Off, Some("cached")), TuningMode::Cached);
@@ -80,11 +62,4 @@ fn profile_keys_bucket_the_plane_size_and_ignore_tuning_switches() {
     assert_eq!(full_hd, wuxga);
     assert_eq!(full_hd, switched);
     assert!(full_hd.ends_with("|w2048|h2048"), "{full_hd}");
-}
-
-#[test]
-fn auto_runs_as_cached_after_tuning() {
-    assert_eq!(TuningMode::Auto.after_tuning(), TuningMode::Cached);
-    assert_eq!(TuningMode::Cached.after_tuning(), TuningMode::Cached);
-    assert_eq!(TuningMode::Off.after_tuning(), TuningMode::Off);
 }

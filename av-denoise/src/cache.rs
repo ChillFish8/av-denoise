@@ -31,10 +31,11 @@
 use std::ffi::OsStr;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::{Once, OnceLock};
+use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use av_denoise_core::PrivateKernelCache;
+use av_denoise_core::tune::{CacheHook, CachePhase};
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 use etcetera::base_strategy::{BaseStrategy, choose_base_strategy};
 
@@ -231,6 +232,16 @@ pub fn finish_compilation_cache() {
 /// The private copy stays in use, so it suits a process that may still compile more.
 pub fn merge_compilation_cache() {
     av_denoise_core::merge_kernel_cache();
+}
+
+/// The hook a tuning pass calls to keep this process's kernel cache in step with other processes.
+///
+/// A taken lock refills the private cache from the shared one, and compiled kernels are merged back.
+pub(crate) fn kernel_cache_hook() -> CacheHook {
+    Arc::new(|phase| match phase {
+        CachePhase::LockTaken => av_denoise_core::refill_kernel_cache(),
+        CachePhase::KernelsCompiled => merge_compilation_cache(),
+    })
 }
 
 fn set_runtime_config(path: &Path) -> Result<(), CacheError> {

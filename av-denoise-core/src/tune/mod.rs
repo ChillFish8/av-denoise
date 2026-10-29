@@ -13,11 +13,14 @@
 //! - [Legality] says what a device may run beyond the fit check
 //! - [Families] groups a site's candidates, each group with a representative member
 //! - [PriorityTable] orders each site's families and the pipeline profiles for one device class
+//! - [TuningMode] says whether a run tunes, uses stored results or runs every baseline
+//! - [TuneStore] saves and loads results per device
 //! - [SearchMode] says how widely tuning searches a key, and [SiteSearch] records how it did
 
 mod budget;
 #[cfg(feature = "vulkan")]
 mod compile_helpers;
+mod config;
 mod consts;
 mod decide;
 mod device;
@@ -29,6 +32,7 @@ mod identity;
 mod key;
 mod ledger;
 pub(crate) mod legality;
+mod lock;
 mod plan;
 pub(crate) mod precompile;
 mod priority;
@@ -38,6 +42,7 @@ mod selector;
 mod session;
 mod site;
 pub(crate) mod sites;
+mod store;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -59,6 +64,7 @@ pub use self::budget::{
 };
 #[cfg(feature = "vulkan")]
 pub use self::compile_helpers::install_compile_helpers;
+pub use self::config::{CacheHook, CachePhase, TuningConfig, TuningMode};
 pub use self::consts::*;
 pub use self::decide::{
     CandidateStats,
@@ -113,6 +119,7 @@ pub use self::legality::{
     PlaneSizeError,
     check_plane_size,
 };
+pub use self::lock::{POLL_INTERVAL, TuneLock, TuneLockOutcome, open_lock_file, wait_for_lock};
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::precompile::Precompiled;
 pub use self::priority::{Basis, PriorityTable, SitePriority, family_order, priority_for, skipped};
@@ -142,3 +149,12 @@ pub use self::search::{
 pub use self::selector::{EngineKernels, KernelSelector};
 pub(crate) use self::session::{calibrate, rewarm};
 pub use self::site::{FitError, LaunchShape, SiteCandidate, VariantSite, fit_candidates, legal_candidates};
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "only the tests read the remembered results directly"
+    )
+)]
+pub(crate) use self::store::remembered;
+pub use self::store::{StoreError, TuneStore, reload, remember, resolve};

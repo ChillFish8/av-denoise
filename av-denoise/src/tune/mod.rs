@@ -4,6 +4,7 @@
 //! the fastest correct one, and saves the result next to the compiled kernel cache so later runs
 //! skip tuning.
 //!
+//! - [default_store_dir] says where results are kept
 //! - [TuneStore] saves and loads results per device
 //! - [TuningMode] says whether a run tunes, uses stored results or runs every baseline
 //! - [tune_planes] runs a tuning pass, and [is_tuned] says whether one is needed
@@ -23,7 +24,10 @@ pub use av_denoise_core::tune::{
     DeviceProfile,
     PipelineProfile,
     SearchMode,
+    StoreError,
     TuneResult,
+    TuneStore,
+    TuningMode,
 };
 
 pub(crate) use self::driver::tune_planar;
@@ -34,16 +38,8 @@ pub(crate) use self::mode::profile_key;
     expect(unused_imports, reason = "only the tests call it from outside its module")
 )]
 pub(crate) use self::mode::resolve_mode;
-pub use self::mode::{TUNE_ENV, TuningMode, tuning_frame_count};
+pub use self::mode::{TUNE_ENV, tuning_frame_count, tuning_mode_from_env};
 pub(crate) use self::setup::{KernelRequest, KernelSetup, engine_kernels};
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "only the tests read the remembered results directly"
-    )
-)]
-pub(crate) use self::store::remembered;
-pub use self::store::{StoreError, TuneStore};
+pub use self::store::default_store_dir;
 pub(crate) use self::store::{reload, remember, resolve};
 pub use crate::backend::selected_device;

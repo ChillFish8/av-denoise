@@ -1,4 +1,5 @@
 use av_denoise::TuningMode;
+use av_denoise::tune::tuning_mode_from_env;
 
 use super::InputSource;
 
@@ -140,7 +141,7 @@ fn check_tune_budget(seconds: f64) -> Result<(), anyhow::Error> {
 impl CommonArgs {
     /// The tuning mode, with `AV_DENOISE_TUNE` applied.
     pub fn tuning_mode(&self) -> TuningMode {
-        self.tune.with_env_override()
+        tuning_mode_from_env(self.tune)
     }
 
     /// The tuning budget, rejecting one that is negative, non-finite or over a day.

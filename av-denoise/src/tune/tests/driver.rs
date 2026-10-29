@@ -27,7 +27,16 @@ use crate::planar::{
 };
 use crate::tune::driver::{FrameCycle, alternative_profiles_for, tune_keys};
 use crate::tune::setup::device_priority;
-use crate::tune::{TuneOutcome, TuneRequest, TuneStore, TuningMode, is_tuned, selected_device, tune_planes};
+use crate::tune::{
+    TuneOutcome,
+    TuneRequest,
+    TuneStore,
+    TuningMode,
+    default_store_dir,
+    is_tuned,
+    selected_device,
+    tune_planes,
+};
 use crate::{Algorithm, Depth, Nl4dOptions, install_compilation_cache_at};
 
 const WIDTH: u32 = 64;
@@ -110,7 +119,8 @@ fn cold_nl4d_request() -> TuneRequest {
 /// How many launch sites the store holds for the device `plane_options` selects.
 fn stored_site_count(plane_options: &PlaneOptions) -> usize {
     let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
-    let store = TuneStore::open_default().expect("the cache is installed");
+    let store_dir = default_store_dir().expect("the cache is installed");
+    let store = TuneStore::at(store_dir);
     let stored = store.load(&device.identity);
 
     stored.sites.len()
@@ -369,7 +379,8 @@ fn an_nl4d_pass_records_a_ranking_for_every_plane() {
     assert!(is_tuned(&plane_options, frame_layout), "{report:?}");
 
     let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
-    let store = TuneStore::open_default().expect("the cache is installed");
+    let store_dir = default_store_dir().expect("the cache is installed");
+    let store = TuneStore::at(store_dir);
     let stored = store.load(&device.identity);
     let table = device_priority(&device);
     let alternatives = alternative_profiles_for(true, &device, table);
@@ -430,7 +441,8 @@ fn a_report_run_overwrites_a_stored_key() {
     assert!(first.summary.is_none(), "{first:?}");
 
     let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
-    let store = TuneStore::open_default().expect("the cache is installed");
+    let store_dir = default_store_dir().expect("the cache is installed");
+    let store = TuneStore::at(store_dir);
     let mut stored = store.load(&device.identity);
     let (key, ranking) = stored
         .sites

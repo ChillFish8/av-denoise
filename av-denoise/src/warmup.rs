@@ -12,11 +12,12 @@
 //! kernel rather than compiling it. Later processes see the stamp and skip the lock entirely.
 
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use av_denoise_core::tune::{open_lock_file, wait_for_lock};
 use cubecl::hash::StableHasher;
 
 use crate::cache::{compilation_cache_dir, merge_compilation_cache};
@@ -28,8 +29,6 @@ use crate::planar::{FrameLayout, PlaneOptions};
 /// an encode is not quiet, so the limit is generous. Waiting longer is worse than duplicating the
 /// work, because the encoder has nothing to do until a frame arrives.
 const WAIT_LIMIT: Duration = Duration::from_secs(180);
-
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The keys this process already holds a place for.
 static CLAIMED_KEYS: LazyLock<Mutex<HashSet<u128>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -164,116 +163,6 @@ impl Drop for WarmUp {
     }
 }
 
-/// The lock file that keeps tuning to one process at a time.
-const TUNE_LOCK_NAME: &str = "tune.lock";
-
-/// How long a process waits for another to finish tuning before running with stored results.
-///
-/// Explicit tuning can take ten minutes, so the wait is longer than the compile wait.
-const TUNE_WAIT_LIMIT: Duration = Duration::from_secs(15 * 60);
-
-/// The one place on this machine to tune kernels at a time.
-///
-/// Tuning times kernels, so two processes tuning at once would measure each other. The lock is
-/// released when this is dropped.
-#[derive(Debug)]
-pub struct TuneLock {
-    lock: File,
-}
-
-/// What asking for the tune lock gave.
-#[derive(Debug)]
-pub enum TuneLockOutcome {
-    Held(TuneLock),
-    /// Caching is off or the lock file cannot be opened, so the caller tunes without a lock.
-    Unlocked,
-    /// Another process held the lock for the whole wait, so the caller should use stored results.
-    TimedOut,
-}
-
-impl TuneLock {
-    /// Waits for the tune lock next to the kernel cache.
-    pub fn acquire() -> TuneLockOutcome {
-        let Some(dir) = compilation_cache_dir() else {
-            return TuneLockOutcome::Unlocked;
-        };
-
-        Self::acquire_in(dir, TUNE_WAIT_LIMIT)
-    }
-
-    fn acquire_in(dir: &Path, wait_limit: Duration) -> TuneLockOutcome {
-        let path = dir.join(TUNE_LOCK_NAME);
-        let Some(lock) = open_lock_file(&path) else {
-            return TuneLockOutcome::Unlocked;
-        };
-
-        if !wait_for_lock(&lock, wait_limit) {
-            return TuneLockOutcome::TimedOut;
-        }
-
-        // A process that tuned before this one merged its kernels before it let the lock go.
-        av_denoise_core::refill_kernel_cache();
-        TuneLockOutcome::Held(TuneLock { lock })
-    }
-}
-
-impl Drop for TuneLock {
-    fn drop(&mut self) {
-        let _ = self.lock.unlock();
-    }
-}
-
-/// Opens the lock file, creating it when this is the first process to ask for these kernels.
-///
-/// A directory that cannot be written is logged and then ignored, because denoising works without
-/// the queue and only compiles more than once.
-fn open_lock_file(path: &Path) -> Option<File> {
-    let opened = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(path);
-
-    match opened {
-        Ok(file) => Some(file),
-        Err(err) => {
-            tracing::debug!(?path, %err, "cannot open the lock file, carrying on without it");
-            None
-        },
-    }
-}
-
-/// Blocks until the lock is held, giving up after `wait_limit`.
-///
-/// Returns whether the lock is held. It is a real advisory file lock rather than a file whose presence
-/// means "taken", so the operating system releases it when Av1an kills a worker mid-compile and the
-/// next process in line wakes up straight away.
-fn wait_for_lock(lock: &File, wait_limit: Duration) -> bool {
-    let start = Instant::now();
-
-    loop {
-        match lock.try_lock() {
-            Ok(()) => return true,
-            Err(TryLockError::WouldBlock) => {},
-            Err(TryLockError::Error(err)) => {
-                tracing::debug!(%err, "cannot take the lock file, carrying on without it");
-                return false;
-            },
-        }
-
-        if start.elapsed() >= wait_limit {
-            tracing::warn!(
-                "waited {:?} for another process to release the lock file, carrying on without it",
-                wait_limit,
-            );
-            return false;
-        }
-
-        std::thread::sleep(POLL_INTERVAL);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,30 +192,6 @@ mod tests {
             place.is_none(),
             "a caller gives up rather than compiling alongside the process ahead",
         );
-    }
-
-    #[test]
-    fn a_tune_lock_held_elsewhere_keeps_this_process_out() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(TUNE_LOCK_NAME);
-        let elsewhere = open_lock_file(&path).unwrap();
-        elsewhere.lock().unwrap();
-
-        let outcome = TuneLock::acquire_in(dir.path(), BRIEFLY);
-
-        assert!(matches!(outcome, TuneLockOutcome::TimedOut), "{outcome:?}");
-    }
-
-    #[test]
-    fn a_free_tune_lock_is_taken_and_released() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let first = TuneLock::acquire_in(dir.path(), BRIEFLY);
-        assert!(matches!(first, TuneLockOutcome::Held(_)));
-        drop(first);
-
-        let second = TuneLock::acquire_in(dir.path(), BRIEFLY);
-        assert!(matches!(second, TuneLockOutcome::Held(_)));
     }
 
     #[test]

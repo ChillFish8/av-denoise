@@ -3,7 +3,6 @@ mod mode;
 mod profile_order;
 mod report;
 mod setup;
-mod store;
 mod warm_up;
 
 #[cfg(feature = "vulkan")]

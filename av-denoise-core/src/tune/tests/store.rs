@@ -1,15 +1,20 @@
-use av_denoise_core::tune::{
+use crate::tune::{
     CandidateRecord,
     CompileProgress,
+    DeviceIdentity,
     FidelityClass,
     PipelineProfile,
     ProfileRanking,
     ProfileRecord,
     SiteKey,
     SiteRanking,
+    StoreError,
+    TuneResult,
+    TuneStore,
+    remember,
+    remembered,
+    resolve,
 };
-
-use crate::tune::{DeviceIdentity, TuneResult, TuneStore, remember, remembered, resolve};
 
 fn identity() -> DeviceIdentity {
     DeviceIdentity {
@@ -353,17 +358,41 @@ fn clearing_removes_only_this_devices_file() {
     assert!(store.path_for(&other).exists());
 }
 
-/// With caching off there is no store, and a result still has to reach every engine in the run.
+/// With no store there is nowhere to read from, and a result still has to reach every engine in the run.
 #[test]
 fn results_are_remembered_without_a_store() {
+    let mut device = identity();
+    device.adapter = "Remembered Without A Store".to_string();
+    let result = sample_result();
+
+    assert_eq!(remembered(None, &device), None);
+    remember(None, &device, &result);
+
+    assert_eq!(remembered(None, &device), Some(result.clone()));
+    assert_eq!(resolve(None, &device), result);
+}
+
+#[test]
+fn results_are_cached_per_store_directory() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
     let device = identity();
     let result = sample_result();
 
-    assert_eq!(remembered(&device), None);
-    remember(&device, &result);
+    remember(Some(first.path()), &device, &result);
 
-    assert_eq!(remembered(&device), Some(result.clone()));
-    assert_eq!(resolve(&device), result);
+    assert_eq!(resolve(Some(first.path()), &device), result);
+    assert_eq!(resolve(Some(second.path()), &device), TuneResult::default());
+}
+
+#[test]
+fn saving_into_a_file_path_reports_an_io_error() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let store = TuneStore::at(file.path());
+
+    let saved = store.save(&identity(), &sample_result());
+
+    assert!(matches!(saved, Err(StoreError::Io { .. })));
 }
 
 #[test]

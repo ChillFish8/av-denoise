@@ -32,6 +32,12 @@ pub enum BudgetRequest {
     Seconds(f64),
 }
 
+impl Default for BudgetRequest {
+    fn default() -> Self {
+        BudgetRequest::Automatic { frames: None }
+    }
+}
+
 /// The time a tuning pass may spend, warm-up and profile comparison included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {

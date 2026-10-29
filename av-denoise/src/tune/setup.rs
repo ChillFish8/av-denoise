@@ -8,10 +8,10 @@ use av_denoise_core::tune::{
     PipelineProfile,
     PriorityTable,
     TuneLedger,
+    TuningMode,
     priority_for,
 };
 
-use super::mode::TuningMode;
 use super::resolve;
 
 /// How the engines of one denoiser are wired for tuning.

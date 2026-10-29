@@ -7,6 +7,7 @@ use av_denoise::tune::{
     TuneRequest,
     TuneResult,
     TuneStore,
+    default_store_dir,
     is_tuned,
     selected_device,
     tune_planes,
@@ -149,7 +150,8 @@ fn short_tunes_store_results_until_a_later_run_loads_them() {
     assert!(first.saved);
 
     let device = selected_device(&plane_options.accelerators, &plane_options.device).expect("a device");
-    let store = TuneStore::open_default().expect("caching is on");
+    let store_dir = default_store_dir().expect("caching is on");
+    let store = TuneStore::at(store_dir);
     let stored = store.load(&device.identity);
     let mut ranked = ranked_count(&stored);
     let mut settled = settled_count(&stored);

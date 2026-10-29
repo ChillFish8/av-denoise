@@ -85,4 +85,4 @@ pub use self::planar::{
 };
 pub use self::stack::{CODEGEN_STACK_BYTES, codegen_stack_is_sufficient, raise_codegen_stack_limit};
 pub use self::tune::{TUNE_ENV, TuningMode};
-pub use self::warmup::{TuneLock, TuneLockOutcome, WarmUp, kernel_key};
+pub use self::warmup::{WarmUp, kernel_key};

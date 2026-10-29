@@ -1,8 +1,5 @@
-use std::fmt;
-use std::str::FromStr;
-
 use av_denoise_core::DenoisingMode;
-use av_denoise_core::tune::{TUNE_EXTRA_FRAMES, bucket_dim};
+use av_denoise_core::tune::{TUNE_EXTRA_FRAMES, TuningMode, bucket_dim};
 
 use crate::host::{Algorithm, DenoiserOptions};
 use crate::planar::PlaneOptions;
@@ -10,67 +7,10 @@ use crate::planar::PlaneOptions;
 /// The environment variable that overrides the tuning mode a caller asked for.
 pub const TUNE_ENV: &str = "AV_DENOISE_TUNE";
 
-/// How a run picks the kernel candidate at each launch site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TuningMode {
-    /// Uses stored results and lets a tuning pass tune the launch sites in place.
-    ///
-    /// The pass ranks the keys the stored results lack, most costly first, and saves the rankings.
-    #[default]
-    Auto,
-    /// Uses stored results only. Keys with none run their baseline.
-    Cached,
-    /// Runs every baseline.
-    Off,
-}
-
-impl FromStr for TuningMode {
-    type Err = String;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let lowered = text.trim().to_ascii_lowercase();
-
-        match lowered.as_str() {
-            "auto" => Ok(TuningMode::Auto),
-            "cached" => Ok(TuningMode::Cached),
-            "off" => Ok(TuningMode::Off),
-            _ => {
-                let message = format!("unknown tuning mode '{text}', expected auto, cached or off");
-                Err(message)
-            },
-        }
-    }
-}
-
-impl fmt::Display for TuningMode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            TuningMode::Auto => "auto",
-            TuningMode::Cached => "cached",
-            TuningMode::Off => "off",
-        };
-
-        formatter.write_str(name)
-    }
-}
-
-impl TuningMode {
-    /// This mode, unless [TUNE_ENV] names another, which wins.
-    pub fn with_env_override(self) -> Self {
-        let env = std::env::var(TUNE_ENV).ok();
-        resolve_mode(self, env.as_deref())
-    }
-
-    /// The mode a denoiser runs with once tuning is done.
-    ///
-    /// [TuningMode::Auto] becomes [TuningMode::Cached], so the denoiser builds from stored results
-    /// and carries no tuning ledger.
-    pub fn after_tuning(self) -> Self {
-        match self {
-            TuningMode::Auto => TuningMode::Cached,
-            other => other,
-        }
-    }
+/// `flag`, unless [TUNE_ENV] names another mode, which wins.
+pub fn tuning_mode_from_env(flag: TuningMode) -> TuningMode {
+    let env = std::env::var(TUNE_ENV).ok();
+    resolve_mode(flag, env.as_deref())
 }
 
 /// `flag`, unless `env` names a valid mode. An invalid `env` is logged and ignored.

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use av_denoise_core::tune::{
     Budget,
     BudgetRequest,
+    CachePhase,
     CensusEntry,
     DeviceIdentity,
     DeviceProfile,
@@ -22,8 +23,12 @@ use av_denoise_core::tune::{
     SiteKey,
     TUNE_EXHAUSTIVE,
     TuneLedger,
+    TuneLock,
+    TuneLockOutcome,
     TunePhase,
     TuneResult,
+    TuneStore,
+    TuningMode,
     WARM_WINDOW,
     WarmUpState,
     WarmUpTracker,
@@ -38,13 +43,12 @@ use av_denoise_core::tune::{
     tuning_order,
 };
 
-use super::mode::TuningMode;
 use super::report::format_report;
 use super::setup::{KernelSetup, device_priority};
-use super::store::TuneStore;
+use super::store::default_store_dir;
 use super::{reload, remember, resolve};
 use crate::backend::selected_device;
-use crate::cache::merge_compilation_cache;
+use crate::cache::kernel_cache_hook;
 use crate::host::Algorithm;
 use crate::planar::{
     FrameLayout,
@@ -54,7 +58,6 @@ use crate::planar::{
     plane_profile_keys,
     push_needs_retry,
 };
-use crate::warmup::{TuneLock, TuneLockOutcome};
 
 /// How many passes over the tuning frames a target key gets to be reached and tuned.
 const PASSES_PER_KEY: usize = 2;
@@ -260,7 +263,9 @@ pub(crate) fn tune_planar(
         return TuneReport::skipped("there are no frames to tune on", started);
     }
 
-    let lock = TuneLock::acquire();
+    let store_dir = default_store_dir();
+    let hook = kernel_cache_hook();
+    let lock = TuneLock::acquire(store_dir.as_deref(), Some(&hook));
     let budget_started = Instant::now();
     let hosts = planar.hosts();
     let identity = hosts[0].device_profile().identity.clone();
@@ -321,7 +326,7 @@ pub(crate) fn tune_planar(
 
     // Tuning compiles kernels nothing else has, so they reach the shared cache before the next
     // process tunes.
-    merge_compilation_cache();
+    hook(CachePhase::KernelsCompiled);
     drop(lock);
     report
 }
@@ -1093,11 +1098,12 @@ fn keep_result(
 }
 
 fn save_result(identity: &DeviceIdentity, result: &TuneResult) -> bool {
-    let Some(store) = TuneStore::open_default() else {
+    let Some(dir) = default_store_dir() else {
         tracing::info!("kernel caching is off, so the tuning result lasts for this run only");
         return false;
     };
 
+    let store = TuneStore::at(dir);
     let written = store.save(identity, result);
     match written {
         Ok(path) => {

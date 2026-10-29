@@ -8,6 +8,7 @@ use av_denoise::tune::{
     TuneRequest,
     TuneResult,
     TuneStore,
+    default_store_dir,
     selected_device,
 };
 use av_denoise_core::tune::{SiteRanking, choose};
@@ -135,9 +136,11 @@ fn tune_request(tune: &TuneArgs, tune_budget: Option<f64>) -> TuneRequest {
 
 fn show_or_clear(tune: &TuneArgs, globals: &Args) -> Result<(), anyhow::Error> {
     let device = selected_device(&globals.accelerators, &globals.device)?;
-    let Some(store) = TuneStore::open_default() else {
+    let Some(store_dir) = default_store_dir() else {
         anyhow::bail!("kernel caching is off, so no tuning results are stored");
     };
+
+    let store = TuneStore::at(store_dir);
 
     if tune.clear {
         let removed = store.clear(&device.identity)?;
