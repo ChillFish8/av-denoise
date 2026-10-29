@@ -8,10 +8,10 @@ use super::resolve::resolve;
 /// Returns the first accelerator, in order of preference, whose client can be built and synchronised
 /// on `device`.
 ///
-/// cubecl kernels are fully asynchronous, so a successful `client.sync()` is enough to prove the
-/// backend works and no test kernel is needed. The probe runs on `device` rather than the backend's
-/// default, because opening a client on another card tests the wrong hardware and pays that card's
-/// first-time driver initialisation.
+/// cubecl kernels are fully asynchronous, so a successful `client.sync()` proves most backends work.
+/// CUDA also runs a small test kernel, as it can open a client yet fail to compile. The probe runs on
+/// `device` rather than the backend's default, because opening a client on another card tests the
+/// wrong hardware and pays that card's first-time driver initialisation.
 ///
 /// An accelerator that cannot express `device` at all is treated as unavailable, which is the answer
 /// building on it would give one step earlier. So is a backend whose driver libraries are missing,

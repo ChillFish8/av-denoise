@@ -6,11 +6,11 @@ mod libdevice;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use cubecl::prelude::Client;
 
-use self::adapters::{NvidiaPresence, adapter_vendor_ids, nvidia_presence};
+use self::adapters::{NvidiaPresence, list_adapters, nvidia_presence};
 use self::capability::check_capability;
 use self::kernel::run_libdevice_probe;
 use self::libdevice::{CUDA_ROOTS, find_libdevice};
@@ -21,12 +21,22 @@ use super::probe::quiet_panics;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CudaUnavailable {
     NoNvidiaGpu,
-    Unsupported { adapter: String, capability: u32 },
+    Unsupported {
+        adapter: String,
+        capability: u32,
+    },
     DriverUnreadable(String),
-    LibdeviceMissing { searched: Vec<PathBuf> },
+    LibdeviceMissing {
+        searched: Vec<PathBuf>,
+        /// Whether `CUDA_PATH` was set and so was the only root searched.
+        from_cuda_path: bool,
+    },
     RuntimeStart(String),
     TestKernel(String),
-    Panicked { step: &'static str, message: String },
+    Panicked {
+        step: &'static str,
+        message: String,
+    },
 }
 
 impl CudaUnavailable {
@@ -51,10 +61,26 @@ impl Display for CudaUnavailable {
             Self::DriverUnreadable(message) => {
                 write!(formatter, "the NVIDIA driver could not be read: {message}")
             },
-            Self::LibdeviceMissing { searched } => {
+            Self::LibdeviceMissing {
+                searched,
+                from_cuda_path,
+            } => {
                 let roots: Vec<_> = searched.iter().map(|root| root.display().to_string()).collect();
                 let roots = roots.join(", ");
-                write!(formatter, "libdevice.10.bc was not found in {roots}")
+                if *from_cuda_path {
+                    write!(
+                        formatter,
+                        "libdevice.10.bc was not found because CUDA_PATH is set to \"{roots}\". \
+                         Point it at a CUDA toolkit containing nvvm/libdevice, or unset it to use the \
+                         bundled copy."
+                    )
+                } else {
+                    write!(
+                        formatter,
+                        "libdevice.10.bc was not found in {roots}. Install the CUDA toolkit, or set \
+                         CUDA_PATH to one containing nvvm/libdevice."
+                    )
+                }
             },
             Self::RuntimeStart(message) => {
                 write!(formatter, "the CUDA runtime did not start: {message}")
@@ -65,6 +91,9 @@ impl Display for CudaUnavailable {
     }
 }
 
+/// Whether an NVIDIA GPU is present, listed once as enumerating adapters is slow.
+static PRESENCE: OnceLock<NvidiaPresence> = OnceLock::new();
+
 type Verdict = Result<(), CudaUnavailable>;
 
 /// Verdicts already reached, so a process pays for the check once per GPU.
@@ -74,8 +103,7 @@ static VERDICTS: Mutex<BTreeMap<usize, Verdict>> = Mutex::new(BTreeMap::new());
 ///
 /// Callers hold the probe lock across this, as the panic hook it quietens is process-wide.
 pub(crate) fn open_checked(device: &cubecl::Device) -> Result<Client, CudaUnavailable> {
-    let vendor_ids = visible_vendor_ids();
-    let presence = nvidia_presence(&vendor_ids);
+    let presence = *PRESENCE.get_or_init(visible_presence);
     if skips_cuda(presence) {
         return Err(CudaUnavailable::NoNvidiaGpu);
     }
@@ -119,9 +147,10 @@ fn check_device(index: usize, device: &cubecl::Device) -> Verdict {
     })
 }
 
-/// The adapter vendors wgpu lists, or none if enumerating them panics.
-fn visible_vendor_ids() -> Vec<u32> {
-    quiet_panics(adapter_vendor_ids).unwrap_or_default()
+/// Whether wgpu lists an NVIDIA adapter, treating a panic while listing as unknown.
+fn visible_presence() -> NvidiaPresence {
+    let adapters = quiet_panics(list_adapters).unwrap_or_default();
+    nvidia_presence(&adapters)
 }
 
 fn skips_cuda(presence: NvidiaPresence) -> bool {
@@ -215,7 +244,8 @@ mod tests {
 
     #[test]
     fn cuda_index_reads_the_selected_index() {
-        let device = cubecl::Device::from(cubecl::device::CudaDevice::new(1));
+        let cuda_device = cubecl::device::CudaDevice::new(1);
+        let device = cubecl::Device::from(cuda_device);
         assert_eq!(cuda_index(&device), Some(1));
     }
 
@@ -231,13 +261,14 @@ mod tests {
     fn a_machine_without_nvidia_skips_cuda_quietly() {
         let _probed = PROBED.lock().unwrap_or_else(|err| err.into_inner());
 
-        let vendor_ids = adapter_vendor_ids();
-        if nvidia_presence(&vendor_ids) != NvidiaPresence::Absent {
+        let adapters = list_adapters();
+        if nvidia_presence(&adapters) != NvidiaPresence::Absent {
             eprintln!("skipped: this machine has an NVIDIA GPU or no visible adapters");
             return;
         }
 
-        let device = cubecl::Device::from(cubecl::device::CudaDevice::new(0));
+        let cuda_device = cubecl::device::CudaDevice::new(0);
+        let device = cubecl::Device::from(cuda_device);
         let result = open_checked(&device);
         assert_eq!(result.err(), Some(CudaUnavailable::NoNvidiaGpu));
     }
@@ -246,6 +277,34 @@ mod tests {
     fn a_runtime_start_failure_names_the_runtime() {
         let error = CudaUnavailable::RuntimeStart("boom".to_string());
         assert_eq!(error.to_string(), "the CUDA runtime did not start: boom");
+    }
+
+    #[test]
+    fn a_missing_libdevice_says_how_to_fix_it() {
+        let error = CudaUnavailable::LibdeviceMissing {
+            searched: vec![PathBuf::from("/usr/local/cuda")],
+            from_cuda_path: false,
+        };
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            "libdevice.10.bc was not found in /usr/local/cuda. Install the CUDA toolkit, or set CUDA_PATH to \
+             one containing nvvm/libdevice."
+        );
+    }
+
+    #[test]
+    fn an_empty_cuda_path_is_named_in_the_message() {
+        let error = CudaUnavailable::LibdeviceMissing {
+            searched: vec![PathBuf::new()],
+            from_cuda_path: true,
+        };
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            "libdevice.10.bc was not found because CUDA_PATH is set to \"\". Point it at a CUDA toolkit \
+             containing nvvm/libdevice, or unset it to use the bundled copy."
+        );
     }
 
     #[test]

@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Any
 from . import _cuda, _plugin
 from ._types import Accelerators, ChannelMode, Nl4dPreset, Preset, Tune
 
-_cuda.apply_bundled_cuda_path(os.environ, _cuda.bundled_cuda_root())
+_bundled_root = _cuda.bundled_cuda_root()
+_cuda.apply_bundled_cuda_path(os.environ, _bundled_root)
 
 if TYPE_CHECKING:
     # vapoursynth ships a vapoursynth.pyi stub but no py.typed marker, so mypy

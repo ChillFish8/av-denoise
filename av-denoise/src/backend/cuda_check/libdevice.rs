@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use super::CudaUnavailable;
 
 /// The toolkit locations cubecl checks when `CUDA_PATH` is unset.
+///
+/// These mirror cubecl-llvm's search, which has no Windows defaults, so Windows relies on `CUDA_PATH`.
 pub(super) const CUDA_ROOTS: [&str; 4] = ["/usr/local/cuda", "/opt/cuda", "/usr/lib/cuda", "/usr"];
 
 /// Finds `libdevice.10.bc` the way cubecl does.
@@ -13,6 +15,7 @@ pub(super) fn find_libdevice(
     cuda_path: Option<PathBuf>,
     defaults: &[PathBuf],
 ) -> Result<PathBuf, CudaUnavailable> {
+    let from_cuda_path = cuda_path.is_some();
     let root = match cuda_path {
         Some(path) => Some(path),
         None => defaults
@@ -23,6 +26,7 @@ pub(super) fn find_libdevice(
     let Some(root) = root else {
         return Err(CudaUnavailable::LibdeviceMissing {
             searched: defaults.to_vec(),
+            from_cuda_path,
         });
     };
 
@@ -31,7 +35,10 @@ pub(super) fn find_libdevice(
         return Ok(file);
     }
 
-    Err(CudaUnavailable::LibdeviceMissing { searched: vec![root] })
+    Err(CudaUnavailable::LibdeviceMissing {
+        searched: vec![root],
+        from_cuda_path,
+    })
 }
 
 fn libdevice_file(root: &Path) -> PathBuf {
@@ -91,6 +98,7 @@ mod tests {
         let error = find_libdevice(Some(roots[0].clone()), &roots[1..]).unwrap_err();
         let expected = CudaUnavailable::LibdeviceMissing {
             searched: vec![roots[0].clone()],
+            from_cuda_path: true,
         };
         assert_eq!(error, expected);
     }
@@ -114,6 +122,7 @@ mod tests {
         let error = find_libdevice(None, &roots).unwrap_err();
         let expected = CudaUnavailable::LibdeviceMissing {
             searched: vec![roots[0].clone()],
+            from_cuda_path: false,
         };
         assert_eq!(error, expected);
     }
@@ -123,7 +132,10 @@ mod tests {
         let (_temp, roots) = roots(3);
 
         let error = find_libdevice(None, &roots).unwrap_err();
-        let expected = CudaUnavailable::LibdeviceMissing { searched: roots };
+        let expected = CudaUnavailable::LibdeviceMissing {
+            searched: roots,
+            from_cuda_path: false,
+        };
         assert_eq!(error, expected);
     }
 }

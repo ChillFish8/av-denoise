@@ -67,7 +67,8 @@ pub unsafe fn point_cuda_path_at_bundle() -> anyhow::Result<()> {
     }
 
     let strategy = etcetera::choose_base_strategy().context("no cache directory")?;
-    let root = bundled_root(strategy.cache_dir().as_path());
+    let cache_dir = strategy.cache_dir();
+    let root = bundled_root(cache_dir.as_path());
     install_libdevice(&root, LIBDEVICE).context("cannot write libdevice")?;
 
     // SAFETY: forwarded from this function's own precondition.
@@ -91,7 +92,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         install_libdevice(dir.path(), b"bitcode").unwrap();
 
-        let written = std::fs::read(dir.path().join("nvvm/libdevice/libdevice.10.bc")).unwrap();
+        let file = dir.path().join("nvvm/libdevice/libdevice.10.bc");
+        let written = std::fs::read(file).unwrap();
         assert_eq!(written, b"bitcode");
     }
 
@@ -102,7 +104,8 @@ mod tests {
         install_libdevice(dir.path(), b"bitcode").unwrap();
         install_libdevice(dir.path(), b"BITCODE").unwrap();
 
-        let kept = std::fs::read(dir.path().join("nvvm/libdevice/libdevice.10.bc")).unwrap();
+        let file = dir.path().join("nvvm/libdevice/libdevice.10.bc");
+        let kept = std::fs::read(file).unwrap();
         assert_eq!(kept, b"bitcode");
     }
 
@@ -112,7 +115,8 @@ mod tests {
         install_libdevice(dir.path(), b"bit").unwrap();
         install_libdevice(dir.path(), b"bitcode").unwrap();
 
-        let replaced = std::fs::read(dir.path().join("nvvm/libdevice/libdevice.10.bc")).unwrap();
+        let file = dir.path().join("nvvm/libdevice/libdevice.10.bc");
+        let replaced = std::fs::read(file).unwrap();
         assert_eq!(replaced, b"bitcode");
     }
 

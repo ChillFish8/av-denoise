@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from vsavd._cuda import apply_bundled_cuda_path
+import sys
+
+from vsavd._cuda import apply_bundled_cuda_path, bundled_cuda_root
 
 
 def _bundle(tmp_path):
@@ -26,3 +28,8 @@ def test_missing_bundle_leaves_cuda_path_unset(tmp_path):
     environ = {}
     apply_bundled_cuda_path(environ, tmp_path)
     assert "CUDA_PATH" not in environ
+
+
+def test_wheel_bundles_libdevice_except_on_macos():
+    libdevice = bundled_cuda_root() / "nvvm" / "libdevice" / "libdevice.10.bc"
+    assert libdevice.exists() == (sys.platform != "darwin")
