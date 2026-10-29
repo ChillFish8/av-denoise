@@ -93,12 +93,11 @@ survive where each frequency on its own would fall under the threshold. Turn it 
 `pooled_threshold=False, enable_psy=True, psy_flat_boost=1.5, psy_flat_texture_cut=1, psy_line_ring=0`,
 to get the output of earlier releases.
 
-**`enable_psy=True` turns on the psy options.** They are off by default. Flat, grainy areas such
-as skies are filtered harder, 1.75 times by default on luma and 1.5 times on chroma. The chroma
-boost applies when chroma is denoised in its own pass, not under `channel_mode="yuv"`. Textured
-dark areas are filtered more gently, at 0.65 times by default, fading out between luma 128 and 160.
-The areas within 16 pixels of a strong line skip shadow soften and the flat texture cut, so the
-grain beside dark ink lines is filtered like the rest of the frame. `noise_map=False` turns all of it off.
+**`enable_psy=True` turns on the psy options.** They are off by default. Flat, grainy areas such as
+skies are filtered harder, 1.75 times by default on luma and 1.5 times on chroma. Textured dark
+areas are filtered more gently, at 0.65 times by default, fading out between luma 128 and 160. The
+areas within 16 pixels of a strong line skip shadow soften and the flat texture cut, so the grain
+beside dark ink lines is filtered like the rest of the frame. `noise_map=False` turns all of it off.
 
 ```python
 clean = avd.Nl4d(clip, enable_psy=True)

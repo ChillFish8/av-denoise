@@ -27,7 +27,6 @@ fn summary(luma_busy: Option<u64>) -> RunSummary {
     let planes = PlanarTiming {
         luma: Some(plane(100, 400, luma_busy, 50)),
         chroma: Some(plane(50, 200, Some(250), 50)),
-        yuv: None,
     };
     let worker = WorkerTiming {
         wall: Duration::from_secs(1),

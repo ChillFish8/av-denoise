@@ -116,8 +116,7 @@ pub struct NlmeansArgs {
     /// Falls back to `--strength` (or the library default) when not
     /// set.
     ///
-    /// Ignored when luma is not being denoised, or when
-    /// `--channel-mode yuv` is used.
+    /// Ignored when luma is not being denoised.
     #[arg(long)]
     pub luma_strength: Option<f32>,
 
@@ -126,8 +125,7 @@ pub struct NlmeansArgs {
     /// Falls back to `--strength` (or the library default) when not
     /// set.
     ///
-    /// Ignored when chroma is not being denoised, or when
-    /// `--channel-mode yuv` is used.
+    /// Ignored when chroma is not being denoised.
     #[arg(long)]
     pub chroma_strength: Option<f32>,
 

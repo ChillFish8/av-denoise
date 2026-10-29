@@ -60,8 +60,7 @@ survive where each frequency on its own would fall under the threshold. Turn it 
 of earlier releases.
 
 **`--enable-psy` turns on the psy options.** They are off by default. Flat, grainy areas such as
-skies are filtered harder, 1.75 times by default on luma and 1.5 times on chroma. The chroma boost
-applies when chroma is denoised in its own pass, not under `--channel-mode yuv`. Textured dark
+skies are filtered harder, 1.75 times by default on luma and 1.5 times on chroma. Textured dark
 areas are filtered more gently, at 0.65 times by default, fading out between luma 128 and 160. The
 areas within 16 pixels of a strong line skip shadow soften and the flat texture cut, so the grain
 beside dark ink lines is filtered like the rest of the frame. `--no-noise-map` turns all of it off.

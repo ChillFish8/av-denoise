@@ -59,8 +59,7 @@ pub struct Nl4dArgs {
     /// Falls back to `--lambda-ht`, or to the per-plane library default,
     /// when not set.
     ///
-    /// Ignored when luma is not being denoised, or when `--channel-mode
-    /// yuv` is used.
+    /// Ignored when luma is not being denoised.
     #[arg(long)]
     pub luma_lambda_ht: Option<f32>,
 
@@ -69,8 +68,7 @@ pub struct Nl4dArgs {
     /// Falls back to `--lambda-ht`, or to the per-plane library default,
     /// when not set.
     ///
-    /// Ignored when chroma is not being denoised, or when
-    /// `--channel-mode yuv` is used.
+    /// Ignored when chroma is not being denoised.
     #[arg(long)]
     pub chroma_lambda_ht: Option<f32>,
 
@@ -373,11 +371,6 @@ impl Nl4dArgs {
             ChannelIntent::Chroma if self.luma_lambda_ht.is_some() => {
                 tracing::warn!("--luma-lambda-ht is ignored when luma is not being denoised");
             },
-            ChannelIntent::YuvFused if self.luma_lambda_ht.is_some() || self.chroma_lambda_ht.is_some() => {
-                tracing::warn!(
-                    "--luma-lambda-ht and --chroma-lambda-ht are ignored when --channel-mode yuv is used"
-                );
-            },
             _ => {},
         }
     }
@@ -410,6 +403,13 @@ mod tests {
         argv.extend_from_slice(extra);
 
         Args::try_parse_from(argv).expect_err("expected clap to reject this argv")
+    }
+
+    #[test]
+    fn channel_mode_yuv_is_rejected() {
+        let error = parse_err(&["--channel-mode", "yuv"]);
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     fn expect_nl4d(opts: &RunOptions) -> Nl4dOptions {

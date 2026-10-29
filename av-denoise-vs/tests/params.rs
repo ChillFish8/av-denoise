@@ -1,7 +1,7 @@
 use av_denoise::{
+    ChannelIntent,
     DenoisingMode,
     Depth,
-    FrameLayout,
     MotionCompensationMode,
     Nl4dOptions,
     NlmeansVariant,
@@ -55,9 +55,31 @@ fn test_format_gray(bits_per_sample: u8) -> RawFormat {
     }
 }
 
-fn yuv420_layout() -> FrameLayout {
-    let format = test_format_yuv(1, 1, 8);
-    layout_from_format(format, 160, 120).unwrap()
+#[test]
+fn channel_mode_yuv_is_unknown() {
+    let raw = RawParams {
+        channel_mode: Some("yuv".to_string()),
+        ..RawParams::default()
+    };
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        err,
+        "unknown channel_mode 'yuv', expected one of luma, chroma, lumachroma"
+    );
+}
+
+#[test]
+fn lumachroma_parses_to_luma_chroma() {
+    let raw = RawParams {
+        channel_mode: Some("lumachroma".to_string()),
+        ..RawParams::default()
+    };
+    let options = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
+
+    assert_eq!(options.intent, ChannelIntent::LumaChroma);
 }
 
 #[test]
@@ -113,8 +135,7 @@ fn strength_is_rejected_for_nl4d() {
         strength: Some(0.5),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
         .unwrap_err()
         .to_string();
 
@@ -131,8 +152,7 @@ fn luma_lambda_ht_is_rejected_for_nlmeans() {
         luma_lambda_ht: Some(1.2),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
         .unwrap_err()
         .to_string();
 
@@ -149,8 +169,7 @@ fn patch_radius_is_rejected_for_nl4d() {
         patch_radius: Some(3),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
         .unwrap_err()
         .to_string();
 
@@ -167,8 +186,7 @@ fn search_radius_is_rejected_for_nl4d() {
         search_radius: Some(3),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
         .unwrap_err()
         .to_string();
 
@@ -188,8 +206,7 @@ fn the_nl4d_mismatch_error_wins_over_the_stack_guard() {
         search_radius: Some(6),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
         .unwrap_err()
         .to_string();
 
@@ -210,8 +227,7 @@ fn per_plane_overrides_reach_plane_options() {
         chroma_strength: Some(0.3),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     assert_eq!(opts.luma_strength, Some(0.6));
     assert_eq!(opts.chroma_strength, Some(0.3));
@@ -223,8 +239,7 @@ fn sigma_reaches_nl4d_options() {
         sigma: Some(6.0),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => {
@@ -241,8 +256,7 @@ fn sigma_is_rejected_for_nlmeans_fast() {
         variant: Some("fast".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
         .unwrap_err()
         .to_string();
 
@@ -260,8 +274,7 @@ fn sigma_reaches_hq_sigma_override_under_variant_hq() {
         variant: Some("hq".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::NlmeansHq(hq) => {
@@ -277,8 +290,7 @@ fn variant_hq_produces_the_hq_algorithm() {
         variant: Some("hq".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     assert!(
         matches!(opts.algorithm, av_denoise::Algorithm::NlmeansHq(_)),
@@ -293,8 +305,7 @@ fn variant_fast_produces_the_fast_algorithm() {
         variant: Some("fast".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     assert!(
         matches!(opts.algorithm, av_denoise::Algorithm::Nlmeans(_)),
@@ -306,8 +317,7 @@ fn variant_fast_produces_the_fast_algorithm() {
 #[test]
 fn no_variant_given_defaults_to_the_hq_algorithm() {
     let raw = RawParams::default();
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     assert!(
         matches!(opts.algorithm, av_denoise::Algorithm::NlmeansHq(_)),
@@ -322,8 +332,7 @@ fn unrecognised_variant_errors_clearly() {
         variant: Some("turbo".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
         .unwrap_err()
         .to_string();
 
@@ -337,8 +346,7 @@ fn unrecognised_variant_errors_clearly() {
 #[test]
 fn nlmeans_default_temporal_radius_is_two() {
     let raw = RawParams::default();
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     assert_eq!(opts.mode, DenoisingMode::Temporal { radius: 2 });
 }
@@ -349,8 +357,7 @@ fn nlmeans_explicit_zero_temporal_radius_stays_spacial() {
         temporal_radius: Some(0),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     assert_eq!(opts.mode, DenoisingMode::Spacial);
 }
@@ -364,8 +371,7 @@ fn a_large_search_radius_is_rejected_when_the_stack_is_not_raised() {
         search_radius: Some(6),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
         .unwrap_err()
         .to_string();
 
@@ -381,8 +387,7 @@ fn sigma_scale_reaches_hq_params_under_variant_hq() {
         sigma_scale: Some(1.5),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::NlmeansHq(hq) => {
@@ -398,8 +403,7 @@ fn sigma_scale_reaches_nl4d_options() {
         sigma_scale: Some(1.5),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => {
@@ -416,8 +420,7 @@ fn sigma_scale_is_rejected_for_nlmeans_fast() {
         variant: Some("fast".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
         .unwrap_err()
         .to_string();
 
@@ -437,8 +440,7 @@ fn prefilter_none_and_empty_parse() {
             prefilter: Some(raw_prefilter.to_string()),
             ..RawParams::default()
         };
-        let layout = yuv420_layout();
-        let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+        let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
         match opts.algorithm {
             av_denoise::Algorithm::NlmeansHq(hq) => {
@@ -455,8 +457,7 @@ fn prefilter_bilateral_parses() {
         prefilter: Some("bilateral:3.0,0.02".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::NlmeansHq(hq) => match hq.nlm.prefilter {
@@ -476,8 +477,7 @@ fn prefilter_nlm_variants_parse() {
         prefilter: Some("nlm:0.8".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::NlmeansHq(hq) => match hq.nlm.prefilter {
@@ -496,8 +496,7 @@ fn prefilter_unknown_string_errors_clearly() {
         prefilter: Some("garbage".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
         .unwrap_err()
         .to_string();
 
@@ -510,8 +509,7 @@ fn prefilter_external_cannot_be_produced() {
         prefilter: Some("external".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
         .unwrap_err()
         .to_string();
 
@@ -527,8 +525,7 @@ fn prefilter_is_rejected_for_nl4d() {
         prefilter: Some("none".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
         .unwrap_err()
         .to_string();
 
@@ -546,8 +543,7 @@ fn preset_resolves_the_same_dials_as_core_for_nlmeans() {
             preset: Some(name.to_string()),
             ..RawParams::default()
         };
-        let layout = yuv420_layout();
-        let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+        let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
         let want_variant = nlmeans_variant_for(preset);
         let want_temporal_radius = nlmeans_temporal_radius_for(preset);
@@ -596,8 +592,7 @@ fn nl4d_resolves_the_library_defaults() {
         preset: Some("base".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap();
     let defaults = Nl4dOptions::default();
 
     assert_eq!(
@@ -620,8 +615,7 @@ fn nl4d_rejects_presets_other_than_base() {
             preset: Some(name.to_string()),
             ..RawParams::default()
         };
-        let layout = yuv420_layout();
-        let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
             .unwrap_err()
             .to_string();
 
@@ -632,8 +626,7 @@ fn nl4d_rejects_presets_other_than_base() {
 #[test]
 fn unset_preset_defaults_to_base() {
     let raw = RawParams::default();
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
     let base_temporal_radius = nlmeans_temporal_radius_for(Preset::Base);
 
     assert_eq!(
@@ -650,8 +643,7 @@ fn unrecognised_preset_errors_clearly() {
         preset: Some("turbo".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
         .unwrap_err()
         .to_string();
 
@@ -665,8 +657,7 @@ fn explicit_temporal_radius_overrides_the_preset() {
         temporal_radius: Some(3),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     assert_eq!(opts.mode, DenoisingMode::Temporal { radius: 3 });
 }
@@ -679,8 +670,7 @@ fn explicit_variant_overrides_the_preset() {
         variant: Some("fast".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     assert!(
         matches!(opts.algorithm, av_denoise::Algorithm::Nlmeans(_)),
@@ -694,8 +684,7 @@ fn explicit_variant_overrides_the_preset() {
 #[test]
 fn motion_compensation_defaults_to_false() {
     let raw = RawParams::default();
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::NlmeansHq(hq) => {
@@ -711,8 +700,7 @@ fn motion_compensation_true_turns_it_on() {
         motion_compensation: Some(true),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::NlmeansHq(hq) => {
@@ -731,8 +719,7 @@ fn motion_compensation_false_stays_off() {
         motion_compensation: Some(false),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::NlmeansHq(hq) => {
@@ -748,8 +735,7 @@ fn motion_compensation_is_rejected_for_nl4d() {
         motion_compensation: Some(true),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
         .unwrap_err()
         .to_string();
 
@@ -763,8 +749,7 @@ fn lambda_ht_scale_reaches_nl4d_options() {
         lambda_ht_scale: Some(1.15),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => {
@@ -780,8 +765,7 @@ fn shared_lambda_ht_reaches_nl4d_options() {
         lambda_ht: Some(4.6),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap();
 
     match opts.algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.lambda_ht, Some(4.6)),
@@ -796,10 +780,7 @@ fn spatial_radius_overrides_the_default() {
             preset: Some("base".into()),
             ..RawParams::default()
         };
-        let layout = yuv420_layout();
-        let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-            .unwrap()
-            .algorithm;
+        let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap().algorithm;
 
         match algorithm {
             av_denoise::Algorithm::Nl4d(nl4d) => nl4d.spatial_radius,
@@ -812,10 +793,7 @@ fn spatial_radius_overrides_the_default() {
         spatial_radius: Some((from_preset + 1) as i64),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-        .unwrap()
-        .algorithm;
+    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap().algorithm;
 
     match algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.spatial_radius, from_preset + 1),
@@ -829,10 +807,7 @@ fn refine_reaches_nl4d_options() {
         refine: Some(3),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-        .unwrap()
-        .algorithm;
+    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap().algorithm;
 
     match algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.refine, 3),
@@ -843,10 +818,7 @@ fn refine_reaches_nl4d_options() {
 #[test]
 fn noise_map_defaults_to_on() {
     let raw = RawParams::default();
-    let layout = yuv420_layout();
-    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-        .unwrap()
-        .algorithm;
+    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap().algorithm;
 
     match algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => assert!(nl4d.noise_map),
@@ -860,10 +832,7 @@ fn noise_map_false_turns_it_off() {
         noise_map: Some(false),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-        .unwrap()
-        .algorithm;
+    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap().algorithm;
 
     match algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => assert!(!nl4d.noise_map),
@@ -877,8 +846,7 @@ fn noise_map_is_rejected_for_nlmeans() {
         noise_map: Some(true),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
         .unwrap_err()
         .to_string();
 
@@ -888,10 +856,7 @@ fn noise_map_is_rejected_for_nlmeans() {
 #[test]
 fn pooled_threshold_defaults_to_on() {
     let raw = RawParams::default();
-    let layout = yuv420_layout();
-    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-        .unwrap()
-        .algorithm;
+    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap().algorithm;
 
     match algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => assert!(nl4d.pooled_threshold),
@@ -905,10 +870,7 @@ fn pooled_threshold_false_turns_it_off() {
         pooled_threshold: Some(false),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
-        .unwrap()
-        .algorithm;
+    let algorithm = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap().algorithm;
 
     match algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => assert!(!nl4d.pooled_threshold),
@@ -922,8 +884,7 @@ fn pooled_threshold_is_rejected_for_nlmeans() {
         pooled_threshold: Some(true),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
         .unwrap_err()
         .to_string();
 
@@ -932,7 +893,6 @@ fn pooled_threshold_is_rejected_for_nlmeans() {
 
 #[test]
 fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
-    let layout = yuv420_layout();
     let cases = [
         (
             "lambda_ht_scale",
@@ -964,7 +924,7 @@ fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
         ),
     ];
     for (name, raw) in cases {
-        let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+        let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
             .unwrap_err()
             .to_string();
 
@@ -973,10 +933,7 @@ fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
 }
 
 fn nl4d_psy(raw: &RawParams) -> Option<av_denoise::PsyParams> {
-    let layout = yuv420_layout();
-    let algorithm = plane_options_from(raw, AlgorithmKind::Nl4d, layout)
-        .unwrap()
-        .algorithm;
+    let algorithm = plane_options_from(raw, AlgorithmKind::Nl4d).unwrap().algorithm;
 
     match algorithm {
         av_denoise::Algorithm::Nl4d(nl4d) => nl4d.psy,
@@ -1063,9 +1020,8 @@ fn single_psy_params() -> [(&'static str, RawParams); 5] {
 
 #[test]
 fn a_psy_param_without_enable_psy_is_rejected() {
-    let layout = yuv420_layout();
     for (name, raw) in single_psy_params() {
-        let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+        let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
             .unwrap_err()
             .to_string();
 
@@ -1079,25 +1035,23 @@ fn a_psy_param_without_enable_psy_is_rejected() {
 
 #[test]
 fn a_psy_param_with_enable_psy_off_is_rejected() {
-    let layout = yuv420_layout();
     let raw = RawParams {
         enable_psy: Some(false),
         psy_line_ring: Some(16),
         ..RawParams::default()
     };
 
-    assert!(plane_options_from(&raw, AlgorithmKind::Nl4d, layout).is_err());
+    assert!(plane_options_from(&raw, AlgorithmKind::Nl4d).is_err());
 }
 
 #[test]
 fn a_negative_psy_line_ring_is_rejected() {
-    let layout = yuv420_layout();
     let raw = RawParams {
         enable_psy: Some(true),
         psy_line_ring: Some(-1),
         ..RawParams::default()
     };
-    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
         .unwrap_err()
         .to_string();
 
@@ -1106,7 +1060,6 @@ fn a_negative_psy_line_ring_is_rejected() {
 
 #[test]
 fn psy_params_are_rejected_for_nlmeans() {
-    let layout = yuv420_layout();
     let mut cases = single_psy_params().to_vec();
     cases.push((
         "enable_psy",
@@ -1116,7 +1069,7 @@ fn psy_params_are_rejected_for_nlmeans() {
         },
     ));
     for (name, raw) in cases {
-        let err = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout)
+        let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
             .unwrap_err()
             .to_string();
 
@@ -1130,8 +1083,7 @@ fn a_negative_spatial_radius_is_rejected() {
         spatial_radius: Some(-1),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
-    let err = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+    let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
         .unwrap_err()
         .to_string();
 
@@ -1141,9 +1093,8 @@ fn a_negative_spatial_radius_is_rejected() {
 #[test]
 fn tuning_defaults_to_auto_and_not_deterministic() {
     let raw = RawParams::default();
-    let layout = yuv420_layout();
 
-    let options = plane_options_from(&raw, AlgorithmKind::Nl4d, layout).unwrap();
+    let options = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap();
 
     assert_eq!(options.tuning, av_denoise::TuningMode::Auto);
     assert!(!options.deterministic);
@@ -1156,9 +1107,8 @@ fn tune_and_deterministic_are_read() {
         deterministic: Some(true),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
 
-    let options = plane_options_from(&raw, AlgorithmKind::Nlmeans, layout).unwrap();
+    let options = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
 
     assert_eq!(options.tuning, av_denoise::TuningMode::Cached);
     assert!(options.deterministic);
@@ -1170,9 +1120,8 @@ fn an_unknown_tune_mode_is_rejected() {
         tune: Some("sometimes".to_string()),
         ..RawParams::default()
     };
-    let layout = yuv420_layout();
 
-    let error = plane_options_from(&raw, AlgorithmKind::Nl4d, layout)
+    let error = plane_options_from(&raw, AlgorithmKind::Nl4d)
         .unwrap_err()
         .to_string();
 

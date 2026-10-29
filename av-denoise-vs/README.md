@@ -192,13 +192,11 @@ starting point and adjust just the dial you care about, as the examples above do
 
 ## Channel modes
 
-`channel_mode` selects which planes get denoised, and takes one of four values:
+`channel_mode` selects which planes get denoised, and takes one of three values:
 
 - `luma` denoises the luma plane only, leaving chroma untouched.
 - `chroma` denoises the chroma planes only, leaving luma untouched.
 - `lumachroma` denoises both, luma and chroma independently.
-- `yuv` denoises luma and chroma together as a single pass. It needs a 4:4:4 source,
-  since it requires the chroma planes to be full resolution.
 
 ## Devices and accelerators
 

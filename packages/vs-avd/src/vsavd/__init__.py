@@ -66,7 +66,7 @@ def Nlm(
     Args:
         clip: The input video node to denoise.
         preset: Preset name. Unset dials fall back to whatever the av-denoise binary defaults to.
-        channel_mode: Which planes to filter, one of `"luma"`, `"chroma"`, `"lumachroma"` or `"yuv"`.
+        channel_mode: Which planes to filter, one of `"luma"`, `"chroma"`, or `"lumachroma"`.
         device: Compute device to run on. `"cpu"` selects a software device where the platform offers one,
             useful for testing, not for real encodes. Example: `"discrete:0"` for discrete GPU 0.
         strength: Overall filter strength. Mirrors FFmpeg's scaling.
@@ -136,7 +136,7 @@ def NlmHQ(
     Args:
         clip: The input video node to denoise.
         preset: Preset name. Unset dials fall back to whatever the av-denoise binary defaults to.
-        channel_mode: Which planes to filter, one of `"luma"`, `"chroma"`, `"lumachroma"` or `"yuv"`.
+        channel_mode: Which planes to filter, one of `"luma"`, `"chroma"`, or `"lumachroma"`.
         device: Compute device to run on. `"cpu"` selects a software device where the platform offers one,
             useful for testing, not for real encodes. Example: `"discrete:0"` for discrete GPU 0.
         sigma_scale: Multiplier nudging the measured noise level up or down.
@@ -220,7 +220,7 @@ def Nl4d(
     Args:
         clip: The input video node to denoise.
         preset: Preset name. NL4D only runs `"base"`.
-        channel_mode: Which planes to filter, one of `"luma"`, `"chroma"`, `"lumachroma"` or `"yuv"`.
+        channel_mode: Which planes to filter, one of `"luma"`, `"chroma"`, or `"lumachroma"`.
         device: Compute device to run on. `"cpu"` selects a software device where the platform offers one,
             useful for testing, not for real encodes. Example: `"discrete:0"` for discrete GPU 0.
         lambda_ht_scale: Threshold multiplier a transform coefficient's estimated-noise standard deviations

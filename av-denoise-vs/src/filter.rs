@@ -138,7 +138,7 @@ impl<'core> Denoise<'core> {
         };
 
         let layout = layout_from_format(raw_format, width, height)?;
-        let mut plane_options = plane_options_from(raw, algorithm_kind, layout)?;
+        let mut plane_options = plane_options_from(raw, algorithm_kind)?;
         plane_options.tuning = tuning_mode_from_env(plane_options.tuning);
 
         // Av1an runs one of these per chunk, so without a cache every chunk pays the ten seconds it

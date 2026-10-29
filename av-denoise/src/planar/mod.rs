@@ -122,9 +122,8 @@ pub struct Planes {
 
 /// Which planes a caller wants cleaned.
 ///
-/// This is separate from [ChannelMode] because a [PlanarDenoiser] may run two `HostDenoiser`s in
-/// lockstep, one for luma and one for chroma, or a single fused three-channel one. Which applies
-/// depends on the caller's channel selection and the source's chroma subsampling.
+/// This is separate from [ChannelMode] because a [PlanarDenoiser] may run a luma and a chroma
+/// `HostDenoiser` in lockstep.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ChannelIntent {
     /// Denoise luma only. Chroma passes through.
@@ -135,23 +134,6 @@ pub enum ChannelIntent {
     ///
     /// Chroma runs at the source's native subsampled resolution.
     LumaChroma,
-    /// A single `HostDenoiser` running the fused three-channel kernel, which needs a YUV444 source.
-    YuvFused,
-}
-
-impl ChannelIntent {
-    /// Rejects the intent if the source's subsampling cannot support it.
-    pub fn validate_for_source(self, layout: FrameLayout) -> Result<(), anyhow::Error> {
-        match self {
-            ChannelIntent::YuvFused if layout.subsampling != Subsampling::Yuv444 => {
-                anyhow::bail!(
-                    "--channel-mode yuv requires a YUV444 source, got {:?}. Convert the input first, for example with `ffmpeg -pix_fmt yuv444p`",
-                    layout.subsampling
-                );
-            },
-            _ => Ok(()),
-        }
-    }
 }
 
 /// The per-plane option set a caller resolves once and passes into [PlanarDenoiser::create].
@@ -205,8 +187,7 @@ impl PlaneOptions {
     fn algorithm_for(&self, channels: ChannelMode) -> Algorithm {
         let per_plane = |luma, chroma| match channels {
             ChannelMode::Luma => luma,
-            ChannelMode::Chroma => chroma,
-            ChannelMode::Yuv => None,
+            _ => chroma,
         };
 
         match self.algorithm {
@@ -291,11 +272,10 @@ fn denoised_planes(options: &PlaneOptions, layout: FrameLayout) -> Vec<(ChannelM
             (ChannelMode::Luma, layout.width, layout.height),
             (ChannelMode::Chroma, chroma_width, chroma_height),
         ],
-        ChannelIntent::YuvFused => vec![(ChannelMode::Yuv, layout.width, layout.height)],
     }
 }
 
-/// The engine spec of every plane `options` denoises at `layout`, in luma, chroma, yuv order.
+/// The engine spec of every plane `options` denoises at `layout`, in luma, chroma order.
 pub(crate) fn plane_specs(options: &PlaneOptions, layout: FrameLayout) -> Vec<EngineSpec> {
     let planes = denoised_planes(options, layout);
 
@@ -327,11 +307,6 @@ fn into_array<const N: usize>(planes: Vec<Vec<u8>>) -> [Vec<u8>; N] {
     array.unwrap_or_else(|_| panic!("expected {N} planes from a HostDenoiser, got {count}"))
 }
 
-fn into_yuv(planes: Vec<Vec<u8>>) -> Planes {
-    let [y, u, v] = into_array(planes);
-    Planes { y, u, v }
-}
-
 fn into_uv(planes: Vec<Vec<u8>>) -> (Vec<u8>, Vec<u8>) {
     let [u_plane, v_plane] = into_array(planes);
     (u_plane, v_plane)
@@ -347,14 +322,12 @@ fn into_luma(planes: Vec<Vec<u8>>) -> Vec<u8> {
 pub struct PlanarTiming {
     pub luma: Option<PlaneTiming>,
     pub chroma: Option<PlaneTiming>,
-    /// Set when all three planes are denoised together.
-    pub yuv: Option<PlaneTiming>,
 }
 
 impl PlanarTiming {
-    /// Each denoised plane's name and timing, in luma, chroma, yuv order.
+    /// Each denoised plane's name and timing, in luma, chroma order.
     pub fn planes(&self) -> Vec<(&'static str, PlaneTiming)> {
-        let named = [("luma", self.luma), ("chroma", self.chroma), ("yuv", self.yuv)];
+        let named = [("luma", self.luma), ("chroma", self.chroma)];
 
         named
             .into_iter()
@@ -396,8 +369,6 @@ pub struct PlanarDenoiser {
     layout: FrameLayout,
     luma: Option<HostDenoiser>,
     chroma: Option<HostDenoiser>,
-    /// Set when the intent is `YuvFused`, in which case `luma` and `chroma` are both unset.
-    yuv: Option<HostDenoiser>,
     // Source planes queued for the disabled side, if there is one. One entry is popped per frame the
     // enabled side emits, so temporal delays stay aligned.
     luma_passthrough: VecDeque<Vec<u8>>,
@@ -450,13 +421,10 @@ impl PlanarDenoiser {
             );
         }
 
-        options.intent.validate_for_source(layout)?;
-
-        let (denoise_luma, denoise_chroma, denoise_yuv) = match options.intent {
-            ChannelIntent::Luma => (true, false, false),
-            ChannelIntent::Chroma => (false, true, false),
-            ChannelIntent::LumaChroma => (true, true, false),
-            ChannelIntent::YuvFused => (false, false, true),
+        let (denoise_luma, denoise_chroma) = match options.intent {
+            ChannelIntent::Luma => (true, false),
+            ChannelIntent::Chroma => (false, true),
+            ChannelIntent::LumaChroma => (true, true),
         };
 
         let luma = denoise_luma
@@ -487,27 +455,13 @@ impl PlanarDenoiser {
             })
             .transpose()?;
 
-        let yuv = denoise_yuv
-            .then(|| {
-                let yuv_options = options.denoiser_options(ChannelMode::Yuv, layout.depth);
-                HostDenoiser::create_with(
-                    &options.accelerators,
-                    &options.device,
-                    placement,
-                    layout.width,
-                    layout.height,
-                    yuv_options,
-                )
-            })
-            .transpose()?;
-
         let temporal_radius = match options.mode {
             DenoisingMode::Spacial => 0,
             DenoisingMode::Temporal { radius } => radius,
         };
 
         // Every host is built from the same algorithm on the same device, so any one answers for all.
-        let first_host = yuv.as_ref().or(luma.as_ref()).or(chroma.as_ref());
+        let first_host = luma.as_ref().or(chroma.as_ref());
         let Some(first_host) = first_host else {
             anyhow::bail!("a planar denoiser needs at least one plane to denoise");
         };
@@ -519,7 +473,6 @@ impl PlanarDenoiser {
             layout,
             luma,
             chroma,
-            yuv,
             luma_passthrough: VecDeque::new(),
             chroma_passthrough: VecDeque::new(),
             temporal_radius,
@@ -535,9 +488,9 @@ impl PlanarDenoiser {
         &self.placement
     }
 
-    /// The host denoisers this denoiser runs, in luma, chroma, yuv order.
+    /// The host denoisers this denoiser runs, in luma, chroma order.
     pub(crate) fn hosts(&self) -> Vec<&HostDenoiser> {
-        let halves = [self.luma.as_ref(), self.chroma.as_ref(), self.yuv.as_ref()];
+        let halves = [self.luma.as_ref(), self.chroma.as_ref()];
         halves.into_iter().flatten().collect()
     }
 
@@ -628,7 +581,7 @@ impl PlanarDenoiser {
         })
     }
 
-    /// Uploads one frame for a tuning pass, in luma, chroma, yuv host order.
+    /// Uploads one frame for a tuning pass, in luma, chroma host order.
     fn tuning_frame(&self, planes: &Planes) -> TuningFrame {
         let mut handles = Vec::with_capacity(2);
 
@@ -642,11 +595,6 @@ impl PlanarDenoiser {
             handles.push(chroma);
         }
 
-        if let Some(denoiser) = self.yuv.as_ref() {
-            let yuv = denoiser.upload_frame(&[&planes.y, &planes.u, &planes.v]);
-            handles.push(yuv);
-        }
-
         TuningFrame::new(handles)
     }
 
@@ -654,7 +602,6 @@ impl PlanarDenoiser {
     fn drop_hosts(&mut self) {
         self.luma = None;
         self.chroma = None;
-        self.yuv = None;
     }
 
     /// Rebuilds the hosts on the same placement from the stored results, with tuning settled.
@@ -674,7 +621,7 @@ impl PlanarDenoiser {
 
     /// Rejects work once [Self::tune] has freed the hosts and could not rebuild them.
     fn check_engines(&self) -> Result<(), DenoiserError> {
-        let has_engines = self.luma.is_some() || self.chroma.is_some() || self.yuv.is_some();
+        let has_engines = self.luma.is_some() || self.chroma.is_some();
         if has_engines {
             return Ok(());
         }
@@ -713,18 +660,13 @@ impl PlanarDenoiser {
         self.push_with(planes, HostDenoiser::push_priming)
     }
 
-    /// Runs `push_frame` against whichever of `yuv`, `luma` and `chroma` is enabled.
+    /// Runs `push_frame` against whichever of `luma` and `chroma` is enabled.
     ///
     /// The planes go over as wire bytes, so the normalisation and the channel interleave both happen
     /// on the GPU.
     fn push_with(&mut self, planes: &Planes, push_frame: WirePush) -> Result<(), DenoiserError> {
         self.check_engines()?;
         self.check_planes(planes)?;
-
-        if let Some(denoiser) = self.yuv.as_mut() {
-            push_frame(denoiser, &[&planes.y, &planes.u, &planes.v])?;
-            return Ok(());
-        }
 
         if let Some(denoiser) = self.luma.as_mut() {
             push_frame(denoiser, &[&planes.y])?;
@@ -776,12 +718,6 @@ impl PlanarDenoiser {
     pub fn recv(&mut self) -> Result<Option<Planes>, anyhow::Error> {
         self.check_engines()?;
 
-        if let Some(denoiser) = self.yuv.as_mut() {
-            let received = denoiser.recv()?;
-            let planes = received.map(into_yuv);
-            return Ok(planes);
-        }
-
         let luma_out = self
             .luma
             .as_mut()
@@ -825,8 +761,7 @@ impl PlanarDenoiser {
     ///
     /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
     pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, anyhow::Error> {
-        let source = self.luma.as_mut().or(self.yuv.as_mut());
-        let Some(denoiser) = source else {
+        let Some(denoiser) = self.luma.as_mut() else {
             return Ok(Vec::new());
         };
 
@@ -840,14 +775,6 @@ impl PlanarDenoiser {
     /// `sink` is called once per emitted planar frame.
     pub fn flush(&mut self, mut sink: impl FnMut(Planes)) -> Result<(), anyhow::Error> {
         self.check_engines()?;
-
-        if let Some(denoiser) = self.yuv.as_mut() {
-            denoiser.flush(|planes| {
-                let frame = into_yuv(planes);
-                sink(frame);
-            })?;
-            return Ok(());
-        }
 
         let mut luma_frames: Vec<Vec<u8>> = Vec::new();
         let mut chroma_frames: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
@@ -912,7 +839,7 @@ impl PlanarDenoiser {
 
     /// Samples the device time of one frame in every `every` on each denoised plane.
     pub fn sample_device_time(&mut self, every: u32) {
-        let denoisers = [&mut self.luma, &mut self.chroma, &mut self.yuv];
+        let denoisers = [&mut self.luma, &mut self.chroma];
 
         for denoiser in denoisers.into_iter().flatten() {
             denoiser.sample_device_time(every);
@@ -923,9 +850,8 @@ impl PlanarDenoiser {
     pub fn timing(&mut self) -> PlanarTiming {
         let luma = self.luma.as_mut().map(HostDenoiser::timing);
         let chroma = self.chroma.as_mut().map(HostDenoiser::timing);
-        let yuv = self.yuv.as_mut().map(HostDenoiser::timing);
 
-        PlanarTiming { luma, chroma, yuv }
+        PlanarTiming { luma, chroma }
     }
 
     /// The backend the denoised planes run on.

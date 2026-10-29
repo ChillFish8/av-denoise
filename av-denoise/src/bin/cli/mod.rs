@@ -44,20 +44,12 @@ pub enum CliChannelMode {
     Luma,
     /// Clean only the colour planes (U, V). Brightness passes through.
     Chroma,
-    /// Clean all three planes together in one pass. Needs a YUV444
-    /// source and cannot be combined with the other modes.
-    Yuv,
 }
 
 /// Turns the `--channel-mode` list into the planes to denoise.
 pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<ChannelIntent, anyhow::Error> {
     if modes.is_empty() {
         anyhow::bail!("--channel-mode must contain at least one value");
-    }
-
-    let has_yuv = modes.contains(&CliChannelMode::Yuv);
-    if has_yuv && modes.len() > 1 {
-        anyhow::bail!("--channel-mode `yuv` cannot be combined with other modes");
     }
 
     let has_luma = modes.contains(&CliChannelMode::Luma);
@@ -67,18 +59,16 @@ pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<ChannelIntent,
         .iter()
         .filter(|mode| **mode == CliChannelMode::Chroma)
         .count();
-    let yuv_count = modes.iter().filter(|mode| **mode == CliChannelMode::Yuv).count();
 
-    if luma_count > 1 || chroma_count > 1 || yuv_count > 1 {
+    if luma_count > 1 || chroma_count > 1 {
         anyhow::bail!("--channel-mode entries must be unique");
     }
 
-    let intent = match (has_yuv, has_luma, has_chroma) {
-        (true, _, _) => ChannelIntent::YuvFused,
-        (false, true, true) => ChannelIntent::LumaChroma,
-        (false, true, false) => ChannelIntent::Luma,
-        (false, false, true) => ChannelIntent::Chroma,
-        (false, false, false) => unreachable!("empty list rejected above"),
+    let intent = match (has_luma, has_chroma) {
+        (true, true) => ChannelIntent::LumaChroma,
+        (true, false) => ChannelIntent::Luma,
+        (false, true) => ChannelIntent::Chroma,
+        (false, false) => unreachable!("empty list rejected above"),
     };
 
     Ok(intent)
@@ -143,11 +133,6 @@ pub struct Args {
     ///
     /// `luma,chroma` cleans both as two independent passes. This is the
     /// default and is usually what you want for noisy footage.
-    ///
-    /// `yuv` cleans all three planes in one fused pass.
-    ///
-    /// `yuv` needs a YUV444 source and cannot be combined with the
-    /// other modes.
     #[arg(
         long,
         env = "AVD_CHANNEL_MODE",

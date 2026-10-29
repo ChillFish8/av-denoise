@@ -114,14 +114,6 @@ mod reseed {
     /// Renders every frame through the streaming path.
     pub(super) fn stream_all(options: &PlaneOptions, frames: &[Planes]) -> Vec<Planes> {
         let frame_layout = layout();
-        stream_all_with_layout(options, frame_layout, frames)
-    }
-
-    fn stream_all_with_layout(
-        options: &PlaneOptions,
-        frame_layout: FrameLayout,
-        frames: &[Planes],
-    ) -> Vec<Planes> {
         let mut denoiser = PlanarDenoiser::create(options, frame_layout).unwrap();
         let mut outputs = Vec::new();
         for frame in frames {
@@ -555,46 +547,6 @@ mod reseed {
                             "len={clip_len} k={target_frame} frame {index} v"
                         );
                     }
-                }
-            }
-        }
-    }
-
-    /// `ChannelIntent::YuvFused` needs a 4:4:4 source, so it runs over its own layout.
-    #[test]
-    fn nl4d_reseed_window_matches_streaming_at_every_frame_in_yuv_fused_mode() {
-        let fused_layout = FrameLayout {
-            subsampling: Subsampling::Yuv444,
-            ..layout()
-        };
-        let options = nl4d_plane_options_with_intent(2, ChannelIntent::YuvFused);
-
-        for clip_len in [3usize, 7, 12] {
-            let frames = ramp_clip(&fused_layout, clip_len);
-            let streamed = stream_all_with_layout(&options, fused_layout, &frames);
-            assert_eq!(streamed.len(), clip_len);
-
-            for target_frame in 0..clip_len {
-                let mut denoiser = PlanarDenoiser::create(&options, fused_layout).unwrap();
-                let got = reseed_shifted(&mut denoiser, &frames, target_frame);
-
-                let expected_len = shifted_output_count(&denoiser, clip_len, target_frame);
-                assert_eq!(got.len(), expected_len, "len={clip_len} k={target_frame}");
-
-                for (offset, planes) in got.iter().enumerate() {
-                    let index = target_frame + offset;
-                    assert_eq!(
-                        planes.y, streamed[index].y,
-                        "len={clip_len} k={target_frame} frame {index} luma"
-                    );
-                    assert_eq!(
-                        planes.u, streamed[index].u,
-                        "len={clip_len} k={target_frame} frame {index} u"
-                    );
-                    assert_eq!(
-                        planes.v, streamed[index].v,
-                        "len={clip_len} k={target_frame} frame {index} v"
-                    );
                 }
             }
         }

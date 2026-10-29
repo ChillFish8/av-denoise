@@ -163,19 +163,17 @@ fn nonnegative(value: i64, field: &str) -> Result<u32, anyhow::Error> {
     u32::try_from(value).map_err(|_| anyhow::anyhow!("{field} must not be negative, got {value}"))
 }
 
-/// Parses a `channel_mode` name, rejecting a mode the source cannot support.
-fn parse_channel_mode(raw: &str, layout: FrameLayout) -> Result<ChannelIntent, anyhow::Error> {
+/// Parses a `channel_mode` name.
+fn parse_channel_mode(raw: &str) -> Result<ChannelIntent, anyhow::Error> {
     let intent = match raw.to_ascii_lowercase().as_str() {
         "luma" => ChannelIntent::Luma,
         "chroma" => ChannelIntent::Chroma,
         "lumachroma" => ChannelIntent::LumaChroma,
-        "yuv" => ChannelIntent::YuvFused,
         other => {
-            anyhow::bail!("unknown channel_mode '{other}', expected one of luma, chroma, lumachroma, yuv");
+            anyhow::bail!("unknown channel_mode '{other}', expected one of luma, chroma, lumachroma");
         },
     };
 
-    intent.validate_for_source(layout)?;
     Ok(intent)
 }
 
@@ -311,7 +309,7 @@ fn psy_options(raw: &RawParams) -> Result<Option<PsyParams>, anyhow::Error> {
     Ok(Some(psy))
 }
 
-/// Validates `raw` against `layout` and builds the denoiser's [PlaneOptions].
+/// Validates `raw` and builds the denoiser's [PlaneOptions].
 ///
 /// Parameters the algorithm never reads are rejected first, so `search_radius` on nl4d fails as a
 /// mismatch rather than tripping the stack check. A `search_radius` above 4 is then rejected when
@@ -320,7 +318,6 @@ fn psy_options(raw: &RawParams) -> Result<Option<PsyParams>, anyhow::Error> {
 pub fn plane_options_from(
     raw: &RawParams,
     algorithm_kind: AlgorithmKind,
-    layout: FrameLayout,
 ) -> Result<PlaneOptions, anyhow::Error> {
     // An explicit `variant`, `temporal_radius` or `search_radius` overrides what the preset picks,
     // matching the CLI's precedence.
@@ -358,7 +355,7 @@ pub fn plane_options_from(
 
     let intent = match raw.channel_mode.as_deref() {
         None => ChannelIntent::LumaChroma,
-        Some(mode) => parse_channel_mode(mode, layout)?,
+        Some(mode) => parse_channel_mode(mode)?,
     };
 
     let device = match &raw.device {

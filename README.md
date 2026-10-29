@@ -24,7 +24,7 @@ denoising tools.
   or decreasing the relative denoise strength.
 - **Temporal denoising with motion awareness** - up to 17-frame windows, per-neighbour block-match confidence, 
   and opt-in on-GPU motion compensation.
-- **Luma, chroma, and YUV444 kernels** - spatial or temporal, each plane individually tunable.
+- **Luma and chroma kernels** - spatial or temporal, each plane individually tunable.
 - **Library and binary** - y4m over a pipe or direct file ingestion via FFMS2, both with
   scene-parallel workers.
 - **8, 10, and 12-bit** - depth is detected from the source and preserved on output. Tuning parameters are normalized

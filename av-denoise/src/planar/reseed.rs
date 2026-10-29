@@ -220,7 +220,7 @@ impl PlanarDenoiser {
 
     /// Abandons the running stream on every enabled half and empties the passthrough queues.
     pub(crate) fn reset_streams(&mut self) {
-        let halves = [self.yuv.as_mut(), self.luma.as_mut(), self.chroma.as_mut()];
+        let halves = [self.luma.as_mut(), self.chroma.as_mut()];
         for denoiser in halves.into_iter().flatten() {
             denoiser.reset_stream();
         }

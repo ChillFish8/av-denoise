@@ -16,7 +16,7 @@ not forwarded at all, so av-denoise's own default stands.
 
     --arg algo=nl4d                 nl4d | nlmhq | nlm
     --arg preset=base               veryfast | fast | base | slow | veryslow (nl4d: base only)
-    --arg channel_mode=lumachroma   luma | chroma | lumachroma | yuv, and
+    --arg channel_mode=lumachroma   luma | chroma | lumachroma, and
                                     lumachroma is already the default
     --arg device=discrete:1         compute device, `cpu` is for smoke tests only
     --arg accelerators=vulkan       comma separated, tried in order

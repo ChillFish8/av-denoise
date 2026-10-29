@@ -66,7 +66,6 @@ pub fn all() -> Vec<ParityConfig> {
     let nl4d_grain = Algorithm::Nl4d(grain_options);
     let yuv420_8 = layout(Subsampling::Yuv420, Depth::Eight);
     let yuv420_10 = layout(Subsampling::Yuv420, Depth::Ten);
-    let yuv444_8 = layout(Subsampling::Yuv444, Depth::Eight);
     let yuv420_8_large = FrameLayout {
         width: 2 * WIDTH,
         height: 2 * HEIGHT,
@@ -125,15 +124,6 @@ pub fn all() -> Vec<ParityConfig> {
         2,
         false,
     );
-    let nlm_hq_yuv_8 = config(
-        "nlm_hq_yuv_8",
-        ChannelIntent::YuvFused,
-        temporal,
-        hq,
-        yuv444_8,
-        10,
-        false,
-    );
     let nl4d_luma_8 = config(
         "nl4d_luma_8",
         ChannelIntent::Luma,
@@ -158,15 +148,6 @@ pub fn all() -> Vec<ParityConfig> {
         temporal,
         nl4d,
         yuv420_10,
-        12,
-        false,
-    );
-    let nl4d_yuv_8 = config(
-        "nl4d_yuv_8",
-        ChannelIntent::YuvFused,
-        temporal,
-        nl4d,
-        yuv444_8,
         12,
         false,
     );
@@ -252,11 +233,9 @@ pub fn all() -> Vec<ParityConfig> {
         nlm_fast_temporal_8,
         nlm_hq_temporal_10,
         nlm_hq_short_8,
-        nlm_hq_yuv_8,
         nl4d_luma_8,
         nl4d_chroma_10,
         nl4d_lumachroma_10,
-        nl4d_yuv_8,
         nl4d_short_8,
         nl4d_grain_8,
         nlm_hq_reseed_8,

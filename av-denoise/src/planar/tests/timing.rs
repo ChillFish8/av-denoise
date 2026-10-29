@@ -118,17 +118,16 @@ fn sampling_device_time_estimates_busy_time_without_changing_output() {
 }
 
 #[test]
-fn planes_are_listed_in_luma_chroma_yuv_order() {
+fn planes_are_listed_in_luma_chroma_order() {
     let plane = PlaneTiming::default();
     let timing = PlanarTiming {
         luma: Some(plane),
         chroma: Some(plane),
-        yuv: Some(plane),
     };
 
     let planes = timing.planes();
     let names: Vec<&str> = planes.iter().map(|(name, _)| *name).collect();
-    assert_eq!(names, ["luma", "chroma", "yuv"]);
+    assert_eq!(names, ["luma", "chroma"]);
 }
 
 #[test]
@@ -136,11 +135,10 @@ fn unset_planes_are_left_out_of_the_listing() {
     let plane = PlaneTiming::default();
     let timing = PlanarTiming {
         luma: None,
-        chroma: None,
-        yuv: Some(plane),
+        chroma: Some(plane),
     };
 
     let planes = timing.planes();
     let names: Vec<&str> = planes.iter().map(|(name, _)| *name).collect();
-    assert_eq!(names, ["yuv"]);
+    assert_eq!(names, ["chroma"]);
 }

@@ -90,16 +90,10 @@ def test_nl4d_rejects_presets_other_than_base():
 
 @pytest.mark.gpu
 def test_every_channel_mode_literal_is_accepted():
-    """_types.ChannelMode duplicates strings the plugin owns. Prove they agree.
-
-    channel_mode="yuv" needs a 4:4:4 source (no subsampled chroma), so
-    it gets its own clip here rather than being skipped.
-    """
+    """_types.ChannelMode duplicates strings the plugin owns. Prove they agree."""
     src = synthetic_clip()
-    src_444 = synthetic_clip(fmt=vs.YUV444P8)
     for mode in get_args(ChannelMode):
-        clip = src_444 if mode == "yuv" else src
-        Nl4d(clip, channel_mode=mode).get_frame(0)
+        Nl4d(src, channel_mode=mode).get_frame(0)
 
 
 @pytest.mark.gpu

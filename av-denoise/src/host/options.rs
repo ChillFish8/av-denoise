@@ -14,12 +14,11 @@ use crate::tune::TuningMode;
 
 /// How a [HostDenoiser](crate::HostDenoiser) should be set up.
 ///
-/// Build one with `DenoiserOptions::builder()`. Every field has a default, so only the parts you care
-/// about need naming.
+/// Build one with `DenoiserOptions::builder()`. Only `channel_mode` is required. Every other field has a
+/// default.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct DenoiserOptions {
     /// Which channels of the frame to denoise.
-    #[builder(default = ChannelMode::Yuv)]
     pub channel_mode: ChannelMode,
     /// Whether to clean each frame on its own or across a temporal window.
     ///

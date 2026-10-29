@@ -455,7 +455,10 @@ fn invalid_params_surface_as_error() {
         ..NlmeansOptions::default()
     };
     let algorithm = Algorithm::Nlmeans(nlmeans_options);
-    let options = DenoiserOptions::builder().algorithm(algorithm).build();
+    let options = DenoiserOptions::builder()
+        .channel_mode(ChannelMode::Luma)
+        .algorithm(algorithm)
+        .build();
     let result = create(16, 16, options);
 
     match result {

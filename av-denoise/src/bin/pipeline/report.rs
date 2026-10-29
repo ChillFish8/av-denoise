@@ -72,7 +72,7 @@ impl PlaneTotals {
     }
 }
 
-/// Every plane's totals over all workers, in luma, chroma, yuv order.
+/// Every plane's totals over all workers, in luma, chroma order.
 fn plane_totals(workers: &[WorkerTiming]) -> Vec<(&'static str, PlaneTotals)> {
     let mut totals: Vec<(&'static str, PlaneTotals)> = Vec::new();
 
@@ -90,7 +90,7 @@ fn plane_totals(workers: &[WorkerTiming]) -> Vec<(&'static str, PlaneTotals)> {
         }
     }
 
-    let order = ["luma", "chroma", "yuv"];
+    let order = ["luma", "chroma"];
     totals.sort_by_key(|(name, _)| order.iter().position(|known| known == name));
     totals
 }

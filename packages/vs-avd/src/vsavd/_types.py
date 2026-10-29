@@ -4,6 +4,6 @@ from typing import Literal
 
 Preset = Literal["veryfast", "fast", "base", "slow", "veryslow"]
 Nl4dPreset = Literal["base"]
-ChannelMode = Literal["luma", "chroma", "lumachroma", "yuv"]
+ChannelMode = Literal["luma", "chroma", "lumachroma"]
 Tune = Literal["auto", "cached", "off"]
 Accelerators = Literal["cuda", "vulkan", "rocm", "metal"]

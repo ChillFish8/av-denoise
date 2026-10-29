@@ -100,7 +100,7 @@ These are global, so they work on either side of the subcommand.
 | Flag                               | What it does                                                                                                     | Default       |
 |------------------------------------|------------------------------------------------------------------------------------------------------------------|---------------|
 | `--preset <veryfast..veryslow>`    | Speed vs quality for `nlmeans`, see the ladder below. `nl4d` only runs `base`.                                   | `base`        |
-| `--channel-mode <luma,chroma,yuv>` | Which planes to clean. `yuv` is one fused pass and needs a YUV444 source.                                        | `luma,chroma` |
+| `--channel-mode <luma,chroma>`     | Which planes to clean.                                                                                           | `luma,chroma` |
 | `-A, --accelerators <list>`        | Backends to try, in order. Comma-separated, for example `cuda,vulkan`.                                           | `vulkan`      |
 | `-d, --device <spec>`              | `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]`, or `cpu`.                                            | `default`     |
 | `--progress`                       | Draws a progress bar. Off by default, because anything else writing to the terminal scrambles it.                | off           |
@@ -384,17 +384,6 @@ av-denoise nlmeans \
   --device discrete:0 \
   --channel-mode luma \
   --strength 3.0 \
-  --input ./sample.mkv \
-    | ffmpeg -hide_banner -loglevel info -y -f yuv4mpegpipe -i - -c:v ffv1 ./output.mkv
-```
-
-**YUV Fused Denoise - Vulkan - On Default GPU - Medium Denoise - Spatial - strength=yuv:0.8**
-```bash
-av-denoise nlmeans \
-  --preset veryfast \
-  --accelerators vulkan \
-  --channel-mode yuv \
-  --strength 2.0 \
   --input ./sample.mkv \
     | ffmpeg -hide_banner -loglevel info -y -f yuv4mpegpipe -i - -c:v ffv1 ./output.mkv
 ```
