@@ -133,7 +133,7 @@ fn host_formulas(front: &NlmDenoiser, median: [f32; 3], low: [f32; 3]) -> Derive
 }
 
 /// Every mix of auto strength, the noise floor, the NLM pilot, motion compensation and the luma
-/// or yuv plane, with temporal confidence on.
+/// or chroma plane, with temporal confidence on.
 fn coefficient_cases() -> Vec<NlmParams> {
     let prefilters = [
         PrefilterMode::None,
@@ -155,7 +155,7 @@ fn coefficient_cases() -> Vec<NlmParams> {
 
             for prefilter in prefilters {
                 for motion in motions {
-                    for channels in [ChannelMode::Luma, ChannelMode::Yuv] {
+                    for channels in [ChannelMode::Luma, ChannelMode::Chroma] {
                         let params = NlmParams {
                             prefilter,
                             hq: Some(hq),

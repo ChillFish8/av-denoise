@@ -123,12 +123,10 @@ fn the_collab_site_first_times_one_representative_per_family() {
 }
 
 #[test]
-fn the_chroma_and_yuv_sites_first_time_as_many_representatives_as_luma() {
+fn the_chroma_site_first_times_as_many_representatives_as_luma() {
     let chroma = CollabSpec::new(64, 48, ChannelMode::Chroma, 2);
-    let yuv = CollabSpec::new(64, 48, ChannelMode::Yuv, 1);
 
     assert_first_timed(chroma);
-    assert_first_timed(yuv);
 }
 
 #[test]
@@ -261,12 +259,12 @@ fn clamp_window_edge(position: u32, offset: i32, max_pos: u32) -> u32 {
     shifted.clamp(0, max_pos as i32) as u32
 }
 
-/// The tile holds every stored lane, so a radius 9 yuv tile at 16 groups is 86 by 26 pixels of
-/// four lanes. That is 35,776 bytes in f32 and half that in f16, plus 4,160 bytes of transpose.
+/// The tile holds every stored lane, so a radius 9 chroma tile at 16 groups is 86 by 26 pixels of
+/// two lanes. That is 17,888 bytes in f32 and half that in f16, plus 4,160 bytes of transpose.
 #[test]
 fn the_tile_holds_every_stored_lane_in_the_search_precision() {
     let client = test_client();
-    let spec = CollabSpec::new(64, 48, ChannelMode::Yuv, 1);
+    let spec = CollabSpec::new(64, 48, ChannelMode::Chroma, 1);
     let tiled16 = CollabVariant {
         groups: 16,
         centre: Centre::Tiled,
@@ -275,11 +273,11 @@ fn the_tile_holds_every_stored_lane_in_the_search_precision() {
 
     let f32_site = collab_site(&client, &spec);
     let f32_bytes = f32_site.shared_bytes(tiled16);
-    assert_eq!(f32_bytes, 39_936);
+    assert_eq!(f32_bytes, 22_048);
 
     let f16_site = collab_site_f16(&client, &spec);
     let f16_bytes = f16_site.shared_bytes(tiled16);
-    assert_eq!(f16_bytes, 22_048);
+    assert_eq!(f16_bytes, 13_104);
 
     // The HIP runtime crashes at process exit while an upload is still queued.
     sync(&client).expect("the uploads finish");
@@ -354,7 +352,8 @@ fn sixteen_groups_still_fit_a_32kb_device() {
 #[test]
 fn a_32kb_device_drops_only_the_tiles_that_do_not_fit() {
     let client = test_client();
-    let spec = CollabSpec::new(64, 48, ChannelMode::Yuv, 1);
+    let mut spec = CollabSpec::new(64, 48, ChannelMode::Chroma, 2);
+    spec.spatial_radius = 16;
     let site = collab_site(&client, &spec);
     let limits = small_device_limits();
     let uniform_only = needs_warp_uniform_search(&client);
@@ -368,32 +367,6 @@ fn a_32kb_device_drops_only_the_tiles_that_do_not_fit() {
         let name = variant.name();
         assert_eq!(offered, expected, "{name}");
     }
-}
-
-/// At spatial radius 16 a yuv f32 tile at 16 groups needs 68,160 bytes, past a 64 KB device, while
-/// the 8-group tile needs 45,600.
-#[test]
-fn radius_16_drops_the_widest_tile_on_a_64kb_device() {
-    let client = test_client();
-    let mut spec = CollabSpec::new(64, 48, ChannelMode::Yuv, 1);
-    spec.spatial_radius = 16;
-    let site = collab_site(&client, &spec);
-    let limits = DeviceLimits {
-        max_shared_bytes: 64 * 1024,
-        ..small_device_limits()
-    };
-    let tiled8 = CollabVariant {
-        centre: Centre::Tiled,
-        ..site.baseline()
-    };
-    let tiled16 = CollabVariant { groups: 16, ..tiled8 };
-
-    let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
-    let tiled16_bytes = site.shared_bytes(tiled16);
-
-    assert_eq!(tiled16_bytes, 68_160);
-    assert!(fitted.contains(&tiled8));
-    assert!(!fitted.contains(&tiled16));
 }
 
 /// Launches the chroma collab baseline once, so a compilation log holds its generated source.

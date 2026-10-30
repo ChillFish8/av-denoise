@@ -67,7 +67,7 @@ fn a_ring_one_frame_past_u32_max_elements_is_invalid_geometry() {
 
 #[test]
 fn a_ring_whose_size_overflows_u64_is_invalid_geometry() {
-    let geometry = sized_geometry(u32::MAX, u32::MAX, ChannelMode::Yuv);
+    let geometry = sized_geometry(u32::MAX, u32::MAX, ChannelMode::Chroma);
     let result = geometry.check_ring_fits(u64::MAX);
     assert!(matches!(result, Err(Error::InvalidGeometry(_))));
 }

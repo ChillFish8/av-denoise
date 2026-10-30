@@ -37,7 +37,7 @@ fn assert_split_matches_fused<S: Float>(client: &Client, fused: &CollabSite<S>, 
 #[test]
 fn the_split_matches_the_fused_kernel_at_every_grid_k_max_and_channel_mode() {
     let client = test_client();
-    let channel_modes = [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv];
+    let channel_modes = [ChannelMode::Luma, ChannelMode::Chroma];
 
     for channels in channel_modes {
         for radius in [0u32, 1, 2] {
@@ -63,7 +63,7 @@ fn the_split_matches_the_fused_kernel_with_an_f16_search() {
         return;
     }
 
-    let channel_modes = [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv];
+    let channel_modes = [ChannelMode::Luma, ChannelMode::Chroma];
 
     for channels in channel_modes {
         for radius in [1u32, 2] {

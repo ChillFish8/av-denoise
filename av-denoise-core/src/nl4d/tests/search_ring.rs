@@ -36,7 +36,7 @@ fn the_f16_search_denoises_a_static_clip_like_the_f32_search() {
 
     let base = textured_base(WIDTH, HEIGHT);
 
-    for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+    for channels in [ChannelMode::Luma, ChannelMode::Chroma] {
         let channel_count = channels.count() as usize;
         let clean = interleave_copies(&base, channel_count);
         let noisy_frames = static_noisy_frames(&base, channel_count);

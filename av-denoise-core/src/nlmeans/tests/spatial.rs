@@ -32,36 +32,6 @@ fn uniform_image_passthrough() {
 }
 
 #[test]
-fn uniform_yuv_passthrough() {
-    let client = make_client();
-    let params = NlmParams {
-        temporal_radius: 0,
-        search_radius: 2,
-        patch_radius: 2,
-        strength: 1.2,
-        self_weight: 1.0,
-        channels: ChannelMode::Yuv,
-        prefilter: PrefilterMode::None,
-        motion_compensation: MotionCompensationMode::None,
-        hq: None,
-    };
-
-    let width = 16;
-    let height = 16;
-    let frame = make_uniform_frame(width, height, 3, 0.5);
-
-    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
-    denoiser.push_frame(&frame);
-
-    let result = denoiser.denoise().unwrap().unwrap();
-    assert_eq!(result.len(), (width * height * 3) as usize);
-
-    for (i, &value) in result.iter().enumerate() {
-        assert!((value - 0.5).abs() < 1e-5, "pixel {i}: expected 0.5, got {value}");
-    }
-}
-
-#[test]
 fn uniform_chroma_passthrough() {
     let client = make_client();
     let params = NlmParams {
@@ -242,7 +212,7 @@ fn spatial_only_no_delay() {
 
     let width = 8;
     let height = 8;
-    let frame = make_uniform_frame(width, height, 3, 0.5);
+    let frame = make_uniform_frame(width, height, 1, 0.5);
 
     let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     denoiser.push_frame(&frame);

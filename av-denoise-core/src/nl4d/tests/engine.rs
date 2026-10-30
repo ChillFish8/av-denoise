@@ -250,16 +250,6 @@ fn chroma_stream_matches_the_oracle() {
 }
 
 #[test]
-fn yuv_stream_matches_the_oracle() {
-    let frames = noisy_frames(WIDTH, HEIGHT, 3, 8);
-    let actual_options = options(1, false);
-    let actual = run_engine(actual_options, ChannelMode::Yuv, &frames, 0);
-    let expected_options = options(1, false);
-    let expected = run_oracle(expected_options, ChannelMode::Yuv, &frames, 0);
-    assert_eq!(actual.frames, expected.frames);
-}
-
-#[test]
 fn a_short_stream_matches_the_oracle() {
     let frames = noisy_frames(WIDTH, HEIGHT, 1, 3);
     let actual_options = options(2, false);
@@ -741,14 +731,14 @@ fn a_plane_past_u32_pixels_is_invalid_geometry() {
     assert!(matches!(built, Err(Error::InvalidGeometry(_))));
 }
 
-/// Each 16384x16384 YUV frame stores 2^30 elements, so a five-frame ring passes `u32::MAX`.
+/// Each 32768x16384 chroma frame stores 2^30 elements, so a five-frame ring passes `u32::MAX`.
 #[test]
 fn a_ring_past_u32_elements_is_invalid_geometry() {
     let client = make_client();
     let oversized = Geometry {
-        width: 16_384,
+        width: 32_768,
         height: 16_384,
-        ..geometry(ChannelMode::Yuv)
+        ..geometry(ChannelMode::Chroma)
     };
 
     let engine_options = options(2, false);

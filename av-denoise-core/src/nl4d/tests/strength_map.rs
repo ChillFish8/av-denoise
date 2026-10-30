@@ -338,14 +338,6 @@ fn the_luma_denoiser_passes_the_psy_cut_and_ring_to_its_front() {
 }
 
 #[test]
-fn the_fused_yuv_denoiser_passes_the_psy_cut_and_ring_to_its_front() {
-    let denoiser = build_nl4d(ChannelMode::Yuv, psy_params());
-
-    assert_eq!(denoiser.front_for_test().flat_texture_cut(), Some(0.21));
-    assert_eq!(denoiser.front_for_test().line_ring(), Some(2));
-}
-
-#[test]
 fn the_chroma_denoiser_never_gets_a_cut_or_ring() {
     let denoiser = build_nl4d(ChannelMode::Chroma, psy_params());
 

@@ -76,8 +76,8 @@ impl DenoiserError {
 /// Push frames in order with [Self::push] and collect the cleaned ones with [Self::recv] or
 /// [Self::try_recv]. At the end of the stream call [Self::flush] to drain the temporal tail.
 ///
-/// Each frame is one byte buffer per plane. Luma takes Y, chroma takes U and V, and YUV takes all
-/// three at one size. Every output frame comes back in the same layout.
+/// Each frame is one byte buffer per plane. Luma takes Y and chroma takes U and V. Every output
+/// frame comes back in the same layout.
 ///
 /// ```no_run
 /// use av_denoise::accelerate::Accelerator;

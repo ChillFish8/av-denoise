@@ -187,7 +187,7 @@ impl PlaneOptions {
     fn algorithm_for(&self, channels: ChannelMode) -> Algorithm {
         let per_plane = |luma, chroma| match channels {
             ChannelMode::Luma => luma,
-            _ => chroma,
+            ChannelMode::Chroma => chroma,
         };
 
         match self.algorithm {
@@ -361,7 +361,7 @@ impl TuningPass {
     }
 }
 
-/// Wraps the luma and chroma `HostDenoiser` instances needed for one subsampled YUV source.
+/// Wraps the luma and chroma `HostDenoiser` instances needed for one planar YUV source.
 ///
 /// The caller pushes planar frames in and gets planar frames out. The luma and chroma split is
 /// invisible from the outside.

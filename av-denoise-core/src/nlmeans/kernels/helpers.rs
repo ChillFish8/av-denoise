@@ -45,9 +45,9 @@ pub(crate) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u
     sum
 }
 
-/// The per-channel distance scale, which is 3 for luma, 1.5 for chroma and 1 for full YUV.
+/// The per-channel distance scale, which is 3 for luma and 1.5 for chroma.
 ///
-/// Scaling this way lets all three channel modes share one `h2_inv_norm`.
+/// Scaling this way lets both channel modes share one `h2_inv_norm`.
 #[cube]
 pub(crate) fn channel_scale(#[comptime] channels: u32) -> f32 {
     let mut scale = 1.0f32;

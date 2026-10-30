@@ -88,7 +88,7 @@ impl<'a> DevicePlane<'a> {
 /// The shape and sample formats an engine is built for.
 ///
 /// `width` and `height` are the dimensions of the planes the engine sees, so a chroma engine is built at
-/// chroma size. Luma takes one plane, Chroma takes U and V, and Yuv takes Y, U and V at one size.
+/// chroma size. Luma takes one plane and Chroma takes U and V.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
     pub width: u32,

@@ -272,11 +272,7 @@ fn run_pipelines(backend: &str, client: &Client) {
         (MotionCompensationMode::None, "_no_mc"),
         (motion_compensation, "_mc"),
     ];
-    let channel_modes = [
-        ("luma", ChannelMode::Luma),
-        ("chroma", ChannelMode::Chroma),
-        ("yuv", ChannelMode::Yuv),
-    ];
+    let channel_modes = [("luma", ChannelMode::Luma), ("chroma", ChannelMode::Chroma)];
 
     for &(channel_name, mode) in &channel_modes {
         for &(variant, tag) in variants {

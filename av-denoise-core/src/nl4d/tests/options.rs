@@ -9,7 +9,7 @@ use crate::nlmeans::{
     PrefilterMode,
 };
 
-const ALL_CHANNELS: [ChannelMode; 3] = [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv];
+const ALL_CHANNELS: [ChannelMode; 2] = [ChannelMode::Luma, ChannelMode::Chroma];
 
 fn lambda_ht_for(options: &Nl4dOptions, channels: ChannelMode) -> f32 {
     let params = resolve_params(options, channels).expect("the options are valid");
@@ -30,14 +30,6 @@ fn nl4d_default_lambda_ht_differs_between_luma_and_chroma() {
 }
 
 #[test]
-fn nl4d_default_lambda_ht_yuv_reads_the_luma_value() {
-    let yuv = nl4d_default_lambda_ht(ChannelMode::Yuv);
-    let luma = nl4d_default_lambda_ht(ChannelMode::Luma);
-
-    assert!((yuv - luma).abs() < f32::EPSILON);
-}
-
-#[test]
 fn nl4d_pool_ratio_gives_the_calibrated_threshold_at_each_default_lambda() {
     for channels in ALL_CHANNELS {
         let threshold = nl4d_pool_ratio(channels) * nl4d_default_lambda_ht(channels);
@@ -46,10 +38,6 @@ fn nl4d_pool_ratio_gives_the_calibrated_threshold_at_each_default_lambda() {
             "{channels:?} gives {threshold}"
         );
     }
-
-    let yuv_ratio = nl4d_pool_ratio(ChannelMode::Yuv);
-    let luma_ratio = nl4d_pool_ratio(ChannelMode::Luma);
-    assert_eq!(yuv_ratio, luma_ratio);
 }
 
 #[test]
@@ -70,13 +58,13 @@ fn nl4d_options_default_temporal_radius_is_2() {
 fn nl4d_options_default_matches_nl4d_params_default() {
     let options = Nl4dOptions::default();
     let params = Nl4dParams::default();
-    let yuv_lambda_ht = nl4d_default_lambda_ht(ChannelMode::Yuv);
+    let luma_lambda_ht = nl4d_default_lambda_ht(ChannelMode::Luma);
 
     assert_eq!(options.refine, params.refine);
     assert_eq!(options.spatial_radius, params.spatial_radius);
     assert!((options.c_min - params.c_min).abs() < f32::EPSILON);
     assert_eq!(options.lambda_ht, None);
-    assert!((params.lambda_ht - yuv_lambda_ht).abs() < f32::EPSILON);
+    assert!((params.lambda_ht - luma_lambda_ht).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -178,7 +166,7 @@ fn nl4d_builds_the_front_ends_hq_params_from_its_own_fields() {
         thsad_scale: 0.8,
         ..Nl4dOptions::default()
     };
-    let params = resolve_params(&options, ChannelMode::Yuv).expect("resolve");
+    let params = resolve_params(&options, ChannelMode::Luma).expect("resolve");
 
     let hq = params.nlm.hq.expect("nl4d always runs the hq front end");
     assert_eq!(hq.sigma_override, Some(0.02));
@@ -193,7 +181,7 @@ fn nl4d_builds_the_front_ends_hq_params_from_its_own_fields() {
 #[test]
 fn nl4d_never_builds_a_prefilter() {
     let options = Nl4dOptions::default();
-    let params = resolve_params(&options, ChannelMode::Yuv).expect("resolve");
+    let params = resolve_params(&options, ChannelMode::Luma).expect("resolve");
 
     assert!(matches!(params.nlm.prefilter, PrefilterMode::None));
 }
@@ -226,7 +214,7 @@ fn nl4d_motion_search_becomes_an_active_mvtools_mode() {
         motion,
         ..Nl4dOptions::default()
     };
-    let params = resolve_params(&options, ChannelMode::Yuv).expect("resolve");
+    let params = resolve_params(&options, ChannelMode::Luma).expect("resolve");
 
     assert!(matches!(
         params.nlm.motion_compensation,
@@ -243,7 +231,7 @@ fn nl4d_motion_search_becomes_an_active_mvtools_mode() {
 #[test]
 fn nl4d_motion_search_defaults_match_the_front_ends_own_defaults() {
     let options = Nl4dOptions::default();
-    let params = resolve_params(&options, ChannelMode::Yuv).expect("resolve");
+    let params = resolve_params(&options, ChannelMode::Luma).expect("resolve");
     let defaults = Nl4dParams::default();
 
     assert_eq!(params.nlm.motion_compensation, defaults.nlm.motion_compensation);

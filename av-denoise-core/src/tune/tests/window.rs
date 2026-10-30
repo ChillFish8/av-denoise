@@ -59,7 +59,7 @@ fn window_candidate_names_round_trip() {
 #[test]
 fn window_shared_bytes_count_the_centre_tile_and_every_distance_tile() {
     let client = test_client();
-    let mut pair = WindowSpec::pair(64, 48, ChannelMode::Yuv);
+    let mut pair = WindowSpec::pair(64, 48, ChannelMode::Chroma);
     pair.patch_radius = 3;
     pair.search_radius = 7;
     let mut single = pair;
@@ -68,15 +68,15 @@ fn window_shared_bytes_count_the_centre_tile_and_every_distance_tile() {
     let pair_site = window_site(&client, &pair);
     let single_site = window_site(&client, &single);
 
-    // Centre tile: (32 + 6 + 14) x (8 + 6 + 14) pixels of four f32 lanes = 23296 bytes.
+    // Centre tile: (32 + 6 + 14) x (8 + 6 + 14) pixels of two f32 lanes = 11648 bytes.
     // One distance tile: (32 + 6) x (8 + 6) f32 = 2128 bytes.
     assert_eq!(
         pair_site.shared_bytes(WindowCandidate::Block32x8),
-        23296 + 2 * 2128 + 2 * 4
+        11648 + 2 * 2128 + 2 * 4
     );
     assert_eq!(
         single_site.shared_bytes(WindowCandidate::Block32x8),
-        23296 + 2128 + 4
+        11648 + 2128 + 4
     );
 }
 
@@ -99,7 +99,7 @@ fn window_keys_name_the_kernel_and_every_compiled_value() {
 fn window_specs() -> Vec<WindowSpec> {
     let mut specs = Vec::new();
 
-    for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+    for channels in [ChannelMode::Luma, ChannelMode::Chroma] {
         for (width, height) in [(70u32, 45u32), (33, 17), (96, 64)] {
             for pair in [false, true] {
                 for reference in [false, true] {
@@ -113,7 +113,7 @@ fn window_specs() -> Vec<WindowSpec> {
         }
     }
 
-    for channels in [ChannelMode::Luma, ChannelMode::Yuv] {
+    for channels in [ChannelMode::Luma, ChannelMode::Chroma] {
         for pair in [false, true] {
             let mut spec = WindowSpec::single(70, 45, channels);
             spec.patch_radius = 4;
@@ -145,19 +145,19 @@ fn every_window_candidate_matches_the_baseline_within_its_fidelity() {
 #[test]
 fn a_tall_cube_does_not_fit_a_32kb_device_at_wide_radii() {
     let client = test_client();
-    let mut spec = WindowSpec::pair(64, 48, ChannelMode::Yuv);
-    spec.patch_radius = 3;
-    spec.search_radius = 7;
+    let mut spec = WindowSpec::pair(64, 48, ChannelMode::Chroma);
+    spec.patch_radius = 7;
+    spec.search_radius = 8;
     let site = window_site(&client, &spec);
     let limits = small_device_limits();
 
     let fitted = fit_candidates(&site, &limits).expect("the baseline fits");
 
-    // 32x16 needs 29952 + 2 * 3344 + 2 * 4 = 36648 bytes, and 42272 with separable sums.
-    // 16x16 needs 27424 with separable sums.
-    // 32x8 needs 27560, and 31136 with separable sums.
-    assert_eq!(site.shared_bytes(WindowCandidate::Block32x16), 36648);
-    assert_eq!(site.shared_bytes(WindowCandidate::Separable16x16), 27424);
+    // 32x16 needs 22816 + 2 * 5520 + 2 * 4 = 33864 bytes, and 41536 with separable sums.
+    // 16x16 needs 27968 with separable sums.
+    // 32x8 needs 26952, and 32576 with separable sums.
+    assert_eq!(site.shared_bytes(WindowCandidate::Block32x16), 33864);
+    assert_eq!(site.shared_bytes(WindowCandidate::Separable16x16), 27968);
     assert_eq!(
         fitted,
         vec![
@@ -171,8 +171,8 @@ fn a_tall_cube_does_not_fit_a_32kb_device_at_wide_radii() {
 #[test]
 fn a_baseline_past_the_cap_is_a_fit_error() {
     let client = test_client();
-    let mut spec = WindowSpec::pair(64, 48, ChannelMode::Yuv);
-    spec.patch_radius = 4;
+    let mut spec = WindowSpec::pair(64, 48, ChannelMode::Chroma);
+    spec.patch_radius = 10;
     spec.search_radius = 8;
     let site = window_site(&client, &spec);
     let limits = small_device_limits();
@@ -183,7 +183,7 @@ fn a_baseline_past_the_cap_is_a_fit_error() {
 }
 
 fn assert_forced_shapes_match(algorithm: NlmeansAlgorithm, label: &str) {
-    for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+    for channels in [ChannelMode::Luma, ChannelMode::Chroma] {
         let planes = channels.count() as usize;
         let (width, height) = (70u32, 45u32);
         let frames = noisy_frames(width, height, planes, 6);
@@ -276,7 +276,7 @@ fn edited_accum(
 }
 
 fn baseline_window_outputs(client: &Client) -> (WindowSite, AccumOutputs) {
-    let spec = WindowSpec::pair(70, 45, ChannelMode::Yuv);
+    let spec = WindowSpec::pair(70, 45, ChannelMode::Chroma);
     let site = window_site(client, &spec);
     let outputs = site.scratch_outputs();
     site.launch(WindowCandidate::Block32x8, &outputs);
@@ -329,7 +329,7 @@ fn the_separable_check_rejects_an_estimate_past_the_bound() {
 #[test]
 fn separable_sums_count_a_row_sum_buffer_per_distance_tile() {
     let client = test_client();
-    let mut pair = WindowSpec::pair(64, 48, ChannelMode::Yuv);
+    let mut pair = WindowSpec::pair(64, 48, ChannelMode::Chroma);
     pair.patch_radius = 3;
     pair.search_radius = 7;
     let mut single = pair;
@@ -341,11 +341,11 @@ fn separable_sums_count_a_row_sum_buffer_per_distance_tile() {
     // A row-sum buffer at 32x8 and patch radius 3 is (8 + 6) x 32 f32 = 1792 bytes.
     assert_eq!(
         pair_site.shared_bytes(WindowCandidate::Separable32x8),
-        23296 + 2 * 2128 + 2 * 1792
+        11648 + 2 * 2128 + 2 * 1792
     );
     assert_eq!(
         single_site.shared_bytes(WindowCandidate::Separable32x8),
-        23296 + 2128 + 1792
+        11648 + 2128 + 1792
     );
 }
 
@@ -376,7 +376,7 @@ fn assert_within_separable_bound(forced: &[Vec<f32>], baseline: &[Vec<f32>], pix
 }
 
 fn assert_forced_separable_within_bound(algorithm: NlmeansAlgorithm, label: &str) {
-    for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+    for channels in [ChannelMode::Luma, ChannelMode::Chroma] {
         let planes = channels.count() as usize;
         let (width, height) = (70u32, 45u32);
         let pixels = (width * height) as usize;
@@ -542,7 +542,7 @@ fn the_pilot_strength_word_gives_the_main_pass_weights() {
     let client = test_client();
 
     for reference in [false, true] {
-        let mut main = WindowSpec::single(70, 45, ChannelMode::Yuv);
+        let mut main = WindowSpec::single(70, 45, ChannelMode::Chroma);
         main.reference = reference;
         let mut pilot = main;
         pilot.pilot = true;

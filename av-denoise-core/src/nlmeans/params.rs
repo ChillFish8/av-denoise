@@ -22,13 +22,12 @@ const HQ_DEFAULT_STRENGTH_CHROMA: [f32; 9] = [1.00, 0.85, 0.70, 0.70, 0.70, 0.70
 /// radii 0, 1, 2, 4 and 8 with luma pinned, and holds flat at 0.70 from radius 2, so radii 3, 5, 6
 /// and 7 sit on that plateau.
 ///
-/// `ChannelMode::Yuv` reads the luma table, which is an assumption because the sweeps do not
-/// cover that mode. Clamping the radius to [MAX_TEMPORAL_RADIUS] is a safety net, since
-/// [NlmParams::validate] already rejects anything larger.
+/// Clamping the radius to [MAX_TEMPORAL_RADIUS] is a safety net, since [NlmParams::validate]
+/// already rejects anything larger.
 pub fn hq_default_strength(channels: ChannelMode, temporal_radius: u32) -> f32 {
     let index = temporal_radius.min(MAX_TEMPORAL_RADIUS) as usize;
     match channels {
-        ChannelMode::Luma | ChannelMode::Yuv => HQ_DEFAULT_STRENGTH_LUMA[index],
+        ChannelMode::Luma => HQ_DEFAULT_STRENGTH_LUMA[index],
         ChannelMode::Chroma => HQ_DEFAULT_STRENGTH_CHROMA[index],
     }
 }
@@ -72,8 +71,8 @@ pub const MAX_SEARCH_RADIUS: u32 = 8;
 
 /// The hard ceiling on `temporal_radius`.
 ///
-/// The ring holds `2 * radius + 1` frames, so device memory grows with it. At radius 16, 1080p YUV
-/// would need roughly 540 MB for the input alone.
+/// The ring holds `2 * radius + 1` frames, so device memory grows with it. At radius 16, a 1080p luma ring
+/// of 33 `f32` frames would need roughly 274 MB for the input alone.
 pub const MAX_TEMPORAL_RADIUS: u32 = 8;
 
 /// The hard ceiling on the bilateral prefilter's radius, `ceil(2 * sigma_s).max(1)`.
@@ -91,8 +90,6 @@ pub enum ChannelMode {
     Luma,
     /// The two colour channels, U and V, with distances scaled by 1.5.
     Chroma,
-    /// All three channels together, with distances left unscaled.
-    Yuv,
 }
 
 impl ChannelMode {
@@ -101,19 +98,14 @@ impl ChannelMode {
         match self {
             ChannelMode::Luma => 1,
             ChannelMode::Chroma => 2,
-            ChannelMode::Yuv => 3,
         }
     }
 
     /// How many channels each pixel occupies in GPU storage.
-    ///
-    /// Kernels read whole `Line<f32>` values and backends only support power-of-two widths, so YUV
-    /// pads from 3 to 4.
     pub fn storage_count(self) -> u32 {
         match self {
             ChannelMode::Luma => 1,
             ChannelMode::Chroma => 2,
-            ChannelMode::Yuv => 4,
         }
     }
 }
@@ -213,7 +205,7 @@ impl Default for NlmParams {
             patch_radius: 4,
             strength: 1.2,
             self_weight: 1.0,
-            channels: ChannelMode::Yuv,
+            channels: ChannelMode::Luma,
             prefilter: PrefilterMode::None,
             motion_compensation: MotionCompensationMode::None,
             hq: None,
@@ -441,7 +433,6 @@ pub(super) fn channel_scale(channels: ChannelMode) -> f32 {
     match channels {
         ChannelMode::Luma => 3.0,
         ChannelMode::Chroma => 1.5,
-        ChannelMode::Yuv => 1.0,
     }
 }
 

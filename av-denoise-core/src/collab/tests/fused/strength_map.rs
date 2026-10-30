@@ -222,15 +222,15 @@ fn both_walks_agree_with_a_map_active() {
     assert_identical("walks with a map", &uniform, &branching);
 }
 
-/// A single-frame 3-channel ring, each channel carrying its own noise.
-fn three_channel_setup() -> Setup {
+/// A single-frame 2-channel ring, each channel carrying its own noise.
+fn two_channel_setup() -> Setup {
     let pixels = (FRAME_SIDE * FRAME_SIDE) as usize;
-    let noise = noisy_flat_field(FRAME_SIDE, FRAME_SIDE * 3, 0.5, 0.02);
-    let stored_channels = ChannelMode::Yuv.storage_count() as usize;
+    let noise = noisy_flat_field(FRAME_SIDE, FRAME_SIDE * 2, 0.5, 0.02);
+    let stored_channels = ChannelMode::Chroma.storage_count() as usize;
 
     let mut ring = vec![0.0f32; pixels * stored_channels];
     for pixel in 0..pixels {
-        for channel in 0..3 {
+        for channel in 0..2 {
             ring[pixel * stored_channels + channel] = noise[channel * pixels + pixel];
         }
     }
@@ -238,7 +238,7 @@ fn three_channel_setup() -> Setup {
     let luma_placeholder = vec![0.0f32; pixels];
     let mut setup = Setup::spatial_only(luma_placeholder, FRAME_SIDE, FRAME_SIDE);
     setup.ring = ring;
-    setup.channel_mode = ChannelMode::Yuv;
+    setup.channel_mode = ChannelMode::Chroma;
     setup.lambda_ht = LAMBDA;
 
     setup
@@ -246,7 +246,7 @@ fn three_channel_setup() -> Setup {
 
 /// Whether any accumulator of `channel` differs between two single-frame runs.
 fn channel_differs(first: &Aggregated, second: &Aggregated, channel: usize) -> bool {
-    let stored_channels = ChannelMode::Yuv.storage_count() as usize;
+    let stored_channels = ChannelMode::Chroma.storage_count() as usize;
     let first_values = first.accum.iter().skip(channel).step_by(stored_channels);
     let second_values = second.accum.iter().skip(channel).step_by(stored_channels);
     first_values
@@ -256,25 +256,23 @@ fn channel_differs(first: &Aggregated, second: &Aggregated, channel: usize) -> b
 
 #[test]
 fn a_luma_map_scales_only_channel_zero() {
-    let mut luma_mapped = three_channel_setup();
+    let mut luma_mapped = two_channel_setup();
     luma_mapped.noise_curve = Some([1.0; NOISE_CURVE_BINS]);
     let luma_map = uniform_map(FRAME_SIDE, FRAME_SIDE, 1.5);
     luma_mapped.strength_map = Some((luma_map, STRENGTH_MAP_LUMA));
     let got = run_fused(&luma_mapped);
 
-    let mut curve_scaled = three_channel_setup();
+    let mut curve_scaled = two_channel_setup();
     curve_scaled.noise_curve = Some([1.5; NOISE_CURVE_BINS]);
     let want = run_fused(&curve_scaled);
 
-    assert_identical("luma map on three channels", &got, &want);
+    assert_identical("luma map on two channels", &got, &want);
 
-    let mut all_mapped = three_channel_setup();
+    let mut all_mapped = two_channel_setup();
     let all_map = uniform_map(FRAME_SIDE, FRAME_SIDE, 1.5);
     all_mapped.strength_map = Some((all_map, STRENGTH_MAP_ALL));
     let all_channels = run_fused(&all_mapped);
 
-    let first_chroma_differs = channel_differs(&all_channels, &got, 1);
-    let second_chroma_differs = channel_differs(&all_channels, &got, 2);
-    assert!(first_chroma_differs);
-    assert!(second_chroma_differs);
+    let second_channel_differs = channel_differs(&all_channels, &got, 1);
+    assert!(second_channel_differs);
 }

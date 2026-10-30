@@ -97,6 +97,12 @@ def test_every_channel_mode_literal_is_accepted():
 
 
 @pytest.mark.gpu
+def test_a_444_source_accepts_lumachroma():
+    src = synthetic_clip(fmt=vs.YUV444P8)
+    Nl4d(src, channel_mode="lumachroma").get_frame(0)
+
+
+@pytest.mark.gpu
 def test_an_unknown_preset_is_rejected():
     """Without this, test_every_preset_literal_is_accepted would pass
 

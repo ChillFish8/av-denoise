@@ -90,7 +90,7 @@ fn gpu_cast_f16_strided_loop_covers_a_slot_larger_than_the_grid() {
 fn the_search_ring_mirrors_every_pushed_and_duplicated_slot() {
     let client = make_client();
 
-    for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+    for channels in [ChannelMode::Luma, ChannelMode::Chroma] {
         let params = ring_params(channels);
         let mut front = NlmDenoiser::new(&client, params, WIDTH_PX, HEIGHT_PX);
         front.enable_search_ring();

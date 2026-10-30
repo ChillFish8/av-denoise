@@ -41,14 +41,6 @@ const DENOISE_VARIANTS: &[(PrefilterMode, &str)] = &[
     (PrefilterMode::NlmSpatial { strength_scale: 1.0 }, "_nlm_pilot"),
 ];
 
-fn stored_channels(channels: u32) -> u32 {
-    match channels {
-        1 => 1,
-        2 => 2,
-        _ => 4, // YUV has 3 logical channels stored as 4, padding vec3 to vec4.
-    }
-}
-
 fn make_synthetic_frame(width: u32, height: u32, channels: u32) -> Vec<f32> {
     let mut data = Vec::with_capacity((width * height * channels) as usize);
 
@@ -64,24 +56,6 @@ fn make_synthetic_frame(width: u32, height: u32, channels: u32) -> Vec<f32> {
                 let noise = (hash as f32 / u32::MAX as f32 - 0.5) * 0.1;
                 data.push((base + noise).clamp(0.0, 1.0));
             }
-        }
-    }
-
-    data
-}
-
-/// A synthetic frame padded to the power-of-two lane count `NlmDenoiser` stores.
-fn make_padded_frame(width: u32, height: u32, channels: u32) -> Vec<f32> {
-    let stored_ch = stored_channels(channels);
-    if stored_ch == channels {
-        return make_synthetic_frame(width, height, channels);
-    }
-
-    let synthetic = make_synthetic_frame(width, height, channels);
-    let mut data = vec![0.0f32; (width * height * stored_ch) as usize];
-    for i in 0..(width * height) as usize {
-        for channel in 0..channels as usize {
-            data[i * stored_ch as usize + channel] = synthetic[i * channels as usize + channel];
         }
     }
 
@@ -156,8 +130,8 @@ fn div_ceil(value: u32, divisor: u32) -> u32 {
 
 fn bench_dist_2d_weight(client: &Client, backend: &str, channels: u32, channel_name: &str) -> BenchResult {
     let pixels = (WIDTH * HEIGHT) as usize;
-    let stored_ch = stored_channels(channels);
-    let frame = make_padded_frame(WIDTH, HEIGHT, channels);
+    let stored_ch = channels;
+    let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
     let frame_bytes = f32::as_bytes(&frame);
     let input = client.create_from_slice(frame_bytes);
     let output = client.empty(pixels * size_of::<f32>());
@@ -165,7 +139,7 @@ fn bench_dist_2d_weight(client: &Client, backend: &str, channels: u32, channel_n
     let channel_mode = match channels {
         1 => ChannelMode::Luma,
         2 => ChannelMode::Chroma,
-        _ => ChannelMode::Yuv,
+        other => panic!("unsupported channel count {other}"),
     };
     let params = NlmParams {
         patch_radius: 4,
@@ -207,8 +181,8 @@ fn bench_dist_2d_weight(client: &Client, backend: &str, channels: u32, channel_n
 
 fn bench_accumulate(client: &Client, backend: &str, channels: u32, channel_name: &str) -> BenchResult {
     let pixels = (WIDTH * HEIGHT) as usize;
-    let stored_ch = stored_channels(channels);
-    let frame = make_padded_frame(WIDTH, HEIGHT, channels);
+    let stored_ch = channels;
+    let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
     let frame_bytes = f32::as_bytes(&frame);
     let input = client.create_from_slice(frame_bytes);
 
@@ -251,8 +225,8 @@ fn bench_accumulate(client: &Client, backend: &str, channels: u32, channel_name:
 
 fn bench_finish(client: &Client, backend: &str, channels: u32, channel_name: &str) -> BenchResult {
     let pixels = (WIDTH * HEIGHT) as usize;
-    let stored_ch = stored_channels(channels);
-    let frame = make_padded_frame(WIDTH, HEIGHT, channels);
+    let stored_ch = channels;
+    let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
     let frame_bytes = f32::as_bytes(&frame);
     let input = client.create_from_slice(frame_bytes);
 
@@ -300,8 +274,8 @@ fn bench_finish(client: &Client, backend: &str, channels: u32, channel_name: &st
 
 fn bench_bilateral(client: &Client, backend: &str, channels: u32, channel_name: &str) -> BenchResult {
     let pixels = (WIDTH * HEIGHT) as usize;
-    let stored_ch = stored_channels(channels);
-    let frame = make_padded_frame(WIDTH, HEIGHT, channels);
+    let stored_ch = channels;
+    let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
     let frame_bytes = f32::as_bytes(&frame);
     let input = client.create_from_slice(frame_bytes);
     let output = client.empty(pixels * stored_ch as usize * size_of::<f32>());
@@ -470,7 +444,6 @@ fn run_all_benches(backend: &str, client: Client) {
     let channel_modes = [
         (1u32, "luma", ChannelMode::Luma),
         (2, "chroma", ChannelMode::Chroma),
-        (3, "yuv", ChannelMode::Yuv),
     ];
 
     for &(channels, channel_name, _) in &channel_modes {

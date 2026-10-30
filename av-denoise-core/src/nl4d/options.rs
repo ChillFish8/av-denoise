@@ -99,10 +99,9 @@ impl Default for Nl4dOptions {
 ///
 /// The values were picked by eye on real film grain, accepting some lost detail for less remaining
 /// noise on heavy grain. Encoders lose more detail to leftover grain than the denoiser does.
-/// `ChannelMode::Yuv` uses the luma value, since a fused pass is dominated by luma.
 pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
-        ChannelMode::Luma | ChannelMode::Yuv => 4.158,
+        ChannelMode::Luma => 4.158,
         ChannelMode::Chroma => 3.234,
     }
 }

@@ -10,8 +10,8 @@
 use std::path::PathBuf;
 
 use av_denoise_core::bench_api::harness::{Clip, KindScore, MotionClass, Score, Still, score, synthesise};
-use av_denoise_core::bench_api::{Device, HostIo, Nl4dDenoiser, Nl4dParams, NlmParams};
-use av_denoise_core::{ChannelMode, MotionCompensationMode, testing};
+use av_denoise_core::bench_api::{Device, HostIo, Nl4dDenoiser, Nl4dParams};
+use av_denoise_core::{MotionCompensationMode, testing};
 use clap::Parser;
 use cubecl::prelude::*;
 
@@ -29,37 +29,19 @@ struct Arm {
     params: fn() -> Nl4dParams,
 }
 
-/// The default parameters switched to `ChannelMode::Luma`.
-///
-/// `Nl4dParams::default` carries `ChannelMode::Yuv`, which expects three interleaved planes per
-/// pushed frame, and the harness only synthesises a single luma plane.
-fn baseline_params() -> Nl4dParams {
-    let nlm = NlmParams {
-        channels: ChannelMode::Luma,
-        ..Nl4dParams::default().nlm
-    };
-
+/// The default parameters with `field_lambda` at 0.5, for context against the shipped default.
+fn with_lambda_0_5() -> Nl4dParams {
     Nl4dParams {
-        nlm,
+        field_lambda: 0.5,
         ..Nl4dParams::default()
     }
 }
 
-/// [baseline_params] with `field_lambda` at 0.5, for context against the shipped default.
-///
-/// It builds on the luma baseline because the three-channel default would panic in the harness.
-fn with_lambda_0_5() -> Nl4dParams {
-    Nl4dParams {
-        field_lambda: 0.5,
-        ..baseline_params()
-    }
-}
-
-/// [baseline_params] with the motion pyramid deepened to three levels.
+/// The default parameters with the motion pyramid deepened to three levels.
 ///
 /// It tests whether the extra level earns its added kernel launch.
 fn with_pyramid_3() -> Nl4dParams {
-    let mut params = baseline_params();
+    let mut params = Nl4dParams::default();
     if let MotionCompensationMode::Mvtools { pyramid_levels, .. } = &mut params.nlm.motion_compensation {
         *pyramid_levels = 3;
     }
@@ -71,7 +53,7 @@ fn arms() -> Vec<Arm> {
     vec![
         Arm {
             name: "baseline",
-            params: baseline_params,
+            params: Nl4dParams::default,
         },
         Arm {
             name: "lambda_0.5",

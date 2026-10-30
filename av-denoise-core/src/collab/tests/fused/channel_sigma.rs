@@ -1,7 +1,7 @@
-use super::{Aggregated, Setup, chroma_cross_frame_setup, run_fused, yuv_cross_frame_setup};
+use super::{Aggregated, Setup, chroma_cross_frame_setup, run_fused};
 
 /// A distinct sigma per channel, each far enough from the others to move the threshold decisions.
-const CHANNEL_SIGMAS: [f32; 3] = [0.02, 0.06, 0.12];
+const CHANNEL_SIGMAS: [f32; 2] = [0.02, 0.06];
 
 /// Channel `channel`'s accumulator values, every region of the ring.
 fn channel_accum(got: &Aggregated, channel: usize, stored: usize) -> Vec<i32> {
@@ -65,11 +65,5 @@ fn assert_each_channel_reads_its_own_sigma(setup: Setup) {
 #[test]
 fn each_chroma_channel_thresholds_with_its_own_sigma() {
     let setup = chroma_cross_frame_setup(64, 64, 2);
-    assert_each_channel_reads_its_own_sigma(setup);
-}
-
-#[test]
-fn each_yuv_channel_thresholds_with_its_own_sigma() {
-    let setup = yuv_cross_frame_setup(64, 64, 2);
     assert_each_channel_reads_its_own_sigma(setup);
 }

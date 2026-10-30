@@ -75,7 +75,6 @@ fn run_all(backend: &str, client: Client) {
     let ingest_cases = [
         (1920, 1080, 1, "luma", IngestFormat::U8),
         (960, 540, 2, "chroma", IngestFormat::U16Ten),
-        (1920, 1080, 3, "yuv", IngestFormat::U16Ten),
         (1920, 1080, 1, "luma", IngestFormat::F32),
     ];
     for (width, height, channels, channel_name, format) in ingest_cases {
@@ -92,7 +91,6 @@ fn run_all(backend: &str, client: Client) {
     let egress_cases = [
         (1920, 1080, 1, "luma", EgressFormat::U8),
         (960, 540, 2, "chroma", EgressFormat::U16Ten),
-        (1920, 1080, 3, "yuv", EgressFormat::U16Ten),
         (1920, 1080, 1, "luma", EgressFormat::F32),
     ];
     for (width, height, channels, channel_name, format) in egress_cases {

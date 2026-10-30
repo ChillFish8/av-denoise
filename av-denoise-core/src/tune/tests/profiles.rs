@@ -25,11 +25,7 @@ fn constant_frames(planes: usize, count: usize) -> Vec<Vec<Vec<f32>>> {
 
 #[test]
 fn the_split_search_profile_matches_the_baseline_bit_for_bit() {
-    let modes = [
-        (ChannelMode::Luma, 1usize),
-        (ChannelMode::Chroma, 2),
-        (ChannelMode::Yuv, 3),
-    ];
+    let modes = [(ChannelMode::Luma, 1usize), (ChannelMode::Chroma, 2)];
 
     for (channels, planes) in modes {
         let noisy = noisy_frames(WIDTH, HEIGHT, planes, 8);

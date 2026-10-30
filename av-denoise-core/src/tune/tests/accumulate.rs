@@ -24,7 +24,7 @@ fn accumulate_uses_no_shared_memory_and_keys_on_its_lanes() {
     let spec = AccumulateSpec {
         width: 640,
         height: 360,
-        channels: ChannelMode::Yuv,
+        channels: ChannelMode::Chroma,
         q_x: 1,
         q_y: -1,
     };
@@ -33,14 +33,14 @@ fn accumulate_uses_no_shared_memory_and_keys_on_its_lanes() {
     let key = site.key();
 
     assert_eq!(site.shared_bytes(AccumulateCandidate::Thin32x16), 0);
-    assert_eq!(key.as_str(), "nlm_accumulate|w1024|h512|stored=4");
+    assert_eq!(key.as_str(), "nlm_accumulate|w1024|h512|stored=2");
 }
 
 #[test]
 fn every_accumulate_shape_matches_the_baseline_bit_for_bit() {
     let client = test_client();
 
-    for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+    for channels in [ChannelMode::Luma, ChannelMode::Chroma] {
         for (width, height) in [(70u32, 45u32), (33, 17)] {
             for (q_x, q_y) in [(1, 0), (-3, 2), (4, -4)] {
                 let spec = AccumulateSpec {
@@ -77,7 +77,7 @@ fn forcing_any_accumulate_shape_leaves_separable_nlmeans_output_unchanged() {
     };
     let algorithm = NlmeansAlgorithm::Fast(options);
 
-    for channels in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+    for channels in [ChannelMode::Luma, ChannelMode::Chroma] {
         let planes = channels.count() as usize;
         let (width, height) = (70u32, 45u32);
         let frames = noisy_frames(width, height, planes, 2);

@@ -218,14 +218,6 @@ fn temporal_chroma_matches_the_oracle_including_the_tail() {
 }
 
 #[test]
-fn temporal_yuv_matches_the_oracle() {
-    let frames = frames(6, 3);
-    let actual = run_engine(1, ChannelMode::Yuv, &frames);
-    let expected = run_oracle(1, ChannelMode::Yuv, &frames);
-    assert_eq!(actual, expected);
-}
-
-#[test]
 fn a_stream_shorter_than_the_window_matches_the_oracle() {
     let frames = frames(2, 1);
     let actual = run_engine(2, ChannelMode::Luma, &frames);
@@ -599,14 +591,14 @@ fn a_plane_past_u32_pixels_is_invalid_geometry() {
     assert!(matches!(built, Err(Error::InvalidGeometry(_))));
 }
 
-/// Each 16384x16384 YUV frame stores 2^30 elements, so a five-frame ring passes `u32::MAX`.
+/// Each 32768x16384 chroma frame stores 2^30 elements, so a five-frame ring passes `u32::MAX`.
 #[test]
 fn a_ring_past_u32_elements_is_invalid_geometry() {
     let client = make_client();
     let oversized = Geometry {
-        width: 16_384,
+        width: 32_768,
         height: 16_384,
-        ..geometry(ChannelMode::Yuv)
+        ..geometry(ChannelMode::Chroma)
     };
 
     let algorithm = hq(2);

@@ -86,7 +86,7 @@ impl Default for Nl4dParams {
         Self {
             nlm: NlmParams {
                 temporal_radius: 2,
-                channels: ChannelMode::Yuv,
+                channels: ChannelMode::Luma,
                 motion_compensation: MotionCompensationMode::Mvtools {
                     blksize: 16,
                     overlap: 8,

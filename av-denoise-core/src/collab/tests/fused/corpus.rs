@@ -1,4 +1,4 @@
-use super::{Setup, chroma_cross_frame_setup, cross_frame_setup, unique_frame, yuv_cross_frame_setup};
+use super::{Setup, chroma_cross_frame_setup, cross_frame_setup, unique_frame};
 use crate::collab::tests::helpers::{cel_frame, constant_frame, letterboxed_frame, noisy_flat_field};
 use crate::nl4d::nl4d_pool_ratio;
 use crate::nlmeans::ChannelMode;
@@ -56,9 +56,6 @@ pub(super) fn collab_corpus() -> Vec<(&'static str, Setup)> {
     let mut f16_chroma = chroma_cross_frame_setup(64, 64, 2);
     f16_chroma.f16_search = true;
     corpus.push(("f16_chroma", f16_chroma));
-
-    let yuv = yuv_cross_frame_setup(64, 64, 2);
-    corpus.push(("yuv", yuv));
 
     let mut pooled_luma = cross_frame_setup(64, 64, 2);
     let luma_ratio = nl4d_pool_ratio(ChannelMode::Luma);

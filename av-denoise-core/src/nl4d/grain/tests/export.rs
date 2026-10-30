@@ -306,29 +306,6 @@ fn short_scene_measures_only_real_pairs() {
 }
 
 #[test]
-fn fused_yuv_measures_the_luma_grain() {
-    let mut yuv = params(true);
-    yuv.nlm.channels = ChannelMode::Yuv;
-    let luma_frames = grain_frames(SIGMA, 9);
-    let frames: Vec<Vec<f32>> = luma_frames
-        .into_iter()
-        .map(|frame| frame.iter().flat_map(|&luma| [luma, 0.5, 0.5]).collect())
-        .collect();
-    let (outputs, chunks, has_export) = run(yuv, &frames);
-    let merged = merged(&chunks);
-    let median = median_of(&merged.source_hist);
-    let counted = frames_counted(&chunks);
-
-    assert!(has_export);
-    assert_eq!(outputs.len(), 9);
-    assert_eq!(counted, 9);
-    assert!(
-        (median / SIGMA as f64 - 1.0).abs() < 0.1,
-        "median {median} vs sigma {SIGMA}"
-    );
-}
-
-#[test]
 fn chroma_denoisers_never_export() {
     let mut chroma = params(true);
     chroma.nlm.channels = ChannelMode::Chroma;

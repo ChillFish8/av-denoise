@@ -334,7 +334,7 @@ fn a_configuration_is_complete_only_when_every_profile_key_is() {
 
     let luma_only = ["luma".to_string()];
     let both = ["luma".to_string(), "chroma".to_string()];
-    let missing = ["luma".to_string(), "yuv".to_string()];
+    let missing = ["luma".to_string(), "missing".to_string()];
 
     assert!(result.is_complete(&luma_only));
     assert!(!result.is_complete(&both));

@@ -465,7 +465,7 @@ fn assert_f16_search_agrees(label: &str, mut setup: Setup) {
 
 #[test]
 fn the_f16_search_matches_the_f32_search_on_f16_exact_content() {
-    for channel_mode in [ChannelMode::Luma, ChannelMode::Chroma, ChannelMode::Yuv] {
+    for channel_mode in [ChannelMode::Luma, ChannelMode::Chroma] {
         let setup = exact_cross_frame_setup(channel_mode);
         assert_f16_search_agrees(&format!("{channel_mode:?} cross frame"), setup);
     }

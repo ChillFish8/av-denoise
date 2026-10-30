@@ -36,7 +36,7 @@ fn separable_uniform_passthrough() {
 }
 
 #[test]
-fn separable_yuv_passthrough() {
+fn separable_chroma_passthrough() {
     let client = make_client();
     let params = NlmParams {
         temporal_radius: 0,
@@ -44,7 +44,7 @@ fn separable_yuv_passthrough() {
         patch_radius: 9, // > SEPARABLE_THRESHOLD
         strength: 1.2,
         self_weight: 1.0,
-        channels: ChannelMode::Yuv,
+        channels: ChannelMode::Chroma,
         prefilter: PrefilterMode::None,
         motion_compensation: MotionCompensationMode::None,
         hq: None,
@@ -52,19 +52,19 @@ fn separable_yuv_passthrough() {
 
     let width = 32;
     let height = 32;
-    let frame = make_uniform_frame(width, height, 3, 0.5);
+    let frame = make_uniform_frame(width, height, 2, 0.5);
 
     let mut denoiser = NlmDenoiser::new(&client, params, width, height);
     assert!(denoiser.use_separable);
     denoiser.push_frame(&frame);
 
     let result = denoiser.denoise().unwrap().unwrap();
-    assert_eq!(result.len(), (width * height * 3) as usize);
+    assert_eq!(result.len(), (width * height * 2) as usize);
 
     for (i, &value) in result.iter().enumerate() {
         assert!(
             (value - 0.5).abs() < 1e-4,
-            "separable yuv: pixel {i}: expected 0.5, got {value}"
+            "separable chroma: pixel {i}: expected 0.5, got {value}"
         );
     }
 }

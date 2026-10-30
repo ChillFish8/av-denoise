@@ -57,7 +57,7 @@ pub const BLOCK_1D: u32 = 256;
 pub const COPY_GRID_1D: u32 = 1024;
 
 /// The logical channel count and row label of each channel mode.
-pub const CHANNELS: &[(u32, &str)] = &[(1, "luma"), (2, "chroma"), (3, "yuv")];
+pub const CHANNELS: &[(u32, &str)] = &[(1, "luma"), (2, "chroma")];
 
 pub fn stored_channels(channels: u32) -> u32 {
     match channels {

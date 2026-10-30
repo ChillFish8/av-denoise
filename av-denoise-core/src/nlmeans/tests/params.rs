@@ -529,18 +529,6 @@ fn hq_default_strength_matches_the_measured_chroma_table() {
 }
 
 #[test]
-fn hq_default_strength_yuv_reads_the_luma_table() {
-    for radius in 0..=8u32 {
-        let yuv = hq_default_strength(ChannelMode::Yuv, radius);
-        let luma = hq_default_strength(ChannelMode::Luma, radius);
-        assert!(
-            (yuv - luma).abs() < f32::EPSILON,
-            "at radius {radius} yuv is {yuv} but luma is {luma}"
-        );
-    }
-}
-
-#[test]
 fn validate_dimensions_rejects_frames_below_the_minimum() {
     let small_width = validate_dimensions(2, 64);
     let small_height = validate_dimensions(64, 2);

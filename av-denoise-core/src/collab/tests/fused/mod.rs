@@ -631,17 +631,6 @@ pub(super) fn chroma_cross_frame_setup(width: u32, height: u32, radius: u32) -> 
     setup
 }
 
-/// [cross_frame_setup] with a three-channel ring stored four floats wide.
-pub(super) fn yuv_cross_frame_setup(width: u32, height: u32, radius: u32) -> Setup {
-    let frames = 2 * radius + 1;
-    let stored = ChannelMode::Yuv.storage_count();
-    let mut setup = cross_frame_setup(width, height, radius);
-    setup.ring = unique_frame(width * stored, height * frames);
-    setup.channel_mode = ChannelMode::Yuv;
-
-    setup
-}
-
 /// A three-frame ring whose neighbours hold an exact copy of the centre frame, at the position the
 /// zero motion field predicts.
 ///
