@@ -78,12 +78,12 @@ fn channel_sums(mean: f32, sigma: f32, pixels: f32) -> (f32, f32) {
 }
 
 /// One slot's records, one per block of a `width` by `height` frame in row-major order.
-pub(crate) fn frame_records(width: u32, height: u32, stored_ch: u32, blocks: &[BlockSpec]) -> Vec<f32> {
+pub(crate) fn frame_records(width: u32, height: u32, channels: u32, blocks: &[BlockSpec]) -> Vec<f32> {
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
+    let record_len = temporal_stats_record_len(channels) as usize;
     let block_count = (blocks_x * blocks_y) as usize;
-    let quarters_base = (2 * stored_ch + TEMPORAL_QUARTER_BASE) as usize;
-    let stored = stored_ch as usize;
+    let quarters_base = (2 * channels + TEMPORAL_QUARTER_BASE) as usize;
+    let channel_count = channels as usize;
 
     let spec_count = blocks.len();
     assert_eq!(spec_count, block_count, "one spec per block");
@@ -99,17 +99,17 @@ pub(crate) fn frame_records(width: u32, height: u32, stored_ch: u32, blocks: &[B
         let pairs = (block_height * block_width.saturating_sub(1)) as f32;
         let record = &mut records[index * record_len..(index + 1) * record_len];
 
-        for channel in 0..stored.min(3) {
+        for channel in 0..channel_count {
             let (sum_d, sum_d2) = channel_sums(spec.mean, spec.sigma[channel], pixels);
             record[channel] = sum_d;
-            record[stored + channel] = sum_d2;
+            record[channel_count + channel] = sum_d2;
         }
 
         let variance = 2.0 * spec.sigma[0] * spec.sigma[0];
         let mean_square = spec.mean * spec.mean;
-        record[2 * stored] = (spec.rho * variance + mean_square) * pairs;
-        record[2 * stored + BLOCK_TEXTURE_LANE as usize] = spec.texture;
-        record[2 * stored + BLOCK_MOVED_LANE as usize] = if spec.moved { 1.0 } else { 0.0 };
+        record[2 * channel_count] = (spec.rho * variance + mean_square) * pairs;
+        record[2 * channel_count + BLOCK_TEXTURE_LANE as usize] = spec.texture;
+        record[2 * channel_count + BLOCK_MOVED_LANE as usize] = if spec.moved { 1.0 } else { 0.0 };
 
         for quarter_index in 0..TEMPORAL_QUARTERS {
             let offset_x = (quarter_index % 2) * TEMPORAL_QUARTER_SIZE;

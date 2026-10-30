@@ -12,7 +12,6 @@ pub(crate) struct NoiseCtx<'a> {
     pub width: u32,
     pub height: u32,
     pub channels: u32,
-    pub stored_ch: u32,
     pub frame_count: u32,
     pub frame: u32,
     pub slot: u32,
@@ -35,7 +34,9 @@ pub(crate) fn noise_partials_slot_stride_bytes(width: u32, height: u32, align: S
     align.pad_bytes(partials_bytes)
 }
 
-/// The Immerkær totals each ring slot keeps in the results buffer, one per stored channel lane.
+/// The Immerkær totals each ring slot keeps in the results buffer.
+///
+/// Each channel has its own lane and the unused lanes read 0.
 pub(crate) const RESULTS_PER_SLOT: usize = 4;
 
 /// The [RESULTS_PER_SLOT](crate::noise::spatial::RESULTS_PER_SLOT) Immerkær totals `slot`
@@ -74,10 +75,10 @@ pub(crate) fn noise_partials_slot_view(
 /// looks partly like content to it. The per-channel totals land in this frame's slot of the results
 /// buffer, which holds four values per slot of the input ring's frame capacity.
 pub(crate) fn run_noise_estimate(client: &Client, ctx: &NoiseCtx<'_>) -> Result<(), anyhow::Error> {
-    let total_input = (ctx.frame_count * ctx.height * ctx.width * ctx.stored_ch) as usize;
+    let total_input = (ctx.frame_count * ctx.height * ctx.width * ctx.channels) as usize;
     let partials_count = partials_len(ctx.width, ctx.height);
     let total_results = ctx.frame_count as usize * RESULTS_PER_SLOT;
-    let stored_ch = ctx.stored_ch as usize;
+    let vector_width = ctx.channels as usize;
     let cubes_x = ctx.width.div_ceil(IMMERKAER_BLOCK_X);
     let cubes_y = ctx.height.div_ceil(IMMERKAER_BLOCK_Y);
 
@@ -86,7 +87,7 @@ pub(crate) fn run_noise_estimate(client: &Client, ctx: &NoiseCtx<'_>) -> Result<
             client,
             CubeCount::new_2d(cubes_x, cubes_y),
             CubeDim::new_2d(IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y),
-            stored_ch,
+            vector_width,
             BufferArg::from_raw_parts(ctx.input_buf.clone(), total_input),
             BufferArg::from_raw_parts(ctx.partials_buf.clone(), partials_count),
             ctx.frame,

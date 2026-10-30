@@ -351,7 +351,7 @@ pub(crate) fn raw_reading_sigma(
     let ctx = TemporalStatsCtx {
         width,
         height,
-        stored_ch: channels,
+        channels,
         frame_count,
         slot_new: 1,
         slot_prev: 0,
@@ -374,7 +374,7 @@ pub(crate) fn raw_reading_sigma(
     )
     .expect("the records read back");
     let settings = QuarterSettings::default();
-    let reading = temporal_noise_reading(&records, channels, channels, width, height, false, settings);
+    let reading = temporal_noise_reading(&records, channels, width, height, false, settings);
 
     reading.sample.map(|sample| sample.sigma)
 }

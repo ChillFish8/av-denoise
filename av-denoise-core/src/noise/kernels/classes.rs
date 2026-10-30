@@ -83,14 +83,14 @@ pub fn noise_classify(
     slot: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] channels: u32,
 ) {
     let blocks_x = comptime!(width.div_ceil(TEMPORAL_NOISE_BLOCK));
     let cols = comptime!(strength_map_dims(width, height).0);
     let rows = comptime!(strength_map_dims(width, height).1);
     let quarters = comptime!(cols * rows);
-    let record_len = comptime!(temporal_stats_record_len(stored_ch));
-    let quarters_base = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE);
+    let record_len = comptime!(temporal_stats_record_len(channels));
+    let quarters_base = comptime!(2 * channels + TEMPORAL_QUARTER_BASE);
 
     let index = ABSOLUTE_POS_X;
 

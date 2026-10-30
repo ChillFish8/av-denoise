@@ -19,7 +19,6 @@ fn estimate_abs_sums(width: u32, height: u32, channels: u32, frame: &[f32]) -> [
         width,
         height,
         channels,
-        stored_ch: channels,
         frame_count: 1,
         frame: 0,
         slot: 0,

@@ -455,12 +455,12 @@ pub struct ReadingInput {
 }
 
 impl ReadingBench {
-    /// The width, height, channels and stored channels of the plane.
-    fn plane(&self) -> (u32, u32, u32, u32) {
+    /// The width, height and channels of the plane.
+    fn plane(&self) -> (u32, u32, u32) {
         if self.chroma {
-            (WIDTH / 2, HEIGHT / 2, 2, 2)
+            (WIDTH / 2, HEIGHT / 2, 2)
         } else {
-            (WIDTH, HEIGHT, 1, 1)
+            (WIDTH, HEIGHT, 1)
         }
     }
 
@@ -498,7 +498,7 @@ impl ReadingBench {
 
     /// Two frames, the second with up to 0.02 of hashed noise added to every sample.
     fn ring(&self) -> Handle {
-        let (width, height, channels, _) = self.plane();
+        let (width, height, channels) = self.plane();
         let frame = if self.curve {
             self.gradient_frame()
         } else {
@@ -551,14 +551,14 @@ impl Benchmark for ReadingBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let (width, height, channels, stored_ch) = self.plane();
+        let (width, height, channels) = self.plane();
         let ring = self.ring();
         let options = ReadingOptions {
             luma_fields: self.luma_fields(),
             map: self.map(),
             offset_tables: None,
         };
-        let reading = NoiseReading::new(&self.client, width, height, channels, stored_ch, &ring, options)
+        let reading = NoiseReading::new(&self.client, width, height, channels, &ring, options)
             .expect("the stats queue");
         reading.queue_before(self.stage);
 
@@ -621,7 +621,7 @@ impl Benchmark for ReadingBench {
     }
 
     fn shapes(&self) -> Vec<Vec<usize>> {
-        let (width, height, channels, _) = self.plane();
+        let (width, height, channels) = self.plane();
 
         vec![vec![width as usize, height as usize, channels as usize]]
     }
@@ -683,9 +683,8 @@ impl Benchmark for FoldBench {
             map,
             offset_tables,
         };
-        let stored_ch = 1;
-        let reading = NoiseReading::new(&self.client, WIDTH, HEIGHT, 1, stored_ch, &ring, options)
-            .expect("the stats queue");
+        let reading =
+            NoiseReading::new(&self.client, WIDTH, HEIGHT, 1, &ring, options).expect("the stats queue");
 
         reading.queue_reading();
         reading.record_window();

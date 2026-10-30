@@ -48,7 +48,6 @@ fn shape(client: &Client, width: u32, height: u32) -> NoiseShape {
         width,
         height,
         channels: 1,
-        stored_ch: 1,
         frames: FRAMES,
         ring_radius: FRAMES / 2,
         temporal: true,

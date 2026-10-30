@@ -68,13 +68,13 @@ fn temporal_stats_blocks_and_slot_len() {
     let exact_blocks = temporal_stats_blocks(32, 16);
     let ragged_blocks = temporal_stats_blocks(33, 17);
     let single_record_len = temporal_stats_record_len(1);
-    let padded_record_len = temporal_stats_record_len(4);
+    let chroma_record_len = temporal_stats_record_len(2);
     let slot_len = temporal_stats_slot_len(32, 16, 1);
 
     assert_eq!(exact_blocks, (2, 1));
     assert_eq!(ragged_blocks, (3, 2)); // ragged on both axes
     assert_eq!(single_record_len, 41);
-    assert_eq!(padded_record_len, 47);
+    assert_eq!(chroma_record_len, 43);
     assert_eq!(slot_len, 82); // 2 blocks x record_len 41
 }
 
@@ -82,7 +82,6 @@ fn temporal_stats_blocks_and_slot_len() {
 fn aggregate_only_static_block_contributes_to_sigma_and_rho() {
     let width = 32;
     let height = 16;
-    let stored_channels = 1;
     let channels = 1;
     let pixel_count = 256.0f32;
     let n_pairs = 240.0f32;
@@ -100,7 +99,7 @@ fn aggregate_only_static_block_contributes_to_sigma_and_rho() {
     let moving_block = scalar_record(sum_d_bad, 0.0, 0.0);
     let records = [static_block, moving_block].concat();
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height)
         .expect("one of two blocks passes the static gate, above the 5% floor");
 
     assert!((sample.static_fraction - 0.5).abs() < 1e-6);
@@ -122,7 +121,6 @@ fn aggregate_only_static_block_contributes_to_sigma_and_rho() {
 fn aggregate_excludes_perfectly_static_blocks_from_the_population() {
     let width = 16 * 8;
     let height = 16;
-    let stored_channels = 1;
     let channels = 1;
     let pixel_count = 256.0f32;
     let n_pairs = 240.0f32;
@@ -140,7 +138,7 @@ fn aggregate_excludes_perfectly_static_blocks_from_the_population() {
         records.extend(record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height)
         .expect("five blocks clear the gate");
 
     assert!(
@@ -165,7 +163,6 @@ fn aggregate_excludes_perfectly_static_blocks_from_the_population() {
 fn aggregate_median_over_multiple_static_blocks() {
     let width = 16 * 5;
     let height = 16;
-    let stored_channels = 1;
     let channels = 1;
     let pixel_count = 256.0f32;
     let n_pairs = 240.0f32;
@@ -184,7 +181,7 @@ fn aggregate_median_over_multiple_static_blocks() {
         records.extend(record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height)
         .expect("all five blocks are static");
 
     assert!((sample.static_fraction - 0.8).abs() < 1e-6);
@@ -210,11 +207,10 @@ fn aggregate_median_over_multiple_static_blocks() {
 fn aggregate_below_static_floor_returns_none() {
     let width = 16 * 5;
     let height = 16 * 5;
-    let stored_channels = 1;
     let channels = 1;
     let pixel_count = 256.0f32;
 
-    let record_len = temporal_stats_record_len(stored_channels) as usize;
+    let record_len = temporal_stats_record_len(channels) as usize;
     let mut records = vec![0.0f32; 25 * record_len];
     let mean0_bad = 10.0 / 255.0;
     for block in 1..25 {
@@ -226,7 +222,7 @@ fn aggregate_below_static_floor_returns_none() {
     records[1] = pixel_count * variance;
     records[2] = 240.0 * 0.5 * variance;
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height);
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height);
     assert!(
         sample.is_none(),
         "1 of 25 static blocks (4%) should fall back below the 5% floor"
@@ -238,48 +234,44 @@ fn aggregate_below_static_floor_returns_none() {
 fn aggregate_zeroed_slot_returns_none() {
     let width = 32;
     let height = 32;
-    let stored_channels = 1;
     let channels = 1;
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
-    let record_len = temporal_stats_record_len(stored_channels) as usize;
+    let record_len = temporal_stats_record_len(channels) as usize;
     let records = vec![0.0f32; (blocks_x * blocks_y) as usize * record_len];
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height);
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height);
     assert!(
         sample.is_none(),
         "a zero-filled duplicate slot's stats must fall back to Immerkær, not report sigma=0"
     );
 }
 
-/// YUV storage puts three channels in four lanes, and the padding lane must never affect the
-/// result.
 #[test]
 fn aggregate_multi_channel_layout_reads_correct_offsets() {
     let width = 16;
     let height = 16;
-    let stored_channels = 4;
-    let channels = 3;
+    let channels = 2;
     let pixel_count = 256.0f32;
     let n_pairs = 240.0f32;
 
-    let sigmas_255 = [2.0f32, 4.0, 6.0];
+    let sigmas_255 = [2.0f32, 4.0];
     let rho_target = 0.6f32;
 
-    let record_len = temporal_stats_record_len(stored_channels) as usize;
+    let record_len = temporal_stats_record_len(channels) as usize;
     let mut record = vec![0.0f32; record_len];
     let mut luma_variance = 0.0f32;
     for (channel, sigma_255) in sigmas_255.iter().enumerate() {
         let sigma = sigma_255 / 255.0;
         let variance = 2.0 * sigma * sigma;
-        record[stored_channels as usize + channel] = pixel_count * variance;
+        record[channels as usize + channel] = pixel_count * variance;
         if channel == 0 {
             luma_variance = variance;
         }
     }
 
-    record[2 * stored_channels as usize] = n_pairs * rho_target * luma_variance;
+    record[2 * channels as usize] = n_pairs * rho_target * luma_variance;
 
-    let sample = aggregate_temporal_noise_stats(&record, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&record, channels, width, height)
         .expect("the single block is static with measurable channel-0 noise");
 
     for (channel, sigma_255) in sigmas_255.iter().enumerate() {
@@ -300,7 +292,6 @@ fn aggregate_multi_channel_layout_reads_correct_offsets() {
 fn aggregate_rejects_majority_zero_mean_texture_outliers() {
     let width = 64;
     let height = 64;
-    let stored_channels = 1;
     let channels = 1;
 
     let background_sigma_255 = 2.0f32;
@@ -318,7 +309,7 @@ fn aggregate_rejects_majority_zero_mean_texture_outliers() {
         records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height)
         .expect("the static minority clears STATIC_FRACTION_MIN on its own");
 
     let expected_sigma = background_sigma_255 / 255.0;
@@ -344,7 +335,6 @@ fn aggregate_rejects_majority_zero_mean_texture_outliers() {
 fn aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread() {
     let width = 64;
     let height = 64;
-    let stored_channels = 1;
     let channels = 1;
 
     let low_sigma_255 = 2.0f32;
@@ -362,8 +352,8 @@ fn aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread() {
         records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
-        .expect("every block is static");
+    let sample =
+        aggregate_temporal_noise_stats(&records, channels, width, height).expect("every block is static");
 
     assert!(
         (sample.static_fraction - 1.0).abs() < 1e-6,
@@ -376,7 +366,6 @@ fn aggregate_keeps_genuinely_static_blocks_despite_spatial_sigma_spread() {
 fn aggregate_outlier_factor_survives_just_under_threshold() {
     let width = 48;
     let height = 48;
-    let stored_channels = 1;
     let channels = 1;
     let background_sigma_255 = 2.0f32;
     let background_rho = 0.1f32;
@@ -387,7 +376,7 @@ fn aggregate_outlier_factor_survives_just_under_threshold() {
         OUTLIER_FACTOR_SURVIVES_RATIO,
     );
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height)
         .expect("all 9 blocks clear the static-fraction floor");
 
     assert!(
@@ -402,7 +391,6 @@ fn aggregate_outlier_factor_survives_just_under_threshold() {
 fn aggregate_outlier_factor_rejects_just_over_threshold() {
     let width = 48;
     let height = 48;
-    let stored_channels = 1;
     let channels = 1;
     let background_sigma_255 = 2.0f32;
     let background_rho = 0.1f32;
@@ -410,7 +398,7 @@ fn aggregate_outlier_factor_rejects_just_over_threshold() {
     let records =
         outlier_factor_boundary_records(background_sigma_255, background_rho, OUTLIER_FACTOR_REJECTS_RATIO);
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height)
         .expect("the 8 background blocks alone still clear the static-fraction floor");
 
     assert!(
@@ -429,7 +417,6 @@ fn aggregate_outlier_factor_rejects_just_over_threshold() {
 fn aggregate_returns_correct_sigma_with_letterbox_zero_population() {
     let width = 160;
     let height = 160;
-    let stored_channels = 1;
     let channels = 1;
 
     let background_rho = 0.2f32;
@@ -447,7 +434,7 @@ fn aggregate_returns_correct_sigma_with_letterbox_zero_population() {
         records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height)
         .expect("74 of 100 blocks carry real static noise, far above the 5% floor");
 
     let expected_sigma = 4.0 / 255.0;
@@ -469,7 +456,6 @@ fn aggregate_returns_correct_sigma_with_letterbox_zero_population() {
 fn aggregate_returns_none_when_the_only_above_gate_population_is_texture() {
     let width = 160;
     let height = 160;
-    let stored_channels = 1;
     let channels = 1;
 
     let texture_sigma_255 = 20.0f32;
@@ -485,7 +471,7 @@ fn aggregate_returns_none_when_the_only_above_gate_population_is_texture() {
         records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height);
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height);
     assert!(
         sample.is_none(),
         "a homogeneous above-gate population with no genuine low anchor must fall back to \
@@ -497,7 +483,6 @@ fn aggregate_returns_none_when_the_only_above_gate_population_is_texture() {
 fn aggregate_rejects_texture_outliers_with_zero_population_present() {
     let width = 64;
     let height = 80; // 4 x 5 TEMPORAL_NOISE_BLOCK grid, 20 blocks.
-    let stored_channels = 1;
     let channels = 1;
 
     let background_sigma_255 = 2.0f32;
@@ -520,7 +505,7 @@ fn aggregate_rejects_texture_outliers_with_zero_population_present() {
         records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height)
         .expect("the static minority clears STATIC_FRACTION_MIN on its own");
 
     let expected_sigma = background_sigma_255 / 255.0;
@@ -547,7 +532,6 @@ fn aggregate_rejects_texture_outliers_with_zero_population_present() {
 fn aggregate_keeps_static_spread_with_zero_population_present() {
     let width = 64;
     let height = 80; // 4 x 5 TEMPORAL_NOISE_BLOCK grid, 20 blocks.
-    let stored_channels = 1;
     let channels = 1;
 
     let low_sigma_255 = 2.0f32;
@@ -570,7 +554,7 @@ fn aggregate_keeps_static_spread_with_zero_population_present() {
         records.extend_from_slice(&record);
     }
 
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height)
         .expect("every non-zero block is static");
 
     assert!(
@@ -587,7 +571,6 @@ fn aggregate_keeps_static_spread_with_zero_population_present() {
 fn aggregate_rho_estimate_stays_within_unit_range() {
     let width = TEMPORAL_NOISE_BLOCK;
     let height = TEMPORAL_NOISE_BLOCK;
-    let stored_channels = 1;
     let channels = 1;
 
     let scale = 0.007f32;
@@ -613,7 +596,7 @@ fn aggregate_rho_estimate_stays_within_unit_range() {
     );
 
     let records = scalar_record(sum_d, sum_d2, sum_lag);
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_channels, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height)
         .expect("the single block clears both gates");
 
     assert!(
@@ -726,7 +709,7 @@ const MAJORITY_RUNS: [BlockRun; 3] = [
 fn motion_sample(runs: &[BlockRun]) -> TemporalNoiseSample {
     let (records, width) = motion_frame(runs);
 
-    aggregate_temporal_noise_stats(&records, 1, 1, width, TEMPORAL_NOISE_BLOCK)
+    aggregate_temporal_noise_stats(&records, 1, width, TEMPORAL_NOISE_BLOCK)
         .expect("every block is accepted, so the sample is trusted")
 }
 
@@ -788,7 +771,7 @@ fn a_sample_with_every_sigma_left_out_is_invalid() {
         },
     ];
     let (records, width) = motion_frame(&runs);
-    let sample = aggregate_temporal_noise_stats(&records, 1, 1, width, TEMPORAL_NOISE_BLOCK);
+    let sample = aggregate_temporal_noise_stats(&records, 1, width, TEMPORAL_NOISE_BLOCK);
 
     assert!(sample.is_none());
 }

@@ -49,13 +49,13 @@ pub fn noise_curve_bins(
     tags: &mut [u32],
     #[comptime] width: u32,
     #[comptime] height: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] channels: u32,
 ) {
     let blocks_x = comptime!(width.div_ceil(TEMPORAL_NOISE_BLOCK));
     let blocks = comptime!(blocks_x * height.div_ceil(TEMPORAL_NOISE_BLOCK));
     let quarters = comptime!(blocks * TEMPORAL_QUARTERS);
-    let record_len = comptime!(temporal_stats_record_len(stored_ch));
-    let quarters_base = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE);
+    let record_len = comptime!(temporal_stats_record_len(channels));
+    let quarters_base = comptime!(2 * channels + TEMPORAL_QUARTER_BASE);
 
     let thread = UNIT_POS_X;
     let mut wanted = Shared::<[u32]>::new_slice(SIGMA_MEDIAN_QUERIES as usize);

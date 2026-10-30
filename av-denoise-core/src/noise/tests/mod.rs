@@ -118,12 +118,12 @@ pub(crate) fn read_temporal_stats_slot(
     stats_buf: &Handle,
     width: u32,
     height: u32,
-    stored_ch: u32,
+    channels: u32,
     frame_count: u32,
     slot: u32,
     align: StorageAlign,
 ) -> Result<Vec<f32>, anyhow::Error> {
-    let sliced = temporal_stats_slot_view(stats_buf, width, height, stored_ch, frame_count, slot, align);
+    let sliced = temporal_stats_slot_view(stats_buf, width, height, channels, frame_count, slot, align);
     let bytes = client
         .read_one(sliced)
         .map_err(|error| anyhow::anyhow!("temporal noise stats readback failed: {error}"))?;

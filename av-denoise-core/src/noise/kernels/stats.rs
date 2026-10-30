@@ -186,8 +186,8 @@ pub fn nlm_noise_reduce(
 ///
 /// # Layout
 ///
-/// Records sit at `stats[block_index * (2 * stored_ch + 39)..]` as every `sum_d`, every `sum_d2`,
-/// then `sum_lag`, `texture` and `moved`. Quarter `q` follows at `2 * stored_ch + 3 + 9 * q`, with
+/// Records sit at `stats[block_index * (2 * channels + 39)..]` as every `sum_d`, every `sum_d2`,
+/// then `sum_lag`, `texture` and `moved`. Quarter `q` follows at `2 * channels + 3 + 9 * q`, with
 /// its fields at the `QUARTER_*` offsets in `noise`. The stride never depends on `luma_fields`.
 /// `stats` must be bound to the new slot's own region of the ring. Thread `l` sums record lane `l`
 /// over every thread in order.
@@ -201,7 +201,7 @@ pub fn nlm_temporal_noise_stats<N: Size>(
     mv_offset: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] channels: u32,
     #[comptime] block: u32,
     #[comptime] luma_fields: bool,
     #[comptime] compensated: bool,
@@ -218,9 +218,9 @@ pub fn nlm_temporal_noise_stats<N: Size>(
     // A separate tile lowers occupancy enough to cost about 40% of the luma variant's throughput.
     // The compensated variant first uses four `threads`-long runs for its variance check.
     let quarter_lanes = comptime!(TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS);
-    let record_len = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE + quarter_lanes);
-    let scratch_len = comptime!(2 * stored_ch + 1);
-    let texture_lane = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE);
+    let record_len = comptime!(2 * channels + TEMPORAL_QUARTER_BASE + quarter_lanes);
+    let scratch_len = comptime!(2 * channels + 1);
+    let texture_lane = comptime!(2 * channels + BLOCK_TEXTURE_LANE);
     let threads = comptime!(block * block);
     let tile_base = comptime!(threads * scratch_len);
 
@@ -389,14 +389,14 @@ pub fn nlm_temporal_noise_stats<N: Size>(
     scratch[(tile_base + thread_id) as usize] = cell_luma;
 
     #[unroll]
-    for channel in 0..stored_ch {
+    for channel in 0..channels {
         let lane_residual = if valid {
             residual.extract(channel as usize)
         } else {
             0.0f32
         };
         scratch[(thread_id * scratch_len + channel) as usize] = lane_residual;
-        scratch[(thread_id * scratch_len + stored_ch + channel) as usize] = lane_residual * lane_residual;
+        scratch[(thread_id * scratch_len + channels + channel) as usize] = lane_residual * lane_residual;
     }
 
     sync_cube();
@@ -408,7 +408,7 @@ pub fn nlm_temporal_noise_stats<N: Size>(
     } else {
         0.0f32
     };
-    scratch[(thread_id * scratch_len + 2 * stored_ch) as usize] = lag;
+    scratch[(thread_id * scratch_len + 2 * channels) as usize] = lag;
 
     sync_cube();
 
@@ -477,12 +477,12 @@ pub fn nlm_temporal_noise_stats<N: Size>(
         }
 
         stats[(out_base + texture_lane) as usize] = texture;
-        stats[(out_base + 2 * stored_ch + BLOCK_MOVED_LANE) as usize] = moved;
+        stats[(out_base + 2 * channels + BLOCK_MOVED_LANE) as usize] = moved;
     }
 
     // The quarter lanes are written explicitly so a reader never sees an earlier frame's data.
     if comptime!(!luma_fields) && thread_id == 0 {
-        let quarters_start = out_base + 2 * stored_ch + TEMPORAL_QUARTER_BASE;
+        let quarters_start = out_base + 2 * channels + TEMPORAL_QUARTER_BASE;
 
         #[unroll]
         for lane in 0..quarter_lanes {
@@ -634,7 +634,7 @@ pub fn nlm_temporal_noise_stats<N: Size>(
             }
 
             let quarter_offset = TEMPORAL_QUARTER_BASE + quarter * TEMPORAL_QUARTER_FIELDS;
-            let quarter_base = out_base + 2 * stored_ch + quarter_offset;
+            let quarter_base = out_base + 2 * channels + quarter_offset;
 
             // An unmatched block reads as no measurable noise, so its seeds and sentinel give way
             // to zeroes.

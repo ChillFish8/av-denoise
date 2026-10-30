@@ -81,7 +81,7 @@ fn run_temporal_stats_prefilled(
     let ctx = TemporalStatsCtx {
         width,
         height,
-        stored_ch: channels,
+        channels,
         frame_count,
         slot_new: 1,
         slot_prev: 0,
@@ -662,7 +662,7 @@ fn white_noise_pair_recovers_known_sigma() {
     let new = noisy_copy(size, 0.5, true_sigma, 2);
 
     let records = run_temporal_stats(size, size, 1, &previous, &new, true);
-    let sample = aggregate_temporal_noise_stats(&records, 1, 1, size, size)
+    let sample = aggregate_temporal_noise_stats(&records, 1, size, size)
         .expect("a static white-noise pair should clear the static-block floor");
 
     let rel_err = (sample.sigma[0] - true_sigma).abs() / true_sigma;
@@ -689,7 +689,7 @@ fn correlated_noise_pair_recovers_marginal_sigma_and_rho() {
     let new = correlated_noisy_frame(width, height, 0.5, sigma_pre, 12);
 
     let records = run_temporal_stats(width, height, 1, &previous, &new, true);
-    let sample = aggregate_temporal_noise_stats(&records, 1, 1, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, 1, width, height)
         .expect("a static correlated-noise pair should clear the static-block floor");
 
     let rel_err = (sample.sigma[0] - sigma_marginal).abs() / sigma_marginal;
@@ -729,7 +729,7 @@ fn moving_content_pair_mostly_non_static() {
     }
 
     let records = run_temporal_stats(width, height, 1, &previous, &new, true);
-    let sample = aggregate_temporal_noise_stats(&records, 1, 1, width, height);
+    let sample = aggregate_temporal_noise_stats(&records, 1, width, height);
     let static_fraction = sample.map(|sample| sample.static_fraction).unwrap_or(0.0);
 
     assert!(
@@ -766,7 +766,6 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
             width,
             height,
             channels: 1,
-            stored_ch: 1,
             frame_count: 1,
             frame: 0,
             slot: 0,
@@ -862,7 +861,7 @@ fn moving_texture_pair_near_zero_mean_residual_recovers_true_sigma() {
     let new = noisy_field_over(&clean_new, width, height, true_sigma, 12);
 
     let records = run_temporal_stats(width, height, 1, &previous, &new, true);
-    let sample = aggregate_temporal_noise_stats(&records, 1, 1, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, 1, width, height)
         .expect("the static top half should clear STATIC_FRACTION_MIN on its own");
 
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);

@@ -280,14 +280,14 @@ fn shadow_multiplier(luma: f32, shadow_soften: f32) -> f32 {
 #[cfg(test)]
 pub(crate) fn classify_quarters(
     records: &[f32],
-    stored_ch: u32,
+    channels: u32,
     width: u32,
     height: u32,
     curve: &NoiseCurve,
     settings: QuarterSettings,
 ) -> QuarterClasses {
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
-    let quarters_base = (2 * stored_ch + TEMPORAL_QUARTER_BASE) as usize;
+    let record_len = temporal_stats_record_len(channels) as usize;
+    let quarters_base = (2 * channels + TEMPORAL_QUARTER_BASE) as usize;
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
     let (map_cols, map_rows) = strength_map_dims(width, height);
     let cols = map_cols as usize;

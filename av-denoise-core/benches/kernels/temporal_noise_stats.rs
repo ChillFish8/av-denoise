@@ -14,10 +14,10 @@ const MOTION_VECTOR: [i32; 2] = [3, -2];
 
 /// The temporal-residual noise-stats kernel over two 1080p ring slots.
 ///
-/// It diffs the slots and reduces every `16 × 16` block into its stats record. `luma_fields`
-/// and `compensated` pick which of the kernel's compiled variants this row times. Rows with
-/// `luma_fields` run on luma frames and the rest on chroma frames. The compensated
-/// row follows a uniform [MOTION_VECTOR] field on a [MOTION_STEP] grid.
+/// It diffs the slots and reduces every `16 × 16` block into its stats record. `luma_fields` and
+/// `compensated` pick which of the kernel's compiled variants this row times. Rows with
+/// `luma_fields` run on luma frames and the rest on chroma frames. The compensated row follows a
+/// uniform [MOTION_VECTOR] field on a [MOTION_STEP] grid.
 pub struct TemporalNoiseStatsBench {
     pub client: Client,
     pub luma_fields: bool,

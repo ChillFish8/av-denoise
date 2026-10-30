@@ -37,21 +37,18 @@ struct Plane {
     width: u32,
     height: u32,
     channels: u32,
-    stored_ch: u32,
 }
 
 const LUMA_1080P: Plane = Plane {
     width: 1920,
     height: 1080,
     channels: 1,
-    stored_ch: 1,
 };
 
 const CHROMA_1080P: Plane = Plane {
     width: 960,
     height: 540,
     channels: 2,
-    stored_ch: 2,
 };
 
 impl Plane {
@@ -60,7 +57,6 @@ impl Plane {
             width,
             height,
             channels: 1,
-            stored_ch: 1,
         }
     }
 
@@ -69,7 +65,6 @@ impl Plane {
             width,
             height,
             channels: 2,
-            stored_ch: 2,
         }
     }
 
@@ -79,7 +74,7 @@ impl Plane {
     }
 
     fn records(self, blocks: &[BlockSpec]) -> Vec<f32> {
-        frame_records(self.width, self.height, self.stored_ch, blocks)
+        frame_records(self.width, self.height, self.channels, blocks)
     }
 }
 
@@ -95,19 +90,12 @@ fn host_reading(plane: Plane, partials: &[f32], records: &[f32]) -> HostReading 
     let reading = temporal_noise_reading(
         records,
         plane.channels,
-        plane.stored_ch,
         plane.width,
         plane.height,
         false,
         QuarterSettings::default(),
     );
-    let accepted_blocks = accepted_static_blocks(
-        records,
-        plane.channels,
-        plane.stored_ch,
-        plane.width,
-        plane.height,
-    );
+    let accepted_blocks = accepted_static_blocks(records, plane.channels, plane.width, plane.height);
     let accepted = accepted_blocks
         .unwrap_or_default()
         .iter()
@@ -126,7 +114,6 @@ fn shape_for(client: &Client, plane: Plane, temporal: bool) -> NoiseShape {
         width: plane.width,
         height: plane.height,
         channels: plane.channels,
-        stored_ch: plane.stored_ch,
         frames: 3,
         ring_radius: 1,
         temporal,

@@ -37,7 +37,6 @@ pub(crate) struct NoiseShape {
     pub width: u32,
     pub height: u32,
     pub channels: u32,
-    pub stored_ch: u32,
     /// Look-ahead slots, one stats region and one reading each.
     pub frames: u32,
     /// The temporal radius of the frame ring the readings feed, which sets how far past a window
@@ -396,7 +395,7 @@ fn measurement_buffers(client: &Client, shape: NoiseShape, settings: NoiseSettin
         let stats_bytes = temporal_stats_buf_bytes(
             shape.width,
             shape.height,
-            shape.stored_ch,
+            shape.channels,
             shape.frames,
             shape.align,
         );

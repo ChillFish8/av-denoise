@@ -82,7 +82,6 @@ struct Plane {
     width: u32,
     height: u32,
     channels: u32,
-    stored_ch: u32,
 }
 
 impl Plane {
@@ -91,7 +90,6 @@ impl Plane {
             width,
             height,
             channels: 1,
-            stored_ch: 1,
         }
     }
 
@@ -100,7 +98,6 @@ impl Plane {
             width,
             height,
             channels: 2,
-            stored_ch: 2,
         }
     }
 }
@@ -236,9 +233,9 @@ impl MapFrame {
 
     /// The first record word of the map quarter at `col`, `row`.
     fn field_start(&self, col: u32, row: u32) -> usize {
-        let stored_ch = self.plane.stored_ch;
-        let record_len = temporal_stats_record_len(stored_ch) as usize;
-        let quarters_base = (2 * stored_ch + TEMPORAL_QUARTER_BASE) as usize;
+        let channels = self.plane.channels;
+        let record_len = temporal_stats_record_len(channels) as usize;
+        let quarters_base = (2 * channels + TEMPORAL_QUARTER_BASE) as usize;
         let (block, quarter) = self.block_quarter(col, row);
         let quarter_start = quarter * TEMPORAL_QUARTER_FIELDS as usize;
 
@@ -247,7 +244,7 @@ impl MapFrame {
 
     fn records(&self) -> Vec<f32> {
         let plane = self.plane;
-        let mut records = frame_records(plane.width, plane.height, plane.stored_ch, &self.blocks);
+        let mut records = frame_records(plane.width, plane.height, plane.channels, &self.blocks);
 
         for row in 0..self.rows {
             for col in 0..self.cols {
@@ -268,7 +265,6 @@ impl MapFrame {
             width: self.plane.width,
             height: self.plane.height,
             channels: self.plane.channels,
-            stored_ch: self.plane.stored_ch,
             frames: 3,
             ring_radius: 1,
             temporal: true,
@@ -326,7 +322,6 @@ fn host_classes(frame: &MapFrame, settings: ReadingSettings) -> Option<QuarterCl
     let reading = temporal_noise_reading(
         &records,
         plane.channels,
-        plane.stored_ch,
         plane.width,
         plane.height,
         true,

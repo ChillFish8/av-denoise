@@ -121,10 +121,8 @@ fn curve_for(quarters: &[SyntheticQuarter]) -> Option<NoiseCurve> {
     let (width, height) = frame_dims(quarters.len());
     let records = synthetic_records(quarters);
 
-    let accepted =
-        accepted_static_blocks(&records, channels, channels, width, height).expect("a trusted selection");
-    let sample = aggregate_temporal_noise_stats(&records, channels, channels, width, height)
-        .expect("a trusted sample");
+    let accepted = accepted_static_blocks(&records, channels, width, height).expect("a trusted selection");
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height).expect("a trusted sample");
     build_noise_curve(&records, channels, &accepted, sample.sigma[0])
 }
 
@@ -162,10 +160,9 @@ fn reading_sample_equals_the_scalar_aggregation() {
 
     let (width, height) = frame_dims(good_quarters.len() + 8);
 
-    let sample_scalar = aggregate_temporal_noise_stats(&records, channels, channels, width, height);
+    let sample_scalar = aggregate_temporal_noise_stats(&records, channels, width, height);
     let reading = temporal_noise_reading(
         &records,
-        channels,
         channels,
         width,
         height,
@@ -397,8 +394,8 @@ fn the_curve_normalises_by_the_quarter_median() {
     let channels = 1;
     let (width, height) = frame_dims(quarters.len());
     let records = synthetic_records(&quarters);
-    let sample = aggregate_temporal_noise_stats(&records, channels, channels, width, height)
-        .expect("every block is static");
+    let sample =
+        aggregate_temporal_noise_stats(&records, channels, width, height).expect("every block is static");
     assert!(sample.sigma[0] > sigma * 1.02, "{}", sample.sigma[0]);
 
     let curve = curve_for(&quarters).expect("three populated bins");
@@ -489,10 +486,8 @@ fn a_ragged_parent_reads_its_partial_quarters_with_their_own_pixel_count() {
         }
     }
 
-    let accepted =
-        accepted_static_blocks(&records, channels, channels, width, height).expect("a trusted selection");
-    let sample = aggregate_temporal_noise_stats(&records, channels, channels, width, height)
-        .expect("a trusted sample");
+    let accepted = accepted_static_blocks(&records, channels, width, height).expect("a trusted selection");
+    let sample = aggregate_temporal_noise_stats(&records, channels, width, height).expect("a trusted sample");
     let curve =
         build_noise_curve(&records, channels, &accepted, sample.sigma[0]).expect("three populated bins");
 

@@ -147,7 +147,6 @@ pub fn noise_block_derive(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] temporal: bool,
     #[comptime] curve: bool,
     #[comptime] immerkaer_tag_count: u32,
@@ -157,9 +156,9 @@ pub fn noise_block_derive(
     let cubes = comptime!(cubes_x * height.div_ceil(IMMERKAER_BLOCK_Y));
     let blocks_x = comptime!(width.div_ceil(TEMPORAL_NOISE_BLOCK));
     let blocks = comptime!(blocks_x * height.div_ceil(TEMPORAL_NOISE_BLOCK));
-    let record_len = comptime!(temporal_stats_record_len(stored_ch));
-    let texture_offset = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE);
-    let moved_offset = comptime!(2 * stored_ch + BLOCK_MOVED_LANE);
+    let record_len = comptime!(temporal_stats_record_len(channels));
+    let texture_offset = comptime!(2 * channels + BLOCK_TEXTURE_LANE);
+    let moved_offset = comptime!(2 * channels + BLOCK_MOVED_LANE);
 
     let index = ABSOLUTE_POS_X;
 
@@ -212,7 +211,7 @@ pub fn noise_block_derive(
         for channel in 0..3u32 {
             if comptime!(channel < channels) {
                 let sum_d = records[(base + channel) as usize];
-                let sum_d2 = records[(base + stored_ch + channel) as usize];
+                let sum_d2 = records[(base + channels + channel) as usize];
                 let (mean, variance, sigma) = residual_sigma(sum_d, sum_d2, pixels);
                 block_values[(value_base + channel) as usize] = sigma;
 
@@ -228,7 +227,7 @@ pub fn noise_block_derive(
 
         let has_pairs = pairs > 0.0f32;
         let pair_divisor = select(has_pairs, pairs, 1.0f32);
-        let lag_sum = records[(base + 2 * stored_ch) as usize];
+        let lag_sum = records[(base + 2 * channels) as usize];
         let mean_lag = select(has_pairs, lag_sum / pair_divisor, 0.0f32);
 
         block_values[(value_base + BLOCK_VALUE_MEAN0) as usize] = mean0;
@@ -321,18 +320,17 @@ pub fn noise_block_accept(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] luma_fields: bool,
     #[comptime] tag_count: u32,
     #[comptime] query_count: u32,
 ) {
     let blocks_x = comptime!(width.div_ceil(TEMPORAL_NOISE_BLOCK));
     let blocks = comptime!(blocks_x * height.div_ceil(TEMPORAL_NOISE_BLOCK));
-    let record_len = comptime!(temporal_stats_record_len(stored_ch));
-    let quarters_base = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE);
+    let record_len = comptime!(temporal_stats_record_len(channels));
+    let quarters_base = comptime!(2 * channels + TEMPORAL_QUARTER_BASE);
     let resolved = comptime!(IMMERKAER_QUERY_TEXTURE + 1 - IMMERKAER_QUERY_REFERENCE);
-    let texture_offset = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE);
-    let moved_offset = comptime!(2 * stored_ch + BLOCK_MOVED_LANE);
+    let texture_offset = comptime!(2 * channels + BLOCK_TEXTURE_LANE);
+    let moved_offset = comptime!(2 * channels + BLOCK_MOVED_LANE);
 
     let thread = UNIT_POS_X;
     let mut wanted = Shared::<[u32]>::new_slice(resolved as usize);

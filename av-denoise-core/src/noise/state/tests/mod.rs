@@ -94,7 +94,7 @@ impl NoiseState {
                 stats_buf,
                 shape.width,
                 shape.height,
-                shape.stored_ch,
+                shape.channels,
                 shape.frames,
                 slot,
                 shape.align,
@@ -153,7 +153,7 @@ impl NoiseState {
         let frames = shape.frames as usize;
         let word = size_of::<f32>();
         let partials_words = partials_len(shape.width, shape.height);
-        let records_words = temporal_stats_slot_len(shape.width, shape.height, shape.stored_ch);
+        let records_words = temporal_stats_slot_len(shape.width, shape.height, shape.channels);
 
         let partials_stride = noise_partials_slot_stride_bytes(shape.width, shape.height, shape.align);
         let partials_stride_words = partials_stride as usize / word;
@@ -163,7 +163,7 @@ impl NoiseState {
         let stats_bytes = temporal_stats_buf_bytes(
             shape.width,
             shape.height,
-            shape.stored_ch,
+            shape.channels,
             shape.frames,
             shape.align,
         );

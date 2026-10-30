@@ -96,11 +96,11 @@ struct CurveQuarter {
 #[cfg(test)]
 pub(crate) fn build_noise_curve(
     records: &[f32],
-    stored_ch: u32,
+    channels: u32,
     accepted: &[AcceptedBlock],
     sigma_block_median: f32,
 ) -> Option<NoiseCurve> {
-    let quarters = static_quarters(records, stored_ch, accepted);
+    let quarters = static_quarters(records, channels, accepted);
     if quarters.is_empty() {
         return None;
     }
@@ -144,11 +144,11 @@ pub(crate) fn build_noise_curve(
 #[cfg(test)]
 pub(crate) fn curve_bin_counts(
     records: &[f32],
-    stored_ch: u32,
+    channels: u32,
     accepted: &[AcceptedBlock],
     sigma_block_median: f32,
 ) -> [usize; NOISE_CURVE_BINS] {
-    let quarters = static_quarters(records, stored_ch, accepted);
+    let quarters = static_quarters(records, channels, accepted);
     let bins = binned_sigmas(&quarters, sigma_block_median);
 
     bins.map(|sigmas| sigmas.len())
@@ -184,9 +184,9 @@ fn binned_sigmas(quarters: &[CurveQuarter], sigma_block_median: f32) -> [Vec<f32
 /// same formula as its block's. A quarter lying wholly outside the frame holds no pixels and is
 /// skipped.
 #[cfg(test)]
-fn static_quarters(records: &[f32], stored_ch: u32, accepted: &[AcceptedBlock]) -> Vec<CurveQuarter> {
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
-    let quarters_base = (2 * stored_ch + TEMPORAL_QUARTER_BASE) as usize;
+fn static_quarters(records: &[f32], channels: u32, accepted: &[AcceptedBlock]) -> Vec<CurveQuarter> {
+    let record_len = temporal_stats_record_len(channels) as usize;
+    let quarters_base = (2 * channels + TEMPORAL_QUARTER_BASE) as usize;
 
     let mut quarters = Vec::new();
     for block in accepted {

@@ -57,7 +57,6 @@ pub(super) fn noise_shape(params: &NlmParams, width: u32, height: u32, align: St
         width,
         height,
         channels: params.channels.count(),
-        stored_ch: params.channels.count(),
         frames: LOOKAHEAD_FRAMES,
         ring_radius: params.temporal_radius,
         // The temporal estimator needs a neighbour frame to take a difference against.

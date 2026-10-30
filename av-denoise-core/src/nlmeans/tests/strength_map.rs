@@ -321,9 +321,8 @@ fn a_reading_carries_classes_exactly_when_it_carries_a_curve() {
     let (width, height) = frame_dims(quarters.len());
     let records = synthetic_records(&quarters);
 
-    let with_curve = temporal_noise_reading(&records, 1, 1, width, height, true, QuarterSettings::default());
-    let without_curve =
-        temporal_noise_reading(&records, 1, 1, width, height, false, QuarterSettings::default());
+    let with_curve = temporal_noise_reading(&records, 1, width, height, true, QuarterSettings::default());
+    let without_curve = temporal_noise_reading(&records, 1, width, height, false, QuarterSettings::default());
 
     assert!(with_curve.curve.is_some());
     assert!(with_curve.classes.is_some());

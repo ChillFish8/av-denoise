@@ -45,7 +45,6 @@ fn shape(client: &Client, channels: u32) -> NoiseShape {
         width: WIDTH,
         height: HEIGHT,
         channels,
-        stored_ch: channels,
         frames: FRAMES,
         ring_radius: FRAMES / 2,
         temporal: true,
@@ -365,7 +364,7 @@ fn the_fold_matches_the_host_window_over_a_stream() {
             settings(StrengthMapKind::Chroma { flat_boost: 1.5 }),
             "chroma, chroma map",
         ),
-        (3, settings(StrengthMapKind::Off), "three channels, no map"),
+        (1, settings(StrengthMapKind::Off), "luma, no map"),
     ];
 
     for (channels, case_settings, what) in cases {
@@ -729,7 +728,6 @@ fn a_4k_luma_map_folds_across_the_grid() {
         width: WIDTH_4K,
         height: HEIGHT_4K,
         channels: 1,
-        stored_ch: 1,
         frames: FRAMES,
         ring_radius: FRAMES / 2,
         temporal: true,

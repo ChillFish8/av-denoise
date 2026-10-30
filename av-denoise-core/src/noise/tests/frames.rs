@@ -46,7 +46,6 @@ pub(super) struct Plane {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) channels: u32,
-    pub(super) stored_ch: u32,
 }
 
 impl Plane {
@@ -55,7 +54,6 @@ impl Plane {
             width,
             height,
             channels: 1,
-            stored_ch: 1,
         }
     }
 
@@ -64,12 +62,11 @@ impl Plane {
             width,
             height,
             channels: 2,
-            stored_ch: 2,
         }
     }
 
     fn frame_len(self) -> usize {
-        (self.width * self.height * self.stored_ch) as usize
+        (self.width * self.height * self.channels) as usize
     }
 
     fn blocks(self) -> usize {
@@ -184,7 +181,6 @@ impl ReadingHarness {
             width: plane.width,
             height: plane.height,
             channels: plane.channels,
-            stored_ch: plane.stored_ch,
             frames,
             ring_radius: frames / 2,
             temporal: true,
@@ -269,19 +265,12 @@ impl ReadingHarness {
         let reading = temporal_noise_reading(
             &records,
             plane.channels,
-            plane.stored_ch,
             plane.width,
             plane.height,
             settings.luma_fields,
             settings.quarter,
         );
-        let accepted_blocks = accepted_static_blocks(
-            &records,
-            plane.channels,
-            plane.stored_ch,
-            plane.width,
-            plane.height,
-        );
+        let accepted_blocks = accepted_static_blocks(&records, plane.channels, plane.width, plane.height);
 
         let mut accepted = vec![false; plane.blocks()];
         for block in accepted_blocks.iter().flatten() {
@@ -290,7 +279,7 @@ impl ReadingHarness {
 
         let bin_counts = match (reading.sample, accepted_blocks.as_deref()) {
             (Some(sample), Some(blocks)) if settings.luma_fields => {
-                let counts = curve_bin_counts(&records, plane.stored_ch, blocks, sample.sigma[0]);
+                let counts = curve_bin_counts(&records, plane.channels, blocks, sample.sigma[0]);
                 Some(counts)
             },
             _ => None,
@@ -667,8 +656,8 @@ fn grain_frame(width: u32, height: u32, seed: u32, frame: u32) -> Vec<f32> {
 
 /// [grain_frame] for each channel of `plane`, interleaved per pixel.
 fn synthetic_frame(plane: Plane, seed: u32, frame: u32) -> Vec<f32> {
-    let mut channels = Vec::with_capacity(plane.stored_ch as usize);
-    for channel in 0..plane.stored_ch {
+    let mut channels = Vec::with_capacity(plane.channels as usize);
+    for channel in 0..plane.channels {
         let channel_seed = seed + 1000 * channel;
         let samples = grain_frame(plane.width, plane.height, channel_seed, frame);
         channels.push(samples);

@@ -19,18 +19,18 @@ pub(crate) const TEMPORAL_NOISE_BLOCK: u32 = 16;
 /// How many 8x8 quarters one block record holds.
 pub(crate) const TEMPORAL_QUARTERS: u32 = 4;
 pub(crate) const TEMPORAL_QUARTER_SIZE: u32 = TEMPORAL_NOISE_BLOCK / 2;
-/// The offset of the block's channel-0 texture past `2 * stored_ch`.
+/// The offset of the block's channel-0 texture past `2 * channels`.
 ///
 /// It is the mean squared difference between adjacent 4x4-cell means of the new frame, over the
 /// cells fully inside the frame. Averaging each cell first keeps the noise from reading as texture.
 pub(crate) const BLOCK_TEXTURE_LANE: u32 = 1;
-/// The offset of the block's moved flag past `2 * stored_ch`.
+/// The offset of the block's moved flag past `2 * channels`.
 ///
 /// It reads 1.0 when the block was differenced along a non-zero motion vector, else 0.0.
 pub(crate) const BLOCK_MOVED_LANE: u32 = 2;
-/// The offset of the first quarter record past `2 * stored_ch`.
+/// The offset of the first quarter record past `2 * channels`.
 ///
-/// Quarter `q` starts at `2 * stored_ch + 3 + 9 * q`, in top-left, top-right, bottom-left,
+/// Quarter `q` starts at `2 * channels + 3 + 9 * q`, in top-left, top-right, bottom-left,
 /// bottom-right order.
 pub(crate) const TEMPORAL_QUARTER_BASE: u32 = 3;
 /// How many `f32`s one quarter record holds.
@@ -117,10 +117,10 @@ pub(crate) const SIGMA_OUTLIER_FACTOR: f32 = 5.0;
 
 /// How many `f32`s one block's stats record holds.
 ///
-/// That is a sum and a sum of squares per stored channel, one lag-1 total, the texture and moved
+/// That is a sum and a sum of squares per channel, one lag-1 total, the texture and moved
 /// lanes, and the four quarter records.
-pub(crate) fn temporal_stats_record_len(stored_ch: u32) -> u32 {
-    2 * stored_ch + TEMPORAL_QUARTER_BASE + TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS
+pub(crate) fn temporal_stats_record_len(channels: u32) -> u32 {
+    2 * channels + TEMPORAL_QUARTER_BASE + TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS
 }
 
 /// The row-major block grid covering a frame, with ragged edges truncated rather than padded.
@@ -131,9 +131,9 @@ pub(crate) fn temporal_stats_blocks(width: u32, height: u32) -> (u32, u32) {
     )
 }
 
-pub(crate) fn temporal_stats_slot_len(width: u32, height: u32, stored_ch: u32) -> usize {
+pub(crate) fn temporal_stats_slot_len(width: u32, height: u32, channels: u32) -> usize {
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
-    (blocks_x * blocks_y * temporal_stats_record_len(stored_ch)) as usize
+    (blocks_x * blocks_y * temporal_stats_record_len(channels)) as usize
 }
 
 /// The byte stride between temporal-stats ring slots, padded to the buffer-binding alignment.
@@ -141,19 +141,19 @@ pub(crate) fn temporal_stats_slot_len(width: u32, height: u32, stored_ch: u32) -
 /// wgpu rejects a bind-group offset that is not a multiple of its
 /// `min_storage_buffer_offset_alignment`, and a small frame or a single-channel mode can leave
 /// [temporal_stats_slot_len] short of one.
-fn temporal_stats_slot_stride_bytes(width: u32, height: u32, stored_ch: u32, align: StorageAlign) -> u64 {
-    let slot_bytes = temporal_stats_slot_len(width, height, stored_ch) as u64 * size_of::<f32>() as u64;
+fn temporal_stats_slot_stride_bytes(width: u32, height: u32, channels: u32, align: StorageAlign) -> u64 {
+    let slot_bytes = temporal_stats_slot_len(width, height, channels) as u64 * size_of::<f32>() as u64;
     align.pad_bytes(slot_bytes)
 }
 
 pub(crate) fn temporal_stats_buf_bytes(
     width: u32,
     height: u32,
-    stored_ch: u32,
+    channels: u32,
     frame_count: u32,
     align: StorageAlign,
 ) -> usize {
-    (temporal_stats_slot_stride_bytes(width, height, stored_ch, align) * frame_count as u64) as usize
+    (temporal_stats_slot_stride_bytes(width, height, channels, align) * frame_count as u64) as usize
 }
 
 /// The motion field a compensated temporal residual statistics dispatch reads.
@@ -178,7 +178,7 @@ pub(crate) struct StatsMotion<'a> {
 pub(crate) struct TemporalStatsCtx<'a> {
     pub width: u32,
     pub height: u32,
-    pub stored_ch: u32,
+    pub channels: u32,
     pub frame_count: u32,
     pub slot_new: u32,
     pub slot_prev: u32,
@@ -201,10 +201,10 @@ pub(crate) fn run_temporal_noise_stats(
     ctx: &TemporalStatsCtx<'_>,
     luma_fields: bool,
 ) -> Result<(), anyhow::Error> {
-    let total_input = (ctx.frame_count * ctx.height * ctx.width * ctx.stored_ch) as usize;
+    let total_input = (ctx.frame_count * ctx.height * ctx.width * ctx.channels) as usize;
     let (blocks_x, blocks_y) = temporal_stats_blocks(ctx.width, ctx.height);
-    let slot_len = temporal_stats_slot_len(ctx.width, ctx.height, ctx.stored_ch);
-    let stride = temporal_stats_slot_stride_bytes(ctx.width, ctx.height, ctx.stored_ch, ctx.align);
+    let slot_len = temporal_stats_slot_len(ctx.width, ctx.height, ctx.channels);
+    let stride = temporal_stats_slot_stride_bytes(ctx.width, ctx.height, ctx.channels, ctx.align);
     let stats_slot = ctx.stats_buf.clone().offset_start((ctx.slot_new as u64) * stride);
 
     // Without motion the kernel never reads the field, so one element of the input ring stands in.
@@ -224,7 +224,7 @@ pub(crate) fn run_temporal_noise_stats(
             client,
             CubeCount::new_2d(blocks_x, blocks_y),
             CubeDim::new_2d(TEMPORAL_NOISE_BLOCK, TEMPORAL_NOISE_BLOCK),
-            ctx.stored_ch as usize,
+            ctx.channels as usize,
             BufferArg::from_raw_parts(ctx.input_buf.clone(), total_input),
             BufferArg::from_raw_parts(stats_slot, slot_len),
             BufferArg::from_raw_parts(motion.mv_field.clone(), motion.mv_len),
@@ -233,7 +233,7 @@ pub(crate) fn run_temporal_noise_stats(
             motion.mv_offset,
             ctx.width,
             ctx.height,
-            ctx.stored_ch,
+            ctx.channels,
             TEMPORAL_NOISE_BLOCK,
             luma_fields,
             compensated,
@@ -255,12 +255,12 @@ pub(crate) fn zero_temporal_stats_slot(
     stats_buf: &Handle,
     width: u32,
     height: u32,
-    stored_ch: u32,
+    channels: u32,
     slot: u32,
     align: StorageAlign,
 ) {
-    let slot_len = temporal_stats_slot_len(width, height, stored_ch) as u32;
-    let stride = temporal_stats_slot_stride_bytes(width, height, stored_ch, align);
+    let slot_len = temporal_stats_slot_len(width, height, channels) as u32;
+    let stride = temporal_stats_slot_stride_bytes(width, height, channels, align);
     let slot_region = stats_buf.clone().offset_start((slot as u64) * stride);
 
     let grid = slot_len.div_ceil(NOISE_BLOCK_1D).min(MAX_GRID_1D);
@@ -283,13 +283,13 @@ pub(crate) fn temporal_stats_slot_view(
     stats_buf: &Handle,
     width: u32,
     height: u32,
-    stored_ch: u32,
+    channels: u32,
     frame_count: u32,
     slot: u32,
     align: StorageAlign,
 ) -> Handle {
-    let slot_len_bytes = temporal_stats_slot_len(width, height, stored_ch) as u64 * size_of::<f32>() as u64;
-    let stride = temporal_stats_slot_stride_bytes(width, height, stored_ch, align);
+    let slot_len_bytes = temporal_stats_slot_len(width, height, channels) as u64 * size_of::<f32>() as u64;
+    let stride = temporal_stats_slot_stride_bytes(width, height, channels, align);
     let total_bytes = frame_count as u64 * stride;
     let start = slot as u64 * stride;
     let end_trim = total_bytes - start - slot_len_bytes;
@@ -376,7 +376,6 @@ pub(crate) struct AcceptedBlock {
 pub(crate) fn accepted_static_blocks(
     records: &[f32],
     channels: u32,
-    stored_ch: u32,
     width: u32,
     height: u32,
 ) -> Option<Vec<AcceptedBlock>> {
@@ -386,7 +385,7 @@ pub(crate) fn accepted_static_blocks(
         return None;
     }
 
-    let candidates = static_gate_candidates(records, channels, stored_ch, width, height);
+    let candidates = static_gate_candidates(records, channels, width, height);
 
     // Perfectly static blocks such as letterbox bars read a sigma of 0. Left in the reference they
     // drag the quartile to 0, which rejects every block with real noise.
@@ -449,14 +448,8 @@ pub(crate) fn accepted_static_blocks(
 /// It is the 40th percentile of the moved candidates above [RHO_SIGMA_GATE], or `None` when no
 /// such candidate exists.
 #[cfg(test)]
-fn moved_texture_threshold(
-    records: &[f32],
-    channels: u32,
-    stored_ch: u32,
-    width: u32,
-    height: u32,
-) -> Option<f32> {
-    let candidates = static_gate_candidates(records, channels, stored_ch, width, height);
+fn moved_texture_threshold(records: &[f32], channels: u32, width: u32, height: u32) -> Option<f32> {
+    let candidates = static_gate_candidates(records, channels, width, height);
     let mut textures: Vec<f32> = candidates
         .iter()
         .filter(|candidate| candidate.moved && candidate.sigma_ch0 > RHO_SIGMA_GATE)
@@ -480,16 +473,14 @@ fn moved_texture_threshold(
 fn static_gate_candidates(
     records: &[f32],
     channels: u32,
-    stored_ch: u32,
     width: u32,
     height: u32,
 ) -> Vec<StaticGateCandidate> {
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
-    let texture_lane = (2 * stored_ch + BLOCK_TEXTURE_LANE) as usize;
-    let moved_lane = (2 * stored_ch + BLOCK_MOVED_LANE) as usize;
-    let channels = channels as usize;
-    let stored_ch = stored_ch as usize;
+    let record_len = temporal_stats_record_len(channels) as usize;
+    let texture_lane = (2 * channels + BLOCK_TEXTURE_LANE) as usize;
+    let moved_lane = (2 * channels + BLOCK_MOVED_LANE) as usize;
+    let channel_count = channels as usize;
 
     let mut candidates = Vec::new();
 
@@ -513,9 +504,9 @@ fn static_gate_candidates(
             let mut sigmas = [0.0f32; 3];
             let mut sigma_ch0 = 0.0f32;
             let mut var_ch0 = 0.0f32;
-            for channel in 0..channels {
+            for channel in 0..channel_count {
                 let mean = record[channel] / pixel_count;
-                let variance = (record[stored_ch + channel] / pixel_count - mean * mean).max(0.0);
+                let variance = (record[channel_count + channel] / pixel_count - mean * mean).max(0.0);
                 let sigma_block = variance.sqrt() / std::f32::consts::SQRT_2;
                 sigmas[channel] = sigma_block;
                 if channel == 0 {
@@ -525,7 +516,7 @@ fn static_gate_candidates(
             }
 
             let mean_lag = if n_pairs > 0.0 {
-                record[2 * stored_ch] / n_pairs
+                record[2 * channel_count] / n_pairs
             } else {
                 0.0
             };
@@ -564,14 +555,12 @@ fn keeps_sigma(block: &AcceptedBlock, threshold: Option<f32>) -> bool {
 pub(crate) fn aggregate_temporal_noise_stats(
     records: &[f32],
     channels: u32,
-    stored_ch: u32,
     width: u32,
     height: u32,
 ) -> Option<TemporalNoiseSample> {
     temporal_noise_reading(
         records,
         channels,
-        stored_ch,
         width,
         height,
         false,
@@ -620,7 +609,6 @@ impl TemporalNoiseReading {
 pub(crate) fn temporal_noise_reading(
     records: &[f32],
     channels: u32,
-    stored_ch: u32,
     width: u32,
     height: u32,
     with_curve: bool,
@@ -631,12 +619,12 @@ pub(crate) fn temporal_noise_reading(
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
     let total_blocks = (blocks_x * blocks_y) as usize;
 
-    let Some(accepted) = accepted_static_blocks(records, channels, stored_ch, width, height) else {
+    let Some(accepted) = accepted_static_blocks(records, channels, width, height) else {
         return none;
     };
 
-    let threshold = moved_texture_threshold(records, channels, stored_ch, width, height);
-    let channels = channels as usize;
+    let threshold = moved_texture_threshold(records, channels, width, height);
+    let channel_count = channels as usize;
 
     let mut rho_samples = Vec::new();
     for block in &accepted {
@@ -658,9 +646,9 @@ pub(crate) fn temporal_noise_reading(
         return none;
     }
 
-    let mut static_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channels];
+    let mut static_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channel_count];
     for block in sigma_blocks {
-        for (channel, sigmas) in static_sigmas.iter_mut().enumerate().take(channels) {
+        for (channel, sigmas) in static_sigmas.iter_mut().enumerate().take(channel_count) {
             sigmas.push(block.sigmas[channel]);
         }
     }
@@ -684,14 +672,14 @@ pub(crate) fn temporal_noise_reading(
     };
 
     let curve = if with_curve {
-        build_noise_curve(records, stored_ch, &accepted, sample.sigma[0])
+        build_noise_curve(records, channels, &accepted, sample.sigma[0])
     } else {
         None
     };
 
     let classes = curve
         .as_ref()
-        .map(|curve| classify_quarters(records, stored_ch, width, height, curve, settings));
+        .map(|curve| classify_quarters(records, channels, width, height, curve, settings));
 
     TemporalNoiseReading {
         sample: Some(sample),

@@ -13,7 +13,7 @@ use super::kernels::mc_warp;
 pub(crate) fn run_compensate(
     client: &Client,
     motion_ctx: &MotionCtx,
-    stored_ch: u32,
+    channels: u32,
     width: u32,
     height: u32,
     frame_count: u32,
@@ -30,7 +30,7 @@ pub(crate) fn run_compensate(
     let grid = CubeCount::new_2d(cubes_x, cubes_y);
     let dim = CubeDim::new_2d(block_x, block_y);
 
-    let total_pixels = (frame_count * height * width * stored_ch) as usize;
+    let total_pixels = (frame_count * height * width * channels) as usize;
     let mv_slice_len = (motion_ctx.blocks_x as usize) * (motion_ctx.blocks_y as usize) * 2;
     let mv_offset = mv_field_byte_offset(motion_ctx, neighbour_idx);
     let mv_slice = mv_field.clone().offset_start(mv_offset);
@@ -40,7 +40,7 @@ pub(crate) fn run_compensate(
             client,
             grid,
             dim,
-            stored_ch as usize,
+            channels as usize,
             BufferArg::from_raw_parts(src.clone(), total_pixels),
             BufferArg::from_raw_parts(dst.clone(), total_pixels),
             BufferArg::from_raw_parts(mv_slice, mv_slice_len),

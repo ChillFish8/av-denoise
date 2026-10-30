@@ -50,7 +50,7 @@ impl Benchmark for WarpBench {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let stored_ch = self.channels as usize;
+        let channels = self.channels as usize;
         let block_x = 16u32;
         let block_y = 16u32;
         let cubes_x = WIDTH.div_ceil(block_x);
@@ -65,7 +65,7 @@ impl Benchmark for WarpBench {
                 &self.client,
                 grid,
                 dim,
-                stored_ch,
+                channels,
                 BufferArg::from_raw_parts(args.src.clone(), args.frame_len),
                 BufferArg::from_raw_parts(args.dst.clone(), args.frame_len),
                 BufferArg::from_raw_parts(args.mv_field.clone(), args.mv_len),

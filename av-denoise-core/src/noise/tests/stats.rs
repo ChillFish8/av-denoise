@@ -83,18 +83,18 @@ impl MotionGrid {
 /// A vector far outside any test frame, which zeroes every block that reads it.
 const DECOY_VECTOR: [i32; 2] = [1000, 1000];
 
-/// Two frames packed as `pixels * stored_ch`, `previous` in ring slot 0 and `new` in slot 1.
+/// Two frames packed as `pixels * channels`, `previous` in ring slot 0 and `new` in slot 1.
 struct StatsFrames {
     width: u32,
     height: u32,
-    stored_ch: u32,
+    channels: u32,
     previous: Vec<f32>,
     new: Vec<f32>,
 }
 
 impl StatsFrames {
     fn record_len(&self) -> usize {
-        temporal_stats_record_len(self.stored_ch) as usize
+        temporal_stats_record_len(self.channels) as usize
     }
 
     fn record<'a>(&self, records: &'a [f32], block_x: u32, block_y: u32) -> &'a [f32] {
@@ -147,7 +147,7 @@ fn run_stats(frames: &StatsFrames, motion: Option<&MotionGrid>, luma_fields: boo
     let input_buf = upload(&client, &ring);
 
     let stats_bytes =
-        temporal_stats_buf_bytes(frames.width, frames.height, frames.stored_ch, frame_count, align);
+        temporal_stats_buf_bytes(frames.width, frames.height, frames.channels, frame_count, align);
     let stats_fill = vec![-7.0f32; stats_bytes / size_of::<f32>()];
     let stats_buf = upload(&client, &stats_fill);
 
@@ -167,7 +167,7 @@ fn run_stats(frames: &StatsFrames, motion: Option<&MotionGrid>, luma_fields: boo
     let ctx = TemporalStatsCtx {
         width: frames.width,
         height: frames.height,
-        stored_ch: frames.stored_ch,
+        channels: frames.channels,
         frame_count,
         slot_new: 1,
         slot_prev: 0,
@@ -182,7 +182,7 @@ fn run_stats(frames: &StatsFrames, motion: Option<&MotionGrid>, luma_fields: boo
         &stats_buf,
         frames.width,
         frames.height,
-        frames.stored_ch,
+        frames.channels,
         frame_count,
         1,
         align,
@@ -211,20 +211,20 @@ fn texture_frame(width: u32, height: u32, shift_x: u32, shift_y: u32) -> Vec<f32
 /// Channel 0's per-block sigma for every block with a non-zero record.
 fn block_sigmas(frames: &StatsFrames, records: &[f32]) -> Vec<f32> {
     let (blocks_x, blocks_y) = temporal_stats_blocks(frames.width, frames.height);
-    let stored_ch = frames.stored_ch as usize;
+    let channels = frames.channels as usize;
 
     let mut sigmas = Vec::new();
     for block_y in 0..blocks_y {
         for block_x in 0..blocks_x {
             let record = frames.record(records, block_x, block_y);
-            if record[stored_ch] == 0.0 {
+            if record[channels] == 0.0 {
                 continue;
             }
 
             let (block_width, block_height) = frames.block_extent(block_x, block_y);
             let pixels = (block_width * block_height) as f32;
             let mean = record[0] / pixels;
-            let variance = record[stored_ch] / pixels - mean * mean;
+            let variance = record[channels] / pixels - mean * mean;
             let sigma = variance.max(0.0).sqrt() / std::f32::consts::SQRT_2;
             sigmas.push(sigma);
         }
@@ -241,7 +241,7 @@ fn median_of(mut values: Vec<f32>) -> f32 {
 /// Channel 0's summed squared residual of one block shifted by `vector`, computed on the host.
 fn host_sum_d2(frames: &StatsFrames, block_x: u32, block_y: u32, vector: [i32; 2]) -> f32 {
     let (block_width, block_height) = frames.block_extent(block_x, block_y);
-    let stride = frames.stored_ch as usize;
+    let stride = frames.channels as usize;
 
     let mut sum_d2 = 0.0f32;
     for local_y in 0..block_height {
@@ -264,7 +264,7 @@ fn host_sum_d2(frames: &StatsFrames, block_x: u32, block_y: u32, vector: [i32; 2
 /// the frame, or `None` when no match does.
 fn host_variance(frames: &StatsFrames, block_x: u32, block_y: u32, vector: [i32; 2]) -> Option<f32> {
     let (block_width, block_height) = frames.block_extent(block_x, block_y);
-    let stride = frames.stored_ch as usize;
+    let stride = frames.channels as usize;
 
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;
@@ -319,7 +319,7 @@ fn compensated_stats_cancel_a_known_pan() {
     let frames = StatsFrames {
         width,
         height,
-        stored_ch: 1,
+        channels: 1,
         previous: noisy_field_over(&previous_clean, width, height, sigma, 1),
         new: noisy_field_over(&new_clean, width, height, sigma, 2),
     };
@@ -346,13 +346,13 @@ fn compensated_stats_cancel_a_known_pan() {
 fn zero_vector_compensated_stats_equal_raw_stats() {
     let (width, height) = (45u32, 29u32);
 
-    for stored_ch in [1u32, 4] {
-        let ring = hashed_ring(width, height, stored_ch, 2, 5);
-        let frame_len = (width * height * stored_ch) as usize;
+    for channels in [1u32, 2] {
+        let ring = hashed_ring(width, height, channels, 2, 5);
+        let frame_len = (width * height * channels) as usize;
         let frames = StatsFrames {
             width,
             height,
-            stored_ch,
+            channels,
             previous: ring[..frame_len].to_vec(),
             new: ring[frame_len..].to_vec(),
         };
@@ -366,10 +366,10 @@ fn zero_vector_compensated_stats_equal_raw_stats() {
             let raw_bits: Vec<u32> = raw.iter().map(|value| value.to_bits()).collect();
             assert_eq!(
                 compensated_bits, raw_bits,
-                "stored_ch {stored_ch}, luma_fields {luma_fields}"
+                "channels {channels}, luma_fields {luma_fields}"
             );
 
-            let moved_lane = 2 * stored_ch as usize + BLOCK_MOVED_LANE as usize;
+            let moved_lane = 2 * channels as usize + BLOCK_MOVED_LANE as usize;
             let record_len = frames.record_len();
             let moved_flags = raw.chunks(record_len).map(|record| record[moved_lane]);
             for moved in moved_flags {
@@ -387,7 +387,7 @@ fn off_frame_displacement_zeroes_the_record() {
     let frames = StatsFrames {
         width,
         height,
-        stored_ch: 1,
+        channels: 1,
         previous: texture_frame(width, height, 0, 0),
         new: texture_frame(width, height, 20, 0),
     };
@@ -422,7 +422,7 @@ fn texture_lane_reads_mean_cell_energy() {
     let frames = StatsFrames {
         width,
         height,
-        stored_ch: 1,
+        channels: 1,
         previous: vec![0.5; ramp.len()],
         new: ramp,
     };
@@ -461,7 +461,7 @@ fn moved_lane_flags_non_zero_vectors() {
     let frames = StatsFrames {
         width,
         height,
-        stored_ch: 1,
+        channels: 1,
         previous: texture_frame(width, height, 0, 0),
         new: texture_frame(width, height, 1, 0),
     };
@@ -523,7 +523,7 @@ fn assert_covering_block_rule(step: u32) {
     let mut frames = StatsFrames {
         width,
         height,
-        stored_ch: 1,
+        channels: 1,
         previous: ring[..frame_len].to_vec(),
         new: ring[frame_len..].to_vec(),
     };
@@ -598,7 +598,7 @@ fn noise_fitted_vector_keeps_the_zero_vector_residual() {
     let frames = StatsFrames {
         width,
         height,
-        stored_ch: 1,
+        channels: 1,
         previous: noisy_field_over(&clean, width, height, sigma, 31),
         new: noisy_field_over(&clean, width, height, sigma, 32),
     };

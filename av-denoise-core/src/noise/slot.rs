@@ -75,7 +75,7 @@ impl NoiseState {
                 stats_buf,
                 shape.width,
                 shape.height,
-                shape.stored_ch,
+                shape.channels,
                 slot,
                 shape.align,
             );
@@ -130,7 +130,7 @@ impl NoiseState {
         let stats_ctx = TemporalStatsCtx {
             width: shape.width,
             height: shape.height,
-            stored_ch: shape.stored_ch,
+            channels: shape.channels,
             frame_count: shape.frames,
             slot_new: slot,
             slot_prev,
@@ -154,7 +154,6 @@ impl NoiseState {
             width: shape.width,
             height: shape.height,
             channels: shape.channels,
-            stored_ch: shape.stored_ch,
             frame_count: shape.frames,
             frame: slot,
             slot,
@@ -239,7 +238,6 @@ impl NoiseState {
                 shape.width,
                 shape.height,
                 shape.channels,
-                shape.stored_ch,
                 shape.temporal,
                 measurement.curve.is_some(),
                 batch.tag_count(),
@@ -300,7 +298,6 @@ impl NoiseState {
                 shape.width,
                 shape.height,
                 shape.channels,
-                shape.stored_ch,
                 luma_fields,
                 reference.tag_count(),
                 reference.query_count(),
@@ -360,7 +357,7 @@ impl NoiseState {
                 bind(curve.tags(), curve_len),
                 shape.width,
                 shape.height,
-                shape.stored_ch,
+                shape.channels,
             );
         }
 
@@ -466,7 +463,7 @@ impl NoiseState {
                 slot,
                 shape.width,
                 shape.height,
-                shape.stored_ch,
+                shape.channels,
             );
         }
 
@@ -554,12 +551,12 @@ impl NoiseState {
             stats_buf,
             shape.width,
             shape.height,
-            shape.stored_ch,
+            shape.channels,
             shape.frames,
             slot,
             shape.align,
         );
-        let records_len = temporal_stats_slot_len(shape.width, shape.height, shape.stored_ch);
+        let records_len = temporal_stats_slot_len(shape.width, shape.height, shape.channels);
 
         Some((records, records_len))
     }

@@ -91,7 +91,7 @@ pub(crate) fn run_pyramid_build(
     slot: u32,
     full_res: &Handle,
     pyramid: &Handle,
-    stored_ch: u32,
+    channels: u32,
 ) -> Result<(), anyhow::Error> {
     extract_luma(
         client,
@@ -101,7 +101,7 @@ pub(crate) fn run_pyramid_build(
         width,
         height,
         frame_count,
-        stored_ch,
+        channels,
         motion_ctx.align,
     );
 
@@ -133,7 +133,7 @@ fn extract_luma(
     width: u32,
     height: u32,
     frame_count: u32,
-    stored_ch: u32,
+    channels: u32,
     align: StorageAlign,
 ) {
     let block_x = 16u32;
@@ -142,7 +142,7 @@ fn extract_luma(
     let cubes_y = height.div_ceil(block_y);
     let grid = CubeCount::new_2d(cubes_x, cubes_y);
     let dim = CubeDim::new_2d(block_x, block_y);
-    let full_len = (frame_count * height * width * stored_ch) as usize;
+    let full_len = (frame_count * height * width * channels) as usize;
     let level0_offset = pyramid_slot_byte_offset(width, height, frame_count, 0, slot, align);
     let level0_dst = pyramid.clone().offset_start(level0_offset);
     let level0_len = (frame_count * height * width) as usize;
@@ -156,7 +156,7 @@ fn extract_luma(
             client,
             grid,
             dim,
-            stored_ch as usize,
+            channels as usize,
             full_res_arg,
             level0_arg,
             slot,

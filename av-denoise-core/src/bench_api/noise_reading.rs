@@ -66,7 +66,6 @@ impl NoiseReading {
         width: u32,
         height: u32,
         channels: u32,
-        stored_ch: u32,
         ring: &Handle,
         options: ReadingOptions,
     ) -> Result<Self, anyhow::Error> {
@@ -75,7 +74,6 @@ impl NoiseReading {
             width,
             height,
             channels,
-            stored_ch,
             frames: 2,
             ring_radius: 1,
             temporal: true,

@@ -122,7 +122,6 @@ fn luma_shape(client: &Client, width: u32, height: u32) -> NoiseShape {
         width,
         height,
         channels: 1,
-        stored_ch: 1,
         frames: 3,
         ring_radius: 1,
         temporal: true,
@@ -143,7 +142,6 @@ fn curve_state(client: &Client, frame: &CurveFrame, records: &[f32], luma_fields
 fn host_curve(frame: &CurveFrame, records: &[f32]) -> (Option<TemporalNoiseSample>, Option<NoiseCurve>) {
     let reading = temporal_noise_reading(
         records,
-        1,
         1,
         frame.width,
         frame.height,
