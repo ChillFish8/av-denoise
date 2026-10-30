@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 
 use crate::engine::align::StorageAlign;
 use crate::noise::spatial::{
+    IMMERKAER_LANES,
     noise_partials_slot_stride_bytes,
     noise_partials_slot_view,
     partials_len,
@@ -21,18 +22,19 @@ fn sigma_from_abs_sum_zero_for_zero_response() {
 
 #[test]
 fn partials_len_matches_cube_grid() {
+    let lanes = IMMERKAER_LANES as usize;
     let one_cube = partials_len(32, 8);
     let spilled = partials_len(33, 9);
     let full_hd = partials_len(1920, 1080);
 
-    assert_eq!(one_cube, 4); // exactly one BLOCK_X x BLOCK_Y cube
-    assert_eq!(spilled, 16); // spills into a 2x2 cube grid
-    assert_eq!(full_hd, 60 * 135 * 4);
+    assert_eq!(one_cube, lanes); // exactly one BLOCK_X x BLOCK_Y cube
+    assert_eq!(spilled, 4 * lanes); // spills into a 2x2 cube grid
+    assert_eq!(full_hd, 60 * 135 * lanes);
 }
 
 #[test]
 fn noise_partials_slot_stride_bytes_pads_odd_cube_count() {
-    // One block's 16 bytes pad up to the next 32-byte multiple.
+    // One block's 8 bytes pad up to the next 32-byte multiple.
     let align = StorageAlign::new(32);
     let stride = noise_partials_slot_stride_bytes(32, 8, align);
     assert_eq!(stride, 32);
@@ -40,9 +42,9 @@ fn noise_partials_slot_stride_bytes_pads_odd_cube_count() {
 
 #[test]
 fn noise_partials_slot_stride_bytes_aligned_count_unchanged() {
-    // A 2x2 grid's 64 bytes are already a multiple of 32.
+    // A 2x4 grid's 64 bytes are already a multiple of 32.
     let align = StorageAlign::new(32);
-    let stride = noise_partials_slot_stride_bytes(33, 9, align);
+    let stride = noise_partials_slot_stride_bytes(33, 25, align);
     assert_eq!(stride, 64);
 }
 
@@ -55,12 +57,12 @@ fn sigma_block_p25_from_partials_uniform_response_matches_frame_wide() {
     let channels = 1;
     let response = 0.02f32;
 
-    let mut partials = vec![0.0f32; 3 * 3 * 4];
+    let mut partials = vec![0.0f32; 3 * 3 * IMMERKAER_LANES as usize];
     let mut total_sum = 0.0f32;
     for (cube_y, row) in RAGGED_CUBE_AREAS.iter().enumerate() {
         for (cube_x, &area) in row.iter().enumerate() {
             let sum = response * area;
-            partials[(cube_y * 3 + cube_x) * 4] = sum;
+            partials[(cube_y * 3 + cube_x) * IMMERKAER_LANES as usize] = sum;
             total_sum += sum;
         }
     }
@@ -84,13 +86,13 @@ fn sigma_block_p25_from_partials_distinct_sums_pick_expected_cube() {
     let channels = 1;
     let sigma_targets_255 = [5.0f32, 2.0, 8.0, 1.0, 9.0, 3.0, 7.0, 4.0, 6.0];
 
-    let mut partials = vec![0.0f32; 3 * 3 * 4];
+    let mut partials = vec![0.0f32; 3 * 3 * IMMERKAER_LANES as usize];
     for (cube_y, row) in RAGGED_CUBE_AREAS.iter().enumerate() {
         for (cube_x, &area) in row.iter().enumerate() {
             let cube = cube_y * 3 + cube_x;
             let sigma_target = sigma_targets_255[cube] / 255.0;
             let sum = sigma_target * 6.0 * area / std::f32::consts::FRAC_PI_2.sqrt();
-            partials[cube * 4] = sum;
+            partials[cube * IMMERKAER_LANES as usize] = sum;
         }
     }
 

@@ -21,7 +21,7 @@ use crate::noise::fold::{FoldSettings, NoiseSettings};
 use crate::noise::history::WindowBounds;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::snapshot::NoiseSnapshot;
-use crate::noise::spatial::{immerkaer_sigma_scale, sigma_from_abs_sum};
+use crate::noise::spatial::{RESULTS_PER_SLOT, immerkaer_sigma_scale, sigma_from_abs_sum};
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
 use crate::noise::strength_map::StrengthMapParams;
 use crate::noise::temporal::TemporalNoiseSample;
@@ -174,8 +174,8 @@ fn empty_record() -> HostRecord {
 }
 
 /// The Immerkær abs sums of `record`.
-fn record_sums(record: &HostRecord) -> [f32; 4] {
-    let mut sums = [0.0f32; 4];
+fn record_sums(record: &HostRecord) -> [f32; RESULTS_PER_SLOT] {
+    let mut sums = [0.0f32; RESULTS_PER_SLOT];
     for (sum, &sigma) in sums.iter_mut().zip(&record.immerkaer) {
         *sum = abs_sum_for(sigma);
     }
@@ -217,7 +217,7 @@ struct Stream {
     settings: NoiseSettings,
     state: NoiseState,
     readings: Vec<ReadingRecord>,
-    sums: Vec<[f32; 4]>,
+    sums: Vec<[f32; RESULTS_PER_SLOT]>,
     maps: Vec<Vec<f32>>,
     records: Vec<HostRecord>,
 }
@@ -229,7 +229,7 @@ impl Stream {
         let frames = FRAMES as usize;
         let empty = empty_record();
         let readings = vec![empty.reading.clone(); frames];
-        let sums = vec![[0.0f32; 4]; frames];
+        let sums = vec![[0.0f32; RESULTS_PER_SLOT]; frames];
         let maps = vec![empty.map.clone(); frames];
         let slot_maps = Self::maps_for(&maps, settings);
         let state = NoiseState::with_readings_for_test(&client, shape, settings, &readings, &sums, slot_maps);
@@ -745,7 +745,7 @@ fn a_4k_luma_map_folds_across_the_grid() {
     readings[0] = first.reading;
     readings[1] = second.reading;
     readings[2] = third.reading;
-    let sums = vec![[0.0f32; 4]; FRAMES as usize];
+    let sums = vec![[0.0f32; RESULTS_PER_SLOT]; FRAMES as usize];
     let maps: Vec<Vec<f32>> = (0..FRAMES).map(|slot| hashed_map_of(slot, quarters)).collect();
 
     let map_settings = settings(luma_map());

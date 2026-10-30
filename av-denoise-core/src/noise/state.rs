@@ -24,7 +24,7 @@ use super::reading::{
     sample_queries,
 };
 use super::select::{SelectBatch, histogram_len};
-use super::spatial::{RESULTS_PER_SLOT, noise_partials_slot_stride_bytes, partials_len};
+use super::spatial::{IMMERKAER_LANES, RESULTS_PER_SLOT, noise_partials_slot_stride_bytes, partials_len};
 use super::strength_map::{QuarterSettings, StrengthMapParams};
 use super::temporal::{min_static_blocks, temporal_stats_blocks, temporal_stats_buf_bytes};
 use crate::collab::geometry::strength_map_dims;
@@ -454,7 +454,7 @@ fn fold_settings_buffer(client: &Client, shape: NoiseShape, settings: NoiseSetti
 /// Immerkær cubes in one frame of `shape`.
 pub(super) fn cube_count(shape: NoiseShape) -> u32 {
     let lanes = partials_len(shape.width, shape.height) as u32;
-    lanes / 4
+    lanes / IMMERKAER_LANES
 }
 
 /// Temporal-stats blocks in one frame of `shape`.

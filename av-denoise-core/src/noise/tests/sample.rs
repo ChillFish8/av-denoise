@@ -12,7 +12,7 @@ use super::records::{
 use crate::engine::align::StorageAlign;
 use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
 use crate::noise::reading::{READING_CURVE_VALID, READING_SAMPLE_VALID, ReadingRecord};
-use crate::noise::spatial::sigma_block_p25_from_partials;
+use crate::noise::spatial::{RESULTS_PER_SLOT, sigma_block_p25_from_partials};
 use crate::noise::state::{BLOCK_ACCEPTED, NoiseShape, NoiseState, ReadingSettings, SlotStats};
 use crate::noise::stats::lower_quartile;
 use crate::noise::strength_map::QuarterSettings;
@@ -29,7 +29,7 @@ use crate::tune::gpu::sync;
 use crate::tune::tests::runtime::test_client;
 
 const MAX_ULPS: u32 = 2;
-const RESULTS_ROW: [f32; 4] = [0.0; 4];
+const RESULTS_ROW: [f32; RESULTS_PER_SLOT] = [0.0; RESULTS_PER_SLOT];
 
 /// The geometry of one plane a test reads.
 #[derive(Debug, Clone, Copy)]

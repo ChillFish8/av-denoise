@@ -9,6 +9,7 @@ use crate::nlmeans::params::NlmParams;
 use crate::noise::{
     IMMERKAER_BLOCK_X,
     IMMERKAER_BLOCK_Y,
+    IMMERKAER_LANES,
     reading_buffer_sizes,
     temporal_stats_blocks,
     temporal_stats_record_len,
@@ -80,7 +81,8 @@ pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32
 
         let cubes_x = u64::from(width.div_ceil(IMMERKAER_BLOCK_X));
         let cubes_y = u64::from(height.div_ceil(IMMERKAER_BLOCK_Y));
-        let partials = times(cubes_x.checked_mul(cubes_y), 4);
+        let lanes = u64::from(IMMERKAER_LANES);
+        let partials = times(cubes_x.checked_mul(cubes_y), lanes);
         let slot_bytes = padded_slot_bytes(partials, align);
         let ring = slot_ring(slot_bytes, lookahead_frames);
         buffers.push(("noise partials ring", ring));

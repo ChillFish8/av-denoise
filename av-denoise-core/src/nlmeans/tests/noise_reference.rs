@@ -4,6 +4,7 @@ use crate::engine::kernels::read_line;
 use crate::noise::{
     BLOCK_MOVED_LANE,
     BLOCK_TEXTURE_LANE,
+    IMMERKAER_LANES,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,
@@ -32,7 +33,7 @@ pub(super) fn reference_noise_partial<N: Size>(
     #[comptime] block_y: u32,
 ) {
     let threads = comptime!(block_x * block_y);
-    let mut scratch = Shared::<[f32]>::new_slice(comptime!(block_x * block_y * 4) as usize);
+    let mut scratch = Shared::<[f32]>::new_slice(comptime!(block_x * block_y * IMMERKAER_LANES) as usize);
 
     let x = ABSOLUTE_POS_X;
     let y = ABSOLUTE_POS_Y;
@@ -60,12 +61,12 @@ pub(super) fn reference_noise_partial<N: Size>(
     #[unroll]
     for channel in 0..channels {
         let lane = response.extract(channel as usize);
-        scratch[(thread_id * 4 + channel) as usize] = f32::abs(lane);
+        scratch[(thread_id * IMMERKAER_LANES + channel) as usize] = f32::abs(lane);
     }
 
     #[unroll]
-    for channel in channels..4u32 {
-        scratch[(thread_id * 4 + channel) as usize] = 0.0f32;
+    for channel in channels..IMMERKAER_LANES {
+        scratch[(thread_id * IMMERKAER_LANES + channel) as usize] = 0.0f32;
     }
 
     sync_cube();
@@ -74,13 +75,13 @@ pub(super) fn reference_noise_partial<N: Size>(
         let cube_index = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
 
         #[unroll]
-        for channel in 0..4u32 {
+        for channel in 0..IMMERKAER_LANES {
             let mut sum = 0.0f32;
             for t in 0..threads {
-                sum += scratch[(t * 4 + channel) as usize];
+                sum += scratch[(t * IMMERKAER_LANES + channel) as usize];
             }
 
-            partials[(cube_index * 4 + channel) as usize] = sum;
+            partials[(cube_index * IMMERKAER_LANES + channel) as usize] = sum;
         }
     }
 }
@@ -94,38 +95,32 @@ pub(super) fn reference_noise_reduce(
     num_partials: u32,
     #[comptime] block: u32,
 ) {
-    let mut scratch = Shared::<[f32]>::new_slice(comptime!(block * 4) as usize);
+    let mut scratch = Shared::<[f32]>::new_slice(comptime!(block * IMMERKAER_LANES) as usize);
     let thread_id = UNIT_POS_X;
 
     let mut sum0 = 0.0f32;
     let mut sum1 = 0.0f32;
-    let mut sum2 = 0.0f32;
-    let mut sum3 = 0.0f32;
     let mut i = thread_id;
     while i < num_partials {
-        sum0 += partials[(i * 4) as usize];
-        sum1 += partials[(i * 4 + 1) as usize];
-        sum2 += partials[(i * 4 + 2) as usize];
-        sum3 += partials[(i * 4 + 3) as usize];
+        sum0 += partials[(i * IMMERKAER_LANES) as usize];
+        sum1 += partials[(i * IMMERKAER_LANES + 1) as usize];
         i += block;
     }
 
-    scratch[(thread_id * 4) as usize] = sum0;
-    scratch[(thread_id * 4 + 1) as usize] = sum1;
-    scratch[(thread_id * 4 + 2) as usize] = sum2;
-    scratch[(thread_id * 4 + 3) as usize] = sum3;
+    scratch[(thread_id * IMMERKAER_LANES) as usize] = sum0;
+    scratch[(thread_id * IMMERKAER_LANES + 1) as usize] = sum1;
 
     sync_cube();
 
     if thread_id == 0 {
         #[unroll]
-        for channel in 0..4u32 {
+        for channel in 0..IMMERKAER_LANES {
             let mut total = 0.0f32;
             for t in 0..block {
-                total += scratch[(t * 4 + channel) as usize];
+                total += scratch[(t * IMMERKAER_LANES + channel) as usize];
             }
 
-            results[(slot * 4 + channel) as usize] = total;
+            results[(slot * IMMERKAER_LANES + channel) as usize] = total;
         }
     }
 }

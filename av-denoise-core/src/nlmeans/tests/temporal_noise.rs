@@ -7,6 +7,7 @@ use crate::noise::tests::read_temporal_stats_slot;
 use crate::noise::{
     BLOCK_MOVED_LANE,
     BLOCK_TEXTURE_LANE,
+    IMMERKAER_LANES,
     NoiseCtx,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
@@ -761,7 +762,8 @@ fn hq_temporal_folds_correlated_grain_above_immerkaer_alone() {
         let partials_bytes = partials_len(width, height) * size_of::<f32>();
         let input_buf = client.create_from_slice(input_bytes);
         let partials_buf = client.empty(partials_bytes);
-        let results_buf = client.empty(4 * size_of::<f32>());
+        let results_len = IMMERKAER_LANES as usize;
+        let results_buf = client.empty(results_len * size_of::<f32>());
         let ctx = NoiseCtx {
             width,
             height,

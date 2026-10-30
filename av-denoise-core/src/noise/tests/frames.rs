@@ -11,7 +11,7 @@ use crate::noise::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS, curve_bin_coun
 use crate::noise::derived::DerivedValues;
 use crate::noise::fold::NoiseSettings;
 use crate::noise::reading::{CURVE_TAGS, ReadingRecord};
-use crate::noise::spatial::sigma_block_p25_from_partials;
+use crate::noise::spatial::{RESULTS_PER_SLOT, sigma_block_p25_from_partials};
 use crate::noise::state::{BLOCK_ACCEPTED, NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
 use crate::noise::strength_map::{QuarterSettings, StrengthMapParams};
 use crate::noise::temporal::{
@@ -143,7 +143,7 @@ pub(super) struct GpuSlot {
 /// What the host reference reads from the same slot's stats.
 pub(super) struct HostSlot {
     /// The Immerkær abs sums both sides fold.
-    pub(super) sums: [f32; 4],
+    pub(super) sums: [f32; RESULTS_PER_SLOT],
     pub(super) immerkaer_low: [f32; 3],
     pub(super) reading: TemporalNoiseReading,
     accepted: Vec<bool>,

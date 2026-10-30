@@ -54,7 +54,7 @@ use crate::noise::temporal::{temporal_stats_buf_bytes, temporal_stats_slot_len, 
 /// One slot's stats a test state starts with.
 pub(crate) struct SlotStats<'a> {
     pub partials: &'a [f32],
-    pub results_row: [f32; 4],
+    pub results_row: [f32; RESULTS_PER_SLOT],
     pub records: &'a [f32],
 }
 
@@ -125,7 +125,7 @@ impl NoiseState {
         shape: NoiseShape,
         settings: ReadingSettings,
         partials: &[f32],
-        results_row: [f32; 4],
+        results_row: [f32; RESULTS_PER_SLOT],
         records: &[f32],
     ) -> Self {
         let slot = SlotStats {
@@ -211,7 +211,7 @@ impl NoiseState {
         shape: NoiseShape,
         settings: NoiseSettings,
         readings: &[ReadingRecord],
-        immerkaer_sums: &[[f32; 4]],
+        immerkaer_sums: &[[f32; RESULTS_PER_SLOT]],
         slot_maps: &[Vec<f32>],
     ) -> Self {
         let mut state = Self::new(client, shape, settings, DerivedValues::default());
@@ -226,7 +226,7 @@ impl NoiseState {
     pub(crate) fn set_readings_for_test(
         &mut self,
         readings: &[ReadingRecord],
-        immerkaer_sums: &[[f32; 4]],
+        immerkaer_sums: &[[f32; RESULTS_PER_SLOT]],
         slot_maps: &[Vec<f32>],
     ) {
         let frames = self.shape.frames as usize;
@@ -461,7 +461,10 @@ impl NoiseState {
     /// Reads back what the history holds for stream frame `frame`.
     ///
     /// The map is empty without a strength map.
-    pub(crate) fn read_history_frame(&self, frame: u32) -> (ReadingRecord, [f32; 4], Vec<f32>) {
+    pub(crate) fn read_history_frame(
+        &self,
+        frame: u32,
+    ) -> (ReadingRecord, [f32; RESULTS_PER_SLOT], Vec<f32>) {
         let history = &self.measurement().history;
         let slot = (frame % history.capacity()) as usize;
 
@@ -502,7 +505,7 @@ impl NoiseState {
     /// Reads the partials, the results row and the records of `slot` back.
     ///
     /// The records are empty without temporal stats.
-    pub(crate) fn read_slot_stats(&self, slot: u32) -> (Vec<f32>, [f32; 4], Vec<f32>) {
+    pub(crate) fn read_slot_stats(&self, slot: u32) -> (Vec<f32>, [f32; RESULTS_PER_SLOT], Vec<f32>) {
         let handles = self.reading_handles(slot);
         let buffers = self.client.read(handles).expect("the slot stats read back");
         let row = f32::from_bytes(&buffers[0]);

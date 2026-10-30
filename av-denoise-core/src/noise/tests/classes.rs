@@ -13,6 +13,7 @@ use crate::collab::geometry::strength_map_dims;
 use crate::engine::MAX_GRID_1D;
 use crate::engine::align::StorageAlign;
 use crate::noise::curve::NOISE_CURVE_BINS;
+use crate::noise::spatial::RESULTS_PER_SLOT;
 use crate::noise::state::{
     CLASS_FLAT,
     CLASS_LINE,
@@ -42,7 +43,7 @@ use crate::noise::temporal::{
 use crate::tune::tests::runtime::test_client;
 
 const MAX_ULPS: u32 = 2;
-const RESULTS_ROW: [f32; 4] = [0.0; 4];
+const RESULTS_ROW: [f32; RESULTS_PER_SLOT] = [0.0; RESULTS_PER_SLOT];
 /// Launches of a luma reading with the curve and the map.
 const MAP_LAUNCHES: u32 = 15;
 /// Launches of a luma reading without the luma quarter fields.

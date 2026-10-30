@@ -47,6 +47,7 @@ pub(crate) use self::fold::{FoldSettings, NoiseSettings};
 pub(crate) use self::history::{NOISE_WINDOW_LEN, NOISE_WINDOW_RADIUS, WindowBounds};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::snapshot::NoiseSnapshot;
+pub(crate) use self::spatial::IMMERKAER_LANES;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::spatial::{NoiseCtx, run_noise_estimate};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]

@@ -83,6 +83,7 @@ pub use crate::noise::DerivedValues;
 
 pub const BLOCK_X: u32 = crate::nlmeans::BLOCK_X;
 pub const BLOCK_Y: u32 = crate::nlmeans::BLOCK_Y;
+pub const IMMERKAER_LANES: u32 = crate::noise::IMMERKAER_LANES;
 pub const NOISE_CURVE_BINS: usize = crate::noise::NOISE_CURVE_BINS;
 pub const DERIVED_WORDS: u32 = crate::noise::DERIVED_WORDS;
 pub const DERIVED_SAD_FLOOR: u32 = crate::noise::DERIVED_SAD_FLOOR;

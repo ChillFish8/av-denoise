@@ -9,7 +9,7 @@ use super::noise_reference::{
 use crate::engine::BLOCK_1D;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 use crate::noise::kernels::{nlm_noise_partial, nlm_noise_reduce, nlm_temporal_noise_stats};
-use crate::noise::{TEMPORAL_NOISE_BLOCK, temporal_stats_record_len};
+use crate::noise::{IMMERKAER_LANES, TEMPORAL_NOISE_BLOCK, temporal_stats_record_len};
 
 #[derive(Clone, Copy)]
 enum Kernel {
@@ -55,14 +55,15 @@ fn run_spatial_pair(
     let cubes_x = width.div_ceil(BLOCK_X);
     let cubes_y = height.div_ceil(BLOCK_Y);
     let block_count = cubes_x * cubes_y;
-    let partials_len = (block_count * 4) as usize;
+    let partials_len = (block_count * IMMERKAER_LANES) as usize;
+    let results_len = IMMERKAER_LANES as usize;
 
     let ring_bytes = f32::as_bytes(ring);
     let input = client.create_from_slice(ring_bytes);
     let partial_fill = vec![f32::NAN; partials_len];
     let partial_fill_bytes = f32::as_bytes(&partial_fill);
     let partials = client.create_from_slice(partial_fill_bytes);
-    let result_fill = vec![f32::NAN; 4];
+    let result_fill = vec![f32::NAN; results_len];
     let result_fill_bytes = f32::as_bytes(&result_fill);
     let results = client.create_from_slice(result_fill_bytes);
 
@@ -103,7 +104,7 @@ fn run_spatial_pair(
         }
 
         let reduce_in = BufferArg::from_raw_parts(partials.clone(), partials_len);
-        let reduce_out = BufferArg::from_raw_parts(results.clone(), 4);
+        let reduce_out = BufferArg::from_raw_parts(results.clone(), results_len);
         let reduce_grid = CubeCount::new_1d(1);
         let reduce_dim = CubeDim::new_1d(BLOCK_1D);
         match kernel {
@@ -135,7 +136,7 @@ fn run_spatial_pair(
     let partial_values = f32::from_bytes(&partial_bytes);
     let result_values = f32::from_bytes(&result_bytes);
     let partial_bits = to_bits(&partial_values[..partials_len]);
-    let result_bits = to_bits(&result_values[..4]);
+    let result_bits = to_bits(&result_values[..results_len]);
     (partial_bits, result_bits)
 }
 

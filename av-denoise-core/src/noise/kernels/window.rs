@@ -32,9 +32,8 @@ use crate::noise::reading::{
     READING_SIGMA_LOW,
     READING_WORDS,
 };
-use crate::noise::spatial::RESULTS_PER_SLOT;
+use crate::noise::spatial::IMMERKAER_LANES;
 
-const RESULT_WORDS: u32 = RESULTS_PER_SLOT as u32;
 const CURVE_BINS: u32 = NOISE_CURVE_BINS as u32;
 /// The chain fed by the boosted median reading.
 const CHAIN_MEDIAN: u32 = 0;
@@ -185,7 +184,7 @@ fn chain_reading(
     let sigma_scale = fold_settings[FOLD_SIGMA_SCALE as usize];
     let immerkaer_factor = fold_settings[FOLD_IMMERKAER_FACTOR as usize];
 
-    let abs_sum = results[(slot * RESULT_WORDS + channel) as usize];
+    let abs_sum = results[(slot * IMMERKAER_LANES + channel) as usize];
     let immerkaer = immerkaer_factor * abs_sum;
     let immerkaer_low = records[(base + READING_IMMERKAER_LOW + channel) as usize];
     let sigma = records[(base + READING_SIGMA + channel) as usize];

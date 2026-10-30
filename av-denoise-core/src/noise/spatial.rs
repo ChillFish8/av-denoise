@@ -20,9 +20,17 @@ pub(crate) struct NoiseCtx<'a> {
     pub results_buf: &'a Handle,
 }
 
-/// The `f32` length of one frame's first-stage partials, four lanes per block.
+/// The Immerkær lanes in each partial and each results row, one per channel.
+///
+/// A luma frame leaves lane 1 at 0.
+pub(crate) const IMMERKAER_LANES: u32 = 2;
+
+/// The `f32` length of one frame's first-stage partials.
+///
+/// Each block holds [IMMERKAER_LANES](crate::noise::spatial::IMMERKAER_LANES) partials.
 pub(crate) fn partials_len(width: u32, height: u32) -> usize {
-    (width.div_ceil(IMMERKAER_BLOCK_X) * height.div_ceil(IMMERKAER_BLOCK_Y) * 4) as usize
+    let cubes = width.div_ceil(IMMERKAER_BLOCK_X) * height.div_ceil(IMMERKAER_BLOCK_Y);
+    (cubes * IMMERKAER_LANES) as usize
 }
 
 /// The byte stride between partials ring slots, padded to the buffer-binding alignment.
@@ -34,10 +42,8 @@ pub(crate) fn noise_partials_slot_stride_bytes(width: u32, height: u32, align: S
     align.pad_bytes(partials_bytes)
 }
 
-/// The Immerkær totals each ring slot keeps in the results buffer.
-///
-/// Each channel has its own lane and the unused lanes read 0.
-pub(crate) const RESULTS_PER_SLOT: usize = 4;
+/// The Immerkær totals each ring slot keeps in the results buffer, one per lane.
+pub(crate) const RESULTS_PER_SLOT: usize = IMMERKAER_LANES as usize;
 
 /// The [RESULTS_PER_SLOT](crate::noise::spatial::RESULTS_PER_SLOT) Immerkær totals `slot`
 /// holds in the results buffer.
@@ -73,7 +79,8 @@ pub(crate) fn noise_partials_slot_view(
 ///
 /// The mask is cheap and needs only one frame, but it reads correlated grain low because the grain
 /// looks partly like content to it. The per-channel totals land in this frame's slot of the results
-/// buffer, which holds four values per slot of the input ring's frame capacity.
+/// buffer, which holds [RESULTS_PER_SLOT](crate::noise::spatial::RESULTS_PER_SLOT) values per slot of
+/// the input ring's frame capacity.
 pub(crate) fn run_noise_estimate(client: &Client, ctx: &NoiseCtx<'_>) -> Result<(), anyhow::Error> {
     let total_input = (ctx.frame_count * ctx.height * ctx.width * ctx.channels) as usize;
     let partials_count = partials_len(ctx.width, ctx.height);
@@ -99,7 +106,7 @@ pub(crate) fn run_noise_estimate(client: &Client, ctx: &NoiseCtx<'_>) -> Result<
         );
     }
 
-    let block_count = (partials_count / 4) as u32;
+    let block_count = partials_count as u32 / IMMERKAER_LANES;
 
     unsafe {
         nlm_noise_reduce::launch_unchecked(
@@ -169,7 +176,7 @@ pub(crate) fn sigma_block_p25_from_partials(
 
             let area = ((overlap_x1 - overlap_x0) * (overlap_y1 - overlap_y0)) as f32;
             let cube_index = (cube_y * cubes_x + cube_x) as usize;
-            let base = cube_index * 4;
+            let base = cube_index * IMMERKAER_LANES as usize;
 
             for (channel, sigmas) in cube_sigmas.iter_mut().enumerate() {
                 let sum = partials[base + channel];

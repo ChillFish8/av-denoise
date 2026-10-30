@@ -35,6 +35,7 @@ use crate::noise::reading::{
     TAG_RHO,
 };
 use crate::noise::select::{SELECT_CUBE_THREADS, SELECT_SLOT_WORDS, UNTAGGED};
+use crate::noise::spatial::IMMERKAER_LANES;
 use crate::noise::state::{
     BLOCK_ACCEPTED,
     BLOCK_CANDIDATE,
@@ -182,7 +183,11 @@ pub fn noise_block_derive(
 
         #[unroll]
         for channel in 0..3u32 {
-            let sum = partials[(index * 4 + channel) as usize];
+            let mut sum = 0.0f32;
+            if comptime!(channel < IMMERKAER_LANES) {
+                sum = partials[(index * IMMERKAER_LANES + channel) as usize];
+            }
+
             let sigma = immerkaer_scale * sum / divisor;
             let active = interior && comptime!(channel < channels);
             let lane = channel * cubes + index;

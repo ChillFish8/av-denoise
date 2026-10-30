@@ -11,6 +11,7 @@ use crate::noise::derived::{DerivedCoefficients, DerivedValues};
 use crate::noise::fold::{FoldSettings, NoiseSettings};
 use crate::noise::history::WindowBounds;
 use crate::noise::reading::ReadingRecord;
+use crate::noise::spatial::RESULTS_PER_SLOT;
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
 use crate::noise::strength_map::StrengthMapParams;
 use crate::noise::temporal::TemporalNoiseSample;
@@ -104,7 +105,7 @@ fn ring_state(
 ) -> NoiseState {
     let curved = !slot_maps.is_empty();
     let readings: Vec<ReadingRecord> = rhos.iter().map(|&rho| sampled_reading(rho, curved)).collect();
-    let sums = vec![[0.0f32; 4]; FRAMES as usize];
+    let sums = vec![[0.0f32; RESULTS_PER_SLOT]; FRAMES as usize];
     let mut state = NoiseState::new(client, shape, settings, STARTING_VALUES);
     state.set_readings_for_test(&readings, &sums, slot_maps);
 

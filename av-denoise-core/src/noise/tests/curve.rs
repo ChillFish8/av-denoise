@@ -14,6 +14,7 @@ use crate::noise::curve::{CLIP_HIGH, CLIP_LOW, FLAT_FACTOR, NOISE_CURVE_BINS, No
 use crate::noise::fold::NoiseSettings;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::select::UNTAGGED;
+use crate::noise::spatial::RESULTS_PER_SLOT;
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, SlotStats};
 use crate::noise::strength_map::QuarterSettings;
 use crate::noise::temporal::{
@@ -29,7 +30,7 @@ use crate::noise::temporal::{
 use crate::tune::tests::runtime::test_client;
 
 const MAX_ULPS: u32 = 2;
-const RESULTS_ROW: [f32; 4] = [0.0; 4];
+const RESULTS_ROW: [f32; RESULTS_PER_SLOT] = [0.0; RESULTS_PER_SLOT];
 /// A flatness far past any flat gate.
 const TEXTURED: f32 = 1.0;
 /// Launches of a luma reading with the curve.

@@ -1,6 +1,7 @@
 use cubecl::prelude::*;
 
 use crate::engine::kernels::read_line;
+use crate::noise::spatial::IMMERKAER_LANES;
 use crate::noise::{
     BLOCK_MOVED_LANE,
     BLOCK_TEXTURE_LANE,
@@ -20,12 +21,15 @@ use crate::noise::{
     UNMEASURED_FLATNESS,
 };
 
+// nlm_noise_reduce keeps one named accumulator per lane.
+const _: () = assert!(IMMERKAER_LANES == 2);
+
 /// The per-block stage of the Immerkær noise estimate.
 ///
 /// Each interior pixel applies a 3x3 mask that cancels smooth content and leaves mostly noise. The
-/// block sums the absolute responses per channel into `partials[block_index * 4 + lane]`. Border
-/// pixels, threads past the image and unused lanes contribute zero. Thread `l` sums lane `l` over
-/// every thread in order.
+/// block sums the absolute responses of each channel into its own lane of the block's
+/// [IMMERKAER_LANES](crate::noise::spatial::IMMERKAER_LANES) partials. Border pixels, threads past
+/// the image and unused lanes contribute zero. Thread `l` sums lane `l` over every thread in order.
 #[cube(launch_unchecked)]
 pub fn nlm_noise_partial<N: Size>(
     input: &[Vector<f32, N>],
@@ -40,10 +44,11 @@ pub fn nlm_noise_partial<N: Size>(
     let threads = comptime!(block_x * block_y);
 
     comptime! {
-        assert!(threads >= 4, "nlm_noise_partial needs a thread per lane");
+        assert!(threads >= IMMERKAER_LANES, "nlm_noise_partial needs a thread per lane");
+        assert!(channels <= IMMERKAER_LANES, "nlm_noise_partial needs a lane per channel");
     }
 
-    let mut scratch = Shared::<[f32]>::new_slice(comptime!(block_x * block_y * 4) as usize);
+    let mut scratch = Shared::<[f32]>::new_slice(comptime!(threads * IMMERKAER_LANES) as usize);
 
     let x = ABSOLUTE_POS_X;
     let y = ABSOLUTE_POS_Y;
@@ -71,32 +76,32 @@ pub fn nlm_noise_partial<N: Size>(
     #[unroll]
     for channel in 0..channels {
         let lane = response.extract(channel as usize);
-        scratch[(thread_id * 4 + channel) as usize] = f32::abs(lane);
+        scratch[(thread_id * IMMERKAER_LANES + channel) as usize] = f32::abs(lane);
     }
 
     #[unroll]
-    for channel in channels..4u32 {
-        scratch[(thread_id * 4 + channel) as usize] = 0.0f32;
+    for channel in channels..IMMERKAER_LANES {
+        scratch[(thread_id * IMMERKAER_LANES + channel) as usize] = 0.0f32;
     }
 
     sync_cube();
 
-    if thread_id < 4u32 {
+    if thread_id < IMMERKAER_LANES {
         let cube_index = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
         let channel = thread_id;
         let mut sum = 0.0f32;
         for t in 0..threads {
-            sum += scratch[(t * 4 + channel) as usize];
+            sum += scratch[(t * IMMERKAER_LANES + channel) as usize];
         }
 
-        partials[(cube_index * 4 + channel) as usize] = sum;
+        partials[(cube_index * IMMERKAER_LANES + channel) as usize] = sum;
     }
 }
 
 /// The final stage of the Immerkær noise estimate.
 ///
-/// A single block of `block` threads sums every partial into the per-channel totals at
-/// `results[slot * 4..]`. Thread `l` sums lane `l` over every thread in order.
+/// A single block of `block` threads sums every partial into the per-channel totals in row `slot`
+/// of `results`. Thread `l` sums lane `l` over every thread in order.
 #[cube(launch_unchecked)]
 pub fn nlm_noise_reduce(
     partials: &[f32],
@@ -106,40 +111,34 @@ pub fn nlm_noise_reduce(
     #[comptime] block: u32,
 ) {
     comptime! {
-        assert!(block >= 4, "nlm_noise_reduce needs a thread per lane");
+        assert!(block >= IMMERKAER_LANES, "nlm_noise_reduce needs a thread per lane");
     }
 
-    let mut scratch = Shared::<[f32]>::new_slice(comptime!(block * 4) as usize);
+    let mut scratch = Shared::<[f32]>::new_slice(comptime!(block * IMMERKAER_LANES) as usize);
     let thread_id = UNIT_POS_X;
 
     let mut sum0 = 0.0f32;
     let mut sum1 = 0.0f32;
-    let mut sum2 = 0.0f32;
-    let mut sum3 = 0.0f32;
     let mut i = thread_id;
     while i < num_partials {
-        sum0 += partials[(i * 4) as usize];
-        sum1 += partials[(i * 4 + 1) as usize];
-        sum2 += partials[(i * 4 + 2) as usize];
-        sum3 += partials[(i * 4 + 3) as usize];
+        sum0 += partials[(i * IMMERKAER_LANES) as usize];
+        sum1 += partials[(i * IMMERKAER_LANES + 1) as usize];
         i += block;
     }
 
-    scratch[(thread_id * 4) as usize] = sum0;
-    scratch[(thread_id * 4 + 1) as usize] = sum1;
-    scratch[(thread_id * 4 + 2) as usize] = sum2;
-    scratch[(thread_id * 4 + 3) as usize] = sum3;
+    scratch[(thread_id * IMMERKAER_LANES) as usize] = sum0;
+    scratch[(thread_id * IMMERKAER_LANES + 1) as usize] = sum1;
 
     sync_cube();
 
-    if thread_id < 4u32 {
+    if thread_id < IMMERKAER_LANES {
         let channel = thread_id;
         let mut total = 0.0f32;
         for t in 0..block {
-            total += scratch[(t * 4 + channel) as usize];
+            total += scratch[(t * IMMERKAER_LANES + channel) as usize];
         }
 
-        results[(slot * 4 + channel) as usize] = total;
+        results[(slot * IMMERKAER_LANES + channel) as usize] = total;
     }
 }
 

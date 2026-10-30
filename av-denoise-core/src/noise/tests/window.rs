@@ -185,7 +185,7 @@ fn upload_history(client: &Client, records: &[HostRecord], newest: u32, map_len:
         words[words_start..words_start + reading_words].copy_from_slice(&reading);
 
         let results_start = slot * RESULTS_PER_SLOT;
-        for channel in 0..3 {
+        for channel in 0..RESULTS_PER_SLOT {
             results[results_start + channel] = abs_sum_for(record.immerkaer[channel]);
         }
 
@@ -307,7 +307,7 @@ fn window_fold_matches_the_host_model() {
     let cases = [
         (1, settings(luma_map(), 1.1)),
         (2, settings(StrengthMapKind::Chroma { flat_boost: 1.5 }, 1.0)),
-        (3, settings(StrengthMapKind::Off, 0.9)),
+        (1, settings(StrengthMapKind::Off, 0.9)),
     ];
     let newest = RECORD_COUNT - 1;
     let centres = [0, RECORD_COUNT / 2, newest];

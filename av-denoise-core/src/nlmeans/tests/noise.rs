@@ -1,19 +1,20 @@
 use cubecl::prelude::*;
 
 use super::helpers::*;
-use crate::noise::{NoiseCtx, partials_len, run_noise_estimate, sigma_from_abs_sum};
+use crate::noise::{IMMERKAER_LANES, NoiseCtx, partials_len, run_noise_estimate, sigma_from_abs_sum};
 
 /// Runs both noise-estimate stages over one frame in a one-slot ring.
 ///
-/// `frame` is packed as `pixels * channels`. Returns the four raw per-lane absolute-sum totals.
-fn estimate_abs_sums(width: u32, height: u32, channels: u32, frame: &[f32]) -> [f32; 4] {
+/// `frame` is packed as `pixels * channels`. Returns the raw per-lane absolute-sum totals.
+fn estimate_abs_sums(width: u32, height: u32, channels: u32, frame: &[f32]) -> Vec<f32> {
     let client = make_client();
 
     let input_bytes = f32::as_bytes(frame);
     let partials_bytes = partials_len(width, height) * size_of::<f32>();
     let input_buf = client.create_from_slice(input_bytes);
     let partials_buf = client.empty(partials_bytes);
-    let results_buf = client.empty(4 * size_of::<f32>());
+    let results_len = IMMERKAER_LANES as usize;
+    let results_buf = client.empty(results_len * size_of::<f32>());
 
     let ctx = NoiseCtx {
         width,
@@ -31,7 +32,7 @@ fn estimate_abs_sums(width: u32, height: u32, channels: u32, frame: &[f32]) -> [
 
     let bytes = client.read_one(results_buf).expect("readback failed");
     let data = f32::from_bytes(&bytes);
-    [data[0], data[1], data[2], data[3]]
+    data[..results_len].to_vec()
 }
 
 /// The luma sigma measured over `frame`.

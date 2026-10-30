@@ -1,3 +1,4 @@
+use av_denoise_core::bench_api::IMMERKAER_LANES;
 use av_denoise_core::bench_api::noise_kernels::{nlm_noise_partial, nlm_noise_reduce};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
@@ -35,7 +36,8 @@ pub struct NoiseInput {
 }
 
 fn partials_len() -> usize {
-    (WIDTH.div_ceil(BLOCK_X) * HEIGHT.div_ceil(BLOCK_Y) * 4) as usize
+    let cubes = WIDTH.div_ceil(BLOCK_X) * HEIGHT.div_ceil(BLOCK_Y);
+    (cubes * IMMERKAER_LANES) as usize
 }
 
 impl Benchmark for NoisePartialBench {
@@ -48,7 +50,8 @@ impl Benchmark for NoisePartialBench {
         let input = self.client.create_from_slice(frame_bytes);
         let partial_lanes = partials_len();
         let partials = self.client.empty(partial_lanes * size_of::<f32>());
-        let results = self.client.empty(4 * size_of::<f32>());
+        let results_len = IMMERKAER_LANES as usize;
+        let results = self.client.empty(results_len * size_of::<f32>());
 
         NoiseInput {
             input,
@@ -60,7 +63,8 @@ impl Benchmark for NoisePartialBench {
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let total_input = (WIDTH * HEIGHT * NOISE_CHANNELS) as usize;
         let partial_lanes = partials_len();
-        let partial_count = (partial_lanes / 4) as u32;
+        let partial_count = partial_lanes as u32 / IMMERKAER_LANES;
+        let results_len = IMMERKAER_LANES as usize;
         let cube_count = cube_count_2d();
         let cube_dim = cube_dim_2d();
 
@@ -87,7 +91,7 @@ impl Benchmark for NoisePartialBench {
                 CubeCount::new_1d(1),
                 CubeDim::new_1d(BLOCK_1D),
                 BufferArg::from_raw_parts(args.partials.clone(), partial_lanes),
-                BufferArg::from_raw_parts(args.results.clone(), 4),
+                BufferArg::from_raw_parts(args.results.clone(), results_len),
                 0u32,
                 partial_count,
                 BLOCK_1D,
