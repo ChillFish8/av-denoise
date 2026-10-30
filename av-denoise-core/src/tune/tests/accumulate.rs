@@ -33,7 +33,7 @@ fn accumulate_uses_no_shared_memory_and_keys_on_its_lanes() {
     let key = site.key();
 
     assert_eq!(site.shared_bytes(AccumulateCandidate::Thin32x16), 0);
-    assert_eq!(key.as_str(), "nlm_accumulate|w1024|h512|stored=2");
+    assert_eq!(key.as_str(), "nlm_accumulate|w1024|h512|ch=2");
 }
 
 #[test]

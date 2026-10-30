@@ -100,14 +100,6 @@ impl ChannelMode {
             ChannelMode::Chroma => 2,
         }
     }
-
-    /// How many channels each pixel occupies in GPU storage.
-    pub fn storage_count(self) -> u32 {
-        match self {
-            ChannelMode::Luma => 1,
-            ChannelMode::Chroma => 2,
-        }
-    }
 }
 
 /// Parameters for the quality-focused `nlmeans-hq` variant.

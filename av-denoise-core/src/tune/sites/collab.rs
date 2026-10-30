@@ -576,7 +576,6 @@ impl<S: Float> CollabSite<S> {
 pub(crate) fn collab_key_builder(site: &'static str, shape: &CollabShape) -> SiteKeyBuilder {
     SiteKey::builder(site, shape.width, shape.height)
         .param("ch", shape.channels)
-        .param("stored", shape.channels)
         .param("radius", shape.radius)
         .param("grid", shape.grid_frames)
         .param("refine", shape.refine)

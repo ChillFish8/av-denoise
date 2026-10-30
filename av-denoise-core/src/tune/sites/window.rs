@@ -363,7 +363,6 @@ impl VariantSite for WindowSite {
             .param("conf", u8::from(confidence))
             .param("step", step)
             .param("ch", self.channels)
-            .param("stored", self.channels)
             .param("pr", self.patch_radius)
             .param("sr", self.search_radius)
             .build()

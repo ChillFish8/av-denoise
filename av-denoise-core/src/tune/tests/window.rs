@@ -92,7 +92,7 @@ fn window_keys_name_the_kernel_and_every_compiled_value() {
 
     assert_eq!(
         key.as_str(),
-        "nlm_window|w2048|h2048|kernel=pair|ref=1|conf=1|step=8|ch=2|stored=2|pr=2|sr=3"
+        "nlm_window|w2048|h2048|kernel=pair|ref=1|conf=1|step=8|ch=2|pr=2|sr=3"
     );
 }
 

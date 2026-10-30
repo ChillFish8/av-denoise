@@ -1,4 +1,4 @@
-use crate::tune::store::{remember, resolve};
+use crate::tune::store::{FORMAT_VERSION, remember, resolve};
 use crate::tune::{
     CandidateRecord,
     CompileProgress,
@@ -270,7 +270,8 @@ fn another_format_version_is_ignored() {
     let result = sample_result();
     let path = store.save(&device, &result).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    let bumped = text.replace("\"format_version\": 2", "\"format_version\": 999");
+    let current = format!("\"format_version\": {FORMAT_VERSION}");
+    let bumped = text.replace(&current, "\"format_version\": 999");
     std::fs::write(&path, bumped).unwrap();
 
     let loaded = store.load(&device);
@@ -515,6 +516,24 @@ fn an_older_layout_of_another_version_is_ignored() {
     let device = identity();
     let path = store.path_for(&device);
     std::fs::write(&path, br#"{ "format_version": 1, "plans": {} }"#).unwrap();
+
+    let loaded = store.load(&device);
+
+    assert_eq!(loaded, TuneResult::default());
+}
+
+#[test]
+fn a_version_two_store_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let result = sample_result();
+    let path = store.save(&device, &result).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let current = format!("\"format_version\": {FORMAT_VERSION}");
+    let version_two = text.replace(&current, "\"format_version\": 2");
+    let old_key = version_two.replace("|pr=2", "|stored=2|pr=2");
+    std::fs::write(&path, old_key).unwrap();
 
     let loaded = store.load(&device);
 

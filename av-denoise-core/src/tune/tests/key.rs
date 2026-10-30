@@ -41,7 +41,7 @@ fn the_text_form_is_stable() {
 #[test]
 fn stored_text_round_trips() {
     let key = SiteKey::builder("nlm_accumulate", 640, 480)
-        .param("stored", 4)
+        .param("ch", 4)
         .build();
     let text = key.as_str();
     let restored = SiteKey::from_stored(text);

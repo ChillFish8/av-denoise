@@ -95,7 +95,7 @@ impl VariantSite for AccumulateSite {
 
     fn key(&self) -> SiteKey {
         SiteKey::builder(NLM_ACCUMULATE, self.width, self.height)
-            .param("stored", self.channels)
+            .param("ch", self.channels)
             .build()
     }
 
