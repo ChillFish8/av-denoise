@@ -50,12 +50,15 @@ pub(crate) fn line_sum_sq<N: Size>(diff: Vector<f32, N>, #[comptime] channels: u
 /// Scaling this way lets both channel modes share one `h2_inv_norm`.
 #[cube]
 pub(crate) fn channel_scale(#[comptime] channels: u32) -> f32 {
-    let mut scale = 1.0f32;
+    comptime! {
+        assert!(channels == 1 || channels == 2, "a frame holds one or two channels");
+    }
+
+    let mut scale = 1.5f32;
     if channels == 1 {
         scale = 3.0f32;
-    } else if channels == 2 {
-        scale = 1.5f32;
     }
+
     scale
 }
 

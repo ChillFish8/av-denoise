@@ -93,7 +93,6 @@ pub(crate) struct PrefilterCtx<'a> {
     pub width: u32,
     pub height: u32,
     pub channels: u32,
-    pub stored_ch: u32,
     pub frame_count: u32,
     pub frame: u32,
     pub input_buf: &'a Handle,

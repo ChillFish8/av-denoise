@@ -12,16 +12,14 @@ use super::{
     block_sync,
     cube_count_2d,
     cube_dim_2d,
-    make_padded_frame,
+    make_synthetic_frame,
     shapes_with_channels,
 };
 
-/// Logical channel count for the bench's YUV storage frame.
-const NOISE_CHANNELS: u32 = 3;
-/// Padded storage width for YUV, padded up to a vec4 lane.
-const NOISE_STORED_CH: u32 = 4;
+/// The channel count of the bench's chroma frame.
+const NOISE_CHANNELS: u32 = 2;
 
-/// Both stages of the Immerkær noise estimate, run back to back on one 1080p YUV frame.
+/// Both stages of the Immerkær noise estimate, run back to back on one 1080p chroma frame.
 ///
 /// `nlm_noise_partial` reduces every `BLOCK_X × BLOCK_Y` cube to one partial per channel lane,
 /// then `nlm_noise_reduce` folds every partial into the frame-level total.
@@ -45,7 +43,7 @@ impl Benchmark for NoisePartialBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let frame = make_padded_frame(WIDTH, HEIGHT, NOISE_CHANNELS);
+        let frame = make_synthetic_frame(WIDTH, HEIGHT, NOISE_CHANNELS);
         let frame_bytes = f32::as_bytes(&frame);
         let input = self.client.create_from_slice(frame_bytes);
         let partial_lanes = partials_len();
@@ -60,7 +58,7 @@ impl Benchmark for NoisePartialBench {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let total_input = (WIDTH * HEIGHT * NOISE_STORED_CH) as usize;
+        let total_input = (WIDTH * HEIGHT * NOISE_CHANNELS) as usize;
         let partial_lanes = partials_len();
         let partial_count = (partial_lanes / 4) as u32;
         let cube_count = cube_count_2d();
@@ -71,7 +69,7 @@ impl Benchmark for NoisePartialBench {
                 &self.client,
                 cube_count,
                 cube_dim,
-                NOISE_STORED_CH as usize,
+                NOISE_CHANNELS as usize,
                 BufferArg::from_raw_parts(args.input.clone(), total_input),
                 BufferArg::from_raw_parts(args.partials.clone(), partial_lanes),
                 0u32,
@@ -100,7 +98,7 @@ impl Benchmark for NoisePartialBench {
     }
 
     fn name(&self) -> String {
-        "noise_estimate_1080p_yuv".to_string()
+        "noise_estimate_1080p_chroma".to_string()
     }
 
     fn sync(&self) {

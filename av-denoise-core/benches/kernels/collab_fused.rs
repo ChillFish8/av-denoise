@@ -37,7 +37,7 @@ use super::nl4d_geometry::{
     conf_stride,
     mv_stride,
 };
-use super::{HEIGHT, WIDTH, block_sync, make_padded_frame, shapes_with_channels, stored_channels};
+use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channels};
 
 /// The fused collaborative kernel at the library's default search geometry over a 1080p frame ring.
 ///
@@ -143,7 +143,7 @@ pub struct CollabFusedInput {
 impl CollabFusedBench {
     /// The tunable site over `args`, with the library's default search geometry.
     pub fn site(&self, args: &CollabFusedInput) -> CollabSite<f32> {
-        let stored_ch = stored_channels(self.channels);
+        let stored_ch = self.channels;
         let (accum_len, wsum_len) = accumulator_lens(stored_ch);
         let refs = ref_count(WIDTH, HEIGHT);
         let refs_x = refs_along(WIDTH);
@@ -233,11 +233,11 @@ impl Benchmark for CollabFusedBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let stored_ch = stored_channels(self.channels);
+        let stored_ch = self.channels;
 
         let mut ring_data = Vec::new();
         for _ in 0..N_FRAMES {
-            let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+            let frame = make_synthetic_frame(WIDTH, HEIGHT, self.channels);
             ring_data.extend(frame);
         }
 

@@ -65,7 +65,7 @@ fn pyramid_ring(width: u32, height: u32, levels: u32, align: StorageAlign, slots
 /// keeps the pixel count within `u32` so the shared size helpers called here cannot overflow.
 pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32, height: u32) -> FrontSizes {
     let align = StorageAlign::from_client(client);
-    let stored_ch = params.channels.storage_count();
+    let channels = params.channels.count();
     let total_frames = u64::from(params.total_frames());
     let neighbours = 2 * u64::from(params.temporal_radius);
     let mut buffers = Vec::new();
@@ -74,7 +74,7 @@ pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32
     let lookahead_frames = u64::from(LOOKAHEAD_FRAMES);
     if noise_shape.is_some() {
         let pixels = u64::from(width).checked_mul(u64::from(height));
-        let frame_len = times(pixels, u64::from(stored_ch));
+        let frame_len = times(pixels, u64::from(channels));
         let lookahead = times(frame_len, lookahead_frames);
         buffers.push(("noise look-ahead ring", lookahead));
 
@@ -89,7 +89,7 @@ pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32
     if noise_shape.is_some_and(|shape| shape.temporal) {
         let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
         let blocks = u64::from(blocks_x).checked_mul(u64::from(blocks_y));
-        let record_len = u64::from(temporal_stats_record_len(stored_ch));
+        let record_len = u64::from(temporal_stats_record_len(channels));
         let slot_len = times(blocks, record_len);
         let slot_bytes = padded_slot_bytes(slot_len, align);
         let ring = slot_ring(slot_bytes, lookahead_frames);

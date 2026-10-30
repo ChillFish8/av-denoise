@@ -59,14 +59,6 @@ pub const COPY_GRID_1D: u32 = 1024;
 /// The logical channel count and row label of each channel mode.
 pub const CHANNELS: &[(u32, &str)] = &[(1, "luma"), (2, "chroma")];
 
-pub fn stored_channels(channels: u32) -> u32 {
-    match channels {
-        1 => 1,
-        2 => 2,
-        _ => 4,
-    }
-}
-
 pub fn make_synthetic_frame(width: u32, height: u32, channels: u32) -> Vec<f32> {
     let mut data = Vec::with_capacity((width * height * channels) as usize);
     for y in 0..height {
@@ -80,24 +72,6 @@ pub fn make_synthetic_frame(width: u32, height: u32, channels: u32) -> Vec<f32> 
                 let noise = (hash as f32 / u32::MAX as f32 - 0.5) * 0.1;
                 data.push((base + noise).clamp(0.0, 1.0));
             }
-        }
-    }
-
-    data
-}
-
-/// A synthetic frame padded to the power-of-two lane count `NlmDenoiser` stores.
-pub fn make_padded_frame(width: u32, height: u32, channels: u32) -> Vec<f32> {
-    let stored_ch = stored_channels(channels);
-    if stored_ch == channels {
-        return make_synthetic_frame(width, height, channels);
-    }
-
-    let synthetic = make_synthetic_frame(width, height, channels);
-    let mut data = vec![0.0f32; (width * height * stored_ch) as usize];
-    for i in 0..(width * height) as usize {
-        for channel in 0..channels as usize {
-            data[i * stored_ch as usize + channel] = synthetic[i * channels as usize + channel];
         }
     }
 

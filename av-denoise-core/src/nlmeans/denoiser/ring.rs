@@ -32,8 +32,8 @@ impl NlmDenoiser {
         src_slot: usize,
         src_slots: usize,
     ) {
-        let stored_ch = self.params.channels.storage_count();
-        let frame_size = self.width * self.height * stored_ch;
+        let channels = self.params.channels.count();
+        let frame_size = self.width * self.height * channels;
         let dst_slots = self.params.total_frames() as usize;
 
         let grid = frame_size.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
@@ -65,8 +65,8 @@ impl NlmDenoiser {
         );
 
         let total_frames = self.params.total_frames() as usize;
-        let stored_ch = self.params.channels.storage_count() as usize;
-        let frame_len = (self.width * self.height) as usize * stored_ch;
+        let channels = self.params.channels.count() as usize;
+        let frame_len = (self.width * self.height) as usize * channels;
         let bytes = frame_len * total_frames * size_of::<half::f16>();
         let search_buf = self.client.empty(bytes);
         self.search_buf = Some(search_buf);
@@ -79,8 +79,8 @@ impl NlmDenoiser {
         };
 
         let total_frames = self.params.total_frames() as usize;
-        let stored_ch = self.params.channels.storage_count();
-        let frame_len = self.width * self.height * stored_ch;
+        let channels = self.params.channels.count();
+        let frame_len = self.width * self.height * channels;
         let ring_len = frame_len as usize * total_frames;
         let grid = frame_len.div_ceil(BLOCK_1D).min(MAX_GRID_1D);
         let total_threads = grid * BLOCK_1D;

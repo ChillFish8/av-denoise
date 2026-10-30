@@ -149,15 +149,14 @@ impl NlmDenoiser {
         let frame = self.lookahead().pushed;
         let slot = lookahead_slot(frame);
         let pixels = self.width * self.height;
-        let stored_ch = self.params.channels.storage_count();
-        let frame_len = pixels * stored_ch;
+        let channels = self.params.channels.count();
+        let frame_len = pixels * channels;
         let target = IngestTarget {
             ring: &self.lookahead().input,
             ring_len: LOOKAHEAD_FRAMES as usize * frame_len as usize,
             offset: slot * frame_len,
             pixels,
-            channels: self.params.channels.count(),
-            stored_ch,
+            channels,
         };
 
         ingest(&self.client, planes, format, &self.placeholder, target);
@@ -311,7 +310,7 @@ impl NlmDenoiser {
             slot,
             &lookahead.input,
             pyramid,
-            self.params.channels.storage_count(),
+            self.params.channels.count(),
         )
         .context("look-ahead pyramid build dispatch failed")
     }

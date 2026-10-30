@@ -24,22 +24,15 @@ fn next_random(state: &mut u64) -> u32 {
     (*state >> 33) as u32
 }
 
-/// `frames` frames of uniform noise in `stored_ch` lanes, with lanes past `channels` left at zero.
-fn noisy_ring(
-    width: u32,
-    height: u32,
-    channels: u32,
-    stored_ch: u32,
-    frames: u32,
-    state: &mut u64,
-) -> Vec<f32> {
+/// `frames` frames of uniform noise in `channels` lanes.
+fn noisy_ring(width: u32, height: u32, channels: u32, frames: u32, state: &mut u64) -> Vec<f32> {
     let pixels = (width * height * frames) as usize;
-    let mut ring = vec![0.0f32; pixels * stored_ch as usize];
+    let mut ring = vec![0.0f32; pixels * channels as usize];
     for pixel in 0..pixels {
         for channel in 0..channels as usize {
             let sample = next_random(state) % 4096;
             let offset = 0.0137 * (channel as f32 + 1.0);
-            ring[pixel * stored_ch as usize + channel] = sample as f32 / 4095.0 + offset;
+            ring[pixel * channels as usize + channel] = sample as f32 / 4095.0 + offset;
         }
     }
 
@@ -56,7 +49,6 @@ fn run_spatial_pair(
     width: u32,
     height: u32,
     channels: u32,
-    stored_ch: u32,
     ring: &[f32],
 ) -> (Vec<u32>, Vec<u32>) {
     let client = make_client();
@@ -84,7 +76,7 @@ fn run_spatial_pair(
                 &client,
                 partial_grid,
                 partial_dim,
-                stored_ch as usize,
+                channels as usize,
                 input_arg,
                 partials_arg,
                 0u32,
@@ -98,7 +90,7 @@ fn run_spatial_pair(
                 &client,
                 partial_grid,
                 partial_dim,
-                stored_ch as usize,
+                channels as usize,
                 input_arg,
                 partials_arg,
                 0u32,
@@ -152,12 +144,11 @@ fn noise_partial_and_reduce_match_the_reference_bit_for_bit() {
     let (width, height) = (643u32, 197u32);
     let mut state = 5u64;
 
-    for (channels, stored_ch) in [(1u32, 1u32), (2, 2), (3, 4)] {
-        let ring = noisy_ring(width, height, channels, stored_ch, 1, &mut state);
+    for channels in [1u32, 2] {
+        let ring = noisy_ring(width, height, channels, 1, &mut state);
         let (expected_partials, expected_totals) =
-            run_spatial_pair(Kernel::Reference, width, height, channels, stored_ch, &ring);
-        let (got_partials, got_totals) =
-            run_spatial_pair(Kernel::Production, width, height, channels, stored_ch, &ring);
+            run_spatial_pair(Kernel::Reference, width, height, channels, &ring);
+        let (got_partials, got_totals) = run_spatial_pair(Kernel::Production, width, height, channels, &ring);
 
         assert_eq!(
             got_partials, expected_partials,
@@ -174,7 +165,7 @@ fn run_temporal(
     kernel: Kernel,
     width: u32,
     height: u32,
-    stored_ch: u32,
+    channels: u32,
     ring: &[f32],
     luma_fields: bool,
 ) -> Vec<u32> {
@@ -182,7 +173,7 @@ fn run_temporal(
     let block = TEMPORAL_NOISE_BLOCK;
     let blocks_x = width.div_ceil(block);
     let blocks_y = height.div_ceil(block);
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
+    let record_len = temporal_stats_record_len(channels) as usize;
     let stats_len = (blocks_x * blocks_y) as usize * record_len;
 
     let ring_bytes = f32::as_bytes(ring);
@@ -201,14 +192,14 @@ fn run_temporal(
                 &client,
                 grid,
                 dim,
-                stored_ch as usize,
+                channels as usize,
                 input_arg,
                 stats_arg,
                 1u32,
                 0u32,
                 width,
                 height,
-                stored_ch,
+                channels,
                 block,
                 luma_fields,
             ),
@@ -216,7 +207,7 @@ fn run_temporal(
                 &client,
                 grid,
                 dim,
-                stored_ch as usize,
+                channels as usize,
                 input_arg,
                 stats_arg,
                 BufferArg::from_raw_parts(input.clone(), 1),
@@ -225,7 +216,7 @@ fn run_temporal(
                 0u32,
                 width,
                 height,
-                stored_ch,
+                channels,
                 block,
                 luma_fields,
                 false,
@@ -246,11 +237,11 @@ fn temporal_noise_stats_match_the_reference_bit_for_bit() {
     let (width, height) = (70u32, 45u32);
     let mut state = 9u64;
 
-    for (channels, stored_ch) in [(1u32, 1u32), (2, 2), (3, 4)] {
+    for channels in [1u32, 2] {
         for luma_fields in [false, true] {
-            let ring = noisy_ring(width, height, channels, stored_ch, 2, &mut state);
-            let expected = run_temporal(Kernel::Reference, width, height, stored_ch, &ring, luma_fields);
-            let got = run_temporal(Kernel::Production, width, height, stored_ch, &ring, luma_fields);
+            let ring = noisy_ring(width, height, channels, 2, &mut state);
+            let expected = run_temporal(Kernel::Reference, width, height, channels, &ring, luma_fields);
+            let got = run_temporal(Kernel::Production, width, height, channels, &ring, luma_fields);
 
             assert_eq!(
                 got, expected,

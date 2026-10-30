@@ -15,8 +15,8 @@ pub fn copy_words(src: &[u32], dst: &mut [u32], words: u32, total_threads: u32) 
 /// Normalises word-packed planes into one interleaved ring slot.
 ///
 /// `max` is the largest sample code, and `offset` is the slot's first element in `ring`. Threads
-/// stride over pixels by `total_threads` and write all `stored_ch` lanes, with padding lanes set to
-/// zero. A plane is only read when `channels` covers it, so an unused plane can be a placeholder.
+/// stride over pixels by `total_threads` and write all `channels` lanes. A plane is only read when
+/// `channels` covers it, so an unused plane can be a placeholder.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -25,13 +25,11 @@ pub fn copy_words(src: &[u32], dst: &mut [u32], words: u32, total_threads: u32) 
 pub fn ingest_words(
     plane_0: &[u32],
     plane_1: &[u32],
-    plane_2: &[u32],
     ring: &mut [f32],
     max: f32,
     offset: u32,
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] samples_per_word: u32,
     #[comptime] total_threads: u32,
 ) {
@@ -42,7 +40,7 @@ pub fn ingest_words(
     while pixel < pixels {
         let word = (pixel / samples_per_word) as usize;
         let shift = (pixel % samples_per_word) * bits;
-        let base = offset + pixel * stored_ch;
+        let base = offset + pixel * channels;
 
         let code_0 = (plane_0[word] >> shift) & mask;
         ring[base as usize] = f32::cast_from(code_0) / max;
@@ -52,55 +50,30 @@ pub fn ingest_words(
             ring[(base + 1) as usize] = f32::cast_from(code_1) / max;
         }
 
-        if channels > 2 {
-            let code_2 = (plane_2[word] >> shift) & mask;
-            ring[(base + 2) as usize] = f32::cast_from(code_2) / max;
-        }
-
-        #[unroll]
-        for lane in channels..stored_ch {
-            ring[(base + lane) as usize] = 0.0f32;
-        }
-
         pixel += total_threads;
     }
 }
 
-/// Copies f32 planes into one interleaved ring slot, with padding lanes set to zero.
+/// Copies f32 planes into one interleaved ring slot.
 ///
 /// A plane is only read when `channels` covers it, so an unused plane can be a placeholder.
 #[cube(launch_unchecked)]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "every argument is a binding or a comptime shape"
-)]
 pub fn ingest_f32(
     plane_0: &[f32],
     plane_1: &[f32],
-    plane_2: &[f32],
     ring: &mut [f32],
     offset: u32,
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] total_threads: u32,
 ) {
     let mut pixel = ABSOLUTE_POS_X;
     while pixel < pixels {
-        let base = offset + pixel * stored_ch;
+        let base = offset + pixel * channels;
         ring[base as usize] = plane_0[pixel as usize];
 
         if channels > 1 {
             ring[(base + 1) as usize] = plane_1[pixel as usize];
-        }
-
-        if channels > 2 {
-            ring[(base + 2) as usize] = plane_2[pixel as usize];
-        }
-
-        #[unroll]
-        for lane in channels..stored_ch {
-            ring[(base + lane) as usize] = 0.0f32;
         }
 
         pixel += total_threads;
@@ -122,11 +95,9 @@ pub fn egress_words(
     frame: &[f32],
     plane_0: &mut [u32],
     plane_1: &mut [u32],
-    plane_2: &mut [u32],
     max: f32,
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] samples_per_word: u32,
     #[comptime] words: u32,
     #[comptime] total_threads: u32,
@@ -137,14 +108,13 @@ pub fn egress_words(
     while word < words {
         let mut packed_0 = 0u32;
         let mut packed_1 = 0u32;
-        let mut packed_2 = 0u32;
 
         #[unroll]
         for lane in 0..samples_per_word {
             let pixel = word * samples_per_word + lane;
 
             if pixel < pixels {
-                let base = pixel * stored_ch;
+                let base = pixel * channels;
                 let shift = lane * bits;
 
                 let value_0 = f32::clamp(frame[base as usize], 0.0, 1.0);
@@ -156,12 +126,6 @@ pub fn egress_words(
                     let code_1 = u32::cast_from(value_1 * max + 0.5);
                     packed_1 |= code_1 << shift;
                 }
-
-                if channels > 2 {
-                    let value_2 = f32::clamp(frame[(base + 2) as usize], 0.0, 1.0);
-                    let code_2 = u32::cast_from(value_2 * max + 0.5);
-                    packed_2 |= code_2 << shift;
-                }
             }
         }
 
@@ -171,43 +135,29 @@ pub fn egress_words(
             plane_1[word as usize] = packed_1;
         }
 
-        if channels > 2 {
-            plane_2[word as usize] = packed_2;
-        }
-
         word += total_threads;
     }
 }
 
-/// Copies an interleaved f32 frame into f32 planes, skipping padding lanes.
+/// Copies an interleaved f32 frame into f32 planes.
 ///
 /// A plane is only written when `channels` covers it, so an unused plane can be a placeholder.
 #[cube(launch_unchecked)]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "every argument is a binding or a comptime shape"
-)]
 pub fn egress_f32(
     frame: &[f32],
     plane_0: &mut [f32],
     plane_1: &mut [f32],
-    plane_2: &mut [f32],
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] total_threads: u32,
 ) {
     let mut pixel = ABSOLUTE_POS_X;
     while pixel < pixels {
-        let base = pixel * stored_ch;
+        let base = pixel * channels;
         plane_0[pixel as usize] = frame[base as usize];
 
         if channels > 1 {
             plane_1[pixel as usize] = frame[(base + 1) as usize];
-        }
-
-        if channels > 2 {
-            plane_2[pixel as usize] = frame[(base + 2) as usize];
         }
 
         pixel += total_threads;

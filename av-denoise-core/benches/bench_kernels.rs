@@ -307,7 +307,7 @@ fn run_all(backend: &str, client: Client) {
     }
 
     // Pyramid build and block matching are luma-only since motion estimation ignores chroma. Warp
-    // runs per channel mode because its memory traffic scales with `stored_ch`.
+    // runs per channel mode because its memory traffic scales with the channel count.
     run(DownscaleBench {
         client: client.clone(),
     });

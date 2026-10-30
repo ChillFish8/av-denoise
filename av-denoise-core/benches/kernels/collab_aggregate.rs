@@ -3,7 +3,7 @@ use cubecl::benchmark::{Benchmark, Instant, ProfileDuration};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{BLOCK_X, BLOCK_Y, HEIGHT, WIDTH, block_sync, stored_channels};
+use super::{BLOCK_X, BLOCK_Y, HEIGHT, WIDTH, block_sync};
 
 /// The 65,535 workgroups per dimension GPU limit the library clamps to.
 ///
@@ -80,7 +80,7 @@ impl Benchmark for CollabNormaliseBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let stored_ch = stored_channels(self.channels) as usize;
+        let stored_ch = self.channels as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
 
         // Shaped like a real pass, with a few dozen contributions per pixel, each already scaled
@@ -111,7 +111,7 @@ impl Benchmark for CollabNormaliseBench {
 
     /// Refills the accumulators, then times one launch with the refill outside the span.
     fn profile_full(&self, args: Self::Input) -> Result<ProfileDuration, String> {
-        let stored_ch = stored_channels(self.channels) as usize;
+        let stored_ch = self.channels as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
         self.refill_from(&args.accum_source, &args.buffers.accum, pixels * stored_ch);
         self.refill_from(&args.wsum_source, &args.buffers.wsum, pixels);
@@ -127,7 +127,7 @@ impl Benchmark for CollabNormaliseBench {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let stored_ch = stored_channels(self.channels) as usize;
+        let stored_ch = self.channels as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
         let buffers = args.buffers;
         let cubes_x = WIDTH.div_ceil(BLOCK_X);
@@ -185,7 +185,7 @@ impl Benchmark for CollabZeroAccumBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let stored_ch = stored_channels(self.channels) as usize;
+        let stored_ch = self.channels as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
         let accum = self.client.empty(pixels * stored_ch * size_of::<i32>());
         let wsum = self.client.empty(pixels * size_of::<i32>());
@@ -195,7 +195,7 @@ impl Benchmark for CollabZeroAccumBench {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let stored_ch = stored_channels(self.channels) as usize;
+        let stored_ch = self.channels as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
         let dim = 256u32;
 

@@ -66,7 +66,7 @@ pub(super) fn write_quarter(
     quarter: &SyntheticQuarter,
     pixels: f32,
 ) {
-    let stored_ch = 1u32;
+    let channels = 1u32;
     let variance = 2.0 * quarter.sigma * quarter.sigma;
     let mean = quarter.mean_residual;
     let sum_d = mean * pixels;
@@ -75,7 +75,7 @@ pub(super) fn write_quarter(
     record[1] += sum_d2;
 
     let quarter_offset = quarter_index as u32 * TEMPORAL_QUARTER_FIELDS;
-    let base = (2 * stored_ch + TEMPORAL_QUARTER_BASE + quarter_offset) as usize;
+    let base = (2 * channels + TEMPORAL_QUARTER_BASE + quarter_offset) as usize;
     record[base + QUARTER_SUM_D as usize] = sum_d;
     record[base + QUARTER_SUM_D2 as usize] = sum_d2;
     record[base + QUARTER_LUMA_SUM as usize] = quarter.mean_luma * pixels;
@@ -117,16 +117,15 @@ pub(super) fn frame_dims(quarter_count: usize) -> (u32, u32) {
 
 /// The curve a single-row frame of `quarters` produces.
 fn curve_for(quarters: &[SyntheticQuarter]) -> Option<NoiseCurve> {
-    let stored_ch = 1;
     let channels = 1;
     let (width, height) = frame_dims(quarters.len());
     let records = synthetic_records(quarters);
 
     let accepted =
-        accepted_static_blocks(&records, channels, stored_ch, width, height).expect("a trusted selection");
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+        accepted_static_blocks(&records, channels, channels, width, height).expect("a trusted selection");
+    let sample = aggregate_temporal_noise_stats(&records, channels, channels, width, height)
         .expect("a trusted sample");
-    build_noise_curve(&records, stored_ch, &accepted, sample.sigma[0])
+    build_noise_curve(&records, channels, &accepted, sample.sigma[0])
 }
 
 /// Gives each block the residual means `+m`, `+m`, `-m`, `-m`.
@@ -140,7 +139,6 @@ fn with_cancelling_means(quarters: &mut [SyntheticQuarter], mean: f32) {
 
 #[test]
 fn reading_sample_equals_the_scalar_aggregation() {
-    let stored_ch = 1;
     let channels = 1;
 
     let good_sigmas_255 = [2.0f32, 3.0, 4.0, 3.5, 2.5];
@@ -153,7 +151,7 @@ fn reading_sample_equals_the_scalar_aggregation() {
 
     // Two blocks with a large mean residual, so the static gate rejects them before either function
     // reads their sigma.
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
+    let record_len = temporal_stats_record_len(channels) as usize;
     let block_pixels = 256.0f32;
     let bad_mean = 10.0 / 255.0;
     for _ in 0..2 {
@@ -164,11 +162,11 @@ fn reading_sample_equals_the_scalar_aggregation() {
 
     let (width, height) = frame_dims(good_quarters.len() + 8);
 
-    let sample_scalar = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height);
+    let sample_scalar = aggregate_temporal_noise_stats(&records, channels, channels, width, height);
     let reading = temporal_noise_reading(
         &records,
         channels,
-        stored_ch,
+        channels,
         width,
         height,
         true,
@@ -396,11 +394,10 @@ fn the_curve_normalises_by_the_quarter_median() {
 
     // The 16x16 median reads above the quarters' own sigma, so normalising by it would put every
     // ratio below 1.
-    let stored_ch = 1;
     let channels = 1;
     let (width, height) = frame_dims(quarters.len());
     let records = synthetic_records(&quarters);
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+    let sample = aggregate_temporal_noise_stats(&records, channels, channels, width, height)
         .expect("every block is static");
     assert!(sample.sigma[0] > sigma * 1.02, "{}", sample.sigma[0]);
 
@@ -449,9 +446,8 @@ fn a_ragged_parent_reads_its_partial_quarters_with_their_own_pixel_count() {
     let rows = 32u32;
     let width = 28;
     let height = 16 * rows;
-    let stored_ch = 1;
     let channels = 1;
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
+    let record_len = temporal_stats_record_len(channels) as usize;
     let mut records = vec![0.0f32; 2 * rows as usize * record_len];
 
     // The full blocks fill three bins at sigma 0.01. Every other quarter reads 0.02, and textured or
@@ -494,11 +490,11 @@ fn a_ragged_parent_reads_its_partial_quarters_with_their_own_pixel_count() {
     }
 
     let accepted =
-        accepted_static_blocks(&records, channels, stored_ch, width, height).expect("a trusted selection");
-    let sample = aggregate_temporal_noise_stats(&records, channels, stored_ch, width, height)
+        accepted_static_blocks(&records, channels, channels, width, height).expect("a trusted selection");
+    let sample = aggregate_temporal_noise_stats(&records, channels, channels, width, height)
         .expect("a trusted sample");
     let curve =
-        build_noise_curve(&records, stored_ch, &accepted, sample.sigma[0]).expect("three populated bins");
+        build_noise_curve(&records, channels, &accepted, sample.sigma[0]).expect("three populated bins");
 
     // 96 quarters read 0.01 and 160 read 0.02, so the quarter median is 0.02 only when the 64 partial
     // quarters read their sigma over 32 pixels. Over 64 they would read 0.0141, and skipped the median

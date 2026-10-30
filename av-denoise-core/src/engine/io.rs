@@ -11,7 +11,6 @@ pub(crate) struct IngestTarget<'a> {
     pub offset: u32,
     pub pixels: u32,
     pub channels: u32,
-    pub stored_ch: u32,
 }
 
 /// The handle bound for plane `index`, falling back to `placeholder` for planes the kernel never reads.
@@ -41,7 +40,6 @@ pub(crate) fn ingest(
     let (count, total_threads) = grid(target.pixels);
     let plane_0 = plane_or(planes, 0, placeholder);
     let plane_1 = plane_or(planes, 1, placeholder);
-    let plane_2 = plane_or(planes, 2, placeholder);
     let ring = unsafe { BufferArg::from_raw_parts(target.ring.clone(), target.ring_len) };
 
     match format {
@@ -55,12 +53,10 @@ pub(crate) fn ingest(
                     CubeDim::new_1d(BLOCK_1D),
                     BufferArg::from_raw_parts(plane_0.clone(), plane_len),
                     BufferArg::from_raw_parts(plane_1.clone(), plane_len),
-                    BufferArg::from_raw_parts(plane_2.clone(), plane_len),
                     ring,
                     target.offset,
                     target.pixels,
                     target.channels,
-                    target.stored_ch,
                     total_threads,
                 );
             }
@@ -77,13 +73,11 @@ pub(crate) fn ingest(
                     CubeDim::new_1d(BLOCK_1D),
                     BufferArg::from_raw_parts(plane_0.clone(), words),
                     BufferArg::from_raw_parts(plane_1.clone(), words),
-                    BufferArg::from_raw_parts(plane_2.clone(), words),
                     ring,
                     max,
                     target.offset,
                     target.pixels,
                     target.channels,
-                    target.stored_ch,
                     samples_per_word,
                     total_threads,
                 );
@@ -97,7 +91,6 @@ pub(crate) struct EgressSource<'a> {
     pub frame: &'a Handle,
     pub pixels: u32,
     pub channels: u32,
-    pub stored_ch: u32,
 }
 
 /// Queues the write of `source` into `planes`.
@@ -110,11 +103,10 @@ pub(crate) fn egress(
     format: SampleFormat,
     placeholder: &Handle,
 ) {
-    let frame_len = (source.pixels * source.stored_ch) as usize;
+    let frame_len = (source.pixels * source.channels) as usize;
     let frame = unsafe { BufferArg::from_raw_parts(source.frame.clone(), frame_len) };
     let plane_0 = plane_or(planes, 0, placeholder);
     let plane_1 = plane_or(planes, 1, placeholder);
-    let plane_2 = plane_or(planes, 2, placeholder);
 
     match format {
         SampleFormat::F32 => {
@@ -129,10 +121,8 @@ pub(crate) fn egress(
                     frame,
                     BufferArg::from_raw_parts(plane_0.clone(), plane_len),
                     BufferArg::from_raw_parts(plane_1.clone(), plane_len),
-                    BufferArg::from_raw_parts(plane_2.clone(), plane_len),
                     source.pixels,
                     source.channels,
-                    source.stored_ch,
                     total_threads,
                 );
             }
@@ -152,11 +142,9 @@ pub(crate) fn egress(
                     frame,
                     BufferArg::from_raw_parts(plane_0.clone(), word_len),
                     BufferArg::from_raw_parts(plane_1.clone(), word_len),
-                    BufferArg::from_raw_parts(plane_2.clone(), word_len),
                     max,
                     source.pixels,
                     source.channels,
-                    source.stored_ch,
                     samples_per_word,
                     words,
                     total_threads,

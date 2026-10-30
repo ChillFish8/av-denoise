@@ -274,7 +274,7 @@ impl NlmDenoiser {
             .expect("compensated_input allocated when mc_ctx is Some");
 
         let centre_slot = self.phys_frame(center_t as i32);
-        let stored_ch = self.params.channels.storage_count();
+        let channels = self.params.channels.count();
 
         copy_frame_into_slot_handle(
             &self.client,
@@ -284,7 +284,7 @@ impl NlmDenoiser {
             self.params.total_frames(),
             self.width,
             self.height,
-            stored_ch,
+            channels,
         );
         if let (Some(ref_src), Some(ref_dst)) = (
             self.reference_buf.as_ref(),
@@ -298,7 +298,7 @@ impl NlmDenoiser {
                 self.params.total_frames(),
                 self.width,
                 self.height,
-                stored_ch,
+                channels,
             );
         }
     }
@@ -312,7 +312,7 @@ impl NlmDenoiser {
             .expect("motion compensation runs only with motion compensation active");
 
         let frame_count = self.params.total_frames();
-        let stored_ch = self.params.channels.storage_count();
+        let channels = self.params.channels.count();
 
         let mv_field = self
             .mv_field_buf
@@ -330,7 +330,7 @@ impl NlmDenoiser {
             run_compensate(
                 &self.client,
                 motion_ctx,
-                stored_ch,
+                channels,
                 self.width,
                 self.height,
                 frame_count,
@@ -348,7 +348,7 @@ impl NlmDenoiser {
                 run_compensate(
                     &self.client,
                     motion_ctx,
-                    stored_ch,
+                    channels,
                     self.width,
                     self.height,
                     frame_count,
@@ -510,9 +510,9 @@ fn copy_frame_into_slot_handle(
     frame_count: u32,
     width: u32,
     height: u32,
-    stored_ch: u32,
+    channels: u32,
 ) {
-    let frame_size = width * height * stored_ch;
+    let frame_size = width * height * channels;
     let ring_len = frame_count as usize * frame_size as usize;
     let offset = slot as u32 * frame_size;
 

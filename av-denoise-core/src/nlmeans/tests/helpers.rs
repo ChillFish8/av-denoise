@@ -224,25 +224,6 @@ pub(super) fn ramp_frame(width: u32, height: u32, frame_index: usize) -> Vec<f32
     frame
 }
 
-/// Pads a dense `pixels * channels` frame to the `pixels * stored_ch` layout the ingest kernel writes.
-///
-/// The extra lanes are zeroed.
-pub(super) fn pad_channels(dense: &[f32], pixels: usize, channels: u32, stored_ch: u32) -> Vec<f32> {
-    if channels == stored_ch {
-        return dense.to_vec();
-    }
-
-    let channels = channels as usize;
-    let stored_ch = stored_ch as usize;
-    let mut out = vec![0.0f32; pixels * stored_ch];
-    for pixel in 0..pixels {
-        let source = &dense[pixel * channels..pixel * channels + channels];
-        out[pixel * stored_ch..pixel * stored_ch + channels].copy_from_slice(source);
-    }
-
-    out
-}
-
 /// Splits an interleaved host frame into one uploaded plane per channel.
 pub(crate) fn upload_planes(client: &Client, frame: &[f32], channels: usize) -> Vec<Handle> {
     (0..channels)
@@ -287,7 +268,6 @@ pub(crate) fn normalise_with_ingest(client: &Client, codes: &[u8], width: u32, h
         offset: 0,
         pixels,
         channels: 1,
-        stored_ch: 1,
     };
 
     ingest(client, &planes, SampleFormat::U8, &placeholder, target);

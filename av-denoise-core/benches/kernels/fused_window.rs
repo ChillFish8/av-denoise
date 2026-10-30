@@ -17,9 +17,8 @@ use super::{
     SEARCH_RADIUS,
     WIDTH,
     block_sync,
-    make_padded_frame,
+    make_synthetic_frame,
     shapes_with_channels,
-    stored_channels,
     window_noise,
 };
 
@@ -73,15 +72,15 @@ impl Benchmark for WindowBench {
 
     fn prepare(&self) -> Self::Input {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels);
-        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let channels = self.channels;
+        let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
         let frame_bytes = f32::as_bytes(&frame);
         let input = self.client.create_from_slice(frame_bytes);
         let reference = self
             .kernel
             .has_reference()
             .then(|| self.client.create_from_slice(frame_bytes));
-        let outputs = allocate_accum(&self.client, pixels * stored_ch as usize, pixels);
+        let outputs = allocate_accum(&self.client, pixels * channels as usize, pixels);
         let noise = window_noise(&self.client);
 
         let pass = if self.kernel.is_pair() {
@@ -125,8 +124,7 @@ impl Benchmark for WindowBench {
             h2_field: DERIVED_H2_INV_NORM,
             width: WIDTH,
             height: HEIGHT,
-            channels: self.channels,
-            stored_ch,
+            channels,
             patch_radius: PATCH_RADIUS,
             search_radius: SEARCH_RADIUS,
         };

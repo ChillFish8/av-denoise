@@ -9,9 +9,8 @@ use super::{
     block_sync,
     cube_count_2d,
     cube_dim_2d,
-    make_padded_frame,
+    make_synthetic_frame,
     shapes_with_channels,
-    stored_channels,
 };
 
 #[derive(Clone)]
@@ -36,12 +35,12 @@ impl Benchmark for FinishBench {
 
     fn prepare(&self) -> Self::Input {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
-        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let channels = self.channels as usize;
+        let frame = make_synthetic_frame(WIDTH, HEIGHT, self.channels);
         let frame_bytes = f32::as_bytes(&frame);
         let input = self.client.create_from_slice(frame_bytes);
 
-        let accum_data = vec![0.25f32; pixels * stored_ch];
+        let accum_data = vec![0.25f32; pixels * channels];
         let accum_bytes = f32::as_bytes(&accum_data);
         let accum = self.client.create_from_slice(accum_bytes);
 
@@ -53,7 +52,7 @@ impl Benchmark for FinishBench {
         let max_weight_bytes = f32::as_bytes(&max_weight_data);
         let max_weight = self.client.create_from_slice(max_weight_bytes);
 
-        let output = self.client.empty(pixels * stored_ch * size_of::<f32>());
+        let output = self.client.empty(pixels * channels * size_of::<f32>());
 
         FinishInput {
             input,
@@ -67,7 +66,7 @@ impl Benchmark for FinishBench {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
+        let channels = self.channels as usize;
         let cube_count = cube_count_2d();
         let cube_dim = cube_dim_2d();
 
@@ -76,10 +75,10 @@ impl Benchmark for FinishBench {
                 &self.client,
                 cube_count,
                 cube_dim,
-                stored_ch,
+                channels,
                 BufferArg::from_raw_parts(args.input.clone(), args.frame_len),
-                BufferArg::from_raw_parts(args.output.clone(), pixels * stored_ch),
-                BufferArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
+                BufferArg::from_raw_parts(args.output.clone(), pixels * channels),
+                BufferArg::from_raw_parts(args.accum.clone(), pixels * channels),
                 BufferArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 BufferArg::from_raw_parts(args.max_weight.clone(), pixels),
                 0u32,

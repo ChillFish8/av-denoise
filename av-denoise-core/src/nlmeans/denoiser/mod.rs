@@ -60,7 +60,7 @@ pub struct NlmDenoiser {
     pub(super) reference_buf: Option<Handle>,
     /// A 4-byte handle bound for planes a kernel never reads.
     pub(super) placeholder: Handle,
-    /// The weighted pixel sum, one entry per stored channel per pixel.
+    /// The weighted pixel sum, one entry per channel per pixel.
     pub(super) accum: Handle,
     pub(super) weight_sum: Handle,
     pub(super) max_weight: Handle,
@@ -171,10 +171,10 @@ impl NlmDenoiser {
             .expect("unsupported frame dimensions, call validate_dimensions first to get this as a Result");
 
         let align = StorageAlign::from_client(client);
-        let stored_ch = params.channels.storage_count();
+        let channels = params.channels.count();
         let total_frames = params.total_frames();
         let pixels = (width * height) as usize;
-        let frame_bytes = pixels * stored_ch as usize * size_of::<f32>();
+        let frame_bytes = pixels * channels as usize * size_of::<f32>();
         let scalar_bytes = pixels * size_of::<f32>();
 
         let input_buf = client.empty(frame_bytes * total_frames as usize);
@@ -406,15 +406,14 @@ impl NlmDenoiser {
         let total_frames = self.params.total_frames() as usize;
         let slot = self.ring_head % total_frames;
         let pixels = self.width * self.height;
-        let stored_ch = self.params.channels.storage_count();
-        let frame_len = pixels * stored_ch;
+        let channels = self.params.channels.count();
+        let frame_len = pixels * channels;
         let target = IngestTarget {
             ring: &self.input_buf,
             ring_len: total_frames * frame_len as usize,
             offset: slot as u32 * frame_len,
             pixels,
-            channels: self.params.channels.count(),
-            stored_ch,
+            channels,
         };
 
         ingest(&self.client, planes, format, &self.placeholder, target);

@@ -60,9 +60,9 @@ pub(crate) fn hashed_unit(index: u32, seed: u32) -> f32 {
     0.2 + 0.6 * unit
 }
 
-/// A ring of `frames` frames of hashed values, stored with `stored_ch` lanes per pixel.
-pub(crate) fn hashed_ring(width: u32, height: u32, stored_ch: u32, frames: u32, seed: u32) -> Vec<f32> {
-    let len = width * height * stored_ch * frames;
+/// A ring of `frames` frames of hashed values, with `channels` lanes per pixel.
+pub(crate) fn hashed_ring(width: u32, height: u32, channels: u32, frames: u32, seed: u32) -> Vec<f32> {
+    let len = width * height * channels * frames;
     (0..len).map(|index| hashed_unit(index, seed)).collect()
 }
 
@@ -172,15 +172,15 @@ fn confidence_binding(client: &Client, spec: &WindowSpec) -> ConfidenceBinding {
 }
 
 pub(crate) fn window_site(client: &Client, spec: &WindowSpec) -> WindowSite {
-    let stored_ch = spec.channels.storage_count();
+    let channels = spec.channels.count();
     let pixels = (spec.width * spec.height) as usize;
-    let ring = hashed_ring(spec.width, spec.height, stored_ch, RING_FRAMES, 1);
+    let ring = hashed_ring(spec.width, spec.height, channels, RING_FRAMES, 1);
     let input = upload(client, &ring);
     let reference = spec.reference.then(|| {
-        let reference_ring = hashed_ring(spec.width, spec.height, stored_ch, RING_FRAMES, 2);
+        let reference_ring = hashed_ring(spec.width, spec.height, channels, RING_FRAMES, 2);
         upload(client, &reference_ring)
     });
-    let outputs = allocate_accum(client, pixels * stored_ch as usize, pixels);
+    let outputs = allocate_accum(client, pixels * channels as usize, pixels);
     let h2_field = if spec.pilot {
         DERIVED_PILOT_H2_INV_NORM
     } else {
@@ -215,8 +215,7 @@ pub(crate) fn window_site(client: &Client, spec: &WindowSpec) -> WindowSite {
         h2_field,
         width: spec.width,
         height: spec.height,
-        channels: spec.channels.count(),
-        stored_ch,
+        channels,
         patch_radius: spec.patch_radius,
         search_radius: spec.search_radius,
     }
@@ -233,13 +232,13 @@ pub(crate) struct AccumulateSpec {
 }
 
 pub(crate) fn accumulate_site(client: &Client, spec: &AccumulateSpec) -> AccumulateSite {
-    let stored_ch = spec.channels.storage_count();
+    let channels = spec.channels.count();
     let pixels = (spec.width * spec.height) as usize;
-    let ring = hashed_ring(spec.width, spec.height, stored_ch, RING_FRAMES, 3);
+    let ring = hashed_ring(spec.width, spec.height, channels, RING_FRAMES, 3);
     let input = upload(client, &ring);
     let weight_values: Vec<f32> = (0..pixels as u32).map(|index| hashed_unit(index, 4)).collect();
     let weights = upload(client, &weight_values);
-    let outputs = allocate_accum(client, pixels * stored_ch as usize, pixels);
+    let outputs = allocate_accum(client, pixels * channels as usize, pixels);
 
     AccumulateSite {
         client: client.clone(),
@@ -252,7 +251,7 @@ pub(crate) fn accumulate_site(client: &Client, spec: &AccumulateSpec) -> Accumul
         q_y: spec.q_y,
         width: spec.width,
         height: spec.height,
-        stored_ch,
+        channels,
     }
 }
 

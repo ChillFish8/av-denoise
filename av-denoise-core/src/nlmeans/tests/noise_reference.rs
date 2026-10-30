@@ -139,7 +139,7 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
     slot_prev: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] channels: u32,
     #[comptime] block: u32,
     #[comptime] luma_fields: bool,
 ) {
@@ -147,10 +147,10 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
     // the reduction as uninitialised memory. The luma branch reuses it for three `threads`-long
     // tensor runs, which fit because `scratch_len` is at least 3.
     let quarter_lanes = comptime!(TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS);
-    let record_len = comptime!(2 * stored_ch + TEMPORAL_QUARTER_BASE + quarter_lanes);
-    let scratch_len = comptime!(2 * stored_ch + 1);
+    let record_len = comptime!(2 * channels + TEMPORAL_QUARTER_BASE + quarter_lanes);
+    let scratch_len = comptime!(2 * channels + 1);
     let threads = comptime!(block * block);
-    let texture_lane = comptime!(2 * stored_ch + BLOCK_TEXTURE_LANE);
+    let texture_lane = comptime!(2 * channels + BLOCK_TEXTURE_LANE);
 
     let mut scratch = Shared::<[f32]>::new_slice(comptime!(threads * scratch_len) as usize);
     let mut d0_tile = Shared::<[f32]>::new_slice(threads as usize);
@@ -208,14 +208,14 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
     luma_tile[thread_id as usize] = cell_luma;
 
     #[unroll]
-    for channel in 0..stored_ch {
+    for channel in 0..channels {
         let lane_residual = if valid {
             residual.extract(channel as usize)
         } else {
             0.0f32
         };
         scratch[(thread_id * scratch_len + channel) as usize] = lane_residual;
-        scratch[(thread_id * scratch_len + stored_ch + channel) as usize] = lane_residual * lane_residual;
+        scratch[(thread_id * scratch_len + channels + channel) as usize] = lane_residual * lane_residual;
     }
 
     sync_cube();
@@ -226,7 +226,7 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
     } else {
         0.0f32
     };
-    scratch[(thread_id * scratch_len + 2 * stored_ch) as usize] = lag;
+    scratch[(thread_id * scratch_len + 2 * channels) as usize] = lag;
 
     sync_cube();
 
@@ -291,11 +291,11 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
 
         stats[(out_base + texture_lane) as usize] = texture;
 
-        stats[(out_base + 2 * stored_ch + BLOCK_MOVED_LANE) as usize] = 0.0f32;
+        stats[(out_base + 2 * channels + BLOCK_MOVED_LANE) as usize] = 0.0f32;
 
         // The quarter lanes are written explicitly so a reader never sees an earlier frame's data.
         if comptime!(!luma_fields) {
-            let quarters_start = out_base + 2 * stored_ch + TEMPORAL_QUARTER_BASE;
+            let quarters_start = out_base + 2 * channels + TEMPORAL_QUARTER_BASE;
 
             #[unroll]
             for lane in 0..quarter_lanes {
@@ -450,7 +450,7 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
 
             let block_index = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
             let quarter_offset = TEMPORAL_QUARTER_BASE + quarter * TEMPORAL_QUARTER_FIELDS;
-            let out_base = block_index * record_len + 2 * stored_ch + quarter_offset;
+            let out_base = block_index * record_len + 2 * channels + quarter_offset;
             stats[(out_base + QUARTER_SUM_D) as usize] = residual_tile[slot as usize];
             stats[(out_base + QUARTER_SUM_D2) as usize] = residual_sq_tile[slot as usize];
             stats[(out_base + QUARTER_LUMA_SUM) as usize] = sum_tile[slot as usize];

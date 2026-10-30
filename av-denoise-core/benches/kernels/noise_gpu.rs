@@ -24,7 +24,7 @@ use cubecl::benchmark::{Benchmark, ProfileDuration};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{HEIGHT, WIDTH, block_sync, make_padded_frame, stored_channels};
+use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame};
 
 /// The 16x16 noise blocks of a 1080p plane.
 const BLOCKS: u32 = (WIDTH / 16) * (HEIGHT / 16);
@@ -458,9 +458,9 @@ impl ReadingBench {
     /// The width, height, channels and stored channels of the plane.
     fn plane(&self) -> (u32, u32, u32, u32) {
         if self.chroma {
-            (WIDTH / 2, HEIGHT / 2, 2, stored_channels(2))
+            (WIDTH / 2, HEIGHT / 2, 2, 2)
         } else {
-            (WIDTH, HEIGHT, 1, stored_channels(1))
+            (WIDTH, HEIGHT, 1, 1)
         }
     }
 
@@ -502,7 +502,7 @@ impl ReadingBench {
         let frame = if self.curve {
             self.gradient_frame()
         } else {
-            make_padded_frame(width, height, channels)
+            make_synthetic_frame(width, height, channels)
         };
         let mut ring = frame.clone();
 
@@ -683,7 +683,7 @@ impl Benchmark for FoldBench {
             map,
             offset_tables,
         };
-        let stored_ch = stored_channels(1);
+        let stored_ch = 1;
         let reading = NoiseReading::new(&self.client, WIDTH, HEIGHT, 1, stored_ch, &ring, options)
             .expect("the stats queue");
 

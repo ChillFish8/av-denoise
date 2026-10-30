@@ -4,7 +4,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{BLOCK_1D, block_sync, make_padded_frame, stored_channels};
+use super::{BLOCK_1D, block_sync, make_synthetic_frame};
 
 const RING_SLOTS: usize = 5;
 const TARGET_SLOT: u32 = 2;
@@ -25,8 +25,8 @@ pub struct CastF16Bench {
 
 impl CastF16Bench {
     fn frame_len(&self) -> usize {
-        let stored_ch = stored_channels(self.channels) as usize;
-        (self.width * self.height) as usize * stored_ch
+        let channels = self.channels as usize;
+        (self.width * self.height) as usize * channels
     }
 }
 
@@ -36,7 +36,7 @@ impl Benchmark for CastF16Bench {
 
     fn prepare(&self) -> Self::Input {
         let frame_len = self.frame_len();
-        let frame = make_padded_frame(self.width, self.height, self.channels);
+        let frame = make_synthetic_frame(self.width, self.height, self.channels);
         let ring = frame.repeat(RING_SLOTS);
         let ring_bytes = f32::as_bytes(&ring);
         let src = self.client.create_from_slice(ring_bytes);

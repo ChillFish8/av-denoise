@@ -3,7 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{HEIGHT, WIDTH, block_sync, make_padded_frame, shapes_with_channels, stored_channels};
+use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channels};
 
 const FINE_STEP: u32 = 8;
 
@@ -30,7 +30,7 @@ impl Benchmark for WarpBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let frame = make_synthetic_frame(WIDTH, HEIGHT, self.channels);
         let frame_bytes = f32::as_bytes(&frame);
         let src = self.client.create_from_slice(frame_bytes);
         let dst = self.client.empty(frame.len() * size_of::<f32>());
@@ -50,7 +50,7 @@ impl Benchmark for WarpBench {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let stored_ch = stored_channels(self.channels) as usize;
+        let stored_ch = self.channels as usize;
         let block_x = 16u32;
         let block_y = 16u32;
         let cubes_x = WIDTH.div_ceil(block_x);

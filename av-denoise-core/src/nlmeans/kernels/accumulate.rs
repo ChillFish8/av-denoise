@@ -80,7 +80,6 @@ pub fn nlm_finish<N: Size>(
     let original = input[frame_idx];
     let accumulated = accum[pixel_idx];
 
-    // `Vector::empty` zeroes its lanes, so the padding lanes of a 3-channel frame stay 0.
     let mut out = Vector::<f32, N>::empty();
 
     if denominator > 1e-30f32 {

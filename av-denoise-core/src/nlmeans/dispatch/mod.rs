@@ -91,7 +91,7 @@ impl NlmDenoiser {
     /// The whole reference ring, for a kernel that picks its slot itself.
     ///
     /// Binding one slot would need its byte offset to meet the runtime's alignment, which a
-    /// `width * height * stored_ch` frame stride cannot promise.
+    /// `width * height * channels` frame stride cannot promise.
     fn reference_ring_arg(&self, ctx: &LaunchCtx) -> BufferArg {
         let buf = self
             .reference_buf
@@ -240,7 +240,6 @@ impl NlmDenoiser {
             width: self.width,
             height: self.height,
             channels: self.params.channels.count(),
-            stored_ch: self.params.channels.storage_count(),
             patch_radius: self.params.patch_radius,
             search_radius: self.params.search_radius,
         }
@@ -313,7 +312,7 @@ impl NlmDenoiser {
                     &self.client,
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
+                    self.params.channels.count() as usize,
                     self.reference_arg_for_temporal(ctx),
                     self.raw_fwd_arg(ctx),
                     self.raw_bwd_arg(ctx),
@@ -333,7 +332,7 @@ impl NlmDenoiser {
                     &self.client,
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
+                    self.params.channels.count() as usize,
                     self.input_arg_for_temporal(ctx),
                     self.raw_fwd_arg(ctx),
                     self.raw_bwd_arg(ctx),
@@ -377,7 +376,7 @@ impl NlmDenoiser {
                 &self.client,
                 ctx.cube_count.clone(),
                 ctx.cube_dim,
-                self.params.channels.storage_count() as usize,
+                self.params.channels.count() as usize,
                 self.tmp_hsum_arg(ctx),
                 self.tmp_hsum_bwd_arg(ctx),
                 self.input_arg_for_temporal(ctx),
@@ -425,7 +424,7 @@ impl NlmDenoiser {
                     &self.client,
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
+                    self.params.channels.count() as usize,
                     self.reference_arg(ctx),
                     self.raw_fwd_arg(ctx),
                     frame_t,
@@ -443,7 +442,7 @@ impl NlmDenoiser {
                     &self.client,
                     ctx.cube_count.clone(),
                     ctx.cube_dim,
-                    self.params.channels.storage_count() as usize,
+                    self.params.channels.count() as usize,
                     self.input_arg(ctx),
                     self.raw_fwd_arg(ctx),
                     frame_t,
@@ -510,7 +509,7 @@ impl NlmDenoiser {
             q_y,
             width: self.width,
             height: self.height,
-            stored_ch: self.params.channels.storage_count(),
+            channels: self.params.channels.count(),
         };
 
         self.kernels.run(&site)
@@ -550,7 +549,7 @@ impl NlmDenoiser {
                 &self.client,
                 ctx.cube_count.clone(),
                 ctx.cube_dim,
-                self.params.channels.storage_count() as usize,
+                self.params.channels.count() as usize,
                 self.input_arg(ctx),
                 output,
                 BufferArg::from_raw_parts(self.accum.clone(), ctx.frame_size),
@@ -579,10 +578,10 @@ impl NlmDenoiser {
     fn launch_ctx(&self) -> LaunchCtx {
         let width = self.width;
         let height = self.height;
-        let stored_ch = self.params.channels.storage_count();
+        let channels = self.params.channels.count();
         let total_frames = self.params.total_frames();
         let pixels = (width * height) as usize;
-        let frame_size = pixels * stored_ch as usize;
+        let frame_size = pixels * channels as usize;
         let cubes_x = width.div_ceil(BLOCK_X);
         let cubes_y = height.div_ceil(BLOCK_Y);
 

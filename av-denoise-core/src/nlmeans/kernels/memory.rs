@@ -42,8 +42,8 @@ pub fn gpu_cast_f16(
 
 /// Zeroes `accum`, `weight_sum` and `max_weight` in one dispatch.
 ///
-/// `accum_len` must be at least `weight_len`, because a tail loop finishes the channel-padded
-/// remainder of `accum`.
+/// `accum_len` must be at least `weight_len`. `accum` holds every channel of a pixel, so a tail
+/// loop zeroes the rest of it.
 #[cube(launch_unchecked)]
 pub fn gpu_zero_buffers(
     accum: &mut [f32],

@@ -48,7 +48,6 @@ impl NlmDenoiser {
             width: self.width,
             height: self.height,
             channels: self.params.channels.count(),
-            stored_ch: self.params.channels.storage_count(),
             frame_count: self.params.total_frames(),
             frame: slot as u32,
             input_buf: &self.input_buf,
@@ -65,7 +64,7 @@ impl NlmDenoiser {
             return Ok(());
         };
 
-        let stored_ch = self.params.channels.storage_count();
+        let channels = self.params.channels.count();
         let frame_count = self.params.total_frames();
 
         if let Some(input_pyramid) = self.pyramid_input.as_ref() {
@@ -78,7 +77,7 @@ impl NlmDenoiser {
                 slot,
                 &self.input_buf,
                 input_pyramid,
-                stored_ch,
+                channels,
             )
             .context("input pyramid build dispatch failed")?;
         }
@@ -95,7 +94,7 @@ impl NlmDenoiser {
                 slot,
                 reference_buf,
                 reference_pyramid,
-                stored_ch,
+                channels,
             )
             .context("reference pyramid build dispatch failed")?;
         }
@@ -122,7 +121,7 @@ impl NlmDenoiser {
             slot,
             &self.input_buf,
             pyramid,
-            self.params.channels.storage_count(),
+            self.params.channels.count(),
         )
         .context("confidence pyramid build dispatch failed")
     }

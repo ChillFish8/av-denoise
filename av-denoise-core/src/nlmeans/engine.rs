@@ -141,7 +141,6 @@ impl Nlmeans {
             frame,
             pixels,
             channels: channels.count(),
-            stored_ch: channels.storage_count(),
         };
         let client = self.front.compute_client();
         let placeholder = self.front.placeholder();

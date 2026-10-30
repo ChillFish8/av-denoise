@@ -3,7 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{BLOCK_1D, block_sync, stored_channels};
+use super::{BLOCK_1D, block_sync};
 
 /// How the planes under test are stored.
 #[derive(Clone, Copy, Debug)]
@@ -57,8 +57,7 @@ impl IngestBench {
     }
 
     fn ring_len(&self) -> usize {
-        let stored_ch = stored_channels(self.channels);
-        self.pixels() as usize * stored_ch as usize
+        self.pixels() as usize * self.channels as usize
     }
 }
 
@@ -80,7 +79,6 @@ impl Benchmark for IngestBench {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = self.pixels();
-        let stored_ch = stored_channels(self.channels);
         let groups = pixels.div_ceil(BLOCK_1D).min(65535);
         let total_threads = groups * BLOCK_1D;
         let words = self.words() as usize;
@@ -91,7 +89,6 @@ impl Benchmark for IngestBench {
         // Planes past `channels` are placeholders the kernel never reads.
         let plane_0 = args.planes[0].clone();
         let plane_1 = args.planes.get(1).unwrap_or(&args.planes[0]).clone();
-        let plane_2 = args.planes.get(2).unwrap_or(&args.planes[0]).clone();
 
         unsafe {
             match self.format {
@@ -101,12 +98,10 @@ impl Benchmark for IngestBench {
                     CubeDim::new_1d(BLOCK_1D),
                     BufferArg::from_raw_parts(plane_0, pixels as usize),
                     BufferArg::from_raw_parts(plane_1, pixels as usize),
-                    BufferArg::from_raw_parts(plane_2, pixels as usize),
                     BufferArg::from_raw_parts(args.ring.clone(), ring_len),
                     0u32,
                     pixels,
                     self.channels,
-                    stored_ch,
                     total_threads,
                 ),
                 IngestFormat::U8 | IngestFormat::U16Ten => ingest_words::launch_unchecked(
@@ -115,13 +110,11 @@ impl Benchmark for IngestBench {
                     CubeDim::new_1d(BLOCK_1D),
                     BufferArg::from_raw_parts(plane_0, words),
                     BufferArg::from_raw_parts(plane_1, words),
-                    BufferArg::from_raw_parts(plane_2, words),
                     BufferArg::from_raw_parts(args.ring.clone(), ring_len),
                     max,
                     0u32,
                     pixels,
                     self.channels,
-                    stored_ch,
                     samples_per_word,
                     total_threads,
                 ),

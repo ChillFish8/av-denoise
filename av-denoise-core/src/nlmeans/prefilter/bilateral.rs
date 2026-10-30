@@ -28,8 +28,8 @@ pub(super) fn run_bilateral(
     sigma_r: f32,
 ) -> Result<(), anyhow::Error> {
     let radius = bilateral_radius(sigma_s);
-    let total = (ctx.frame_count * ctx.height * ctx.width * ctx.stored_ch) as usize;
-    let stored_ch = ctx.stored_ch as usize;
+    let total = (ctx.frame_count * ctx.height * ctx.width * ctx.channels) as usize;
+    let vector_size = ctx.channels as usize;
 
     let inv_two_sigma_s_sq = inv_two_sigma_sq(sigma_s);
     let inv_two_sigma_r_sq = inv_two_sigma_sq(sigma_r);
@@ -42,7 +42,7 @@ pub(super) fn run_bilateral(
             client,
             CubeCount::new_2d(cubes_x, cubes_y),
             CubeDim::new_2d(BLOCK_X, BLOCK_Y),
-            stored_ch,
+            vector_size,
             BufferArg::from_raw_parts(ctx.input_buf.clone(), total),
             BufferArg::from_raw_parts(ctx.reference_buf.clone(), total),
             ctx.frame,

@@ -5,14 +5,11 @@ use crate::noise::{NoiseCtx, partials_len, run_noise_estimate, sigma_from_abs_su
 
 /// Runs both noise-estimate stages over one frame in a one-slot ring.
 ///
-/// `dense` is packed as `pixels * channels` and is padded to `stored_ch` on upload. Returns the four
-/// raw per-lane absolute-sum totals.
-fn estimate_abs_sums(width: u32, height: u32, channels: u32, stored_ch: u32, dense: &[f32]) -> [f32; 4] {
+/// `frame` is packed as `pixels * channels`. Returns the four raw per-lane absolute-sum totals.
+fn estimate_abs_sums(width: u32, height: u32, channels: u32, frame: &[f32]) -> [f32; 4] {
     let client = make_client();
-    let pixels = (width * height) as usize;
-    let padded = pad_channels(dense, pixels, channels, stored_ch);
 
-    let input_bytes = f32::as_bytes(&padded);
+    let input_bytes = f32::as_bytes(frame);
     let partials_bytes = partials_len(width, height) * size_of::<f32>();
     let input_buf = client.create_from_slice(input_bytes);
     let partials_buf = client.empty(partials_bytes);
@@ -22,7 +19,7 @@ fn estimate_abs_sums(width: u32, height: u32, channels: u32, stored_ch: u32, den
         width,
         height,
         channels,
-        stored_ch,
+        stored_ch: channels,
         frame_count: 1,
         frame: 0,
         slot: 0,
@@ -40,7 +37,7 @@ fn estimate_abs_sums(width: u32, height: u32, channels: u32, stored_ch: u32, den
 
 /// The luma sigma measured over `frame`.
 fn estimate_luma_sigma(width: u32, height: u32, frame: &[f32]) -> f32 {
-    let sums = estimate_abs_sums(width, height, 1, 1, frame);
+    let sums = estimate_abs_sums(width, height, 1, frame);
     sigma_from_abs_sum(sums[0], width, height)
 }
 
@@ -74,39 +71,31 @@ fn noise_estimate_zero_on_uniform() {
     );
 }
 
-/// The unused 4th lane must read exactly zero because stage 1 zeroes it for every thread.
 #[test]
 fn noise_estimate_per_channel() {
     let width = 256;
     let height = 256;
-    let true_sigma_y = 8.0 / 255.0;
-    let true_sigma_uv = 2.0 / 255.0;
+    let true_sigma_u = 8.0 / 255.0;
+    let true_sigma_v = 2.0 / 255.0;
 
-    let sigmas = [true_sigma_y, true_sigma_uv, true_sigma_uv];
-    let frame = make_noisy_gaussian_frame(width, height, 3, 0.5, &sigmas);
-    let sums = estimate_abs_sums(width, height, 3, 4, &frame);
+    let sigmas = [true_sigma_u, true_sigma_v];
+    let frame = make_noisy_gaussian_frame(width, height, 2, 0.5, &sigmas);
+    let sums = estimate_abs_sums(width, height, 2, &frame);
 
-    let estimated_y = sigma_from_abs_sum(sums[0], width, height);
-    let estimated_u = sigma_from_abs_sum(sums[1], width, height);
-    let estimated_v = sigma_from_abs_sum(sums[2], width, height);
+    let estimated_u = sigma_from_abs_sum(sums[0], width, height);
+    let estimated_v = sigma_from_abs_sum(sums[1], width, height);
 
-    let rel_err_y = (estimated_y - true_sigma_y).abs() / true_sigma_y;
-    let rel_err_u = (estimated_u - true_sigma_uv).abs() / true_sigma_uv;
-    let rel_err_v = (estimated_v - true_sigma_uv).abs() / true_sigma_uv;
+    let rel_err_u = (estimated_u - true_sigma_u).abs() / true_sigma_u;
+    let rel_err_v = (estimated_v - true_sigma_v).abs() / true_sigma_v;
 
-    assert!(
-        rel_err_y <= 0.25,
-        "Y: estimated {estimated_y} vs true {true_sigma_y} (rel err {rel_err_y:.3})"
-    );
     assert!(
         rel_err_u <= 0.25,
-        "U: estimated {estimated_u} vs true {true_sigma_uv} (rel err {rel_err_u:.3})"
+        "U: estimated {estimated_u} vs true {true_sigma_u} (rel err {rel_err_u:.3})"
     );
     assert!(
         rel_err_v <= 0.25,
-        "V: estimated {estimated_v} vs true {true_sigma_uv} (rel err {rel_err_v:.3})"
+        "V: estimated {estimated_v} vs true {true_sigma_v} (rel err {rel_err_v:.3})"
     );
-    assert_eq!(sums[3], 0.0, "padding lane must be exactly zero, got {}", sums[3]);
 }
 
 /// The mask is orthogonal to affine content, so this bounds the known content bias on a gradient.

@@ -3,16 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{
-    BLOCK_1D,
-    COPY_GRID_1D,
-    HEIGHT,
-    WIDTH,
-    block_sync,
-    make_padded_frame,
-    shapes_with_channels,
-    stored_channels,
-};
+use super::{BLOCK_1D, COPY_GRID_1D, HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channels};
 
 #[derive(Clone)]
 pub struct CopyInput {
@@ -31,7 +22,7 @@ impl Benchmark for CopyBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let frame = make_synthetic_frame(WIDTH, HEIGHT, self.channels);
         let frame_bytes = f32::as_bytes(&frame);
         let src = self.client.create_from_slice(frame_bytes);
         let dst = self.client.empty(frame.len() * size_of::<f32>());
@@ -40,8 +31,8 @@ impl Benchmark for CopyBench {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let stored_ch = stored_channels(self.channels) as usize;
-        let len = (WIDTH * HEIGHT) as usize * stored_ch;
+        let channels = self.channels as usize;
+        let len = (WIDTH * HEIGHT) as usize * channels;
         let total_threads = COPY_GRID_1D * BLOCK_1D;
 
         unsafe {

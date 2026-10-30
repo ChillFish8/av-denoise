@@ -333,16 +333,16 @@ fn k4_params(estimation: MotionEstimation) -> NlmParams {
     }
 }
 
-/// Reads frame `slot` from a ring buffer of `height * width * stored_channels` f32 frames.
+/// Reads frame `slot` from a ring buffer of `height * width * channels` f32 frames.
 fn read_frame_slot(
     client: &Client,
     buf: &Handle,
     slot: u32,
     width: u32,
     height: u32,
-    stored_channels: u32,
+    channels: u32,
 ) -> Vec<f32> {
-    let frame_size = (width * height * stored_channels) as usize;
+    let frame_size = (width * height * channels) as usize;
     let byte_offset = (slot as u64) * (frame_size as u64) * (size_of::<f32>() as u64);
     let sliced = buf.clone().offset_start(byte_offset);
     let bytes = client.read_one(sliced).expect("frame readback failed");
@@ -372,7 +372,7 @@ fn k4_compensated_residual(estimation: MotionEstimation, k: i32) -> f32 {
     denoiser.denoise().unwrap();
 
     let radius = denoiser.params.temporal_radius;
-    let stored_channels = denoiser.params.channels.storage_count();
+    let channels = denoiser.params.channels.count();
     let centre_slot = denoiser.phys_frame(radius as i32);
     let neighbour_slot = denoiser.phys_frame(radius as i32 + k);
     let compensated = denoiser
@@ -386,7 +386,7 @@ fn k4_compensated_residual(estimation: MotionEstimation, k: i32) -> f32 {
         centre_slot,
         width,
         height,
-        stored_channels,
+        channels,
     );
     let warped = read_frame_slot(
         &denoiser.client,
@@ -394,7 +394,7 @@ fn k4_compensated_residual(estimation: MotionEstimation, k: i32) -> f32 {
         neighbour_slot,
         width,
         height,
-        stored_channels,
+        channels,
     );
 
     let mut sum = 0.0f32;

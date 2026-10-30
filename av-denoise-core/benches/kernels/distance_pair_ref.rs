@@ -11,9 +11,8 @@ use super::{
     block_sync,
     cube_count_2d,
     cube_dim_2d,
-    make_padded_frame,
+    make_synthetic_frame,
     shapes_with_channels,
-    stored_channels,
 };
 
 pub struct DistancePairRefBench {
@@ -28,7 +27,7 @@ impl Benchmark for DistancePairRefBench {
 
     fn prepare(&self) -> Self::Input {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let frame = make_synthetic_frame(WIDTH, HEIGHT, self.channels);
         let frame_bytes = f32::as_bytes(&frame);
         let input = self.client.create_from_slice(frame_bytes);
         let dist_fwd = self.client.empty(pixels * size_of::<f32>());
@@ -44,7 +43,7 @@ impl Benchmark for DistancePairRefBench {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
+        let channels = self.channels as usize;
         let cube_count = cube_count_2d();
         let cube_dim = cube_dim_2d();
 
@@ -53,7 +52,7 @@ impl Benchmark for DistancePairRefBench {
                 &self.client,
                 cube_count,
                 cube_dim,
-                stored_ch,
+                channels,
                 BufferArg::from_raw_parts(args.input.clone(), args.frame_len),
                 BufferArg::from_raw_parts(args.dist_fwd.clone(), pixels),
                 BufferArg::from_raw_parts(args.dist_bwd.clone(), pixels),

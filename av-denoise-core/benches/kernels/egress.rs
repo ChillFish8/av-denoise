@@ -3,7 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{BLOCK_1D, block_sync, make_padded_frame, stored_channels};
+use super::{BLOCK_1D, block_sync, make_synthetic_frame};
 
 /// How the planes under test are stored.
 #[derive(Clone, Copy, Debug)]
@@ -58,8 +58,7 @@ impl EgressBench {
     }
 
     fn frame_len(&self) -> usize {
-        let stored_ch = stored_channels(self.channels);
-        self.pixels() as usize * stored_ch as usize
+        self.pixels() as usize * self.channels as usize
     }
 }
 
@@ -68,7 +67,7 @@ impl Benchmark for EgressBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let frame_data = make_padded_frame(self.width, self.height, self.channels);
+        let frame_data = make_synthetic_frame(self.width, self.height, self.channels);
         let frame_bytes = f32::as_bytes(&frame_data);
         let frame = self.client.create_from_slice(frame_bytes);
         let plane_bytes = self.words() as usize * size_of::<u32>();
@@ -86,7 +85,6 @@ impl Benchmark for EgressBench {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = self.pixels();
-        let stored_ch = stored_channels(self.channels);
         let frame_len = self.frame_len();
         let samples_per_word = self.format.samples_per_word();
         let max = self.format.max();
@@ -105,7 +103,6 @@ impl Benchmark for EgressBench {
         // Planes past `channels` bind a distinct placeholder the kernel never writes.
         let plane_0 = args.planes[0].clone();
         let plane_1 = args.planes.get(1).unwrap_or(&args.placeholder).clone();
-        let plane_2 = args.planes.get(2).unwrap_or(&args.placeholder).clone();
 
         unsafe {
             match self.format {
@@ -116,10 +113,8 @@ impl Benchmark for EgressBench {
                     BufferArg::from_raw_parts(args.frame.clone(), frame_len),
                     BufferArg::from_raw_parts(plane_0, plane_len),
                     BufferArg::from_raw_parts(plane_1, plane_len),
-                    BufferArg::from_raw_parts(plane_2, plane_len),
                     pixels,
                     self.channels,
-                    stored_ch,
                     total_threads,
                 ),
                 EgressFormat::U8 | EgressFormat::U16Ten => egress_words::launch_unchecked(
@@ -129,11 +124,9 @@ impl Benchmark for EgressBench {
                     BufferArg::from_raw_parts(args.frame.clone(), frame_len),
                     BufferArg::from_raw_parts(plane_0, plane_len),
                     BufferArg::from_raw_parts(plane_1, plane_len),
-                    BufferArg::from_raw_parts(plane_2, plane_len),
                     max,
                     pixels,
                     self.channels,
-                    stored_ch,
                     samples_per_word,
                     words,
                     total_threads,

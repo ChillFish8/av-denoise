@@ -130,7 +130,6 @@ fn div_ceil(value: u32, divisor: u32) -> u32 {
 
 fn bench_dist_2d_weight(client: &Client, backend: &str, channels: u32, channel_name: &str) -> BenchResult {
     let pixels = (WIDTH * HEIGHT) as usize;
-    let stored_ch = channels;
     let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
     let frame_bytes = f32::as_bytes(&frame);
     let input = client.create_from_slice(frame_bytes);
@@ -160,7 +159,7 @@ fn bench_dist_2d_weight(client: &Client, backend: &str, channels: u32, channel_n
             client,
             cube_count.clone(),
             cube_dim,
-            stored_ch as usize,
+            channels as usize,
             BufferArg::from_raw_parts(input.clone(), frame.len()),
             BufferArg::from_raw_parts(output.clone(), pixels),
             0u32,
@@ -181,7 +180,6 @@ fn bench_dist_2d_weight(client: &Client, backend: &str, channels: u32, channel_n
 
 fn bench_accumulate(client: &Client, backend: &str, channels: u32, channel_name: &str) -> BenchResult {
     let pixels = (WIDTH * HEIGHT) as usize;
-    let stored_ch = channels;
     let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
     let frame_bytes = f32::as_bytes(&frame);
     let input = client.create_from_slice(frame_bytes);
@@ -190,7 +188,7 @@ fn bench_accumulate(client: &Client, backend: &str, channels: u32, channel_name:
     let weights_bytes = f32::as_bytes(&weights_data);
     let weights = client.create_from_slice(weights_bytes);
 
-    let accum = client.empty(pixels * stored_ch as usize * size_of::<f32>());
+    let accum = client.empty(pixels * channels as usize * size_of::<f32>());
     let weight_sum = client.empty(pixels * size_of::<f32>());
     let max_weight = client.empty(pixels * size_of::<f32>());
 
@@ -206,9 +204,9 @@ fn bench_accumulate(client: &Client, backend: &str, channels: u32, channel_name:
             client,
             cube_count.clone(),
             cube_dim,
-            stored_ch as usize,
+            channels as usize,
             BufferArg::from_raw_parts(input.clone(), frame.len()),
-            BufferArg::from_raw_parts(accum.clone(), pixels * stored_ch as usize),
+            BufferArg::from_raw_parts(accum.clone(), pixels * channels as usize),
             BufferArg::from_raw_parts(weight_sum.clone(), pixels),
             BufferArg::from_raw_parts(weights.clone(), pixels),
             BufferArg::from_raw_parts(weights.clone(), pixels),
@@ -225,12 +223,11 @@ fn bench_accumulate(client: &Client, backend: &str, channels: u32, channel_name:
 
 fn bench_finish(client: &Client, backend: &str, channels: u32, channel_name: &str) -> BenchResult {
     let pixels = (WIDTH * HEIGHT) as usize;
-    let stored_ch = channels;
     let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
     let frame_bytes = f32::as_bytes(&frame);
     let input = client.create_from_slice(frame_bytes);
 
-    let accum_data = vec![0.25f32; pixels * stored_ch as usize];
+    let accum_data = vec![0.25f32; pixels * channels as usize];
     let accum_bytes = f32::as_bytes(&accum_data);
     let accum = client.create_from_slice(accum_bytes);
 
@@ -242,7 +239,7 @@ fn bench_finish(client: &Client, backend: &str, channels: u32, channel_name: &st
     let max_weight_bytes = f32::as_bytes(&max_weight_data);
     let max_weight = client.create_from_slice(max_weight_bytes);
 
-    let output = client.empty(pixels * stored_ch as usize * size_of::<f32>());
+    let output = client.empty(pixels * channels as usize * size_of::<f32>());
 
     let grid_x = div_ceil(WIDTH, BLOCK_X);
     let grid_y = div_ceil(HEIGHT, BLOCK_Y);
@@ -256,10 +253,10 @@ fn bench_finish(client: &Client, backend: &str, channels: u32, channel_name: &st
             client,
             cube_count.clone(),
             cube_dim,
-            stored_ch as usize,
+            channels as usize,
             BufferArg::from_raw_parts(input.clone(), frame.len()),
-            BufferArg::from_raw_parts(output.clone(), pixels * stored_ch as usize),
-            BufferArg::from_raw_parts(accum.clone(), pixels * stored_ch as usize),
+            BufferArg::from_raw_parts(output.clone(), pixels * channels as usize),
+            BufferArg::from_raw_parts(accum.clone(), pixels * channels as usize),
             BufferArg::from_raw_parts(weight_sum.clone(), pixels),
             BufferArg::from_raw_parts(max_weight.clone(), pixels),
             0u32,
@@ -274,11 +271,10 @@ fn bench_finish(client: &Client, backend: &str, channels: u32, channel_name: &st
 
 fn bench_bilateral(client: &Client, backend: &str, channels: u32, channel_name: &str) -> BenchResult {
     let pixels = (WIDTH * HEIGHT) as usize;
-    let stored_ch = channels;
     let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
     let frame_bytes = f32::as_bytes(&frame);
     let input = client.create_from_slice(frame_bytes);
-    let output = client.empty(pixels * stored_ch as usize * size_of::<f32>());
+    let output = client.empty(pixels * channels as usize * size_of::<f32>());
 
     let radius = bilateral_radius(BILATERAL_SIGMA_S);
 
@@ -294,9 +290,9 @@ fn bench_bilateral(client: &Client, backend: &str, channels: u32, channel_name: 
             client,
             cube_count.clone(),
             cube_dim,
-            stored_ch as usize,
+            channels as usize,
             BufferArg::from_raw_parts(input.clone(), frame.len()),
-            BufferArg::from_raw_parts(output.clone(), pixels * stored_ch as usize),
+            BufferArg::from_raw_parts(output.clone(), pixels * channels as usize),
             0u32,
             1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S),
             1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R),

@@ -14,9 +14,8 @@ use super::{
     block_sync,
     cube_count_2d,
     cube_dim_2d,
-    make_padded_frame,
+    make_synthetic_frame,
     shapes_with_channels,
-    stored_channels,
 };
 
 pub struct BilateralBench {
@@ -31,11 +30,11 @@ impl Benchmark for BilateralBench {
 
     fn prepare(&self) -> Self::Input {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
-        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let channels = self.channels as usize;
+        let frame = make_synthetic_frame(WIDTH, HEIGHT, self.channels);
         let frame_bytes = f32::as_bytes(&frame);
         let input = self.client.create_from_slice(frame_bytes);
-        let output = self.client.empty(pixels * stored_ch * size_of::<f32>());
+        let output = self.client.empty(pixels * channels * size_of::<f32>());
 
         InputOutput {
             input,
@@ -46,7 +45,7 @@ impl Benchmark for BilateralBench {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
+        let channels = self.channels as usize;
         let radius = bilateral_radius(BILATERAL_SIGMA_S);
         let cube_count = cube_count_2d();
         let cube_dim = cube_dim_2d();
@@ -56,9 +55,9 @@ impl Benchmark for BilateralBench {
                 &self.client,
                 cube_count,
                 cube_dim,
-                stored_ch,
+                channels,
                 BufferArg::from_raw_parts(args.input.clone(), args.frame_len),
-                BufferArg::from_raw_parts(args.output.clone(), pixels * stored_ch),
+                BufferArg::from_raw_parts(args.output.clone(), pixels * channels),
                 0u32,
                 1.0 / (2.0 * BILATERAL_SIGMA_S * BILATERAL_SIGMA_S),
                 1.0 / (2.0 * BILATERAL_SIGMA_R * BILATERAL_SIGMA_R),

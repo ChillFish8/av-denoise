@@ -3,7 +3,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{BLOCK_1D, COPY_GRID_1D, HEIGHT, WIDTH, block_sync, shapes_with_channels, stored_channels};
+use super::{BLOCK_1D, COPY_GRID_1D, HEIGHT, WIDTH, block_sync, shapes_with_channels};
 
 #[derive(Clone)]
 pub struct ZeroInput {
@@ -24,8 +24,8 @@ impl Benchmark for ZeroBench {
 
     fn prepare(&self) -> Self::Input {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
-        let accum = self.client.empty(pixels * stored_ch * size_of::<f32>());
+        let channels = self.channels as usize;
+        let accum = self.client.empty(pixels * channels * size_of::<f32>());
         let weight_sum = self.client.empty(pixels * size_of::<f32>());
         let max_weight = self.client.empty(pixels * size_of::<f32>());
 
@@ -38,7 +38,7 @@ impl Benchmark for ZeroBench {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels) as usize;
+        let channels = self.channels as usize;
         let total_threads = COPY_GRID_1D * BLOCK_1D;
 
         unsafe {
@@ -46,10 +46,10 @@ impl Benchmark for ZeroBench {
                 &self.client,
                 CubeCount::new_1d(COPY_GRID_1D),
                 CubeDim::new_1d(BLOCK_1D),
-                BufferArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
+                BufferArg::from_raw_parts(args.accum.clone(), pixels * channels),
                 BufferArg::from_raw_parts(args.weight_sum.clone(), pixels),
                 BufferArg::from_raw_parts(args.max_weight.clone(), pixels),
-                (pixels * stored_ch) as u32,
+                (pixels * channels) as u32,
                 pixels as u32,
                 total_threads,
             );

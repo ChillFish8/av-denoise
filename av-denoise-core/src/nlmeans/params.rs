@@ -77,10 +77,10 @@ pub const MAX_TEMPORAL_RADIUS: u32 = 8;
 
 /// The hard ceiling on the bilateral prefilter's radius, `ceil(2 * sigma_s).max(1)`.
 ///
-/// `nlm_bilateral` loads a `(32 + 2r) x (8 + 2r)` tile of up to four `f32` lanes into shared
-/// memory, which costs `16 * (32 + 2r) * (8 + 2r)` bytes. Against the 64 KiB RDNA-class hardware
-/// offers, `r = 22` fits at 63,232 bytes and `r = 23` does not at 67,392. `bilateral_radius`
-/// reaches 22 at `sigma_s = 11.0`.
+/// `nlm_bilateral` loads a `(32 + 2r) x (8 + 2r)` tile of up to two `f32` lanes into shared
+/// memory, which costs `8 * (32 + 2r) * (8 + 2r)` bytes. At `r = 22` that is 31,616 bytes, well
+/// within the 64 KiB RDNA-class hardware offers. The limit is kept at 22, which `bilateral_radius`
+/// reaches at `sigma_s = 11.0`.
 pub const MAX_BILATERAL_RADIUS: u32 = 22;
 
 /// Which channels of a frame the denoiser works on.

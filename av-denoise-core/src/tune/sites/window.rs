@@ -157,7 +157,6 @@ pub struct WindowSite {
     pub width: u32,
     pub height: u32,
     pub channels: u32,
-    pub stored_ch: u32,
     pub patch_radius: u32,
     pub search_radius: u32,
 }
@@ -187,7 +186,7 @@ impl WindowSite {
     }
 
     fn launch_single(&self, grid: WindowGrid, offsets: &Handle, offsets_len: usize, outputs: &AccumOutputs) {
-        let vector_size = self.stored_ch as usize;
+        let vector_size = self.channels as usize;
         let input = bind(&self.input, self.ring_len);
         let accum = bind(&outputs.accum, outputs.accum_len);
         let weight_sum = bind(&outputs.weight_sum, outputs.pixels);
@@ -260,7 +259,7 @@ impl WindowSite {
         outputs: &AccumOutputs,
     ) {
         let (frame_fwd, frame_bwd) = frames;
-        let vector_size = self.stored_ch as usize;
+        let vector_size = self.channels as usize;
         let input = bind(&self.input, self.ring_len);
         let accum = bind(&outputs.accum, outputs.accum_len);
         let weight_sum = bind(&outputs.weight_sum, outputs.pixels);
@@ -364,7 +363,7 @@ impl VariantSite for WindowSite {
             .param("conf", u8::from(confidence))
             .param("step", step)
             .param("ch", self.channels)
-            .param("stored", self.stored_ch)
+            .param("stored", self.channels)
             .param("pr", self.patch_radius)
             .param("sr", self.search_radius)
             .build()
@@ -383,7 +382,7 @@ impl VariantSite for WindowSite {
         let expanded = ((block_x + reach) * (block_y + reach)) as usize;
         let tile = ((block_x + halo) * (block_y + halo)) as usize;
         let hsum = hsum_elements(separable, block_x, block_y, self.patch_radius) as usize;
-        let vector_bytes = self.stored_ch as usize * size_of::<f32>();
+        let vector_bytes = self.channels as usize * size_of::<f32>();
         let distance_tiles = match self.pass {
             WindowPass::Single { .. } => 1,
             WindowPass::Pair { .. } => 2,
@@ -434,7 +433,7 @@ impl VariantSite for WindowSite {
     ) -> Result<CompareResult, anyhow::Error> {
         match fidelity {
             Fidelity::Exact => compare_accum(&self.client, baseline, candidate, fidelity),
-            _ => compare_estimates(&self.client, baseline, candidate, self.stored_ch, fidelity),
+            _ => compare_estimates(&self.client, baseline, candidate, self.channels, fidelity),
         }
     }
 }
@@ -447,11 +446,11 @@ fn compare_estimates(
     client: &Client,
     baseline: &AccumOutputs,
     candidate: &AccumOutputs,
-    stored_ch: u32,
+    channels: u32,
     fidelity: Fidelity,
 ) -> Result<CompareResult, anyhow::Error> {
-    let expected = normalised_planes(client, baseline, stored_ch)?;
-    let actual = normalised_planes(client, candidate, stored_ch)?;
+    let expected = normalised_planes(client, baseline, channels)?;
+    let actual = normalised_planes(client, candidate, channels)?;
     let diffs: Vec<PlaneDiff> = expected
         .iter()
         .zip(&actual)
@@ -466,26 +465,26 @@ fn compare_estimates(
 fn normalised_planes(
     client: &Client,
     outputs: &AccumOutputs,
-    stored_ch: u32,
+    channels: u32,
 ) -> Result<Vec<Vec<f32>>, anyhow::Error> {
     let accum = read_f32(client, &outputs.accum, outputs.accum_len)?;
     let weight_sum = read_f32(client, &outputs.weight_sum, outputs.pixels)?;
     let max_weight = read_f32(client, &outputs.max_weight, outputs.pixels)?;
-    let planes = estimate_planes(&accum, &weight_sum, &max_weight, stored_ch);
+    let planes = estimate_planes(&accum, &weight_sum, &max_weight, channels);
 
     Ok(planes)
 }
 
-/// Divides each pixel's `stored_ch` sums and largest weight by its weight sum, one plane each.
+/// Divides each pixel's `channels` sums and largest weight by its weight sum, one plane each.
 ///
 /// A pixel with a zero weight sum reads as zero in every plane.
 pub(crate) fn estimate_planes(
     accum: &[f32],
     weight_sum: &[f32],
     max_weight: &[f32],
-    stored_ch: u32,
+    channels: u32,
 ) -> Vec<Vec<f32>> {
-    let lanes = stored_ch as usize;
+    let lanes = channels as usize;
     let pixels = weight_sum.len();
     let mut planes: Vec<Vec<f32>> = (0..=lanes).map(|_| Vec::with_capacity(pixels)).collect();
 

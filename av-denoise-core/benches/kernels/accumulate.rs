@@ -8,7 +8,7 @@ use av_denoise_core::tune::{SiteCandidate, VariantSite};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 
-use super::{HEIGHT, Q_X, Q_Y, WIDTH, block_sync, make_padded_frame, shapes_with_channels, stored_channels};
+use super::{HEIGHT, Q_X, Q_Y, WIDTH, block_sync, make_synthetic_frame, shapes_with_channels};
 
 pub struct AccumulateBench {
     pub client: Client,
@@ -23,15 +23,15 @@ impl Benchmark for AccumulateBench {
 
     fn prepare(&self) -> Self::Input {
         let pixels = (WIDTH * HEIGHT) as usize;
-        let stored_ch = stored_channels(self.channels);
-        let frame = make_padded_frame(WIDTH, HEIGHT, self.channels);
+        let channels = self.channels;
+        let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
         let frame_bytes = f32::as_bytes(&frame);
         let input = self.client.create_from_slice(frame_bytes);
 
         let weights_data = vec![0.5f32; pixels];
         let weights_bytes = f32::as_bytes(&weights_data);
         let weights = self.client.create_from_slice(weights_bytes);
-        let outputs = allocate_accum(&self.client, pixels * stored_ch as usize, pixels);
+        let outputs = allocate_accum(&self.client, pixels * channels as usize, pixels);
 
         let site = AccumulateSite {
             client: self.client.clone(),
@@ -44,7 +44,7 @@ impl Benchmark for AccumulateBench {
             q_y: Q_Y,
             width: WIDTH,
             height: HEIGHT,
-            stored_ch,
+            channels,
         };
 
         (site, outputs)

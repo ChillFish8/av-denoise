@@ -117,10 +117,10 @@ impl Geometry {
     ///
     /// The kernels index the frame ring and its accumulators with `u32`, so a larger ring would wrap.
     pub(crate) fn check_ring_fits(&self, slots: u64) -> Result<(), Error> {
-        let stored_ch = u64::from(self.channels.storage_count());
+        let channels = u64::from(self.channels.count());
         let elements = self
             .pixels()
-            .checked_mul(stored_ch)
+            .checked_mul(channels)
             .and_then(|frame_len| frame_len.checked_mul(slots));
         let fits = elements.is_some_and(|elements| elements <= u64::from(u32::MAX));
         if !fits {

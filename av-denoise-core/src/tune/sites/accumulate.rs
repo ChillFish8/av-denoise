@@ -82,7 +82,7 @@ pub struct AccumulateSite {
     pub q_y: i32,
     pub width: u32,
     pub height: u32,
-    pub stored_ch: u32,
+    pub channels: u32,
 }
 
 impl VariantSite for AccumulateSite {
@@ -95,7 +95,7 @@ impl VariantSite for AccumulateSite {
 
     fn key(&self) -> SiteKey {
         SiteKey::builder(NLM_ACCUMULATE, self.width, self.height)
-            .param("stored", self.stored_ch)
+            .param("stored", self.channels)
             .build()
     }
 
@@ -118,7 +118,7 @@ impl VariantSite for AccumulateSite {
         let cubes_y = self.height.div_ceil(block_y);
         let cube_count = CubeCount::new_2d(cubes_x, cubes_y);
         let cube_dim = CubeDim::new_2d(block_x, block_y);
-        let vector_size = self.stored_ch as usize;
+        let vector_size = self.channels as usize;
 
         let input = bind(&self.input, self.ring_len);
         let accum = bind(&outputs.accum, outputs.accum_len);

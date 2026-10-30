@@ -171,7 +171,6 @@ impl Nl4d {
             frame,
             pixels,
             channels: channels.count(),
-            stored_ch: channels.storage_count(),
         };
         let placeholder = self.inner.placeholder();
 

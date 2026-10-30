@@ -278,7 +278,6 @@ fn read_frame(
         frame,
         pixels,
         channels: channels.count(),
-        stored_ch: channels.storage_count(),
     };
 
     egress(client, source, &planes, SampleFormat::F32, placeholder);
