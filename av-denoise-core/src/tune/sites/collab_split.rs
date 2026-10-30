@@ -285,7 +285,7 @@ impl<S: Float> VariantSite for CollabSearchSite<S> {
     /// The centre tile, the only shared buffer the search allocates.
     fn shared_bytes(&self, candidate: SearchVariant) -> usize {
         let shape = &self.shape;
-        let tile_elements = candidate.0.tile_elements(shape.spatial_radius, shape.stored_ch);
+        let tile_elements = candidate.0.tile_elements(shape.spatial_radius, shape.channels);
         tile_elements as usize * size_of::<S>()
     }
 
@@ -387,7 +387,7 @@ impl<S: Float> CollabSearchSite<S> {
                 &self.client,
                 cube_count,
                 cube_dim,
-                shape.stored_ch as usize,
+                shape.channels as usize,
                 ring,
                 search_ring,
                 mv_field,
@@ -410,7 +410,6 @@ impl<S: Float> CollabSearchSite<S> {
                 shape.height,
                 shape.channels,
                 shape.k_max,
-                shape.stored_ch,
                 shape.spatial_radius,
                 shape.refs_x,
                 candidate.0,
@@ -552,7 +551,7 @@ impl CollabFilterSite {
                 &self.client,
                 cube_count,
                 cube_dim,
-                shape.stored_ch as usize,
+                shape.channels as usize,
                 ring,
                 ring_scalar,
                 members,
@@ -573,7 +572,6 @@ impl CollabFilterSite {
                 shape.width,
                 shape.height,
                 shape.channels,
-                shape.stored_ch,
                 shape.refs_x,
                 shape.map_cols,
                 shape.map_rows,

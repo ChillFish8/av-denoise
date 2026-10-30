@@ -204,7 +204,6 @@ pub fn collab_fused<S: Float, N: Size>(
     #[comptime] height: u32,
     #[comptime] channels: u32,
     #[comptime] k_max: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] spatial_radius: u32,
     #[comptime] refs_x: u32,
     #[comptime] map_cols: u32,
@@ -227,7 +226,6 @@ pub fn collab_fused<S: Float, N: Size>(
         width,
         height,
         channels,
-        stored_ch,
     });
 
     let transpose_floats = comptime!(groups * TRANSPOSE_REGION_FLOATS);
@@ -235,7 +233,7 @@ pub fn collab_fused<S: Float, N: Size>(
 
     let centre = comptime!(variant.centre);
     let lanes = comptime!(variant.lanes());
-    let tile_len = comptime!(variant.tile_elements(spatial_radius, stored_ch));
+    let tile_len = comptime!(variant.tile_elements(spatial_radius, channels));
     let mut tile = Shared::<[S]>::new_slice(tile_len as usize);
 
     // A dead group works on the last real reference of the row, so every read stays inside the
@@ -347,7 +345,6 @@ pub fn collab_fused<S: Float, N: Size>(
         width,
         height,
         channels,
-        stored_ch,
         map_cols,
         map_rows,
         pooled,
@@ -593,7 +590,6 @@ pub(crate) fn filter_group(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] map_cols: u32,
     #[comptime] map_rows: u32,
     #[comptime] pooled: bool,
@@ -662,7 +658,7 @@ pub(crate) fn filter_group(
             #[unroll]
             for r in 0..PATCH_SIZE {
                 let line_index = (src_slot * height + member_y + r) * width + member_x + sub;
-                let value_index = line_index * stored_ch + c;
+                let value_index = line_index * channels + c;
                 stack[(m * PATCH_SIZE + r) as usize] = ring_scalar[value_index as usize];
             }
         }
@@ -815,7 +811,7 @@ pub(crate) fn filter_group(
                         first_channel,
                         c,
                         width,
-                        stored_ch,
+                        channels,
                         dst_slot,
                         comptime!(width * height),
                         accum_scale,

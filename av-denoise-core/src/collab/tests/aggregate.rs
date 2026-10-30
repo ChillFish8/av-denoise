@@ -48,7 +48,6 @@ fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32)
             width,
             height,
             1u32,
-            1u32,
         );
     }
 
@@ -292,7 +291,7 @@ fn run_scatter_stage_windowed(
     let normalise_grid = CubeCount::new_2d(blocks_x, blocks_y);
     let normalise_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
-    let stored_ch = 1usize;
+    let channels = 1usize;
 
     unsafe {
         collab_zero_accum::launch_unchecked(
@@ -312,10 +311,10 @@ fn run_scatter_stage_windowed(
             &client,
             fused_grid,
             fused_dim,
-            stored_ch,
+            channels,
             BufferArg::from_raw_parts(input.clone(), pixels),
             ring_scalar,
-            BufferArg::from_raw_parts(input.clone(), stored_ch),
+            BufferArg::from_raw_parts(input.clone(), channels),
             BufferArg::from_raw_parts(mv_dummy, 2),
             BufferArg::from_raw_parts(conf_dummy, 1),
             BufferArg::from_raw_parts(slots_dummy, 1),
@@ -345,7 +344,6 @@ fn run_scatter_stage_windowed(
             height,
             1u32,
             k_max,
-            1u32,
             9u32,
             refs_x,
             map_cols,
@@ -378,7 +376,6 @@ fn run_scatter_stage_windowed(
             0u32,
             width,
             height,
-            1u32,
             1u32,
         );
     }

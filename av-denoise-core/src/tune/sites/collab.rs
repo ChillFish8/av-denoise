@@ -354,7 +354,6 @@ pub struct CollabShape {
     pub height: u32,
     pub channels: u32,
     pub k_max: u32,
-    pub stored_ch: u32,
     pub spatial_radius: u32,
     pub refs_x: u32,
     pub refs_y: u32,
@@ -428,7 +427,7 @@ impl<S: Float> VariantSite for CollabSite<S> {
 
     fn shared_bytes(&self, candidate: CollabVariant) -> usize {
         let search_bytes = size_of::<S>();
-        candidate.shared_bytes(self.shape.spatial_radius, self.shape.stored_ch, search_bytes)
+        candidate.shared_bytes(self.shape.spatial_radius, self.shape.channels, search_bytes)
     }
 
     fn min_plane_size(&self, _candidate: CollabVariant) -> u32 {
@@ -528,7 +527,7 @@ impl<S: Float> CollabSite<S> {
                 &self.client,
                 cube_count,
                 cube_dim,
-                shape.stored_ch as usize,
+                shape.channels as usize,
                 ring,
                 ring_scalar,
                 search_ring,
@@ -561,7 +560,6 @@ impl<S: Float> CollabSite<S> {
                 shape.height,
                 shape.channels,
                 shape.k_max,
-                shape.stored_ch,
                 shape.spatial_radius,
                 shape.refs_x,
                 shape.map_cols,
@@ -578,7 +576,7 @@ impl<S: Float> CollabSite<S> {
 pub(crate) fn collab_key_builder(site: &'static str, shape: &CollabShape) -> SiteKeyBuilder {
     SiteKey::builder(site, shape.width, shape.height)
         .param("ch", shape.channels)
-        .param("stored", shape.stored_ch)
+        .param("stored", shape.channels)
         .param("radius", shape.radius)
         .param("grid", shape.grid_frames)
         .param("refine", shape.refine)

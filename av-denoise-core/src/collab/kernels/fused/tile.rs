@@ -7,7 +7,7 @@ use crate::engine::kernels::read_line;
 
 /// Loads the cube's centre tile, `tile_width` by `tile_height` pixels from `(origin_x, origin_y)`.
 ///
-/// Pixels are row-major with every stored lane interleaved, each read clamped to the frame. With
+/// Pixels are row-major with every channel interleaved, each read clamped to the frame. With
 /// `f16_search` the tile copies `search_ring`, otherwise it copies `ring`. Every lane of the cube
 /// loads a strided share, and the caller syncs the cube before any lane reads the tile.
 #[cube]
@@ -30,7 +30,7 @@ pub(crate) fn load_centre_tile<S: Float, N: Size>(
     let f16_search = comptime!(shape.f16_search);
     let width = comptime!(shape.width);
     let height = comptime!(shape.height);
-    let stored_ch = comptime!(shape.stored_ch);
+    let channels = comptime!(shape.channels);
     let pixels = comptime!(tile_width * tile_height);
     let last_x = comptime!(width - 1);
     let last_y = comptime!(height - 1);
@@ -41,18 +41,18 @@ pub(crate) fn load_centre_tile<S: Float, N: Size>(
         let tile_y = index / tile_width;
         let source_x = u32::min(origin_x + tile_x, last_x);
         let source_y = u32::min(origin_y + tile_y, last_y);
-        let first_lane = index * stored_ch;
+        let first_lane = index * channels;
 
         if comptime!(f16_search) {
             let line = read_line(search_ring, source_x, source_y, centre_slot, width, height);
             #[unroll]
-            for c in 0..stored_ch {
+            for c in 0..channels {
                 tile[(first_lane + c) as usize] = line.extract(c as usize);
             }
         } else {
             let line = read_line(ring, source_x, source_y, centre_slot, width, height);
             #[unroll]
-            for c in 0..stored_ch {
+            for c in 0..channels {
                 let lane = line.extract(c as usize);
                 tile[(first_lane + c) as usize] = S::cast_from(lane);
             }
@@ -80,10 +80,9 @@ pub(crate) fn tile_partial<S: Float>(
 ) -> f32 {
     let f16_search = comptime!(shape.f16_search);
     let channels = comptime!(shape.channels);
-    let stored_ch = comptime!(shape.stored_ch);
     let mut partial = 0.0f32;
 
-    if comptime!(f16_search && stored_ch == 1) {
+    if comptime!(f16_search && channels == 1) {
         let mut sum = Vector::<S, Const<2>>::new(S::new(0.0f32));
 
         #[unroll]
@@ -97,12 +96,12 @@ pub(crate) fn tile_partial<S: Float>(
 
         partial = pair_sum_total(sum);
     } else if comptime!(f16_search) {
-        let pairs_per_row = comptime!(stored_ch / 2);
+        let pairs_per_row = comptime!(channels / 2);
         let mut sum = Vector::<S, Const<2>>::new(S::new(0.0f32));
 
         #[unroll]
         for r in 0..PATCH_SIZE {
-            let first_lane = ((row + r) * tile_width + column) * stored_ch;
+            let first_lane = ((row + r) * tile_width + column) * channels;
             #[unroll]
             for p in 0..pairs_per_row {
                 let first = tile[(first_lane + comptime!(2 * p)) as usize];
@@ -117,7 +116,7 @@ pub(crate) fn tile_partial<S: Float>(
     } else {
         #[unroll]
         for r in 0..PATCH_SIZE {
-            let first_lane = ((row + r) * tile_width + column) * stored_ch;
+            let first_lane = ((row + r) * tile_width + column) * channels;
             #[unroll]
             for c in 0..channels {
                 let pixel = f32::cast_from(tile[(first_lane + c) as usize]);

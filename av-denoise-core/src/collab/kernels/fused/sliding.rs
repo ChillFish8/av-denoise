@@ -40,7 +40,7 @@ pub(crate) fn search_line<S: Float, N: Size>(
     }
 }
 
-/// The f16 partial over a window, pairing row `r` with `r + 4` for one stored channel and
+/// The f16 partial over a window, pairing row `r` with `r + 4` for one channel and
 /// neighbouring channels within a row otherwise.
 #[cube]
 fn window_packed_partial<S: Float, N: Size>(
@@ -48,11 +48,11 @@ fn window_packed_partial<S: Float, N: Size>(
     reference: &[Vector<S, Const<2>>],
     #[comptime] shape: SearchShape,
 ) -> f32 {
-    let stored_ch = comptime!(shape.stored_ch);
+    let channels = comptime!(shape.channels);
     let zero = S::new(0.0f32);
     let mut sum = Vector::<S, Const<2>>::new(zero);
 
-    if comptime!(stored_ch == 1) {
+    if comptime!(channels == 1) {
         #[unroll]
         for r in 0..comptime!(PATCH_SIZE / 2) {
             let top = window[r as usize];
@@ -63,7 +63,7 @@ fn window_packed_partial<S: Float, N: Size>(
             sum += squared;
         }
     } else {
-        let pairs_per_row = comptime!(stored_ch / 2);
+        let pairs_per_row = comptime!(channels / 2);
 
         #[unroll]
         for r in 0..PATCH_SIZE {

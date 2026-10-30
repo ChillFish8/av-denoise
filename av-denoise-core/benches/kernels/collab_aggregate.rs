@@ -24,7 +24,7 @@ fn refill(source: &[i32], target: &mut [i32], #[comptime] length: u32, #[comptim
 
 /// Divides the fixed-point accumulators back out to a finished 1080p frame plane.
 ///
-/// Cost scales with `stored_ch`, since one accumulator slot per channel is read for every pixel.
+/// Cost scales with `channels`, since one accumulator slot per channel is read for every pixel.
 /// The kernel zeroes what it reads, so the accumulators are refilled before every sample, outside
 /// the timed span, and each sample times the divide.
 pub struct CollabNormaliseBench {
@@ -80,12 +80,12 @@ impl Benchmark for CollabNormaliseBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let stored_ch = self.channels as usize;
+        let channels = self.channels as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
 
         // Shaped like a real pass, with a few dozen contributions per pixel, each already scaled
         // into the accumulator's fixed point.
-        let accum_data: Vec<i32> = (0..pixels * stored_ch)
+        let accum_data: Vec<i32> = (0..pixels * channels)
             .map(|index| (index % 97) as i32 * 8192)
             .collect();
         let wsum_data: Vec<i32> = (0..pixels)
@@ -98,7 +98,7 @@ impl Benchmark for CollabNormaliseBench {
         let wsum_bytes = i32::as_bytes(&wsum_data);
         let wsum = self.client.create_from_slice(wsum_bytes);
         let wsum_source = self.client.create_from_slice(wsum_bytes);
-        let output = self.client.empty(pixels * stored_ch * size_of::<f32>());
+        let output = self.client.empty(pixels * channels * size_of::<f32>());
 
         let buffers = CollabNormaliseInput { accum, wsum, output };
 
@@ -111,9 +111,9 @@ impl Benchmark for CollabNormaliseBench {
 
     /// Refills the accumulators, then times one launch with the refill outside the span.
     fn profile_full(&self, args: Self::Input) -> Result<ProfileDuration, String> {
-        let stored_ch = self.channels as usize;
+        let channels = self.channels as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
-        self.refill_from(&args.accum_source, &args.buffers.accum, pixels * stored_ch);
+        self.refill_from(&args.accum_source, &args.buffers.accum, pixels * channels);
         self.refill_from(&args.wsum_source, &args.buffers.wsum, pixels);
 
         self.sync();
@@ -127,7 +127,7 @@ impl Benchmark for CollabNormaliseBench {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let stored_ch = self.channels as usize;
+        let channels = self.channels as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
         let buffers = args.buffers;
         let cubes_x = WIDTH.div_ceil(BLOCK_X);
@@ -136,15 +136,15 @@ impl Benchmark for CollabNormaliseBench {
         let cube_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
 
         unsafe {
-            let accum_arg = BufferArg::from_raw_parts(buffers.accum, pixels * stored_ch);
+            let accum_arg = BufferArg::from_raw_parts(buffers.accum, pixels * channels);
             let wsum_arg = BufferArg::from_raw_parts(buffers.wsum, pixels);
-            let output_arg = BufferArg::from_raw_parts(buffers.output, pixels * stored_ch);
+            let output_arg = BufferArg::from_raw_parts(buffers.output, pixels * channels);
 
             collab_normalise::launch_unchecked(
                 &self.client,
                 cube_count,
                 cube_dim,
-                stored_ch,
+                channels,
                 accum_arg,
                 wsum_arg,
                 output_arg,
@@ -153,7 +153,6 @@ impl Benchmark for CollabNormaliseBench {
                 WIDTH,
                 HEIGHT,
                 self.channels,
-                stored_ch as u32,
             );
         }
 
@@ -185,9 +184,9 @@ impl Benchmark for CollabZeroAccumBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let stored_ch = self.channels as usize;
+        let channels = self.channels as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
-        let accum = self.client.empty(pixels * stored_ch * size_of::<i32>());
+        let accum = self.client.empty(pixels * channels * size_of::<i32>());
         let wsum = self.client.empty(pixels * size_of::<i32>());
         let output = self.client.empty(size_of::<f32>());
 
@@ -195,24 +194,24 @@ impl Benchmark for CollabZeroAccumBench {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let stored_ch = self.channels as usize;
+        let channels = self.channels as usize;
         let pixels = (WIDTH * HEIGHT) as usize;
         let dim = 256u32;
 
         // `collab_zero_accum` strides, so the clamped grid still reaches every slot.
-        let grid = ((pixels * stored_ch) as u32).div_ceil(dim).min(MAX_GRID_1D);
+        let grid = ((pixels * channels) as u32).div_ceil(dim).min(MAX_GRID_1D);
 
         unsafe {
             collab_zero_accum::launch_unchecked(
                 &self.client,
                 CubeCount::new_1d(grid),
                 CubeDim::new_1d(dim),
-                BufferArg::from_raw_parts(args.accum.clone(), pixels * stored_ch),
+                BufferArg::from_raw_parts(args.accum.clone(), pixels * channels),
                 BufferArg::from_raw_parts(args.wsum.clone(), pixels),
                 // A single-frame region, as a single-frame caller passes.
                 0u32,
                 pixels as u32,
-                stored_ch as u32,
+                self.channels,
                 grid * dim,
             );
         }

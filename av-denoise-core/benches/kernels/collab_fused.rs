@@ -71,11 +71,11 @@ pub struct CollabFusedBench {
 }
 
 /// The element counts of `accum` and `wsum` over the bench ring.
-fn accumulator_lens(stored_ch: u32) -> (usize, usize) {
+fn accumulator_lens(channels: u32) -> (usize, usize) {
     let pixels = (WIDTH * HEIGHT) as usize;
     let frames = N_FRAMES as usize;
     let wsum_len = pixels * frames;
-    let accum_len = pixels * stored_ch as usize * frames;
+    let accum_len = pixels * channels as usize * frames;
 
     (accum_len, wsum_len)
 }
@@ -123,7 +123,7 @@ pub struct CollabFusedInput {
     pub mv_field: Handle,
     pub confidence: Handle,
     pub neighbour_slots: Handle,
-    /// The derived noise values, with every live channel at `SIGMA`.
+    /// The derived noise values, with every channel at `SIGMA`.
     pub noise: Handle,
     pub dct_profile: Handle,
     /// The uniform aggregation window.
@@ -143,8 +143,7 @@ pub struct CollabFusedInput {
 impl CollabFusedBench {
     /// The tunable site over `args`, with the library's default search geometry.
     pub fn site(&self, args: &CollabFusedInput) -> CollabSite<f32> {
-        let stored_ch = self.channels;
-        let (accum_len, wsum_len) = accumulator_lens(stored_ch);
+        let (accum_len, wsum_len) = accumulator_lens(self.channels);
         let refs = ref_count(WIDTH, HEIGHT);
         let refs_x = refs_along(WIDTH);
         let refs_y = refs_along(HEIGHT);
@@ -163,7 +162,7 @@ impl CollabFusedBench {
             ring: args.ring.clone(),
             ring_len: args.ring_len,
             search_ring: args.ring.clone(),
-            search_len: stored_ch as usize,
+            search_len: self.channels as usize,
             mv_field: args.mv_field.clone(),
             mv_len: (2 * RADIUS * neighbour_mv_stride) as usize,
             confidence: args.confidence.clone(),
@@ -200,7 +199,6 @@ impl CollabFusedBench {
             height: HEIGHT,
             channels: self.channels,
             k_max: K_MAX,
-            stored_ch,
             spatial_radius: SPATIAL_RADIUS,
             refs_x,
             refs_y,
@@ -233,8 +231,6 @@ impl Benchmark for CollabFusedBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let stored_ch = self.channels;
-
         let mut ring_data = Vec::new();
         for _ in 0..N_FRAMES {
             let frame = make_synthetic_frame(WIDTH, HEIGHT, self.channels);
@@ -300,7 +296,7 @@ impl Benchmark for CollabFusedBench {
 
         // One accumulator region per ring slot, the same shape `Nl4dDenoiser` allocates, so the
         // scatter crosses the same address range it does in the pipeline.
-        let (accum_len, wsum_len) = accumulator_lens(stored_ch);
+        let (accum_len, wsum_len) = accumulator_lens(self.channels);
         let accum = self.client.empty(accum_len * size_of::<i32>());
         let wsum = self.client.empty(wsum_len * size_of::<i32>());
         let refs = ref_count(WIDTH, HEIGHT);

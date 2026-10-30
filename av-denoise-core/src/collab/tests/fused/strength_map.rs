@@ -1,12 +1,11 @@
 use cubecl::prelude::*;
 
 use super::noise_curve::{assert_columns_identical, assert_identical, columns_differ};
-use super::{Aggregated, Setup, cross_frame_setup, run_fused, run_fused_variant};
+use super::{Setup, cross_frame_setup, run_fused, run_fused_variant};
 use crate::collab::geometry::{ref_pos, refs_along, strength_map_dims};
 use crate::collab::kernels::fused::strength_map::strength_map_scale;
 use crate::collab::kernels::fused::{CollabVariant, Walk};
 use crate::collab::tests::helpers::{make_client, noisy_flat_field};
-use crate::nlmeans::ChannelMode;
 use crate::noise::{NOISE_CURVE_BINS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA};
 
 const FRAME_SIDE: u32 = 64;
@@ -220,59 +219,4 @@ fn both_walks_agree_with_a_map_active() {
     let branching = run_fused_variant(&setup, CollabVariant::BASELINE);
 
     assert_identical("walks with a map", &uniform, &branching);
-}
-
-/// A single-frame 2-channel ring, each channel carrying its own noise.
-fn two_channel_setup() -> Setup {
-    let pixels = (FRAME_SIDE * FRAME_SIDE) as usize;
-    let noise = noisy_flat_field(FRAME_SIDE, FRAME_SIDE * 2, 0.5, 0.02);
-    let stored_channels = ChannelMode::Chroma.storage_count() as usize;
-
-    let mut ring = vec![0.0f32; pixels * stored_channels];
-    for pixel in 0..pixels {
-        for channel in 0..2 {
-            ring[pixel * stored_channels + channel] = noise[channel * pixels + pixel];
-        }
-    }
-
-    let luma_placeholder = vec![0.0f32; pixels];
-    let mut setup = Setup::spatial_only(luma_placeholder, FRAME_SIDE, FRAME_SIDE);
-    setup.ring = ring;
-    setup.channel_mode = ChannelMode::Chroma;
-    setup.lambda_ht = LAMBDA;
-
-    setup
-}
-
-/// Whether any accumulator of `channel` differs between two single-frame runs.
-fn channel_differs(first: &Aggregated, second: &Aggregated, channel: usize) -> bool {
-    let stored_channels = ChannelMode::Chroma.storage_count() as usize;
-    let first_values = first.accum.iter().skip(channel).step_by(stored_channels);
-    let second_values = second.accum.iter().skip(channel).step_by(stored_channels);
-    first_values
-        .zip(second_values)
-        .any(|(first_value, second_value)| first_value != second_value)
-}
-
-#[test]
-fn a_luma_map_scales_only_channel_zero() {
-    let mut luma_mapped = two_channel_setup();
-    luma_mapped.noise_curve = Some([1.0; NOISE_CURVE_BINS]);
-    let luma_map = uniform_map(FRAME_SIDE, FRAME_SIDE, 1.5);
-    luma_mapped.strength_map = Some((luma_map, STRENGTH_MAP_LUMA));
-    let got = run_fused(&luma_mapped);
-
-    let mut curve_scaled = two_channel_setup();
-    curve_scaled.noise_curve = Some([1.5; NOISE_CURVE_BINS]);
-    let want = run_fused(&curve_scaled);
-
-    assert_identical("luma map on two channels", &got, &want);
-
-    let mut all_mapped = two_channel_setup();
-    let all_map = uniform_map(FRAME_SIDE, FRAME_SIDE, 1.5);
-    all_mapped.strength_map = Some((all_map, STRENGTH_MAP_ALL));
-    let all_channels = run_fused(&all_mapped);
-
-    let second_channel_differs = channel_differs(&all_channels, &got, 1);
-    assert!(second_channel_differs);
 }

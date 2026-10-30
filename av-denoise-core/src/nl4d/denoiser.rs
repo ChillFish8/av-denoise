@@ -237,11 +237,11 @@ impl Nl4dDenoiser {
         let cuda_needs_uniform = needs_warp_uniform_search(client);
         let uniform_walk_only = cuda_needs_uniform || legality.uniform_walk_only;
 
-        let stored_ch = channels.storage_count();
+        let channel_count = channels.count();
         let k_max = MAX_K;
         let refs = ref_count(width, height);
         let pixels = (width * height) as usize;
-        let frame_len = pixels * stored_ch as usize;
+        let frame_len = pixels * channel_count as usize;
 
         let group_weight = client.empty(refs * size_of::<f32>());
 
@@ -275,7 +275,7 @@ impl Nl4dDenoiser {
 
         // `client.empty` memory is not zeroed, so a stream's first pass zeroes the whole ring.
         let ring_frames = 1 + 2 * params.temporal_radius;
-        let (accum_len, wsum_len) = accumulator_lens(pixels, stored_ch, ring_frames);
+        let (accum_len, wsum_len) = accumulator_lens(pixels, channel_count, ring_frames);
         let accum = client.empty(accum_len * size_of::<i32>());
         let wsum = client.empty(wsum_len * size_of::<i32>());
         let outputs = [
@@ -303,7 +303,7 @@ impl Nl4dDenoiser {
             let geometry = GrainGeometry {
                 width,
                 height,
-                stored_ch,
+                channels: channel_count,
                 blocks_x: motion_ctx.blocks_x,
                 blocks_y: motion_ctx.blocks_y,
                 step: motion_ctx.step,
@@ -723,11 +723,11 @@ impl Nl4dDenoiser {
     /// reuses it.
     fn normalise_region(&mut self, region_slot: u32) -> (Handle, usize) {
         let client = self.front.compute_client().clone();
-        let stored_ch = self.channels.storage_count();
+        let channels = self.channels.count();
         let pixels = (self.width * self.height) as usize;
-        let frame_len = pixels * stored_ch as usize;
+        let frame_len = pixels * channels as usize;
         let total_frames = 1 + 2 * self.temporal_radius;
-        let (accum_ring_len, wsum_ring_len) = accumulator_lens(pixels, stored_ch, total_frames);
+        let (accum_ring_len, wsum_ring_len) = accumulator_lens(pixels, channels, total_frames);
         let agg_cubes_x = self.width.div_ceil(BLOCK_X);
         let agg_cubes_y = self.height.div_ceil(BLOCK_Y);
         let agg_grid = CubeCount::new_2d(agg_cubes_x, agg_cubes_y);
@@ -749,15 +749,14 @@ impl Nl4dDenoiser {
                 &client,
                 agg_grid,
                 agg_dim,
-                stored_ch as usize,
+                channels as usize,
                 accum_arg,
                 wsum_arg,
                 output_arg,
                 region_slot * pixels as u32,
                 self.width,
                 self.height,
-                self.channels.count(),
-                stored_ch,
+                channels,
             );
         }
 
@@ -768,10 +767,10 @@ impl Nl4dDenoiser {
 }
 
 /// The element counts of `accum` and `wsum` over a ring of `ring_frames` regions.
-pub(super) fn accumulator_lens(pixels: usize, stored_ch: u32, ring_frames: u32) -> (usize, usize) {
+pub(super) fn accumulator_lens(pixels: usize, channels: u32, ring_frames: u32) -> (usize, usize) {
     let frames = ring_frames as usize;
     let wsum_len = pixels * frames;
-    let accum_len = pixels * stored_ch as usize * frames;
+    let accum_len = pixels * channels as usize * frames;
 
     (accum_len, wsum_len)
 }

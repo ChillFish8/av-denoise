@@ -9,9 +9,8 @@ use crate::tune::tests::runtime::test_client;
 fn normalise_leaves_the_region_it_read_zeroed() {
     let (width, height) = (21u32, 16u32);
     let pixels = (width * height) as usize;
-    let stored_ch = 4u32;
-    let channels = 3u32;
-    let region_len = pixels * stored_ch as usize;
+    let channels = 2u32;
+    let region_len = pixels * channels as usize;
 
     let accum_host: Vec<i32> = (0..2 * region_len as i32).map(|value| value + 1).collect();
     let wsum_host: Vec<i32> = (0..2 * pixels as i32).map(|value| value + 7).collect();
@@ -39,7 +38,7 @@ fn normalise_leaves_the_region_it_read_zeroed() {
             &client,
             grid,
             dim,
-            stored_ch as usize,
+            channels as usize,
             accum_arg,
             wsum_arg,
             output_arg,
@@ -47,7 +46,6 @@ fn normalise_leaves_the_region_it_read_zeroed() {
             width,
             height,
             channels,
-            stored_ch,
         );
     }
 
@@ -61,7 +59,7 @@ fn normalise_leaves_the_region_it_read_zeroed() {
     );
     assert!(
         accum_after[region_len..].iter().all(|&value| value == 0),
-        "every stored channel lane of the read region is zeroed"
+        "every channel of the read region is zeroed"
     );
     assert_eq!(
         &wsum_after[..pixels],

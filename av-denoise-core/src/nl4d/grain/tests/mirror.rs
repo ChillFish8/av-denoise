@@ -20,7 +20,7 @@ use crate::nl4d::grain::consts::{
 };
 use crate::nl4d::grain::fit::bucket_of;
 
-/// One completed frame's inputs, luma only, with `stored_ch = 1`.
+/// One completed frame's inputs, luma only.
 pub(super) struct MirrorFrame<'a> {
     pub width: u32,
     pub height: u32,

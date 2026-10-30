@@ -27,7 +27,6 @@ struct PlaneGeometry {
     width: u32,
     height: u32,
     channels: u32,
-    stored_channels: u32,
     label: &'static str,
 }
 
@@ -36,14 +35,12 @@ const PLANES: &[PlaneGeometry] = &[
         width: 1920,
         height: 1080,
         channels: 1,
-        stored_channels: 1,
         label: "luma   1920x1080 c1",
     },
     PlaneGeometry {
         width: 960,
         height: 540,
         channels: 2,
-        stored_channels: 2,
         label: "chroma  960x540  c2",
     },
 ];
@@ -64,21 +61,17 @@ const LAMBDA_HT: f32 = 4.158;
 const POOL_RATIO: f32 = 2.42 / LAMBDA_HT;
 
 fn frame_data(geometry: PlaneGeometry) -> Vec<f32> {
-    let mut data = Vec::with_capacity((geometry.width * geometry.height * geometry.stored_channels) as usize);
+    let mut data = Vec::with_capacity((geometry.width * geometry.height * geometry.channels) as usize);
     for y in 0..geometry.height {
         for x in 0..geometry.width {
             let base = 0.5 + 0.2 * (x as f32 * 0.05).sin() * (y as f32 * 0.03).cos();
-            for channel in 0..geometry.stored_channels {
-                let seed = (y * geometry.width + x) * geometry.stored_channels + channel;
+            for channel in 0..geometry.channels {
+                let seed = (y * geometry.width + x) * geometry.channels + channel;
                 let hash = seed
                     .wrapping_mul(2654435761)
                     .wrapping_add(seed.wrapping_mul(340573321));
                 let noise = (hash as f32 / u32::MAX as f32 - 0.5) * 0.1;
-                let sample = if channel < geometry.channels {
-                    (base + noise).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
+                let sample = (base + noise).clamp(0.0, 1.0);
                 data.push(sample);
             }
         }
@@ -165,7 +158,7 @@ impl Rig {
 
         let refs = ref_count(geometry.width, geometry.height);
         let pixels = (geometry.width * geometry.height) as usize;
-        let frame_len = pixels * geometry.stored_channels as usize;
+        let frame_len = pixels * geometry.channels as usize;
 
         let (map_cols, map_rows) = strength_map_dims(geometry.width, geometry.height);
         let map_len = (map_cols * map_rows) as usize;
@@ -263,7 +256,7 @@ impl Rig {
 
     /// The f32 search, with the f32 ring bound as its placeholder search ring.
     fn fused_with(&self, kaiser: &Handle, pooled: bool) {
-        let placeholder_len = self.geometry.stored_channels as usize;
+        let placeholder_len = self.geometry.channels as usize;
         self.fused_launch::<f32>(kaiser, pooled, &self.ring, placeholder_len, false);
     }
 
@@ -279,7 +272,7 @@ impl Rig {
         let refs = ref_count(geometry.width, geometry.height);
         let refs_x = refs_along(geometry.width);
         let pixels = (geometry.width * geometry.height) as usize;
-        let frame_len = pixels * geometry.stored_channels as usize;
+        let frame_len = pixels * geometry.channels as usize;
         let (map_cols, map_rows) = strength_map_dims(geometry.width, geometry.height);
 
         let variant = CollabVariant::for_client(&self.client);
@@ -295,7 +288,7 @@ impl Rig {
                 &self.client,
                 CubeCount::new_2d(cubes_x, refs_y),
                 cube_dim,
-                geometry.stored_channels as usize,
+                geometry.channels as usize,
                 BufferArg::from_raw_parts(self.ring.clone(), self.ring_len),
                 ring_scalar,
                 BufferArg::from_raw_parts(search_ring.clone(), search_len),
@@ -328,7 +321,6 @@ impl Rig {
                 geometry.height,
                 geometry.channels,
                 K_MAX,
-                geometry.stored_channels,
                 SPATIAL_RADIUS,
                 refs_x,
                 map_cols,
@@ -343,7 +335,7 @@ impl Rig {
     fn normalise(&self) {
         let geometry = self.geometry;
         let pixels = (geometry.width * geometry.height) as usize;
-        let frame_len = pixels * geometry.stored_channels as usize;
+        let frame_len = pixels * geometry.channels as usize;
         let cubes_x = geometry.width.div_ceil(BLOCK_X);
         let cubes_y = geometry.height.div_ceil(BLOCK_Y);
 
@@ -352,7 +344,7 @@ impl Rig {
                 &self.client,
                 CubeCount::new_2d(cubes_x, cubes_y),
                 CubeDim::new_2d(BLOCK_X, BLOCK_Y),
-                geometry.stored_channels as usize,
+                geometry.channels as usize,
                 BufferArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
                 BufferArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
                 BufferArg::from_raw_parts(self.output.clone(), frame_len),
@@ -360,7 +352,6 @@ impl Rig {
                 geometry.width,
                 geometry.height,
                 geometry.channels,
-                geometry.stored_channels,
             );
         }
     }
@@ -368,7 +359,7 @@ impl Rig {
     fn zero(&self) {
         let geometry = self.geometry;
         let pixels = (geometry.width * geometry.height) as usize;
-        let frame_len = pixels * geometry.stored_channels as usize;
+        let frame_len = pixels * geometry.channels as usize;
         let dim = 256u32;
         let grid = (frame_len as u32).div_ceil(dim).min(65_535);
 
@@ -381,7 +372,7 @@ impl Rig {
                 BufferArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
                 0u32,
                 pixels as u32,
-                geometry.stored_channels,
+                geometry.channels,
                 grid * dim,
             );
         }

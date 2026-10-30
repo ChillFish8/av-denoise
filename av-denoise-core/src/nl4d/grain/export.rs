@@ -25,7 +25,7 @@ const EDGES_LEN: usize = STD_BUCKETS + 1;
 pub(crate) struct GrainGeometry {
     pub width: u32,
     pub height: u32,
-    pub stored_ch: u32,
+    pub channels: u32,
     pub blocks_x: u32,
     pub blocks_y: u32,
     pub step: u32,
@@ -194,7 +194,7 @@ impl GrainExport {
 
         let (chunk_hist, chunk_autocov) = self.open_chunk(client);
         let geometry = &self.geometry;
-        let frame_len = (geometry.width * geometry.height * geometry.stored_ch) as usize;
+        let frame_len = (geometry.width * geometry.height * geometry.channels) as usize;
         let ring_len = frame_len * geometry.ring_frames as usize;
         let cells_x = geometry.cells_x();
         let cells_y = geometry.cells_y();
@@ -204,7 +204,7 @@ impl GrainExport {
                 client,
                 CubeCount::new_2d(cells_x, cells_y),
                 CubeDim::new_2d(CELL, CELL),
-                geometry.stored_ch as usize,
+                geometry.channels as usize,
                 BufferArg::from_raw_parts(input.clone(), ring_len),
                 BufferArg::from_raw_parts(outputs[output_slot].clone(), frame_len),
                 BufferArg::from_raw_parts(outputs[prev_output].clone(), frame_len),
@@ -221,7 +221,7 @@ impl GrainExport {
                 has_kept as u32,
                 geometry.width,
                 geometry.height,
-                geometry.stored_ch,
+                geometry.channels,
                 geometry.blocks_x,
                 geometry.blocks_y,
                 geometry.step,

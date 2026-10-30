@@ -144,7 +144,7 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
     let accum_scale = cross_frame_accum_scale(knobs.spatial_radius, fixture.radius);
     let grid_frame_count = grid_frames(fixture.radius);
 
-    let stored_ch = 1usize;
+    let channels = 1usize;
 
     unsafe {
         let ring_scalar = BufferArg::from_raw_parts(ring_buf.clone(), fixture.ring.len());
@@ -152,10 +152,10 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             &client,
             grid,
             dim,
-            stored_ch,
+            channels,
             BufferArg::from_raw_parts(ring_buf.clone(), fixture.ring.len()),
             ring_scalar,
-            BufferArg::from_raw_parts(ring_buf, stored_ch),
+            BufferArg::from_raw_parts(ring_buf, channels),
             BufferArg::from_raw_parts(mv_buf, fixture.mv_field.len()),
             BufferArg::from_raw_parts(conf_buf, fixture.confidence.len()),
             BufferArg::from_raw_parts(slots_buf, fixture.neighbour_slots.len()),
@@ -185,7 +185,6 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             height,
             1u32,
             knobs.k_max,
-            1u32,
             knobs.spatial_radius,
             refs_x,
             map_cols,

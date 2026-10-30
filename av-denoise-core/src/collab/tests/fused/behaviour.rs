@@ -409,29 +409,22 @@ fn hashed_eighth(index: u64) -> f32 {
     (hash % 9) as f32 / 8.0
 }
 
-/// Refills the ring with a hashed eighth per pixel and live channel, and zero in padding lanes.
+/// Refills the ring with a hashed eighth per pixel and channel.
 ///
 /// Every difference, square and sum the f16 search makes on such content is exact, so it scores
 /// each candidate exactly as the f32 search does.
 fn fill_with_hashed_eighths(setup: &mut Setup) {
-    let stored_channels = setup.stored_channels() as usize;
-    let live_channels = setup.channel_mode.count() as usize;
     for (index, value) in setup.ring.iter_mut().enumerate() {
-        let channel = index % stored_channels;
-        *value = if channel < live_channels {
-            hashed_eighth(index as u64)
-        } else {
-            0.0
-        };
+        *value = hashed_eighth(index as u64);
     }
 }
 
 /// [cross_frame_setup] in `channel_mode`, its ring filled by [fill_with_hashed_eighths].
 fn exact_cross_frame_setup(channel_mode: ChannelMode) -> Setup {
     let mut setup = cross_frame_setup(64, 64, 2);
-    let stored_channels = channel_mode.storage_count() as usize;
+    let channels = channel_mode.count() as usize;
     let frames = setup.frames() as usize;
-    setup.ring = vec![0.0f32; setup.pixels() * frames * stored_channels];
+    setup.ring = vec![0.0f32; setup.pixels() * frames * channels];
     setup.channel_mode = channel_mode;
     fill_with_hashed_eighths(&mut setup);
 

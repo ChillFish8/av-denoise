@@ -135,27 +135,27 @@ impl CollabVariant {
         GROUP_LANES * self.groups
     }
 
-    /// Elements of the centre tile, one per stored lane per pixel.
+    /// Elements of the centre tile, one per channel per pixel.
     ///
     /// Centres other than [Centre::Tiled](crate::collab::kernels::fused::Centre::Tiled) keep a
     /// one-element placeholder, so every variant shares one kernel body and one set of helper
     /// signatures.
-    pub fn tile_elements(self, spatial_radius: u32, stored_ch: u32) -> u32 {
+    pub fn tile_elements(self, spatial_radius: u32, channels: u32) -> u32 {
         if self.centre != Centre::Tiled {
             return 1;
         }
 
         let width = tile_width(self.groups, spatial_radius);
         let height = tile_height(spatial_radius);
-        width * height * stored_ch
+        width * height * channels
     }
 
     /// Bytes of every shared-memory buffer the kernel allocates, with the tile holding values of
     /// `search_bytes` bytes.
-    pub fn shared_bytes(self, spatial_radius: u32, stored_ch: u32, search_bytes: usize) -> usize {
+    pub fn shared_bytes(self, spatial_radius: u32, channels: u32, search_bytes: usize) -> usize {
         let transpose_floats = self.groups * TRANSPOSE_REGION_FLOATS;
         let transpose = transpose_floats as usize * size_of::<f32>();
-        let tile_elements = self.tile_elements(spatial_radius, stored_ch);
+        let tile_elements = self.tile_elements(spatial_radius, channels);
         let tile = tile_elements as usize * search_bytes;
 
         transpose + tile

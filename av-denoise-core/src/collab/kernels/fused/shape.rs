@@ -3,8 +3,7 @@ use cubecl::prelude::*;
 /// The comptime frame and patch shape the collab searches read.
 ///
 /// `f16_search` scores candidates from the f16 search ring. `spatial_radius` is the centre
-/// search's reach around the reference. `stored_ch` is the lanes each pixel stores, which can be
-/// more than the `channels` the distance sums.
+/// search's reach around the reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct SearchShape {
     pub(crate) f16_search: bool,
@@ -12,7 +11,6 @@ pub(crate) struct SearchShape {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) channels: u32,
-    pub(crate) stored_ch: u32,
 }
 
 /// One lane's position in its group's centre search.

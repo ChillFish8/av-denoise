@@ -185,7 +185,7 @@ pub fn scatter_patch(
     write_weight: bool,
     channel: u32,
     #[comptime] width: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] channels: u32,
     frame_slot: u32,
     #[comptime] frame_pixels: u32,
     accum_scale: f32,
@@ -201,7 +201,7 @@ pub fn scatter_patch(
     let weight = weight * window;
     let accum_fixed = to_fixed(value * weight, accum_scale);
 
-    let accum_index = pixel * stored_ch + channel;
+    let accum_index = pixel * channels + channel;
     Atomic::fetch_add(&accum[accum_index as usize], accum_fixed);
 
     if write_weight {
@@ -216,7 +216,7 @@ pub fn scatter_patch(
 /// [collab_normalise] leaves every region it reads zeroed. A later pass clears the newest region
 /// with this whenever normalise has not zeroed it, as in a continuation stream.
 ///
-/// The `accum` region is `pixels * stored_ch` slots and `wsum`'s is `pixels`, so the weight write
+/// The `accum` region is `pixels * channels` slots and `wsum`'s is `pixels`, so the weight write
 /// is masked past its end. The loop is strided so the grid stays under the 65,535 workgroup limit,
 /// which a 4K or 8K frame exceeds at 256 threads per block.
 #[cube(launch_unchecked)]
@@ -225,12 +225,12 @@ pub fn collab_zero_accum(
     wsum: &mut [Atomic<i32>],
     frame_offset: u32,
     #[comptime] pixels: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] channels: u32,
     #[comptime] total_threads: u32,
 ) {
     let mut idx = ABSOLUTE_POS_X;
-    while idx < pixels * stored_ch {
-        Atomic::store(&accum[(frame_offset * stored_ch + idx) as usize], 0i32);
+    while idx < pixels * channels {
+        Atomic::store(&accum[(frame_offset * channels + idx) as usize], 0i32);
         if idx < pixels {
             Atomic::store(&wsum[(frame_offset + idx) as usize], 0i32);
         }
@@ -249,10 +249,6 @@ pub fn collab_zero_accum(
 /// times and [WEIGHT_GAIN] keeps every group weight from rounding to nothing. A zero sum returns
 /// the accumulator untouched rather than a NaN.
 #[cube(launch_unchecked)]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "every argument is a buffer or comptime shape the kernel binds"
-)]
 pub fn collab_normalise<N: Size>(
     accum: &mut [i32],
     wsum: &mut [i32],
@@ -261,7 +257,6 @@ pub fn collab_normalise<N: Size>(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
 ) {
     let x = ABSOLUTE_POS_X;
     let y = ABSOLUTE_POS_Y;
@@ -276,7 +271,7 @@ pub fn collab_normalise<N: Size>(
     let mut pixel_out = Vector::<f32, N>::empty();
     #[unroll]
     for channel in 0..channels {
-        let accumulated = accum[(pixel * stored_ch + channel) as usize] as f32;
+        let accumulated = accum[(pixel * channels + channel) as usize] as f32;
         let mut value = accumulated;
         if weight_total != 0i32 {
             value = accumulated * WEIGHT_GAIN / (weight_total as f32);
@@ -285,10 +280,10 @@ pub fn collab_normalise<N: Size>(
     }
     output[local_pixel as usize] = pixel_out;
 
-    // A later frame reuses this region and expects it empty, padding lanes included.
+    // A later frame reuses this region and expects it empty.
     #[unroll]
-    for channel in 0..stored_ch {
-        accum[(pixel * stored_ch + channel) as usize] = 0i32;
+    for channel in 0..channels {
+        accum[(pixel * channels + channel) as usize] = 0i32;
     }
 
     wsum[pixel as usize] = 0i32;

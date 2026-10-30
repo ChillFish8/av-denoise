@@ -212,7 +212,7 @@ pub fn grain_measure<N: Size>(
     has_kept: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
-    #[comptime] stored_ch: u32,
+    #[comptime] channels: u32,
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
     #[comptime] step: u32,
@@ -280,7 +280,7 @@ pub fn grain_measure<N: Size>(
         blocks_y,
         step,
     );
-    let clean = out_t[((y * width + x) * stored_ch) as usize];
+    let clean = out_t[((y * width + x) * channels) as usize];
     let current = luma_at(input, x, y, slot_t, width, height);
     let dx = saved_mv[(source_base + block * 2) as usize];
     let dy = saved_mv[(source_base + block * 2 + 1) as usize];
@@ -402,8 +402,8 @@ pub fn grain_measure<N: Size>(
     let kept_dy = saved_mv[(kept_base + block * 2 + 1) as usize];
     let warped_x = clamp_shift(x, kept_dx, width);
     let warped_y = clamp_shift(y, kept_dy, height);
-    let warped = out_t[((warped_y * width + warped_x) * stored_ch) as usize];
-    let previous = out_prev[((y * width + x) * stored_ch) as usize];
+    let warped = out_t[((warped_y * width + warped_x) * channels) as usize];
+    let previous = out_prev[((y * width + x) * channels) as usize];
     let kept = (warped - previous) * std::f32::consts::FRAC_1_SQRT_2;
 
     sums[thread_id as usize] = kept;

@@ -381,8 +381,7 @@ fn run_spatial_only(
     variant: CollabVariant,
 ) -> Vec<f32> {
     let k_max = MAX_K;
-    let stored_ch = 1u32;
-    let channels_count = 1u32;
+    let channels = 1u32;
     let refs_x = refs_along(width);
     let refs_y = refs_along(height);
     let refs = ref_count(width, height);
@@ -449,7 +448,7 @@ fn run_spatial_only(
             BufferArg::from_raw_parts(wsum.clone(), pixels),
             0u32,
             pixels as u32,
-            stored_ch,
+            channels,
             zero_workgroups * zero_dim,
         );
 
@@ -458,10 +457,10 @@ fn run_spatial_only(
             client,
             fused_grid,
             fused_dim,
-            stored_ch as usize,
+            channels as usize,
             BufferArg::from_raw_parts(ring_buf.clone(), noisy_centre.len()),
             ring_scalar,
-            BufferArg::from_raw_parts(ring_buf, stored_ch as usize),
+            BufferArg::from_raw_parts(ring_buf, channels as usize),
             BufferArg::from_raw_parts(mv_dummy, 1),
             BufferArg::from_raw_parts(conf_dummy, 1),
             BufferArg::from_raw_parts(neighbour_slots_dummy, 1),
@@ -489,9 +488,8 @@ fn run_spatial_only(
             1u32,
             width,
             height,
-            channels_count,
+            channels,
             k_max,
-            stored_ch,
             spatial_radius,
             refs_x,
             map_cols,
@@ -505,15 +503,14 @@ fn run_spatial_only(
             client,
             agg_grid,
             agg_dim,
-            stored_ch as usize,
+            channels as usize,
             BufferArg::from_raw_parts(accum, frame_len),
             BufferArg::from_raw_parts(wsum, pixels),
             BufferArg::from_raw_parts(output.clone(), frame_len),
             0u32,
             width,
             height,
-            channels_count,
-            stored_ch,
+            channels,
         );
     }
 
@@ -705,7 +702,7 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let agg_cubes_y = height.div_ceil(BLOCK_Y);
         let agg_grid = CubeCount::new_2d(agg_cubes_x, agg_cubes_y);
         let agg_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
-        let stored_ch = 1usize;
+        let channels = 1usize;
 
         unsafe {
             let ring_scalar = BufferArg::from_raw_parts(view.input.clone(), ring_len);
@@ -713,10 +710,10 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 &client,
                 fused_grid,
                 fused_dim,
-                stored_ch,
+                channels,
                 BufferArg::from_raw_parts(view.input.clone(), ring_len),
                 ring_scalar,
-                BufferArg::from_raw_parts(view.input.clone(), stored_ch),
+                BufferArg::from_raw_parts(view.input.clone(), channels),
                 BufferArg::from_raw_parts(view.mv_field.clone(), mv_len.max(1)),
                 BufferArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
                 BufferArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
@@ -746,7 +743,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 height,
                 1u32,
                 k_max,
-                1u32,
                 SPATIAL_RADIUS,
                 refs_x,
                 map_cols,
@@ -767,7 +763,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 centre_slot * pixels as u32,
                 width,
                 height,
-                1u32,
                 1u32,
             );
         }

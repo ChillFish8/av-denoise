@@ -7,9 +7,8 @@ use crate::engine::kernels::read_line;
 
 /// Packs the reference column into `S` pairs for [packed_partial].
 ///
-/// A single stored channel pairs row `r` with row `r + 4`. Wider storage pairs neighbouring
-/// channels within each row, and lanes past `channels` stay zero. Without `f16_search` it returns
-/// one unfilled pair.
+/// A single channel pairs row `r` with row `r + 4`. Wider frames pair neighbouring channels within
+/// each row. Without `f16_search` it returns one unfilled pair.
 #[cube]
 pub(crate) fn pack_reference<S: Float>(
     current: &[f32],
@@ -17,19 +16,18 @@ pub(crate) fn pack_reference<S: Float>(
 ) -> Array<Vector<S, Const<2>>> {
     let f16_search = comptime!(shape.f16_search);
     let channels = comptime!(shape.channels);
-    let stored_ch = comptime!(shape.stored_ch);
     let pair_count = comptime!(
         if !f16_search {
             1
-        } else if stored_ch == 1 {
+        } else if channels == 1 {
             PATCH_SIZE / 2
         } else {
-            PATCH_SIZE * stored_ch / 2
+            PATCH_SIZE * channels / 2
         }
     );
     let mut packed = Array::<Vector<S, Const<2>>>::new(pair_count as usize);
 
-    if comptime!(f16_search && stored_ch == 1) {
+    if comptime!(f16_search && channels == 1) {
         #[unroll]
         for r in 0..comptime!(PATCH_SIZE / 2) {
             let mut pair = Vector::<f32, Const<2>>::new(0.0f32);
@@ -38,7 +36,7 @@ pub(crate) fn pack_reference<S: Float>(
             packed[r as usize] = Vector::<S, Const<2>>::cast_from(pair);
         }
     } else if comptime!(f16_search) {
-        let pairs_per_row = comptime!(stored_ch / 2);
+        let pairs_per_row = comptime!(channels / 2);
         #[unroll]
         for r in 0..PATCH_SIZE {
             #[unroll]
@@ -46,12 +44,8 @@ pub(crate) fn pack_reference<S: Float>(
                 let first = comptime!(2 * p);
                 let second = comptime!(2 * p + 1);
                 let mut pair = Vector::<f32, Const<2>>::new(0.0f32);
-                if comptime!(first < channels) {
-                    pair.insert(0usize, current[comptime!(r * channels + first) as usize]);
-                }
-                if comptime!(second < channels) {
-                    pair.insert(1usize, current[comptime!(r * channels + second) as usize]);
-                }
+                pair.insert(0usize, current[comptime!(r * channels + first) as usize]);
+                pair.insert(1usize, current[comptime!(r * channels + second) as usize]);
                 packed[comptime!(r * pairs_per_row + p) as usize] = Vector::<S, Const<2>>::cast_from(pair);
             }
         }
@@ -102,10 +96,10 @@ pub(crate) fn packed_partial<S: Float, N: Size>(
 ) -> f32 {
     let width = comptime!(shape.width);
     let height = comptime!(shape.height);
-    let stored_ch = comptime!(shape.stored_ch);
+    let channels = comptime!(shape.channels);
     let mut sum = Vector::<S, Const<2>>::new(S::new(0.0f32));
 
-    if comptime!(stored_ch == 1) {
+    if comptime!(channels == 1) {
         #[unroll]
         for r in 0..comptime!(PATCH_SIZE / 2) {
             let top = read_line(search_ring, x + sub, y + r, slot, width, height);
@@ -117,7 +111,7 @@ pub(crate) fn packed_partial<S: Float, N: Size>(
             sum += squared;
         }
     } else {
-        let pairs_per_row = comptime!(stored_ch / 2);
+        let pairs_per_row = comptime!(channels / 2);
         #[unroll]
         for r in 0..PATCH_SIZE {
             let line = read_line(search_ring, x + sub, y + r, slot, width, height);

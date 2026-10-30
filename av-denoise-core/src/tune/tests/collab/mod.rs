@@ -259,10 +259,10 @@ fn clamp_window_edge(position: u32, offset: i32, max_pos: u32) -> u32 {
     shifted.clamp(0, max_pos as i32) as u32
 }
 
-/// The tile holds every stored lane, so a radius 9 chroma tile at 16 groups is 86 by 26 pixels of
-/// two lanes. That is 17,888 bytes in f32 and half that in f16, plus 4,160 bytes of transpose.
+/// The tile holds every channel, so a radius 9 chroma tile at 16 groups is 86 by 26 pixels of
+/// two channels. That is 17,888 bytes in f32 and half that in f16, plus 4,160 bytes of transpose.
 #[test]
-fn the_tile_holds_every_stored_lane_in_the_search_precision() {
+fn the_tile_holds_every_channel_in_the_search_precision() {
     let client = test_client();
     let spec = CollabSpec::new(64, 48, ChannelMode::Chroma, 1);
     let tiled16 = CollabVariant {

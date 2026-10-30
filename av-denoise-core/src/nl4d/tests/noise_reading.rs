@@ -106,15 +106,15 @@ fn frame_sigma(denoiser: &Nl4dDenoiser, frame: usize) -> Option<[f32; 3]> {
 ///
 /// The look-ahead keeps a frame's stats only until its slot is reused, so this reads the frame
 /// just pushed.
-fn moved_share(denoiser: &Nl4dDenoiser, frame: usize, stored_ch: u32) -> f32 {
+fn moved_share(denoiser: &Nl4dDenoiser, frame: usize, channels: u32) -> f32 {
     let noise = denoiser
         .front_for_test()
         .measured_noise()
         .expect("the noise is measured");
     let slot = frame as u32 % LOOKAHEAD_FRAMES;
     let (_, _, records) = noise.read_slot_stats(slot);
-    let record_len = temporal_stats_record_len(stored_ch) as usize;
-    let moved_lane = (2 * stored_ch + BLOCK_MOVED_LANE) as usize;
+    let record_len = temporal_stats_record_len(channels) as usize;
+    let moved_lane = (2 * channels + BLOCK_MOVED_LANE) as usize;
 
     let blocks = records.len() / record_len;
     let moved = records

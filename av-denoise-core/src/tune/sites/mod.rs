@@ -88,7 +88,7 @@ pub struct AccumOutputs {
     pub accum: Handle,
     pub weight_sum: Handle,
     pub max_weight: Handle,
-    /// Elements in `accum`, one per stored channel per pixel.
+    /// Elements in `accum`, one per channel per pixel.
     pub accum_len: usize,
     /// Elements in `weight_sum` and in `max_weight`.
     pub pixels: usize,

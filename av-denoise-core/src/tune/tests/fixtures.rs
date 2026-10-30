@@ -291,15 +291,15 @@ impl CollabSpec {
 
 /// The ring a collab fixture searches.
 fn collab_ring(spec: &CollabSpec) -> Vec<f32> {
-    let stored_ch = spec.channels.storage_count();
+    let channels = spec.channels.count();
     let frames = 2 * spec.radius + 1;
 
     if spec.flat {
-        let len = spec.width * spec.height * stored_ch * frames;
+        let len = spec.width * spec.height * channels * frames;
         return vec![0.5f32; len as usize];
     }
 
-    hashed_ring(spec.width, spec.height, stored_ch, frames, 5)
+    hashed_ring(spec.width, spec.height, channels, frames, 5)
 }
 
 /// A cross-frame ring of hashed content with motion and confidence fields that vary by block.
@@ -308,7 +308,7 @@ fn collab_ring(spec: &CollabSpec) -> Vec<f32> {
 /// searched. The centre is the middle slot, and the neighbour slots list the frames behind it and
 /// then the frames ahead of it, nearest first.
 pub(crate) fn collab_site(client: &Client, spec: &CollabSpec) -> CollabSite<f32> {
-    let stored_ch = spec.channels.storage_count();
+    let channels = spec.channels.count();
     let frames = 2 * spec.radius + 1;
     let pixels = (spec.width * spec.height) as usize;
     let ring_values = collab_ring(spec);
@@ -372,7 +372,7 @@ pub(crate) fn collab_site(client: &Client, spec: &CollabSpec) -> CollabSite<f32>
 
     let spatial_radius = spec.spatial_radius;
     let refs = ref_count(spec.width, spec.height);
-    let accum_len = pixels * stored_ch as usize * frames as usize;
+    let accum_len = pixels * channels as usize * frames as usize;
     let wsum_len = pixels * frames as usize;
     let accum = client.empty(accum_len * size_of::<i32>());
     let wsum = client.empty(wsum_len * size_of::<i32>());
@@ -385,7 +385,7 @@ pub(crate) fn collab_site(client: &Client, spec: &CollabSpec) -> CollabSite<f32>
         ring: ring.clone(),
         ring_len: ring_values.len(),
         search_ring: ring,
-        search_len: stored_ch as usize,
+        search_len: channels as usize,
         mv_field,
         mv_len: mv_values.len(),
         confidence,
@@ -429,9 +429,8 @@ pub(crate) fn collab_site(client: &Client, spec: &CollabSpec) -> CollabSite<f32>
         blocks_y,
         width: spec.width,
         height: spec.height,
-        channels: spec.channels.count(),
+        channels,
         k_max: MAX_K,
-        stored_ch,
         spatial_radius,
         refs_x,
         refs_y,

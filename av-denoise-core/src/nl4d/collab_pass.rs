@@ -31,7 +31,7 @@ struct FusedPass {
     neighbour_slots: Handle,
     noise_curve: Handle,
     strength_map: Handle,
-    stored_ch: u32,
+    channels: u32,
     /// Values in the frame ring, which the f16 search ring matches.
     ring_len: usize,
     accum_ring_len: usize,
@@ -50,12 +50,12 @@ impl Nl4dDenoiser {
         let centre_slot = view.centre_slot;
         let client = self.front.compute_client().clone();
 
-        let stored_ch = self.channels.storage_count();
+        let channels = self.channels.count();
         let pixels = (self.width * self.height) as usize;
-        let frame_len = pixels * stored_ch as usize;
+        let frame_len = pixels * channels as usize;
         let total_frames = 1 + 2 * self.temporal_radius;
         let ring_len = frame_len * total_frames as usize;
-        let (accum_ring_len, wsum_ring_len) = accumulator_lens(pixels, stored_ch, total_frames);
+        let (accum_ring_len, wsum_ring_len) = accumulator_lens(pixels, channels, total_frames);
         let neighbours = 2 * self.temporal_radius;
 
         let neighbour_slots_buf = view.neighbour_slots_buf.clone();
@@ -106,7 +106,7 @@ impl Nl4dDenoiser {
             neighbour_slots: neighbour_slots_buf,
             noise_curve: noise_curve_buf,
             strength_map: strength_map_buf,
-            stored_ch,
+            channels,
             ring_len,
             accum_ring_len,
             wsum_ring_len,
@@ -156,7 +156,7 @@ impl Nl4dDenoiser {
     ) -> Result<(), anyhow::Error> {
         let client = self.front.compute_client().clone();
         let pixels = (self.width * self.height) as usize;
-        let frame_len = pixels * pass.stored_ch as usize;
+        let frame_len = pixels * pass.channels as usize;
         let accum_ring_len = pass.accum_ring_len;
 
         let zero_dim = 256u32;
@@ -185,7 +185,7 @@ impl Nl4dDenoiser {
                     wsum_arg,
                     slot * pixels as u32,
                     pixels as u32,
-                    pass.stored_ch,
+                    pass.channels,
                     zero_total_threads_one_frame,
                 );
             }
@@ -201,7 +201,7 @@ impl Nl4dDenoiser {
             self.launch_collab_fused::<half::f16>(&client, view, search_handle, search_len, pass)?;
         } else {
             let placeholder = view.input.clone();
-            let search_len = pass.stored_ch as usize;
+            let search_len = pass.channels as usize;
             self.launch_collab_fused::<f32>(&client, view, placeholder, search_len, pass)?;
         }
 
@@ -272,9 +272,8 @@ impl Nl4dDenoiser {
             blocks_y: motion_ctx.blocks_y,
             width: self.width,
             height: self.height,
-            channels: self.channels.count(),
+            channels: pass.channels,
             k_max: self.k_max,
-            stored_ch: pass.stored_ch,
             spatial_radius: self.spatial_radius,
             refs_x,
             refs_y,

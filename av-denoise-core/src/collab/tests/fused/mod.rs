@@ -82,7 +82,7 @@ pub(super) struct Setup {
     pub(super) height: u32,
     pub(super) k_max: u32,
     pub(super) sigma: f32,
-    /// One sigma per live channel, in place of `sigma` for every channel.
+    /// One sigma per channel, in place of `sigma` for every channel.
     ///
     /// The weight scale follows channel 0's.
     pub(super) channel_sigmas: Option<Vec<f32>>,
@@ -101,8 +101,7 @@ pub(super) struct Setup {
     pub(super) strength_map: Option<(Vec<f32>, u32)>,
     /// The pooled threshold's ratio to lambda. `None` launches the plain per-coefficient test.
     pub(super) pooled: Option<f32>,
-    /// The channels the ring interleaves per pixel, laid out at
-    /// [ChannelMode::storage_count](crate::nlmeans::ChannelMode::storage_count) floats each.
+    /// The channels the ring interleaves per pixel.
     pub(super) channel_mode: ChannelMode,
     /// Scores candidates from an f16 copy of the ring.
     pub(super) f16_search: bool,
@@ -149,12 +148,12 @@ impl Setup {
 
     /// Slots in the frame ring, which is also how many regions the accumulators carry.
     pub(super) fn frames(&self) -> u32 {
-        let frame_len = self.width * self.height * self.stored_channels();
+        let frame_len = self.width * self.height * self.channels();
         self.ring.len() as u32 / frame_len
     }
 
-    pub(super) fn stored_channels(&self) -> u32 {
-        self.channel_mode.storage_count()
+    pub(super) fn channels(&self) -> u32 {
+        self.channel_mode.count()
     }
 
     pub(super) fn pixels(&self) -> usize {
@@ -349,15 +348,14 @@ pub(super) fn buffers(setup: &Setup) -> Buffers {
     let refs_y = refs_along(setup.height);
     let refs = ref_count(setup.width, setup.height);
     let frames = setup.frames() as usize;
-    let stored_channels = setup.stored_channels() as usize;
-    let accum_len = setup.pixels() * stored_channels * frames;
+    let channels = setup.channels() as usize;
+    let accum_len = setup.pixels() * channels * frames;
     let wsum_len = setup.pixels() * frames;
 
-    let live_channels = setup.channel_mode.count() as usize;
-    let uniform_sigma = vec![setup.sigma; live_channels];
+    let uniform_sigma = vec![setup.sigma; channels];
     let sigma = setup.channel_sigmas.clone().unwrap_or(uniform_sigma);
     let sigma_count = sigma.len();
-    assert_eq!(sigma_count, live_channels, "one sigma per live channel");
+    assert_eq!(sigma_count, channels, "one sigma per channel");
 
     let profile = setup.profile();
     let scale = weight_scale(sigma[0], &profile);
@@ -503,7 +501,7 @@ pub(super) fn assert_listed_variants_match_recorded(
 /// Launches [collab_fused] with its search ring read as `S`.
 fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle, variant: CollabVariant) {
     let (map_cols, map_rows) = strength_map_dims(setup.width, setup.height);
-    let stored_channels = setup.stored_channels();
+    let channels = setup.channels();
 
     let cubes_x = fused_cubes_x(setup.width, variant.groups);
     let grid = CubeCount::new_2d(cubes_x, handles.refs_y);
@@ -518,7 +516,7 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             &handles.client,
             grid,
             dim,
-            stored_channels as usize,
+            channels as usize,
             BufferArg::from_raw_parts(handles.ring.clone(), setup.ring.len()),
             ring_scalar,
             BufferArg::from_raw_parts(search_ring, setup.ring.len()),
@@ -549,9 +547,8 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             setup.blocks_y,
             setup.width,
             setup.height,
-            setup.channel_mode.count(),
+            channels,
             setup.k_max,
-            stored_channels,
             setup.spatial_radius,
             handles.refs_x,
             map_cols,

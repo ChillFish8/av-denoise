@@ -53,7 +53,6 @@ pub fn collab_search<S: Float, N: Size>(
     #[comptime] height: u32,
     #[comptime] channels: u32,
     #[comptime] k_max: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] spatial_radius: u32,
     #[comptime] refs_x: u32,
     #[comptime] variant: CollabVariant,
@@ -72,12 +71,11 @@ pub fn collab_search<S: Float, N: Size>(
         width,
         height,
         channels,
-        stored_ch,
     });
 
     let centre = comptime!(variant.centre);
     let lanes = comptime!(variant.lanes());
-    let tile_len = comptime!(variant.tile_elements(spatial_radius, stored_ch));
+    let tile_len = comptime!(variant.tile_elements(spatial_radius, channels));
     let mut tile = Shared::<[S]>::new_slice(tile_len as usize);
 
     let ref_x_index = CUBE_POS_X * groups + group;
@@ -200,7 +198,6 @@ pub fn collab_filter<N: Size>(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] stored_ch: u32,
     #[comptime] refs_x: u32,
     #[comptime] map_cols: u32,
     #[comptime] map_rows: u32,
@@ -274,7 +271,6 @@ pub fn collab_filter<N: Size>(
         width,
         height,
         channels,
-        stored_ch,
         map_cols,
         map_rows,
         pooled,
