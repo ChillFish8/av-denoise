@@ -33,6 +33,10 @@ pub fn ingest_words(
     #[comptime] samples_per_word: u32,
     #[comptime] total_threads: u32,
 ) {
+    comptime! {
+        assert!(channels <= 2, "a frame holds at most two channels");
+    }
+
     let bits = comptime![32u32 / samples_per_word];
     let mask = comptime![(1u32 << (32u32 / samples_per_word)) - 1];
 
@@ -67,6 +71,10 @@ pub fn ingest_f32(
     #[comptime] channels: u32,
     #[comptime] total_threads: u32,
 ) {
+    comptime! {
+        assert!(channels <= 2, "a frame holds at most two channels");
+    }
+
     let mut pixel = ABSOLUTE_POS_X;
     while pixel < pixels {
         let base = offset + pixel * channels;
@@ -102,6 +110,10 @@ pub fn egress_words(
     #[comptime] words: u32,
     #[comptime] total_threads: u32,
 ) {
+    comptime! {
+        assert!(channels <= 2, "a frame holds at most two channels");
+    }
+
     let bits = comptime![32u32 / samples_per_word];
 
     let mut word = ABSOLUTE_POS_X;
@@ -151,6 +163,10 @@ pub fn egress_f32(
     #[comptime] channels: u32,
     #[comptime] total_threads: u32,
 ) {
+    comptime! {
+        assert!(channels <= 2, "a frame holds at most two channels");
+    }
+
     let mut pixel = ABSOLUTE_POS_X;
     while pixel < pixels {
         let base = pixel * channels;

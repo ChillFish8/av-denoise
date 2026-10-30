@@ -14,6 +14,10 @@ pub(crate) fn pack_reference<S: Float>(
     current: &[f32],
     #[comptime] shape: SearchShape,
 ) -> Array<Vector<S, Const<2>>> {
+    comptime! {
+        assert!(shape.channels <= 2, "a frame holds at most two channels");
+    }
+
     let f16_search = comptime!(shape.f16_search);
     let channels = comptime!(shape.channels);
     let pair_count = comptime!(
@@ -94,6 +98,10 @@ pub(crate) fn packed_partial<S: Float, N: Size>(
     sub: u32,
     #[comptime] shape: SearchShape,
 ) -> f32 {
+    comptime! {
+        assert!(shape.channels <= 2, "a frame holds at most two channels");
+    }
+
     let width = comptime!(shape.width);
     let height = comptime!(shape.height);
     let channels = comptime!(shape.channels);

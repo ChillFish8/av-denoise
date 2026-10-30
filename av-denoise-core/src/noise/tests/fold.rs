@@ -25,7 +25,7 @@ use crate::noise::spatial::{RESULTS_PER_SLOT, immerkaer_sigma_scale, sigma_from_
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
 use crate::noise::strength_map::StrengthMapParams;
 use crate::noise::temporal::TemporalNoiseSample;
-use crate::noise::{NOISE_BLOCK_1D, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
+use crate::noise::{NOISE_BLOCK_1D, NOISE_CHANNELS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use crate::tune::gpu::sync;
 use crate::tune::tests::runtime::test_client;
 
@@ -86,8 +86,8 @@ fn abs_sum_for(sigma: f32) -> f32 {
 /// A sample with sigmas between 2 and 4 codes, lower quartiles at about 0.8 of them, and a
 /// correlation between 0 and 0.75.
 fn hashed_sample(seed: u32, channels: u32) -> TemporalNoiseSample {
-    let mut sigma = [0.0f32; 3];
-    let mut sigma_low = [0.0f32; 3];
+    let mut sigma = [0.0f32; NOISE_CHANNELS as usize];
+    let mut sigma_low = [0.0f32; NOISE_CHANNELS as usize];
     for channel in 0..channels {
         let unit = hashed_unit(seed, 20 + channel);
         let low_unit = hashed_unit(seed, 30 + channel);
@@ -130,8 +130,8 @@ fn hashed_map_of(seed: u32, quarters: usize) -> Vec<f32> {
 /// A record with hashed Immerkær sigmas of between 1 and 5 codes, a hashed quartile and, when
 /// asked, a sample and a curve.
 fn hashed_record(seed: u32, channels: u32, sampled: bool, curved: bool) -> HostRecord {
-    let mut immerkaer = [0.0f32; 3];
-    let mut immerkaer_low = [0.0f32; 3];
+    let mut immerkaer = [0.0f32; NOISE_CHANNELS as usize];
+    let mut immerkaer_low = [0.0f32; NOISE_CHANNELS as usize];
     for channel in 0..channels {
         let sigma_unit = hashed_unit(seed, 10 + channel);
         let low_unit = hashed_unit(seed, channel);
@@ -159,7 +159,7 @@ fn hashed_record(seed: u32, channels: u32, sampled: bool, curved: bool) -> HostR
 /// A no-sample record with no Immerkær response and a map of ones.
 fn empty_record() -> HostRecord {
     let reading = ReadingRecord {
-        immerkaer_low: [0.0; 3],
+        immerkaer_low: [0.0; NOISE_CHANNELS as usize],
         sample: None,
         accepted: 0,
         curve: None,
@@ -168,7 +168,7 @@ fn empty_record() -> HostRecord {
 
     HostRecord {
         reading,
-        immerkaer: [0.0; 3],
+        immerkaer: [0.0; NOISE_CHANNELS as usize],
         map: vec![1.0; quarters()],
     }
 }
@@ -489,8 +489,8 @@ fn the_correlation_factor_matches_the_host_table() {
 
     for rho in rhos {
         let sample = TemporalNoiseSample {
-            sigma: [1.0, 0.0, 0.0],
-            sigma_low: [1.0, 0.0, 0.0],
+            sigma: [1.0, 0.0],
+            sigma_low: [1.0, 0.0],
             rho,
             static_fraction: 0.5,
         };
@@ -675,7 +675,7 @@ fn a_fold_on_a_letterboxed_stream_keeps_every_derived_value_finite() {
         let median = run.snapshot.median.expect("the median chain is written");
 
         assert!(finite, "derived words {words:?}");
-        assert_eq!(median, [SIGMA_FLOOR, SIGMA_FLOOR, 0.0]);
+        assert_eq!(median, [SIGMA_FLOOR, SIGMA_FLOOR]);
         assert!(run.snapshot.derived.weight_scale > 0.0);
     }
 }

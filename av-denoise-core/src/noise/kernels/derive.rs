@@ -12,7 +12,6 @@ use crate::noise::derived::{
     DERIVED_RHO,
     DERIVED_SAD_FLOOR,
     DERIVED_WEIGHT_SCALE,
-    DERIVED_WORDS,
 };
 use crate::noise::fold::{
     FOLD_CONFIDENCE_SAD_PER_SIGMA,
@@ -46,8 +45,6 @@ const FACTOR_3: f32 = CORRELATION_FACTOR_TABLE[3].1;
 const FACTOR_SPAN_0: f32 = FACTOR_1 - FACTOR_0;
 const FACTOR_SPAN_1: f32 = FACTOR_2 - FACTOR_1;
 const FACTOR_SPAN_2: f32 = FACTOR_3 - FACTOR_2;
-/// The derived words past the rho, written as 0.
-const DERIVED_SPARE: u32 = DERIVED_RHO + 1;
 /// The shared words thread 0 hands the offset tables, the noise offset, the input noise offset
 /// and the rho.
 pub(super) const TABLE_INPUTS: u32 = 3;
@@ -197,10 +194,6 @@ pub(super) fn write_derived(
     derived[DERIVED_NOISE_OFFSET as usize] = noise_offset;
     derived[DERIVED_INPUT_NOISE_OFFSET as usize] = input_offset;
     derived[DERIVED_RHO as usize] = rho;
-
-    for word in DERIVED_SPARE..DERIVED_WORDS {
-        derived[word as usize] = 0.0f32;
-    }
 
     if comptime!(table_radius > 0) {
         table_inputs[0] = noise_offset;

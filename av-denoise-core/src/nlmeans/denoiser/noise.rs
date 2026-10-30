@@ -19,6 +19,7 @@ use crate::noise::{
     DerivedCoefficients,
     DerivedValues,
     FoldSettings,
+    NOISE_CHANNELS,
     NoiseConsumer,
     NoiseSettings,
     NoiseShape,
@@ -384,7 +385,7 @@ impl NlmDenoiser {
             .map_or(0.0, |geometry| sad_noise_floor(geometry.blksize, sigma_y));
 
         DerivedValues {
-            sigma: [sigma_y; 3],
+            sigma: [sigma_y; NOISE_CHANNELS as usize],
             weight_scale: weight,
             curve_valid: false,
             map_mode: STRENGTH_MAP_OFF,
@@ -417,9 +418,9 @@ impl NlmDenoiser {
     /// A fixed `sigma_override` is returned for every channel. Before the first estimate, and
     /// on the fast path, it is zero.
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn current_sigmas(&self) -> [f32; 3] {
+    pub(crate) fn current_sigmas(&self) -> [f32; NOISE_CHANNELS as usize] {
         if let Some(sigma) = self.params.hq.and_then(|hq| hq.sigma_override) {
-            return [sigma; 3];
+            return [sigma; NOISE_CHANNELS as usize];
         }
 
         let channels = self.params.channels.count() as usize;
@@ -433,9 +434,9 @@ impl NlmDenoiser {
     /// A fixed `sigma_override` is returned for every channel. Before the first estimate, and
     /// on the fast path, it is zero.
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn current_sigmas_low_unboosted(&self) -> [f32; 3] {
+    pub(crate) fn current_sigmas_low_unboosted(&self) -> [f32; NOISE_CHANNELS as usize] {
         if let Some(sigma) = self.params.hq.and_then(|hq| hq.sigma_override) {
-            return [sigma; 3];
+            return [sigma; NOISE_CHANNELS as usize];
         }
 
         let channels = self.params.channels.count() as usize;
@@ -449,9 +450,9 @@ impl NlmDenoiser {
     /// A fixed `sigma_override` is returned for every channel. Until a trustworthy temporal
     /// reading lands, this falls back to the unboosted low chain, since zero would under-filter.
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn current_sigmas_temporal_only(&self) -> [f32; 3] {
+    pub(crate) fn current_sigmas_temporal_only(&self) -> [f32; NOISE_CHANNELS as usize] {
         if let Some(sigma) = self.params.hq.and_then(|hq| hq.sigma_override) {
-            return [sigma; 3];
+            return [sigma; NOISE_CHANNELS as usize];
         }
 
         let channels = self.params.channels.count() as usize;
@@ -464,8 +465,11 @@ impl NlmDenoiser {
 
 /// The first `channels` values of `sigmas`, with the rest at zero.
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-fn leading_channels(sigmas: [f32; 3], channels: usize) -> [f32; 3] {
-    let mut leading = [0.0f32; 3];
+fn leading_channels(
+    sigmas: [f32; NOISE_CHANNELS as usize],
+    channels: usize,
+) -> [f32; NOISE_CHANNELS as usize] {
+    let mut leading = [0.0f32; NOISE_CHANNELS as usize];
     leading[..channels].copy_from_slice(&sigmas[..channels]);
 
     leading

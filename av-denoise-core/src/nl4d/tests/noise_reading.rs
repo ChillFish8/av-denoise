@@ -4,7 +4,7 @@ use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::{interleave_planes, panning_frames, raw_reading_sigma};
 use crate::nlmeans::{ChannelMode, MotionCompensationMode, MotionEstimation, NlmParams};
-use crate::noise::{BLOCK_MOVED_LANE, temporal_stats_record_len};
+use crate::noise::{BLOCK_MOVED_LANE, NOISE_CHANNELS, temporal_stats_record_len};
 
 const PAN_WIDTH: u32 = 256;
 const PAN_HEIGHT: u32 = 192;
@@ -91,7 +91,7 @@ fn folded_temporal_sigma(denoiser: &Nl4dDenoiser) -> f32 {
 }
 
 /// The temporal sample sigma the history holds for stream frame `frame`.
-fn frame_sigma(denoiser: &Nl4dDenoiser, frame: usize) -> Option<[f32; 3]> {
+fn frame_sigma(denoiser: &Nl4dDenoiser, frame: usize) -> Option<[f32; NOISE_CHANNELS as usize]> {
     let noise = denoiser
         .front_for_test()
         .measured_noise()

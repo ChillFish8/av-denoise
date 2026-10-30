@@ -1,3 +1,4 @@
+use super::NOISE_CHANNELS;
 #[cfg(test)]
 use super::snapshot::NoiseSnapshot;
 #[cfg(test)]
@@ -8,36 +9,38 @@ use super::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use crate::collab::kernels::aggregate::weight_scale;
 use crate::collab::kernels::transforms::RECIPROCAL_FLOOR;
 
-/// The per-channel folded sigma, 3 words.
+/// The per-channel folded sigma, one word per channel.
 ///
 /// It is the temporal-only chain, or the unboosted low chain until that has a sample. Channels
 /// past the count read 0.
 pub(crate) const DERIVED_SIGMA: u32 = 0;
 /// `sigma0 * sigma0 * g_max * g_max`, or the floor when that is not finite or not above it.
-pub(crate) const DERIVED_WEIGHT_SCALE: u32 = 3;
+pub(crate) const DERIVED_WEIGHT_SCALE: u32 = DERIVED_SIGMA + NOISE_CHANNELS;
 /// 1.0 when the current curve exists and the consumer applies it.
-pub(crate) const DERIVED_CURVE_VALID: u32 = 4;
+pub(crate) const DERIVED_CURVE_VALID: u32 = DERIVED_WEIGHT_SCALE + 1;
 /// One of the `STRENGTH_MAP_*` modes as `f32`.
-pub(crate) const DERIVED_MAP_MODE: u32 = 5;
+pub(crate) const DERIVED_MAP_MODE: u32 = DERIVED_CURVE_VALID + 1;
 /// The motion-compensation SAD floor, prefilter fraction included, 0 without motion compensation.
-pub(crate) const DERIVED_SAD_FLOOR: u32 = 6;
+pub(crate) const DERIVED_SAD_FLOOR: u32 = DERIVED_MAP_MODE + 1;
 /// The confidence-only pass's SAD floor, 0 without that pass.
-pub(crate) const DERIVED_CONFIDENCE_SAD_FLOOR: u32 = 7;
-pub(crate) const DERIVED_H2_INV_NORM: u32 = 8;
-pub(crate) const DERIVED_PILOT_H2_INV_NORM: u32 = 9;
+pub(crate) const DERIVED_CONFIDENCE_SAD_FLOOR: u32 = DERIVED_SAD_FLOOR + 1;
+pub(crate) const DERIVED_H2_INV_NORM: u32 = DERIVED_CONFIDENCE_SAD_FLOOR + 1;
+pub(crate) const DERIVED_PILOT_H2_INV_NORM: u32 = DERIVED_H2_INV_NORM + 1;
 /// The main pass's noise offset, 0 under the NLM pilot.
-pub(crate) const DERIVED_NOISE_OFFSET: u32 = 10;
-pub(crate) const DERIVED_INPUT_NOISE_OFFSET: u32 = 11;
+pub(crate) const DERIVED_NOISE_OFFSET: u32 = DERIVED_PILOT_H2_INV_NORM + 1;
+pub(crate) const DERIVED_INPUT_NOISE_OFFSET: u32 = DERIVED_NOISE_OFFSET + 1;
 /// The folded grain correlation, 0 while unset.
-pub(crate) const DERIVED_RHO: u32 = 12;
+pub(crate) const DERIVED_RHO: u32 = DERIVED_INPUT_NOISE_OFFSET + 1;
 /// The `f32` words of the derived buffer.
-pub(crate) const DERIVED_WORDS: u32 = 16;
+pub(crate) const DERIVED_WORDS: u32 = DERIVED_RHO + 1;
+
+const SIGMA_WORDS: usize = NOISE_CHANNELS as usize;
 
 /// The values every noise consumer reads, as the derived buffer holds them.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct DerivedValues {
-    pub sigma: [f32; 3],
+    pub sigma: [f32; SIGMA_WORDS],
     pub weight_scale: f32,
     pub curve_valid: bool,
     pub map_mode: u32,
@@ -51,13 +54,12 @@ pub struct DerivedValues {
 }
 
 impl DerivedValues {
-    /// The buffer words, with flags as 0.0 or 1.0, the map mode as an exact `f32` and the spare
-    /// words at 0.0.
+    /// The buffer words, with flags as 0.0 or 1.0 and the map mode as an exact `f32`.
     pub fn to_words(&self) -> [f32; DERIVED_WORDS as usize] {
         let mut words = [0.0f32; DERIVED_WORDS as usize];
         let sigma_start = DERIVED_SIGMA as usize;
 
-        words[sigma_start..sigma_start + 3].copy_from_slice(&self.sigma);
+        words[sigma_start..sigma_start + SIGMA_WORDS].copy_from_slice(&self.sigma);
         words[DERIVED_WEIGHT_SCALE as usize] = self.weight_scale;
         words[DERIVED_CURVE_VALID as usize] = if self.curve_valid { 1.0 } else { 0.0 };
         words[DERIVED_MAP_MODE as usize] = self.map_mode as f32;
@@ -77,8 +79,8 @@ impl DerivedValues {
         assert_eq!(word_count, DERIVED_WORDS as usize, "the derived buffer's words");
 
         let sigma_start = DERIVED_SIGMA as usize;
-        let mut sigma = [0.0f32; 3];
-        sigma.copy_from_slice(&words[sigma_start..sigma_start + 3]);
+        let mut sigma = [0.0f32; SIGMA_WORDS];
+        sigma.copy_from_slice(&words[sigma_start..sigma_start + SIGMA_WORDS]);
 
         Self {
             sigma,

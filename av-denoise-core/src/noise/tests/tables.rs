@@ -31,7 +31,7 @@ const LUMA_PARAMS: StrengthMapParams = StrengthMapParams {
 /// The derived values a test state starts from, whose host-built tables are nonzero off the
 /// centre.
 const STARTING_VALUES: DerivedValues = DerivedValues {
-    sigma: [0.0; 3],
+    sigma: [0.0; 2],
     weight_scale: 0.0,
     curve_valid: false,
     map_mode: 0,
@@ -75,8 +75,8 @@ fn settings(radius: u32, coefficients: DerivedCoefficients, map: StrengthMapKind
 /// A reading with a sample of correlation `rho` and, when asked, a flat curve.
 fn sampled_reading(rho: f32, curved: bool) -> ReadingRecord {
     let sample = TemporalNoiseSample {
-        sigma: [3.0 / 255.0, 0.0, 0.0],
-        sigma_low: [2.5 / 255.0, 0.0, 0.0],
+        sigma: [3.0 / 255.0, 0.0],
+        sigma_low: [2.5 / 255.0, 0.0],
         rho,
         static_fraction: 0.5,
     };
@@ -86,7 +86,7 @@ fn sampled_reading(rho: f32, curved: bool) -> ReadingRecord {
     });
 
     ReadingRecord {
-        immerkaer_low: [1.0 / 255.0, 0.0, 0.0],
+        immerkaer_low: [1.0 / 255.0, 0.0],
         sample: Some(sample),
         accepted: 40,
         curve,

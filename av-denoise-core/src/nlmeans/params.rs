@@ -71,8 +71,8 @@ pub const MAX_SEARCH_RADIUS: u32 = 8;
 
 /// The hard ceiling on `temporal_radius`.
 ///
-/// The ring holds `2 * radius + 1` frames, so device memory grows with it. At radius 16, a 1080p luma ring
-/// of 33 `f32` frames would need roughly 274 MB for the input alone.
+/// The ring holds `2 * radius + 1` frames, so device memory grows with it. At radius 8, a 1080p luma ring
+/// of 17 `f32` frames needs roughly 141 MB for the input alone.
 pub const MAX_TEMPORAL_RADIUS: u32 = 8;
 
 /// The hard ceiling on the bilateral prefilter's radius, `ceil(2 * sigma_s).max(1)`.

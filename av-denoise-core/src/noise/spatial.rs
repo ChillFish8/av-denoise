@@ -4,7 +4,7 @@ use cubecl::server::Handle;
 use super::kernels::{nlm_noise_partial, nlm_noise_reduce};
 #[cfg(test)]
 use super::stats::{lower_quartile, sort_ascending};
-use super::{IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y, NOISE_BLOCK_1D};
+use super::{IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y, NOISE_BLOCK_1D, NOISE_CHANNELS};
 use crate::engine::align::StorageAlign;
 
 /// The inputs one Immerkær noise estimate needs.
@@ -23,7 +23,7 @@ pub(crate) struct NoiseCtx<'a> {
 /// The Immerkær lanes in each partial and each results row, one per channel.
 ///
 /// A luma frame leaves lane 1 at 0.
-pub(crate) const IMMERKAER_LANES: u32 = 2;
+pub(crate) const IMMERKAER_LANES: u32 = NOISE_CHANNELS;
 
 /// The `f32` length of one frame's first-stage partials.
 ///
@@ -150,7 +150,7 @@ pub(crate) fn sigma_block_p25_from_partials(
     channels: u32,
     width: u32,
     height: u32,
-) -> [f32; 3] {
+) -> [f32; NOISE_CHANNELS as usize] {
     let cubes_x = width.div_ceil(IMMERKAER_BLOCK_X);
     let cubes_y = height.div_ceil(IMMERKAER_BLOCK_Y);
     let channels = channels as usize;
@@ -186,7 +186,7 @@ pub(crate) fn sigma_block_p25_from_partials(
         }
     }
 
-    let mut sigma_low = [0.0f32; 3];
+    let mut sigma_low = [0.0f32; NOISE_CHANNELS as usize];
     for (channel, sigmas) in cube_sigmas.iter_mut().enumerate() {
         if sigmas.is_empty() {
             continue;

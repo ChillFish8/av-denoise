@@ -3,6 +3,8 @@ use cubecl::server::Handle;
 
 use super::NOISE_BLOCK_1D;
 #[cfg(test)]
+use super::NOISE_CHANNELS;
+#[cfg(test)]
 use super::curve::{NoiseCurve, build_noise_curve};
 use super::kernels::{nlm_temporal_noise_stats, nlm_temporal_stats_zero};
 #[cfg(test)]
@@ -305,12 +307,12 @@ pub(crate) struct TemporalNoiseSample {
     /// units.
     ///
     /// Entries past the active channel count stay 0.
-    pub sigma: [f32; 3],
+    pub sigma: [f32; NOISE_CHANNELS as usize],
     /// The per-channel lower-quartile sigma in normalised units, for consumers where reading high
     /// does more harm than reading low.
     ///
     /// Entries past the active channel count stay 0.
-    pub sigma_low: [f32; 3],
+    pub sigma_low: [f32; NOISE_CHANNELS as usize],
     /// The median lag-1 correlation of the residuals, measuring how correlated the grain is
     /// between neighbouring pixels.
     pub rho: f32,
@@ -324,7 +326,7 @@ struct StaticGateCandidate {
     index: usize,
     width: u32,
     height: u32,
-    sigmas: [f32; 3],
+    sigmas: [f32; NOISE_CHANNELS as usize],
     sigma_ch0: f32,
     var_ch0: f32,
     mean0: f32,
@@ -344,7 +346,7 @@ pub(crate) struct AcceptedBlock {
     /// The in-frame height, which a ragged edge truncates.
     pub(crate) height: u32,
     /// The per-channel sigma, with entries past the active channel count at 0.
-    pub(crate) sigmas: [f32; 3],
+    pub(crate) sigmas: [f32; NOISE_CHANNELS as usize],
     /// Channel 0's mean residual.
     pub(crate) mean0: f32,
     /// Channel 0's mean lag-1 product over adjacent pixel pairs.
@@ -501,7 +503,7 @@ fn static_gate_candidates(
                 continue;
             }
 
-            let mut sigmas = [0.0f32; 3];
+            let mut sigmas = [0.0f32; NOISE_CHANNELS as usize];
             let mut sigma_ch0 = 0.0f32;
             let mut var_ch0 = 0.0f32;
             for channel in 0..channel_count {
@@ -653,8 +655,8 @@ pub(crate) fn temporal_noise_reading(
         }
     }
 
-    let mut sigma = [0.0f32; 3];
-    let mut sigma_low = [0.0f32; 3];
+    let mut sigma = [0.0f32; NOISE_CHANNELS as usize];
+    let mut sigma_low = [0.0f32; NOISE_CHANNELS as usize];
     for (channel, sigmas) in static_sigmas.iter_mut().enumerate() {
         sort_ascending(sigmas);
         sigma[channel] = median(sigmas);

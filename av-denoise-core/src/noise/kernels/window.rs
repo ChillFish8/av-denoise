@@ -1,7 +1,6 @@
 use cubecl::prelude::*;
 
 use super::derive::{FoldedNoise, TABLE_INPUTS, correlation_factor, write_derived, write_offset_tables};
-use crate::noise::NOISE_BLOCK_1D;
 use crate::noise::curve::NOISE_CURVE_BINS;
 use crate::noise::derived::DERIVED_SIGMA;
 use crate::noise::estimator::SIGMA_FLOOR;
@@ -32,7 +31,8 @@ use crate::noise::reading::{
     READING_SIGMA_LOW,
     READING_WORDS,
 };
-use crate::noise::spatial::IMMERKAER_LANES;
+use crate::noise::spatial::RESULTS_PER_SLOT;
+use crate::noise::{NOISE_BLOCK_1D, NOISE_CHANNELS};
 
 const CURVE_BINS: u32 = NOISE_CURVE_BINS as u32;
 /// The chain fed by the boosted median reading.
@@ -44,8 +44,9 @@ const CHAIN_LOW_UNBOOSTED: u32 = 2;
 /// The chain fed by the temporal median alone, from frames with a sample.
 const CHAIN_TEMPORAL_ONLY: u32 = 3;
 const CHAINS: u32 = 4;
-/// The shared median of chain `chain` on channel `channel` sits at `chain * 3 + channel`.
-const MEDIAN_CHAIN_WORDS: u32 = CHAINS * 3;
+/// The shared median of chain `chain` on channel `channel` sits at
+/// `chain * NOISE_CHANNELS + channel`.
+const MEDIAN_CHAIN_WORDS: u32 = CHAINS * NOISE_CHANNELS;
 const MEDIAN_RHO: u32 = MEDIAN_CHAIN_WORDS;
 const MEDIAN_QUARTER: u32 = MEDIAN_RHO + 1;
 const MEDIAN_RATIOS: u32 = MEDIAN_QUARTER + 1;
@@ -184,7 +185,8 @@ fn chain_reading(
     let sigma_scale = fold_settings[FOLD_SIGMA_SCALE as usize];
     let immerkaer_factor = fold_settings[FOLD_IMMERKAER_FACTOR as usize];
 
-    let abs_sum = results[(slot * IMMERKAER_LANES + channel) as usize];
+    let results_per_slot = comptime!(RESULTS_PER_SLOT as u32);
+    let abs_sum = results[(slot * results_per_slot + channel) as usize];
     let immerkaer = immerkaer_factor * abs_sum;
     let immerkaer_low = records[(base + READING_IMMERKAER_LOW + channel) as usize];
     let sigma = records[(base + READING_SIGMA + channel) as usize];
@@ -258,8 +260,8 @@ fn window_median_task(
     #[comptime] channels: u32,
 ) {
     if task < MEDIAN_CHAIN_WORDS {
-        let chain = task / 3u32;
-        let channel = task % 3u32;
+        let chain = task / NOISE_CHANNELS;
+        let channel = task % NOISE_CHANNELS;
         let mut median = 0.0f32;
 
         if channel < channels {
@@ -304,11 +306,11 @@ fn write_window_state(
     let mut low_sum = 0.0f32;
 
     #[unroll]
-    for channel in 0..3u32 {
-        let median = medians[(CHAIN_MEDIAN * 3 + channel) as usize];
-        let low = medians[(CHAIN_LOW * 3 + channel) as usize];
-        let unboosted = medians[(CHAIN_LOW_UNBOOSTED * 3 + channel) as usize];
-        let temporal = medians[(CHAIN_TEMPORAL_ONLY * 3 + channel) as usize];
+    for channel in 0..NOISE_CHANNELS {
+        let median = medians[(CHAIN_MEDIAN * NOISE_CHANNELS + channel) as usize];
+        let low = medians[(CHAIN_LOW * NOISE_CHANNELS + channel) as usize];
+        let unboosted = medians[(CHAIN_LOW_UNBOOSTED * NOISE_CHANNELS + channel) as usize];
+        let temporal = medians[(CHAIN_TEMPORAL_ONLY * NOISE_CHANNELS + channel) as usize];
 
         state[(STATE_MEDIAN + 1 + channel) as usize] = median;
         state[(STATE_LOW + 1 + channel) as usize] = low;
@@ -319,8 +321,8 @@ fn write_window_state(
 
     #[unroll]
     for channel in 0..channels {
-        let median = medians[(CHAIN_MEDIAN * 3 + channel) as usize];
-        let low = medians[(CHAIN_LOW * 3 + channel) as usize];
+        let median = medians[(CHAIN_MEDIAN * NOISE_CHANNELS + channel) as usize];
+        let low = medians[(CHAIN_LOW * NOISE_CHANNELS + channel) as usize];
 
         median_sum += median * median;
         low_sum += low * low;
@@ -354,7 +356,7 @@ fn write_window_state(
 
     let folded = FoldedNoise {
         sigma0: derived[DERIVED_SIGMA as usize],
-        median0: medians[(CHAIN_MEDIAN * 3) as usize],
+        median0: medians[(CHAIN_MEDIAN * NOISE_CHANNELS) as usize],
         median_sum,
         low_sum,
         curve_valid,
@@ -409,6 +411,10 @@ pub fn noise_window_fold(
     #[comptime] map_len: u32,
     #[comptime] table_radius: u32,
 ) {
+    comptime! {
+        assert!(channels <= NOISE_CHANNELS, "noise_window_fold needs a slot per channel");
+    }
+
     let mut table_inputs = Shared::<[f32]>::new_slice(TABLE_INPUTS as usize);
     let mut medians = Shared::<[f32]>::new_slice(MEDIAN_WORDS as usize);
     let window = Window { first, last };

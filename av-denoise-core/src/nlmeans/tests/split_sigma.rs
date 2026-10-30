@@ -3,14 +3,14 @@ use crate::bench_api::HostIo;
 use crate::nlmeans::*;
 use crate::noise::tests::fold_reference::relative_gap;
 use crate::noise::tests::frames::MAX_RELATIVE;
-use crate::noise::{NoiseSnapshot, sigma_from_abs_sum};
+use crate::noise::{NOISE_CHANNELS, NoiseSnapshot, sigma_from_abs_sum};
 
 fn snapshot(denoiser: &NlmDenoiser) -> NoiseSnapshot {
     denoiser.noise_snapshot().expect("the noise state reads back")
 }
 
 /// The first channel of a chain, `None` before the chain's first update.
-fn first_channel(chain: Option<[f32; 3]>) -> Option<f32> {
+fn first_channel(chain: Option<[f32; NOISE_CHANNELS as usize]>) -> Option<f32> {
     chain.map(|sigmas| sigmas[0])
 }
 

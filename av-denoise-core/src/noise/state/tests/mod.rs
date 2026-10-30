@@ -296,7 +296,7 @@ impl NoiseState {
 
     /// Fills every batch's keys and tags and the block scratch with values no reading may keep.
     ///
-    /// Every tag joins channel 1 or 2 with a key far above any sigma, and every block reads as an
+    /// Every lane carries tag 1 or 2 with a key far above any sigma, and every block reads as an
     /// accepted candidate with garbage values.
     pub(crate) fn poison_for_test(&mut self) {
         let client = self.client.clone();

@@ -14,6 +14,7 @@ use crate::nlmeans::{
 };
 use crate::noise::tests::read_temporal_stats_slot;
 use crate::noise::{
+    NOISE_CHANNELS,
     QuarterSettings,
     TemporalStatsCtx,
     run_temporal_noise_stats,
@@ -335,7 +336,7 @@ pub(crate) fn raw_reading_sigma(
     width: u32,
     height: u32,
     channels: u32,
-) -> Option<[f32; 3]> {
+) -> Option<[f32; NOISE_CHANNELS as usize]> {
     let client = make_client();
     let frame_count = 2u32;
     let align = StorageAlign::from_client(&client);

@@ -16,7 +16,13 @@ use av_denoise_core::bench_api::tune_sites::{
     CollabValues,
     CollabVariant,
 };
-use av_denoise_core::bench_api::{DerivedValues, NOISE_CURVE_BINS, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
+use av_denoise_core::bench_api::{
+    DerivedValues,
+    NOISE_CHANNELS,
+    NOISE_CURVE_BINS,
+    STRENGTH_MAP_LUMA,
+    STRENGTH_MAP_OFF,
+};
 use av_denoise_core::tune::{DeviceLimits, SiteCandidate, VariantSite, fit_candidates};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
@@ -274,7 +280,7 @@ impl Benchmark for CollabFusedBench {
             STRENGTH_MAP_OFF
         };
 
-        let mut sigma = [0.0f32; 3];
+        let mut sigma = [0.0f32; NOISE_CHANNELS as usize];
         sigma[..self.channels as usize].fill(SIGMA);
         let group_weight_scale = weight_scale(SIGMA, &profile_host);
         let derived = DerivedValues {

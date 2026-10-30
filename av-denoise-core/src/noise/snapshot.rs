@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use cubecl::prelude::*;
 
-use super::NOISE_CURVE_BINS;
 use super::derived::DerivedValues;
 use super::fold::{
     STATE_CLASSES_PRESENT,
@@ -16,14 +15,15 @@ use super::fold::{
     STATE_TEMPORAL_ONLY,
 };
 use super::state::NoiseState;
+use super::{NOISE_CHANNELS, NOISE_CURVE_BINS};
 
 /// A readback of one noise state's chains, curve and derived values.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NoiseSnapshot {
-    pub median: Option<[f32; 3]>,
-    pub low: Option<[f32; 3]>,
-    pub low_unboosted: Option<[f32; 3]>,
-    pub temporal_only: Option<[f32; 3]>,
+    pub median: Option<[f32; NOISE_CHANNELS as usize]>,
+    pub low: Option<[f32; NOISE_CHANNELS as usize]>,
+    pub low_unboosted: Option<[f32; NOISE_CHANNELS as usize]>,
+    pub temporal_only: Option<[f32; NOISE_CHANNELS as usize]>,
     pub rho: Option<f32>,
     /// The curve's ratios and the quarter median they are relative to.
     pub curve: Option<([f32; NOISE_CURVE_BINS], f32)>,
@@ -93,10 +93,17 @@ impl NoiseState {
     }
 }
 
-/// The three values of the chain starting at `start`, `None` while its flag is clear.
-fn chain(state: &[f32], start: u32) -> Option<[f32; 3]> {
+/// The per-channel values of the chain starting at `start`, `None` while its flag is clear.
+fn chain(state: &[f32], start: u32) -> Option<[f32; NOISE_CHANNELS as usize]> {
     let start = start as usize;
     let valid = state[start] != 0.0;
+    let values_start = start + 1;
+    let values_end = values_start + NOISE_CHANNELS as usize;
 
-    valid.then(|| [state[start + 1], state[start + 2], state[start + 3]])
+    valid.then(|| {
+        let mut values = [0.0f32; NOISE_CHANNELS as usize];
+        values.copy_from_slice(&state[values_start..values_end]);
+
+        values
+    })
 }

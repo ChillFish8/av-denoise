@@ -1,3 +1,4 @@
+use super::NOISE_CHANNELS;
 use super::curve::NOISE_CURVE_BINS;
 #[cfg(test)]
 use super::curve::NoiseCurve;
@@ -5,28 +6,28 @@ use super::select::{RankRule, SelectQuery};
 #[cfg(test)]
 use super::temporal::TemporalNoiseSample;
 
-/// The per-channel lower quartile of the Immerkær cube sigmas, 3 words.
+/// The per-channel lower quartile of the Immerkær cube sigmas, one word per channel.
 pub(crate) const READING_IMMERKAER_LOW: u32 = 0;
 /// 1.0 when the slot has a temporal sample, else 0.0.
-pub(crate) const READING_SAMPLE_VALID: u32 = 3;
-/// The sample's per-channel median sigma, 3 words.
-pub(crate) const READING_SIGMA: u32 = 4;
-/// The sample's per-channel lower-quartile sigma, 3 words.
-pub(crate) const READING_SIGMA_LOW: u32 = 7;
+pub(crate) const READING_SAMPLE_VALID: u32 = READING_IMMERKAER_LOW + NOISE_CHANNELS;
+/// The sample's per-channel median sigma, one word per channel.
+pub(crate) const READING_SIGMA: u32 = READING_SAMPLE_VALID + 1;
+/// The sample's per-channel lower-quartile sigma, one word per channel.
+pub(crate) const READING_SIGMA_LOW: u32 = READING_SIGMA + NOISE_CHANNELS;
 /// The sample's median lag-1 correlation.
-pub(crate) const READING_RHO: u32 = 10;
+pub(crate) const READING_RHO: u32 = READING_SIGMA_LOW + NOISE_CHANNELS;
 /// The sample's fraction of accepted blocks.
-pub(crate) const READING_STATIC_FRACTION: u32 = 11;
+pub(crate) const READING_STATIC_FRACTION: u32 = READING_RHO + 1;
 /// How many blocks were accepted as static noise.
-pub(crate) const READING_ACCEPTED: u32 = 12;
+pub(crate) const READING_ACCEPTED: u32 = READING_STATIC_FRACTION + 1;
 /// 1.0 when the slot has a noise curve, else 0.0.
-pub(crate) const READING_CURVE_VALID: u32 = 13;
+pub(crate) const READING_CURVE_VALID: u32 = READING_ACCEPTED + 1;
 /// The median sigma of the quarters the curve was built from.
-pub(crate) const READING_QUARTER_MEDIAN: u32 = 14;
+pub(crate) const READING_QUARTER_MEDIAN: u32 = READING_CURVE_VALID + 1;
 /// How many curve bins held enough quarters for a median.
-pub(crate) const READING_POPULATED_BINS: u32 = 15;
+pub(crate) const READING_POPULATED_BINS: u32 = READING_QUARTER_MEDIAN + 1;
 /// The curve's ratio per luma bin, 16 words.
-pub(crate) const READING_RATIOS: u32 = 16;
+pub(crate) const READING_RATIOS: u32 = READING_POPULATED_BINS + 1;
 /// The `f32` words of one slot's reading.
 pub(crate) const READING_WORDS: u32 = READING_RATIOS + NOISE_CURVE_BINS as u32;
 
@@ -36,7 +37,7 @@ pub(crate) const READING_WORDS: u32 = READING_RATIOS + NOISE_CURVE_BINS as u32;
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReadingRecord {
-    pub immerkaer_low: [f32; 3],
+    pub immerkaer_low: [f32; NOISE_CHANNELS as usize],
     pub sample: Option<TemporalNoiseSample>,
     pub accepted: u32,
     pub curve: Option<NoiseCurve>,
@@ -49,11 +50,11 @@ impl ReadingRecord {
         let word_count = words.len();
         assert_eq!(word_count, READING_WORDS as usize, "one reading's words");
 
-        let immerkaer_low = triple(words, READING_IMMERKAER_LOW);
+        let immerkaer_low = channel_words(words, READING_IMMERKAER_LOW);
         let sample_valid = words[READING_SAMPLE_VALID as usize] != 0.0;
         let sample = sample_valid.then(|| TemporalNoiseSample {
-            sigma: triple(words, READING_SIGMA),
-            sigma_low: triple(words, READING_SIGMA_LOW),
+            sigma: channel_words(words, READING_SIGMA),
+            sigma_low: channel_words(words, READING_SIGMA_LOW),
             rho: words[READING_RHO as usize],
             static_fraction: words[READING_STATIC_FRACTION as usize],
         });
@@ -84,12 +85,12 @@ impl ReadingRecord {
     pub(crate) fn to_words(&self) -> [f32; READING_WORDS as usize] {
         let mut words = [0.0f32; READING_WORDS as usize];
 
-        set_triple(&mut words, READING_IMMERKAER_LOW, self.immerkaer_low);
+        set_channel_words(&mut words, READING_IMMERKAER_LOW, self.immerkaer_low);
 
         if let Some(sample) = self.sample {
             words[READING_SAMPLE_VALID as usize] = 1.0;
-            set_triple(&mut words, READING_SIGMA, sample.sigma);
-            set_triple(&mut words, READING_SIGMA_LOW, sample.sigma_low);
+            set_channel_words(&mut words, READING_SIGMA, sample.sigma);
+            set_channel_words(&mut words, READING_SIGMA_LOW, sample.sigma_low);
             words[READING_RHO as usize] = sample.rho;
             words[READING_STATIC_FRACTION as usize] = sample.static_fraction;
         }
@@ -111,53 +112,82 @@ impl ReadingRecord {
 }
 
 #[cfg(test)]
-fn triple(words: &[f32], start: u32) -> [f32; 3] {
+fn channel_words(words: &[f32], start: u32) -> [f32; NOISE_CHANNELS as usize] {
     let start = start as usize;
-    [words[start], words[start + 1], words[start + 2]]
+    let end = start + NOISE_CHANNELS as usize;
+    let mut values = [0.0f32; NOISE_CHANNELS as usize];
+    values.copy_from_slice(&words[start..end]);
+
+    values
 }
 
 #[cfg(test)]
-fn set_triple(words: &mut [f32], start: u32, values: [f32; 3]) {
+fn set_channel_words(words: &mut [f32], start: u32, values: [f32; NOISE_CHANNELS as usize]) {
     let start = start as usize;
-    words[start..start + 3].copy_from_slice(&values);
+    let end = start + NOISE_CHANNELS as usize;
+    words[start..end].copy_from_slice(&values);
 }
 
+/// The rules of each channel's immerkaer queries, its lower quartile pair.
+const IMMERKAER_CHANNEL_RULES: [RankRule; 2] = [RankRule::QuartileLow, RankRule::QuartileHigh];
+/// The rules of the reference set's queries, its lower quartile pair, its first and its last.
+const REFERENCE_RULES: [RankRule; 4] = [
+    RankRule::QuartileLow,
+    RankRule::QuartileHigh,
+    RankRule::First,
+    RankRule::Last,
+];
+/// The rules of each channel's sample queries, its median pair then its lower quartile pair.
+const SAMPLE_CHANNEL_RULES: [RankRule; 4] = [
+    RankRule::MedianLow,
+    RankRule::MedianHigh,
+    RankRule::QuartileLow,
+    RankRule::QuartileHigh,
+];
+/// The rules of the correlation's and the quarters' queries, a median pair each.
+const MEDIAN_RULES: [RankRule; 2] = [RankRule::MedianLow, RankRule::MedianHigh];
+
+/// The immerkaer batch's queries per channel.
+pub(crate) const IMMERKAER_CHANNEL_QUERIES: u32 = IMMERKAER_CHANNEL_RULES.len() as u32;
+/// The sample batch's queries per channel.
+pub(crate) const SAMPLE_CHANNEL_QUERIES: u32 = SAMPLE_CHANNEL_RULES.len() as u32;
+
 /// The immerkaer batch tag of a candidate block above the measurable-noise gate.
-pub(crate) const TAG_REFERENCE: u32 = 3;
+pub(crate) const TAG_REFERENCE: u32 = NOISE_CHANNELS;
 /// The immerkaer batch tag of a candidate block at or below the measurable-noise gate.
-pub(crate) const TAG_EXCLUDED: u32 = 4;
+pub(crate) const TAG_EXCLUDED: u32 = TAG_REFERENCE + 1;
 /// The immerkaer batch tag of a moved candidate block's texture, above the measurable-noise gate.
-pub(crate) const TAG_MOVED_TEXTURE: u32 = 5;
-/// The immerkaer batch's tags with temporal stats, three channels and the three block sets.
-pub(crate) const IMMERKAER_TAGS: u32 = 6;
+pub(crate) const TAG_MOVED_TEXTURE: u32 = TAG_EXCLUDED + 1;
+/// The immerkaer batch's tags with temporal stats, one per channel and the three block sets.
+pub(crate) const IMMERKAER_TAGS: u32 = TAG_MOVED_TEXTURE + 1;
 /// The immerkaer batch's tags without temporal stats, one per channel.
-pub(crate) const IMMERKAER_SPATIAL_TAGS: u32 = 3;
-/// The immerkaer batch's queries with temporal stats.
-pub(crate) const IMMERKAER_QUERIES: u32 = 12;
+pub(crate) const IMMERKAER_SPATIAL_TAGS: u32 = NOISE_CHANNELS;
 /// The query of the reference set's lower quartile floor, followed by its ceiling, its first and
 /// its last element.
-pub(crate) const IMMERKAER_QUERY_REFERENCE: u32 = 6;
+pub(crate) const IMMERKAER_QUERY_REFERENCE: u32 = NOISE_CHANNELS * IMMERKAER_CHANNEL_QUERIES;
 /// The query whose count says how many candidates the reference set left out.
-pub(crate) const IMMERKAER_QUERY_EXCLUDED: u32 = 10;
+pub(crate) const IMMERKAER_QUERY_EXCLUDED: u32 = IMMERKAER_QUERY_REFERENCE + REFERENCE_RULES.len() as u32;
 /// The query of the moved blocks' texture threshold.
-pub(crate) const IMMERKAER_QUERY_TEXTURE: u32 = 11;
+pub(crate) const IMMERKAER_QUERY_TEXTURE: u32 = IMMERKAER_QUERY_EXCLUDED + 1;
+/// The immerkaer batch's queries with temporal stats.
+pub(crate) const IMMERKAER_QUERIES: u32 = IMMERKAER_QUERY_TEXTURE + 1;
 
 /// The sample batch tag of an accepted block's clamped correlation.
-pub(crate) const TAG_RHO: u32 = 3;
+pub(crate) const TAG_RHO: u32 = NOISE_CHANNELS;
 /// The sample batch tag of a static quarter's sigma.
-pub(crate) const TAG_QUARTER: u32 = 4;
+pub(crate) const TAG_QUARTER: u32 = TAG_RHO + 1;
 /// The sample batch tag every accepted block joins, so its count is the accepted count.
-pub(crate) const TAG_ACCEPTED: u32 = 5;
-/// The sample batch's tags, three channels, the correlation, the quarters and the accepted blocks.
-pub(crate) const SAMPLE_TAGS: u32 = 6;
-/// The sample batch's queries.
-pub(crate) const SAMPLE_QUERIES: u32 = 17;
+pub(crate) const TAG_ACCEPTED: u32 = TAG_QUARTER + 1;
+/// The sample batch's tags, one per channel, the correlation, the quarters and the accepted blocks.
+pub(crate) const SAMPLE_TAGS: u32 = TAG_ACCEPTED + 1;
 /// The query of the correlation's lower median, followed by its upper median.
-pub(crate) const SAMPLE_QUERY_RHO: u32 = 12;
+pub(crate) const SAMPLE_QUERY_RHO: u32 = NOISE_CHANNELS * SAMPLE_CHANNEL_QUERIES;
 /// The query of the static quarters' lower median, followed by its upper median.
-pub(crate) const SAMPLE_QUERY_QUARTER: u32 = 14;
+pub(crate) const SAMPLE_QUERY_QUARTER: u32 = SAMPLE_QUERY_RHO + MEDIAN_RULES.len() as u32;
 /// The query whose count says how many blocks were accepted.
-pub(crate) const SAMPLE_QUERY_ACCEPTED: u32 = 16;
+pub(crate) const SAMPLE_QUERY_ACCEPTED: u32 = SAMPLE_QUERY_QUARTER + MEDIAN_RULES.len() as u32;
+/// The sample batch's queries.
+pub(crate) const SAMPLE_QUERIES: u32 = SAMPLE_QUERY_ACCEPTED + 1;
 
 /// The curve batch's tags, one per luma bin.
 pub(crate) const CURVE_TAGS: u32 = NOISE_CURVE_BINS as u32;
@@ -170,28 +200,17 @@ pub(crate) const CURVE_QUERIES: u32 = 2 * CURVE_TAGS;
 pub(crate) fn immerkaer_queries(temporal: bool) -> Vec<SelectQuery> {
     let mut queries = Vec::with_capacity(IMMERKAER_QUERIES as usize);
 
-    for tag in 0..3 {
-        queries.push(SelectQuery {
-            tag,
-            rule: RankRule::QuartileLow,
-        });
-        queries.push(SelectQuery {
-            tag,
-            rule: RankRule::QuartileHigh,
-        });
+    for tag in 0..NOISE_CHANNELS {
+        for rule in IMMERKAER_CHANNEL_RULES {
+            queries.push(SelectQuery { tag, rule });
+        }
     }
 
     if !temporal {
         return queries;
     }
 
-    let reference_rules = [
-        RankRule::QuartileLow,
-        RankRule::QuartileHigh,
-        RankRule::First,
-        RankRule::Last,
-    ];
-    for rule in reference_rules {
+    for rule in REFERENCE_RULES {
         queries.push(SelectQuery {
             tag: TAG_REFERENCE,
             rule,
@@ -213,23 +232,16 @@ pub(crate) fn immerkaer_queries(temporal: bool) -> Vec<SelectQuery> {
 /// The sample batch's queries, a median pair and a quartile pair per channel, the median pairs of
 /// the correlation and the quarters, then the accepted set's first.
 pub(crate) fn sample_queries() -> Vec<SelectQuery> {
-    let percentile_rules = [
-        RankRule::MedianLow,
-        RankRule::MedianHigh,
-        RankRule::QuartileLow,
-        RankRule::QuartileHigh,
-    ];
-    let median_rules = [RankRule::MedianLow, RankRule::MedianHigh];
     let mut queries = Vec::with_capacity(SAMPLE_QUERIES as usize);
 
-    for tag in 0..3 {
-        for rule in percentile_rules {
+    for tag in 0..NOISE_CHANNELS {
+        for rule in SAMPLE_CHANNEL_RULES {
             queries.push(SelectQuery { tag, rule });
         }
     }
 
     for tag in [TAG_RHO, TAG_QUARTER] {
-        for rule in median_rules {
+        for rule in MEDIAN_RULES {
             queries.push(SelectQuery { tag, rule });
         }
     }

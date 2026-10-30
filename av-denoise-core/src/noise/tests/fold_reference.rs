@@ -1,4 +1,5 @@
 use crate::collab::kernels::transforms::RECIPROCAL_FLOOR;
+use crate::noise::NOISE_CHANNELS;
 use crate::noise::correlation::correlation_factor;
 use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
 use crate::noise::derived::{DerivedCoefficients, DerivedValues, NoiseConsumer};
@@ -7,6 +8,9 @@ use crate::noise::fold::NoiseSettings;
 use crate::noise::history::WindowBounds;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::snapshot::NoiseSnapshot;
+
+/// One value per channel slot.
+type ChannelValues = [f32; NOISE_CHANNELS as usize];
 
 /// The largest gap in ulp the synthetic fold tests allow.
 pub(super) const MAX_ULPS: u32 = 4;
@@ -50,7 +54,7 @@ pub(super) fn state_pairs(
         assert_eq!(gpu_present, host_present, "{name} chain presence");
 
         if let (Some(gpu_values), Some(host_values)) = (gpu_chain, host_chain) {
-            for channel in 0..3 {
+            for channel in 0..NOISE_CHANNELS as usize {
                 if channel >= active {
                     assert_eq!(gpu_values[channel], 0.0, "{name} past the channel count");
                     continue;
@@ -95,7 +99,7 @@ pub(super) fn derived_pairs(
     assert_eq!(gpu.map_mode, host.map_mode, "derived map mode");
 
     let mut pairs = Vec::new();
-    for channel in 0..3 {
+    for channel in 0..NOISE_CHANNELS as usize {
         if channel >= channels as usize {
             assert_eq!(gpu.sigma[channel], 0.0, "derived sigma past the channel count");
             continue;
@@ -208,7 +212,6 @@ fn derived_value_gaps(gpu: &DerivedValues, host: &DerivedValues) -> f32 {
     let gpu_values = [
         gpu.sigma[0],
         gpu.sigma[1],
-        gpu.sigma[2],
         gpu.weight_scale,
         gpu.sad_noise_floor,
         gpu.confidence_sad_noise_floor,
@@ -221,7 +224,6 @@ fn derived_value_gaps(gpu: &DerivedValues, host: &DerivedValues) -> f32 {
     let host_values = [
         host.sigma[0],
         host.sigma[1],
-        host.sigma[2],
         host.weight_scale,
         host.sad_noise_floor,
         host.confidence_sad_noise_floor,
@@ -253,7 +255,7 @@ pub(crate) fn curve_gap(gpu: &NoiseSnapshot, host: &NoiseSnapshot) -> f32 {
 pub(crate) struct HostRecord {
     pub(crate) reading: ReadingRecord,
     /// The per-channel Immerkær sigma from the frame's abs sums.
-    pub(crate) immerkaer: [f32; 3],
+    pub(crate) immerkaer: ChannelValues,
     /// The frame's strength map, empty without one.
     pub(crate) map: Vec<f32>,
 }
@@ -261,11 +263,11 @@ pub(crate) struct HostRecord {
 /// The chains, rho, curve, classes and map one window fold gives.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HostDerived {
-    pub(crate) median: [f32; 3],
-    pub(crate) low: [f32; 3],
-    pub(crate) low_unboosted: [f32; 3],
+    pub(crate) median: ChannelValues,
+    pub(crate) low: ChannelValues,
+    pub(crate) low_unboosted: ChannelValues,
     /// `None` when no frame of the window has a sample.
-    pub(crate) temporal_only: Option<[f32; 3]>,
+    pub(crate) temporal_only: Option<ChannelValues>,
     pub(crate) rho: Option<f32>,
     /// The curve's ratios and quarter median, present exactly when the classes are.
     pub(crate) curve: Option<([f32; NOISE_CURVE_BINS], f32)>,
@@ -297,8 +299,8 @@ impl HostDerived {
     }
 }
 
-fn active_channels(values: [f32; 3], channels: usize) -> [f32; 3] {
-    let mut active = [0.0f32; 3];
+fn active_channels(values: ChannelValues, channels: usize) -> ChannelValues {
+    let mut active = [0.0f32; NOISE_CHANNELS as usize];
     active[..channels].copy_from_slice(&values[..channels]);
     active
 }
@@ -315,7 +317,7 @@ fn window_median(values: &mut [f32]) -> f32 {
 }
 
 /// One frame's combined and scaled readings for the median, low and unboosted low chains.
-fn frame_readings(record: &HostRecord, sigma_scale: f32) -> [[f32; 3]; 3] {
+fn frame_readings(record: &HostRecord, sigma_scale: f32) -> [ChannelValues; 3] {
     let reading = &record.reading;
     let mut raw = record.immerkaer;
     let mut raw_low = reading.immerkaer_low;
@@ -323,25 +325,25 @@ fn frame_readings(record: &HostRecord, sigma_scale: f32) -> [[f32; 3]; 3] {
 
     if let Some(sample) = reading.sample {
         let factor = correlation_factor(sample.rho);
-        for channel in 0..3 {
+        for channel in 0..NOISE_CHANNELS as usize {
             raw[channel] = raw[channel].max(sample.sigma[channel] * factor);
             raw_low[channel] = raw_low[channel].max(sample.sigma_low[channel] * factor);
             raw_unboosted[channel] = raw_unboosted[channel].max(sample.sigma_low[channel]);
         }
     }
 
-    let scale = |values: [f32; 3]| values.map(|value| value * sigma_scale);
+    let scale = |values: ChannelValues| values.map(|value| value * sigma_scale);
 
     [scale(raw), scale(raw_low), scale(raw_unboosted)]
 }
 
 /// The per-channel floored median of `readings`, `None` for no readings.
-fn chain_median(readings: &[[f32; 3]]) -> Option<[f32; 3]> {
+fn chain_median(readings: &[ChannelValues]) -> Option<ChannelValues> {
     if readings.is_empty() {
         return None;
     }
 
-    let mut chain = [0.0f32; 3];
+    let mut chain = [0.0f32; NOISE_CHANNELS as usize];
     for (channel, value) in chain.iter_mut().enumerate() {
         let mut values: Vec<f32> = readings.iter().map(|reading| reading[channel]).collect();
         let median = window_median(&mut values);
@@ -366,14 +368,14 @@ pub(crate) fn fold_window(records: &[HostRecord], bounds: WindowBounds, sigma_sc
         .filter(|record| record.reading.curve.is_some())
         .collect();
 
-    let readings: Vec<[[f32; 3]; 3]> = window
+    let readings: Vec<[ChannelValues; 3]> = window
         .iter()
         .map(|record| frame_readings(record, sigma_scale))
         .collect();
-    let medians: Vec<[f32; 3]> = readings.iter().map(|reading| reading[0]).collect();
-    let lows: Vec<[f32; 3]> = readings.iter().map(|reading| reading[1]).collect();
-    let unboosted: Vec<[f32; 3]> = readings.iter().map(|reading| reading[2]).collect();
-    let temporal: Vec<[f32; 3]> = sampled
+    let medians: Vec<ChannelValues> = readings.iter().map(|reading| reading[0]).collect();
+    let lows: Vec<ChannelValues> = readings.iter().map(|reading| reading[1]).collect();
+    let unboosted: Vec<ChannelValues> = readings.iter().map(|reading| reading[2]).collect();
+    let temporal: Vec<ChannelValues> = sampled
         .iter()
         .map(|record| record.reading.sample.unwrap().sigma)
         .map(|sigma| sigma.map(|value| value * sigma_scale))

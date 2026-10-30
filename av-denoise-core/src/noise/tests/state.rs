@@ -225,7 +225,7 @@ fn a_fixed_state_queues_nothing_and_snapshots_its_values() {
     let ring = luma_ring(&client);
     let shape = luma_shape(&client, true);
     let fixed = DerivedValues {
-        sigma: [0.02, 0.0, 0.0],
+        sigma: [0.02, 0.0],
         sad_noise_floor: 5.75,
         h2_inv_norm: 12.5,
         ..DerivedValues::default()

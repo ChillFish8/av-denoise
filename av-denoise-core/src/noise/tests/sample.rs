@@ -10,8 +10,32 @@ use super::records::{
     ulp_gap,
 };
 use crate::engine::align::StorageAlign;
+use crate::noise::NOISE_CHANNELS;
 use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
-use crate::noise::reading::{READING_CURVE_VALID, READING_SAMPLE_VALID, ReadingRecord};
+use crate::noise::reading::{
+    IMMERKAER_CHANNEL_QUERIES,
+    IMMERKAER_QUERIES,
+    IMMERKAER_QUERY_EXCLUDED,
+    IMMERKAER_QUERY_REFERENCE,
+    IMMERKAER_QUERY_TEXTURE,
+    READING_CURVE_VALID,
+    READING_SAMPLE_VALID,
+    ReadingRecord,
+    SAMPLE_CHANNEL_QUERIES,
+    SAMPLE_QUERIES,
+    SAMPLE_QUERY_ACCEPTED,
+    SAMPLE_QUERY_QUARTER,
+    SAMPLE_QUERY_RHO,
+    TAG_ACCEPTED,
+    TAG_EXCLUDED,
+    TAG_MOVED_TEXTURE,
+    TAG_QUARTER,
+    TAG_REFERENCE,
+    TAG_RHO,
+    immerkaer_queries,
+    sample_queries,
+};
+use crate::noise::select::{RankRule, SelectQuery};
 use crate::noise::spatial::{RESULTS_PER_SLOT, sigma_block_p25_from_partials};
 use crate::noise::state::{BLOCK_ACCEPTED, NoiseShape, NoiseState, ReadingSettings, SlotStats};
 use crate::noise::stats::lower_quartile;
@@ -80,7 +104,7 @@ impl Plane {
 
 /// What the host reference reads from one slot's stats.
 struct HostReading {
-    immerkaer_low: [f32; 3],
+    immerkaer_low: [f32; NOISE_CHANNELS as usize],
     sample: Option<TemporalNoiseSample>,
     accepted: Vec<usize>,
 }
@@ -174,7 +198,7 @@ fn assert_close(gpu: f32, host: f32, max_ulps: u32, what: &str) {
 }
 
 fn assert_immerkaer_matches(gpu: &ReadingRecord, host: &HostReading) {
-    for channel in 0..3 {
+    for channel in 0..NOISE_CHANNELS as usize {
         let what = format!("immerkaer_low[{channel}]");
         assert_close(
             gpu.immerkaer_low[channel],
@@ -192,7 +216,7 @@ fn assert_sample_matches(gpu: Option<TemporalNoiseSample>, host: Option<Temporal
         (gpu, host) => panic!("the gpu sample {gpu:?} and the host sample {host:?} disagree"),
     };
 
-    for channel in 0..3 {
+    for channel in 0..NOISE_CHANNELS as usize {
         let sigma_what = format!("sigma[{channel}]");
         let low_what = format!("sigma_low[{channel}]");
         assert_close(gpu.sigma[channel], host.sigma[channel], max_ulps, &sigma_what);
@@ -254,11 +278,73 @@ fn static_blocks(plane: Plane, seed: u32) -> Vec<BlockSpec> {
     (0..count).map(|index| static_block(seed, index)).collect()
 }
 
+/// Asserts `queries` holds `tag` with each of `rules` in turn, starting at `first`.
+fn assert_query_run(queries: &[SelectQuery], first: u32, tag: u32, rules: &[RankRule]) {
+    for (offset, &rule) in rules.iter().enumerate() {
+        let index = first as usize + offset;
+        let expected = SelectQuery { tag, rule };
+
+        assert_eq!(queries[index], expected, "query {index}");
+    }
+}
+
+#[test]
+fn the_query_indices_name_their_queries() {
+    let spatial = immerkaer_queries(false);
+    let immerkaer = immerkaer_queries(true);
+    let sample = sample_queries();
+
+    let quartile_pair = [RankRule::QuartileLow, RankRule::QuartileHigh];
+    let median_pair = [RankRule::MedianLow, RankRule::MedianHigh];
+    let sample_channel = [
+        RankRule::MedianLow,
+        RankRule::MedianHigh,
+        RankRule::QuartileLow,
+        RankRule::QuartileHigh,
+    ];
+    let reference = [
+        RankRule::QuartileLow,
+        RankRule::QuartileHigh,
+        RankRule::First,
+        RankRule::Last,
+    ];
+
+    assert_eq!(spatial.len(), IMMERKAER_QUERY_REFERENCE as usize);
+    assert_eq!(immerkaer.len(), IMMERKAER_QUERIES as usize);
+    assert_eq!(sample.len(), SAMPLE_QUERIES as usize);
+
+    for channel in 0..NOISE_CHANNELS {
+        let immerkaer_first = IMMERKAER_CHANNEL_QUERIES * channel;
+        let sample_first = SAMPLE_CHANNEL_QUERIES * channel;
+
+        assert_query_run(&spatial, immerkaer_first, channel, &quartile_pair);
+        assert_query_run(&immerkaer, immerkaer_first, channel, &quartile_pair);
+        assert_query_run(&sample, sample_first, channel, &sample_channel);
+    }
+
+    assert_query_run(&immerkaer, IMMERKAER_QUERY_REFERENCE, TAG_REFERENCE, &reference);
+    assert_query_run(
+        &immerkaer,
+        IMMERKAER_QUERY_EXCLUDED,
+        TAG_EXCLUDED,
+        &[RankRule::First],
+    );
+    assert_query_run(
+        &immerkaer,
+        IMMERKAER_QUERY_TEXTURE,
+        TAG_MOVED_TEXTURE,
+        &[RankRule::TextureShare],
+    );
+    assert_query_run(&sample, SAMPLE_QUERY_RHO, TAG_RHO, &median_pair);
+    assert_query_run(&sample, SAMPLE_QUERY_QUARTER, TAG_QUARTER, &median_pair);
+    assert_query_run(&sample, SAMPLE_QUERY_ACCEPTED, TAG_ACCEPTED, &[RankRule::First]);
+}
+
 #[test]
 fn a_reading_survives_its_words() {
     let sample = TemporalNoiseSample {
-        sigma: [0.01, 0.02, 0.0],
-        sigma_low: [0.005, 0.015, 0.0],
+        sigma: [0.01, 0.02],
+        sigma_low: [0.005, 0.015],
         rho: 0.3,
         static_fraction: 0.75,
     };
@@ -269,7 +355,7 @@ fn a_reading_survives_its_words() {
         sigma_quarter_median: 0.012,
     };
     let record = ReadingRecord {
-        immerkaer_low: [0.004, 0.003, 0.0],
+        immerkaer_low: [0.004, 0.003],
         sample: Some(sample),
         accepted: 1234,
         curve: Some(curve),
@@ -498,10 +584,10 @@ fn stale_tags_never_join_a_set() {
     let sample = gpu.sample.expect("the luma state has a sample");
     let immerkaer_second = gpu.immerkaer_low[1];
     let sigma_second = sample.sigma[1];
-    let sigma_low_third = sample.sigma_low[2];
+    let sigma_low_second = sample.sigma_low[1];
     assert_eq!(immerkaer_second, 0.0);
     assert_eq!(sigma_second, 0.0);
-    assert_eq!(sigma_low_third, 0.0);
+    assert_eq!(sigma_low_second, 0.0);
 }
 
 #[test]

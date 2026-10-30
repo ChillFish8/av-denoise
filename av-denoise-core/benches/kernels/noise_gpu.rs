@@ -1,7 +1,6 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use av_denoise_core::bench_api::MAX_GRID_1D;
 use av_denoise_core::bench_api::noise_kernels::{noise_select_histogram, noise_select_resolve};
 use av_denoise_core::bench_api::noise_reading::{NoiseReading, ReadingMap, ReadingOptions, ReadingStage};
 use av_denoise_core::bench_api::noise_select::{
@@ -19,6 +18,15 @@ use av_denoise_core::bench_api::noise_select::{
     resolve_cube_threads,
     state_len,
     tag_table,
+};
+use av_denoise_core::bench_api::{
+    MAX_GRID_1D,
+    NOISE_CHANNELS,
+    SAMPLE_RUN_QUARTERS,
+    SAMPLE_RUN_RHO,
+    TAG_QUARTER,
+    TAG_RHO,
+    TEMPORAL_QUARTERS,
 };
 use cubecl::benchmark::{Benchmark, ProfileDuration};
 use cubecl::prelude::*;
@@ -171,7 +179,8 @@ fn sigma_like(index: u32) -> f32 {
 
 /// The luma sample batch of each accepted block's sigma, rho and four quarter sigmas.
 fn luma_sample() -> BatchData {
-    let lanes = (8 * BLOCKS) as usize;
+    let quarter_base = (SAMPLE_RUN_QUARTERS * BLOCKS) as usize;
+    let lanes = quarter_base + (TEMPORAL_QUARTERS * BLOCKS) as usize;
     let mut values = vec![0.0f32; lanes];
     let mut tags = vec![UNTAGGED; lanes];
 
@@ -185,26 +194,27 @@ fn luma_sample() -> BatchData {
         values[sigma_lane] = sigma_like(block);
         tags[sigma_lane] = 0;
 
-        let rho_lane = (3 * BLOCKS + block) as usize;
+        let rho_lane = (SAMPLE_RUN_RHO * BLOCKS + block) as usize;
         let rho_unit = hashed_unit(block + BLOCKS);
         values[rho_lane] = 0.6 * rho_unit;
-        tags[rho_lane] = 3;
+        tags[rho_lane] = TAG_RHO;
 
-        for quarter in 0..4 {
-            let quarter_lane = (4 * BLOCKS + 4 * block + quarter) as usize;
-            values[quarter_lane] = sigma_like(4 * block + quarter + 2 * BLOCKS);
-            tags[quarter_lane] = 4;
+        for quarter in 0..TEMPORAL_QUARTERS {
+            let quarter_index = TEMPORAL_QUARTERS * block + quarter;
+            let quarter_lane = quarter_base + quarter_index as usize;
+            values[quarter_lane] = sigma_like(quarter_index + 2 * BLOCKS);
+            tags[quarter_lane] = TAG_QUARTER;
         }
     }
 
-    let mut queries = queries_for(0..3, &PERCENTILE_RULES);
-    let median_queries = queries_for(3..5, &MEDIAN_RULES);
+    let mut queries = queries_for(0..NOISE_CHANNELS, &PERCENTILE_RULES);
+    let median_queries = queries_for(TAG_RHO..TAG_QUARTER + 1, &MEDIAN_RULES);
     queries.extend(median_queries);
 
     BatchData {
         values,
         tags,
-        tag_count: 5,
+        tag_count: TAG_QUARTER + 1,
         queries,
     }
 }

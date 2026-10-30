@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use crate::noise::reading::READING_WORDS;
-use crate::noise::spatial::IMMERKAER_LANES;
+use crate::noise::spatial::RESULTS_PER_SLOT;
 
 /// Copies ring slot `slot`'s reading, Immerkær abs sums and, with a map, its map into history slot
 /// `history_slot`, in one launch.
@@ -27,6 +27,7 @@ pub fn noise_record(
     let stride = CUBE_COUNT_X * CUBE_DIM_X;
     let mut index = CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X;
     let words = comptime!(READING_WORDS.max(map_len));
+    let results_per_slot = comptime!(RESULTS_PER_SLOT as u32);
 
     while index < words {
         if index < READING_WORDS {
@@ -35,9 +36,9 @@ pub fn noise_record(
             records[target as usize] = readings[source as usize];
         }
 
-        if index < IMMERKAER_LANES {
-            let source = slot * IMMERKAER_LANES + index;
-            let target = history_slot * IMMERKAER_LANES + index;
+        if index < results_per_slot {
+            let source = slot * results_per_slot + index;
+            let target = history_slot * results_per_slot + index;
             history_results[target as usize] = results[source as usize];
         }
 

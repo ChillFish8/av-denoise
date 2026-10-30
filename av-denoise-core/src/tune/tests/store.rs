@@ -533,6 +533,7 @@ fn a_version_two_store_is_ignored() {
     let current = format!("\"format_version\": {FORMAT_VERSION}");
     let version_two = text.replace(&current, "\"format_version\": 2");
     let old_key = version_two.replace("|pr=2", "|stored=2|pr=2");
+    assert!(old_key.contains("stored=2"));
     std::fs::write(&path, old_key).unwrap();
 
     let loaded = store.load(&device);

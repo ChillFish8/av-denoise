@@ -15,7 +15,15 @@ use av_denoise_core::bench_api::collab::kernels::aggregate::{
 use av_denoise_core::bench_api::collab::kernels::fused::{CollabVariant, collab_fused};
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::bench_api::collab::{PATCH_SIZE, grid_frames, supports_f16_search};
-use av_denoise_core::bench_api::{BLOCK_X, BLOCK_Y, DERIVED_WORDS, DerivedValues, Device, NOISE_CURVE_BINS};
+use av_denoise_core::bench_api::{
+    BLOCK_X,
+    BLOCK_Y,
+    DERIVED_WORDS,
+    DerivedValues,
+    Device,
+    NOISE_CHANNELS,
+    NOISE_CURVE_BINS,
+};
 use av_denoise_core::testing;
 use clap::Parser;
 use cubecl::benchmark::{Benchmark, BenchmarkComputations, TimingMethod};
@@ -177,7 +185,7 @@ impl Rig {
         let output = client.empty(frame_len * size_of::<f32>());
         let group_weight = client.empty(refs * size_of::<f32>());
         let profile_host = dct_noise_profile(0.0);
-        let mut sigma = [0.0f32; 3];
+        let mut sigma = [0.0f32; NOISE_CHANNELS as usize];
         sigma[..geometry.channels as usize].fill(SIGMA);
         let group_weight_scale = weight_scale(SIGMA, &profile_host);
         let derived = DerivedValues {

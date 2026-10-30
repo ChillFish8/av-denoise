@@ -11,6 +11,7 @@ use crate::nlmeans::*;
 use crate::noise::tests::fold_reference::relative_gap;
 use crate::noise::{
     DerivedValues,
+    NOISE_CHANNELS,
     NoiseConsumer,
     NoiseSnapshot,
     STRENGTH_MAP_OFF,
@@ -97,7 +98,11 @@ fn nl4d_params(channels: ChannelMode) -> Nl4dParams {
 }
 
 /// The host formulas' derived values for `median` and `low` on `front`.
-fn host_formulas(front: &NlmDenoiser, median: [f32; 3], low: [f32; 3]) -> DerivedValues {
+fn host_formulas(
+    front: &NlmDenoiser,
+    median: [f32; NOISE_CHANNELS as usize],
+    low: [f32; NOISE_CHANNELS as usize],
+) -> DerivedValues {
     let params = &front.params;
     let count = params.channels.count() as usize;
     let effective_sigma = sigma_eff(&median[..count], params.channels);
@@ -174,11 +179,7 @@ fn coefficient_cases() -> Vec<NlmParams> {
 #[test]
 fn the_coefficients_reproduce_the_host_formulas() {
     let client = make_client();
-    let triples = [
-        [0.01, 0.02, 0.03],
-        [4.0 / 255.0, 2.5 / 255.0, 3.1 / 255.0],
-        [0.2, 0.15, 0.1],
-    ];
+    let medians = [[0.01, 0.02], [4.0 / 255.0, 2.5 / 255.0], [0.2, 0.15]];
     let mut checked = 0;
 
     for params in coefficient_cases() {
@@ -188,7 +189,7 @@ fn the_coefficients_reproduce_the_host_formulas() {
         let coefficients = noise.settings().fold.coefficients;
         let count = params.channels.count() as usize;
 
-        for median in triples {
+        for median in medians {
             let low = median.map(|sigma| 0.8 * sigma);
             let snapshot = NoiseSnapshot {
                 median: Some(median),
@@ -232,7 +233,7 @@ fn the_coefficients_reproduce_the_host_formulas() {
         }
     }
 
-    assert_eq!(checked, 96, "every configuration and triple is checked");
+    assert_eq!(checked, 96, "every configuration and median is checked");
 }
 
 /// Reads back the derived values the front's kernels bind.
@@ -393,7 +394,7 @@ fn pinned_formulas(front: &NlmDenoiser, sigma: f32) -> DerivedValues {
     let consumer = front.noise_settings_for_test().fold.consumer;
     let weight = weight_scale_with_g_max(sigma, consumer.weight_g_max);
     let count = params.channels.count() as usize;
-    let sigmas = [sigma; 3];
+    let sigmas = [sigma; NOISE_CHANNELS as usize];
     let h2_inv_norm = params.h2_inv_norm_with(Some(sigma));
     let input_noise_offset = params.noise_offset_with(Some(&sigmas[..count]));
 

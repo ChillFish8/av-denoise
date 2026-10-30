@@ -11,7 +11,14 @@ use super::kernels::noise_window_fold;
 use super::reading::READING_WORDS;
 use super::spatial::{RESULTS_PER_SLOT, immerkaer_sigma_scale};
 use super::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind, quarter_count};
-use super::{NOISE_BLOCK_1D, NOISE_CURVE_BINS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
+use super::{
+    NOISE_BLOCK_1D,
+    NOISE_CHANNELS,
+    NOISE_CURVE_BINS,
+    STRENGTH_MAP_ALL,
+    STRENGTH_MAP_LUMA,
+    STRENGTH_MAP_OFF,
+};
 use crate::engine::MAX_GRID_1D;
 use crate::tune::gpu::bind;
 
@@ -40,24 +47,26 @@ pub(crate) const FOLD_SEGMENT_RECIPROCALS: u32 = 14;
 /// The `f32` words of the fold settings buffer.
 pub(crate) const FOLD_WORDS: u32 = 17;
 
+/// The words of one chain, its valid flag then one sigma per channel.
+pub(crate) const STATE_CHAIN_WORDS: u32 = 1 + NOISE_CHANNELS;
 /// The median chain, which drives the strength.
 pub(crate) const STATE_MEDIAN: u32 = 0;
 /// The low chain, which drives the noise offsets.
-pub(crate) const STATE_LOW: u32 = 4;
+pub(crate) const STATE_LOW: u32 = STATE_MEDIAN + STATE_CHAIN_WORDS;
 /// The low chain without the correlation boost.
-pub(crate) const STATE_LOW_UNBOOSTED: u32 = 8;
+pub(crate) const STATE_LOW_UNBOOSTED: u32 = STATE_LOW + STATE_CHAIN_WORDS;
 /// The temporal median alone, over the frames with a sample.
-pub(crate) const STATE_TEMPORAL_ONLY: u32 = 12;
+pub(crate) const STATE_TEMPORAL_ONLY: u32 = STATE_LOW_UNBOOSTED + STATE_CHAIN_WORDS;
 /// 1.0 when a frame of the window has a sample, which sets the correlation.
-pub(crate) const STATE_RHO_VALID: u32 = 16;
-pub(crate) const STATE_RHO: u32 = 17;
+pub(crate) const STATE_RHO_VALID: u32 = STATE_TEMPORAL_ONLY + STATE_CHAIN_WORDS;
+pub(crate) const STATE_RHO: u32 = STATE_RHO_VALID + 1;
 /// 1.0 while the state holds a curve.
-pub(crate) const STATE_CURVE_VALID: u32 = 18;
-pub(crate) const STATE_QUARTER_MEDIAN: u32 = 19;
+pub(crate) const STATE_CURVE_VALID: u32 = STATE_RHO + 1;
+pub(crate) const STATE_QUARTER_MEDIAN: u32 = STATE_CURVE_VALID + 1;
 /// 1.0 while the state holds quarter classes, which it does exactly when it holds a curve.
-pub(crate) const STATE_CLASSES_PRESENT: u32 = 20;
+pub(crate) const STATE_CLASSES_PRESENT: u32 = STATE_QUARTER_MEDIAN + 1;
 /// The current curve's ratio per luma bin, 16 words.
-pub(crate) const STATE_RATIOS: u32 = 21;
+pub(crate) const STATE_RATIOS: u32 = STATE_CLASSES_PRESENT + 1;
 /// The `f32` words of the stream state.
 pub(crate) const STATE_WORDS: u32 = STATE_RATIOS + NOISE_CURVE_BINS as u32;
 

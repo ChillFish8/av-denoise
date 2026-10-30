@@ -1,3 +1,4 @@
+use crate::noise::NOISE_CHANNELS;
 use crate::noise::spatial::partials_len;
 use crate::noise::temporal::{
     BLOCK_MOVED_LANE,
@@ -35,7 +36,7 @@ pub(crate) struct QuarterSpec {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct BlockSpec {
     pub mean: f32,
-    pub sigma: [f32; 3],
+    pub sigma: [f32; NOISE_CHANNELS as usize],
     pub rho: f32,
     pub texture: f32,
     pub moved: bool,
@@ -47,7 +48,7 @@ impl BlockSpec {
     pub(crate) fn uniform(mean: f32, sigma: f32, rho: f32) -> Self {
         Self {
             mean,
-            sigma: [sigma; 3],
+            sigma: [sigma; NOISE_CHANNELS as usize],
             rho,
             texture: 0.0,
             moved: false,
@@ -156,7 +157,7 @@ pub(crate) fn static_block(seed: u32, index: u32) -> BlockSpec {
     let mean = (mean_unit - 0.5) * STATIC_GATE;
     let rho = 0.1 + 0.4 * rho_unit;
 
-    let mut sigma = [0.0f32; 3];
+    let mut sigma = [0.0f32; NOISE_CHANNELS as usize];
     for (channel, channel_sigma) in sigma.iter_mut().enumerate() {
         let unit = hashed_unit(seed + channel as u32, 4 * index + 2);
         *channel_sigma = (2.0 + 2.0 * unit) / 255.0;

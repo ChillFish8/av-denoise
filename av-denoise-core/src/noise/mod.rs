@@ -45,6 +45,7 @@ pub(crate) use self::derived::{
 };
 pub(crate) use self::fold::{FoldSettings, NoiseSettings};
 pub(crate) use self::history::{NOISE_WINDOW_LEN, NOISE_WINDOW_RADIUS, WindowBounds};
+pub(crate) use self::reading::{TAG_QUARTER, TAG_RHO};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::snapshot::NoiseSnapshot;
 pub(crate) use self::spatial::IMMERKAER_LANES;
@@ -56,6 +57,8 @@ pub(crate) use self::state::{
     NoiseShape,
     NoiseState,
     ReadingSettings,
+    SAMPLE_RUN_QUARTERS,
+    SAMPLE_RUN_RHO,
     StrengthMapKind,
     reading_buffer_sizes,
 };
@@ -98,6 +101,9 @@ pub(crate) use self::temporal::{
 };
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::temporal::{temporal_noise_reading, temporal_stats_buf_bytes};
+
+/// The most channels a noise reading holds, which sizes every per-channel slot.
+pub(crate) const NOISE_CHANNELS: u32 = 2;
 
 /// Cube X dimension for the Immerkær noise partials kernel.
 pub(crate) const IMMERKAER_BLOCK_X: u32 = 32;

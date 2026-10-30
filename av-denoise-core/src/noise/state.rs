@@ -8,7 +8,6 @@ use cubecl::server::Handle;
 
 #[cfg(test)]
 pub(crate) use self::tests::SlotStats;
-use super::NOISE_BLOCK_1D;
 use super::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS};
 use super::derived::DerivedValues;
 use super::fold::{FoldSettings, NoiseSettings, OffsetTables, STATE_WORDS, fold_words};
@@ -26,7 +25,13 @@ use super::reading::{
 use super::select::{SelectBatch, histogram_len};
 use super::spatial::{IMMERKAER_LANES, RESULTS_PER_SLOT, noise_partials_slot_stride_bytes, partials_len};
 use super::strength_map::{QuarterSettings, StrengthMapParams};
-use super::temporal::{min_static_blocks, temporal_stats_blocks, temporal_stats_buf_bytes};
+use super::temporal::{
+    TEMPORAL_QUARTERS,
+    min_static_blocks,
+    temporal_stats_blocks,
+    temporal_stats_buf_bytes,
+};
+use super::{NOISE_BLOCK_1D, NOISE_CHANNELS};
 use crate::collab::geometry::strength_map_dims;
 use crate::engine::BufferSize;
 use crate::engine::align::StorageAlign;
@@ -58,23 +63,31 @@ pub(crate) enum StrengthMapKind {
     },
 }
 
-/// The `f32` values block derive keeps per block, starting with the three channel sigmas.
-pub(crate) const BLOCK_FIELDS: u32 = 8;
-/// The sample batch's lanes per block, three channel sigmas, the correlation, four quarter sigmas
-/// and the accepted flag.
-pub(crate) const SAMPLE_LANES_PER_BLOCK: u32 = 9;
-/// The curve batch's lanes per block, one per static quarter.
-pub(crate) const CURVE_LANES_PER_BLOCK: u32 = 4;
-/// The block value of channel 0's mean residual.
-pub(crate) const BLOCK_VALUE_MEAN0: u32 = 3;
+/// The block value of channel 0's mean residual, after one sigma per channel.
+pub(crate) const BLOCK_VALUE_MEAN0: u32 = NOISE_CHANNELS;
 /// The block value of channel 0's mean lag-1 product.
-pub(crate) const BLOCK_VALUE_MEAN_LAG: u32 = 4;
+pub(crate) const BLOCK_VALUE_MEAN_LAG: u32 = BLOCK_VALUE_MEAN0 + 1;
 /// The block value of channel 0's residual variance.
-pub(crate) const BLOCK_VALUE_VAR0: u32 = 5;
+pub(crate) const BLOCK_VALUE_VAR0: u32 = BLOCK_VALUE_MEAN_LAG + 1;
 /// The block value of the pixel pair count.
-pub(crate) const BLOCK_VALUE_PAIRS: u32 = 6;
-/// The unused last block value.
-pub(crate) const BLOCK_VALUE_SPARE: u32 = 7;
+pub(crate) const BLOCK_VALUE_PAIRS: u32 = BLOCK_VALUE_VAR0 + 1;
+/// The `f32` values block derive keeps per block.
+pub(crate) const BLOCK_FIELDS: u32 = BLOCK_VALUE_PAIRS + 1;
+/// The sample batch's run of correlation lanes, after one run of sigma lanes per channel.
+///
+/// Each run holds one lane per block, and run `r` starts at lane `r * blocks`.
+pub(crate) const SAMPLE_RUN_RHO: u32 = NOISE_CHANNELS;
+/// The sample batch's first run of quarter sigma lanes.
+///
+/// The quarters fill [TEMPORAL_QUARTERS](crate::noise::temporal::TEMPORAL_QUARTERS) runs, with each
+/// block's quarters side by side.
+pub(crate) const SAMPLE_RUN_QUARTERS: u32 = SAMPLE_RUN_RHO + 1;
+/// The sample batch's run of accepted flag lanes.
+pub(crate) const SAMPLE_RUN_ACCEPTED: u32 = SAMPLE_RUN_QUARTERS + TEMPORAL_QUARTERS;
+/// The sample batch's lanes per block.
+pub(crate) const SAMPLE_LANES_PER_BLOCK: u32 = SAMPLE_RUN_ACCEPTED + 1;
+/// The curve batch's lanes per block, one per static quarter.
+pub(crate) const CURVE_LANES_PER_BLOCK: u32 = TEMPORAL_QUARTERS;
 /// The block flag of a block whose mean residual passes the static gate.
 pub(crate) const BLOCK_CANDIDATE: u32 = 1;
 /// The block flag of a block accepted as static noise.
@@ -484,12 +497,13 @@ pub(super) fn quarter_grid(shape: NoiseShape) -> u32 {
     quarters.div_ceil(NOISE_BLOCK_1D)
 }
 
-/// The immerkaer batch's lanes, `3 * cubes` plus, with temporal stats, two per block.
+/// The immerkaer batch's lanes, one per cube for each channel plus, with temporal stats, two per
+/// block.
 fn immerkaer_lanes(shape: NoiseShape) -> u32 {
     let cubes = cube_count(shape);
     let block_lanes = if shape.temporal { 2 * block_count(shape) } else { 0 };
 
-    3 * cubes + block_lanes
+    NOISE_CHANNELS * cubes + block_lanes
 }
 
 fn immerkaer_tag_count(shape: NoiseShape) -> u32 {

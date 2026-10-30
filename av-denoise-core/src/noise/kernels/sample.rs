@@ -7,6 +7,7 @@ use crate::noise::curve::{MIN_POPULATED_BINS, MIN_QUARTERS_PER_BIN, QUARTER_STAT
 use crate::noise::reading::{
     CURVE_QUERIES,
     CURVE_TAGS,
+    IMMERKAER_CHANNEL_QUERIES,
     IMMERKAER_QUERY_EXCLUDED,
     IMMERKAER_QUERY_REFERENCE,
     IMMERKAER_QUERY_TEXTURE,
@@ -22,6 +23,7 @@ use crate::noise::reading::{
     READING_SIGMA_LOW,
     READING_STATIC_FRACTION,
     READING_WORDS,
+    SAMPLE_CHANNEL_QUERIES,
     SAMPLE_QUERIES,
     SAMPLE_QUERY_ACCEPTED,
     SAMPLE_QUERY_QUARTER,
@@ -43,8 +45,10 @@ use crate::noise::state::{
     BLOCK_VALUE_MEAN_LAG,
     BLOCK_VALUE_MEAN0,
     BLOCK_VALUE_PAIRS,
-    BLOCK_VALUE_SPARE,
     BLOCK_VALUE_VAR0,
+    SAMPLE_RUN_ACCEPTED,
+    SAMPLE_RUN_QUARTERS,
+    SAMPLE_RUN_RHO,
 };
 use crate::noise::temporal::{
     BLOCK_MOVED_LANE,
@@ -61,7 +65,7 @@ use crate::noise::temporal::{
     TEMPORAL_QUARTERS,
     temporal_stats_record_len,
 };
-use crate::noise::{IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y};
+use crate::noise::{IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y, NOISE_CHANNELS};
 
 const MIN_BIN_QUARTERS: u32 = MIN_QUARTERS_PER_BIN as u32;
 const MIN_CURVE_BINS: u32 = MIN_POPULATED_BINS as u32;
@@ -114,14 +118,14 @@ pub(crate) fn median_from_pair(low: f32, high: f32) -> f32 {
 
 /// Writes each Immerkær cube's sigmas and each block's gate, values and reference lane.
 ///
-/// Thread `i` writes cube `i`'s three channel lanes at `c * cubes + i`, each tagged with its channel,
-/// or `UNTAGGED` past the active channels or for a cube with no interior. With `temporal`, it also
+/// Thread `i` writes cube `i`'s channel lanes at `c * cubes + i`, each tagged with its channel, or
+/// `UNTAGGED` past the active channels or for a cube with no interior. With `temporal`, it also
 /// derives block `i`'s per-channel sigma, mean residual, lag-1 mean, variance and pair count, flags
 /// it a candidate when its mean residual passes the static gate, and writes its channel-0 sigma at
-/// `3 * cubes + i`. A candidate above the measurable-noise gate joins the reference set and one at
-/// or below it the excluded set. Its texture is written at `3 * cubes + blocks + i`, and joins the
-/// moved texture set when the candidate is above the gate and moved. Without `temporal`, `records`,
-/// `block_values` and `block_flags` are never touched.
+/// `n * cubes + i`, for `n` channel lanes per cube. A candidate above the measurable-noise gate
+/// joins the reference set and one at or below it the excluded set. Its texture is written at
+/// `n * cubes + blocks + i`, and joins the moved texture set when the candidate is above the gate
+/// and moved. Without `temporal`, `records`, `block_values` and `block_flags` are never touched.
 ///
 /// The grid then clears the histogram and state of the immerkaer batch and, with `temporal` and
 /// `curve`, of the sample and curve batches, so each reading's passes start from zero. Bindings of a
@@ -153,6 +157,10 @@ pub fn noise_block_derive(
     #[comptime] immerkaer_tag_count: u32,
     #[comptime] immerkaer_query_count: u32,
 ) {
+    comptime! {
+        assert!(channels <= NOISE_CHANNELS, "noise_block_derive needs a slot per channel");
+    }
+
     let cubes_x = comptime!(width.div_ceil(IMMERKAER_BLOCK_X));
     let cubes = comptime!(cubes_x * height.div_ceil(IMMERKAER_BLOCK_Y));
     let blocks_x = comptime!(width.div_ceil(TEMPORAL_NOISE_BLOCK));
@@ -182,12 +190,8 @@ pub fn noise_block_derive(
         let divisor = 6.0f32 * area;
 
         #[unroll]
-        for channel in 0..3u32 {
-            let mut sum = 0.0f32;
-            if comptime!(channel < IMMERKAER_LANES) {
-                sum = partials[(index * IMMERKAER_LANES + channel) as usize];
-            }
-
+        for channel in 0..NOISE_CHANNELS {
+            let sum = partials[(index * IMMERKAER_LANES + channel) as usize];
             let sigma = immerkaer_scale * sum / divisor;
             let active = interior && comptime!(channel < channels);
             let lane = channel * cubes + index;
@@ -213,7 +217,7 @@ pub fn noise_block_derive(
         let mut sigma0 = 0.0f32;
 
         #[unroll]
-        for channel in 0..3u32 {
+        for channel in 0..NOISE_CHANNELS {
             if comptime!(channel < channels) {
                 let sum_d = records[(base + channel) as usize];
                 let sum_d2 = records[(base + channels + channel) as usize];
@@ -239,12 +243,11 @@ pub fn noise_block_derive(
         block_values[(value_base + BLOCK_VALUE_MEAN_LAG) as usize] = mean_lag;
         block_values[(value_base + BLOCK_VALUE_VAR0) as usize] = var0;
         block_values[(value_base + BLOCK_VALUE_PAIRS) as usize] = pairs;
-        block_values[(value_base + BLOCK_VALUE_SPARE) as usize] = 0.0f32;
 
         let candidate = f32::abs(mean0) < STATIC_GATE;
         let measurable = sigma0 > RHO_SIGMA_GATE;
         let set_tag = select(measurable, TAG_REFERENCE, TAG_EXCLUDED);
-        let lane = 3 * cubes + index;
+        let lane = NOISE_CHANNELS * cubes + index;
 
         block_flags[index as usize] = select(candidate, BLOCK_CANDIDATE, 0u32);
         keys[lane as usize] = order_key(sigma0);
@@ -253,7 +256,7 @@ pub fn noise_block_derive(
         let texture = records[(base + texture_offset) as usize];
         let moved = records[(base + moved_offset) as usize] != 0.0f32;
         let moved_measurable = candidate && measurable && moved;
-        let texture_lane = 3 * cubes + blocks + index;
+        let texture_lane = NOISE_CHANNELS * cubes + blocks + index;
 
         keys[texture_lane as usize] = order_key(texture);
         tags[texture_lane as usize] = select(moved_measurable, TAG_MOVED_TEXTURE, UNTAGGED);
@@ -397,14 +400,14 @@ pub fn noise_block_accept(
         let moved = records[(base + moved_offset) as usize] != 0.0f32;
         let textured = has_threshold && texture > texture_threshold;
         let sigma_kept = accepted && !(moved && textured);
-        let accepted_lane = 8 * blocks + index;
+        let accepted_lane = SAMPLE_RUN_ACCEPTED * blocks + index;
 
         block_flags[index as usize] = flags | select(accepted, BLOCK_ACCEPTED, 0u32);
         keys[accepted_lane as usize] = 0u32;
         tags[accepted_lane as usize] = select(accepted, TAG_ACCEPTED, UNTAGGED);
 
         #[unroll]
-        for channel in 0..3u32 {
+        for channel in 0..NOISE_CHANNELS {
             let sigma = block_values[(value_base + channel) as usize];
             let active = sigma_kept && comptime!(channel < channels);
             let lane = channel * blocks + index;
@@ -421,7 +424,7 @@ pub fn noise_block_accept(
         let variance = select(has_rho, var0, 1.0f32);
         let rho = (mean_lag - mean0 * mean0) / variance;
         let clamped_rho = f32::clamp(rho, 0.0f32, 1.0f32);
-        let rho_lane = 3 * blocks + index;
+        let rho_lane = SAMPLE_RUN_RHO * blocks + index;
 
         keys[rho_lane as usize] = order_key(clamped_rho);
         tags[rho_lane as usize] = select(has_rho, TAG_RHO, UNTAGGED);
@@ -436,7 +439,7 @@ pub fn noise_block_accept(
             let quarter_height = u32::min(inside_y, TEMPORAL_QUARTER_SIZE);
             let pixels = f32::cast_from(quarter_width * quarter_height);
             let start = base + quarters_base + comptime!(quarter * TEMPORAL_QUARTER_FIELDS);
-            let lane = 4 * blocks + 4 * index + quarter;
+            let lane = SAMPLE_RUN_QUARTERS * blocks + TEMPORAL_QUARTERS * index + quarter;
 
             if comptime!(luma_fields) {
                 let (passes, sigma) = static_quarter_sigma(records, start, pixels);
@@ -582,9 +585,10 @@ pub fn noise_sample_finish(
 
     if thread == 0 {
         #[unroll]
-        for channel in 0..3u32 {
-            let (low, count) = select_result(&immerkaer_out, comptime!(2 * channel));
-            let (high, _) = select_result(&immerkaer_out, comptime!(2 * channel + 1));
+        for channel in 0..NOISE_CHANNELS {
+            let first = comptime!(IMMERKAER_CHANNEL_QUERIES * channel);
+            let (low, count) = select_result(&immerkaer_out, first);
+            let (high, _) = select_result(&immerkaer_out, comptime!(first + 1));
             let quartile = quartile_from_pair(low, high, count);
 
             readings[(base + READING_IMMERKAER_LOW + channel) as usize] = quartile;
@@ -594,8 +598,8 @@ pub fn noise_sample_finish(
         let kept = select(valid, 1.0f32, 0.0f32);
 
         #[unroll]
-        for channel in 0..3u32 {
-            let first = comptime!(4 * channel);
+        for channel in 0..NOISE_CHANNELS {
+            let first = comptime!(SAMPLE_CHANNEL_QUERIES * channel);
             let (median_low, _) = select_result(&sample_out, first);
             let (median_high, _) = select_result(&sample_out, comptime!(first + 1));
             let (quartile_low, count) = select_result(&sample_out, comptime!(first + 2));

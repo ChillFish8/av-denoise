@@ -7,6 +7,7 @@ use super::y4m::read_y4m;
 use crate::collab::geometry::strength_map_dims;
 use crate::engine::align::StorageAlign;
 use crate::nl4d::PsyParams;
+use crate::noise::NOISE_CHANNELS;
 use crate::noise::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS, curve_bin_counts};
 use crate::noise::derived::DerivedValues;
 use crate::noise::fold::NoiseSettings;
@@ -144,7 +145,7 @@ pub(super) struct GpuSlot {
 pub(super) struct HostSlot {
     /// The Immerkær abs sums both sides fold.
     pub(super) sums: [f32; RESULTS_PER_SLOT],
-    pub(super) immerkaer_low: [f32; 3],
+    pub(super) immerkaer_low: [f32; NOISE_CHANNELS as usize],
     pub(super) reading: TemporalNoiseReading,
     accepted: Vec<bool>,
     /// The bin counts, present when the curve is built and the slot has a sample.

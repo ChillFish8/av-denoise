@@ -3,6 +3,7 @@ use cubecl::prelude::*;
 use super::helpers::*;
 use crate::bench_api::{GpuOutput, HostIo};
 use crate::nlmeans::*;
+use crate::noise::NOISE_CHANNELS;
 
 fn temporal_params(radius: u32) -> NlmParams {
     NlmParams {
@@ -263,13 +264,13 @@ fn current_sigmas_reads_zero_on_the_fast_path() {
 
     let params = temporal_params(0);
     let mut denoiser = NlmDenoiser::new(&client, params, width, height);
-    assert_eq!(denoiser.current_sigmas(), [0.0, 0.0, 0.0]);
+    assert_eq!(denoiser.current_sigmas(), [0.0, 0.0]);
 
     denoiser.push_frame(&frame);
     let _ = denoiser.denoise().expect("denoise failed");
     assert_eq!(
         denoiser.current_sigmas(),
-        [0.0, 0.0, 0.0],
+        [0.0, 0.0],
         "no HQ estimator runs on the fast path, so the sigma stays zero"
     );
 }
@@ -294,12 +295,14 @@ fn current_sigmas_broadcasts_a_pinned_sigma_override() {
     };
     let mut denoiser = NlmDenoiser::new(&client, params, width, height);
 
+    let pinned = [6.0 / 255.0; NOISE_CHANNELS as usize];
+
     // A pinned sigma reads back immediately, before any frame is pushed.
-    assert_eq!(denoiser.current_sigmas(), [6.0 / 255.0; 3]);
+    assert_eq!(denoiser.current_sigmas(), pinned);
 
     denoiser.push_frame(&frame);
     let _ = denoiser.denoise().expect("denoise failed");
-    assert_eq!(denoiser.current_sigmas(), [6.0 / 255.0; 3]);
+    assert_eq!(denoiser.current_sigmas(), pinned);
 }
 
 #[test]

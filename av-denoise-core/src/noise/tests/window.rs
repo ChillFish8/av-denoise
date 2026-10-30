@@ -14,6 +14,7 @@ use super::fold_reference::{
 use super::records::hashed_unit;
 use crate::collab::geometry::strength_map_dims;
 use crate::engine::align::StorageAlign;
+use crate::noise::NOISE_CHANNELS;
 use crate::noise::correlation::build_spatial_offset_lut;
 use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
 use crate::noise::derived::DerivedValues;
@@ -85,10 +86,10 @@ fn abs_sum_for(sigma: f32) -> f32 {
 
 /// A record with hashed values on the active channels and, when asked, a sample and a curve.
 fn hashed_record(seed: u32, channels: u32, sampled: bool, curved: bool) -> HostRecord {
-    let mut immerkaer = [0.0f32; 3];
-    let mut immerkaer_low = [0.0f32; 3];
-    let mut sigma = [0.0f32; 3];
-    let mut sigma_low = [0.0f32; 3];
+    let mut immerkaer = [0.0f32; NOISE_CHANNELS as usize];
+    let mut immerkaer_low = [0.0f32; NOISE_CHANNELS as usize];
+    let mut sigma = [0.0f32; NOISE_CHANNELS as usize];
+    let mut sigma_low = [0.0f32; NOISE_CHANNELS as usize];
     for channel in 0..channels as usize {
         let index = channel as u32;
         immerkaer[channel] = (1.0 + 4.0 * hashed_unit(seed, 10 + index)) / 255.0;
@@ -143,8 +144,8 @@ fn hashed_records(count: u32, channels: u32, seed: u32) -> Vec<HostRecord> {
 /// correlation 0.2.
 fn level_record(level: f32) -> HostRecord {
     let sample = TemporalNoiseSample {
-        sigma: [level, 0.0, 0.0],
-        sigma_low: [level * 0.8, 0.0, 0.0],
+        sigma: [level, 0.0],
+        sigma_low: [level * 0.8, 0.0],
         rho: 0.2,
         static_fraction: 0.5,
     };
@@ -154,7 +155,7 @@ fn level_record(level: f32) -> HostRecord {
         sigma_quarter_median: level,
     };
     let reading = ReadingRecord {
-        immerkaer_low: [level * 0.5, 0.0, 0.0],
+        immerkaer_low: [level * 0.5, 0.0],
         sample: Some(sample),
         accepted: 40,
         curve: Some(curve),
@@ -163,7 +164,7 @@ fn level_record(level: f32) -> HostRecord {
 
     HostRecord {
         reading,
-        immerkaer: [level * 0.75, 0.0, 0.0],
+        immerkaer: [level * 0.75, 0.0],
         map: vec![0.625 * codes; quarters()],
     }
 }

@@ -12,6 +12,7 @@ use super::frames::{
     synthetic_stream,
 };
 use super::y4m::read_y4m;
+use crate::noise::NOISE_CHANNELS;
 use crate::noise::fold::{FoldSettings, NoiseSettings};
 use crate::noise::history::WindowBounds;
 use crate::noise::reading::ReadingRecord;
@@ -72,7 +73,7 @@ impl FoldHarness {
         }
 
         let plane = self.readings.plane;
-        let mut immerkaer = [0.0f32; 3];
+        let mut immerkaer = [0.0f32; NOISE_CHANNELS as usize];
         for (channel, sigma) in immerkaer.iter_mut().enumerate().take(plane.channels as usize) {
             *sigma = sigma_from_abs_sum(host.sums[channel], plane.width, plane.height);
         }
