@@ -29,7 +29,7 @@ pub fn clip(kind: ClipKind, layout: FrameLayout, frame_count: usize) -> Vec<Plan
 }
 
 fn plane(kind: ClipKind, width: u32, height: u32, depth: Depth, frame: usize, channel: u32) -> Vec<u8> {
-    let max_code = depth.max_value();
+    let max_code = ((1usize << depth.bits()) - 1) as f32;
     let mut samples = Vec::with_capacity((width * height) as usize);
 
     for row in 0..height {

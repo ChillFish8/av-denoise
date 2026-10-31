@@ -20,8 +20,6 @@ use kernels::collab_fused::{CollabFusedBench, fitted_variants};
 use kernels::collab_split::{CollabSplitBench, fitted_split_kernels};
 use kernels::compilation_cache::install_bench_compilation_cache;
 use kernels::copy::CopyBench;
-use kernels::dist_2d_weight::DistWeightBench;
-use kernels::dist_2d_weight_ref::DistWeightRefBench;
 use kernels::distance::DistanceBench;
 use kernels::distance_pair::DistancePairBench;
 use kernels::distance_pair_ref::DistancePairRefBench;
@@ -106,22 +104,6 @@ fn run_all(backend: &str, client: Client) {
 
     for &(channels, channel_name) in CHANNELS {
         run(ZeroBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-        });
-    }
-
-    for &(channels, channel_name) in CHANNELS {
-        run(DistWeightBench {
-            client: client.clone(),
-            channels,
-            channel_name,
-        });
-    }
-
-    for &(channels, channel_name) in CHANNELS {
-        run(DistWeightRefBench {
             client: client.clone(),
             channels,
             channel_name,

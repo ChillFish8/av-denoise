@@ -1,6 +1,6 @@
 use av_denoise_core::{ChannelMode, DenoisingMode, NlmTuning, NlmeansOptions};
 
-use crate::host::{Algorithm, DenoiserOptions, HostDenoiser, Pending, TryWait};
+use crate::host::{Algorithm, DenoiserOptions, HostDenoiser, Pending};
 
 /// A spatial luma denoiser with small radii, since wide kernels cost codegen stack.
 fn spatial_luma(size: u32) -> HostDenoiser {
@@ -49,28 +49,4 @@ fn pending_survives_denoiser_drop() {
     for (index, &sample) in planes[0].iter().enumerate() {
         assert_eq!(sample, 128, "pixel {index}");
     }
-}
-
-/// Large enough that the GPU cannot have finished by the time the first poll runs.
-const LARGE_SIZE: u32 = 2048;
-
-#[test]
-fn dropping_a_polled_pending_settles_its_readback() {
-    let mut denoiser = spatial_luma(LARGE_SIZE);
-
-    let pending = submit(&mut denoiser, LARGE_SIZE);
-    let not_ready = match pending.try_wait().expect("poll failed") {
-        TryWait::NotReady(pending) => pending,
-        TryWait::Ready(_) => {
-            panic!("the first poll landed, so the drop path cannot be exercised at this size")
-        },
-    };
-    drop(not_ready);
-
-    let pending = submit(&mut denoiser, LARGE_SIZE);
-    let planes = pending
-        .wait()
-        .expect("a readback after a dropped polled Pending must still work");
-
-    assert_eq!(planes[0].len(), (LARGE_SIZE * LARGE_SIZE) as usize);
 }

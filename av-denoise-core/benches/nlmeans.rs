@@ -1,7 +1,7 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use av_denoise_core::bench_api::kernels::{nlm_accumulate, nlm_bilateral, nlm_dist_2d_weight, nlm_finish};
+use av_denoise_core::bench_api::kernels::{nlm_accumulate, nlm_bilateral, nlm_finish};
 use av_denoise_core::bench_api::prefilter::bilateral_radius;
 use av_denoise_core::bench_api::{
     BLOCK_X,
@@ -126,56 +126,6 @@ fn run_bench(
 
 fn div_ceil(value: u32, divisor: u32) -> u32 {
     value.div_ceil(divisor)
-}
-
-fn bench_dist_2d_weight(client: &Client, backend: &str, channels: u32, channel_name: &str) -> BenchResult {
-    let pixels = (WIDTH * HEIGHT) as usize;
-    let frame = make_synthetic_frame(WIDTH, HEIGHT, channels);
-    let frame_bytes = f32::as_bytes(&frame);
-    let input = client.create_from_slice(frame_bytes);
-    let output = client.empty(pixels * size_of::<f32>());
-
-    let channel_mode = match channels {
-        1 => ChannelMode::Luma,
-        2 => ChannelMode::Chroma,
-        other => panic!("unsupported channel count {other}"),
-    };
-    let params = NlmParams {
-        patch_radius: 4,
-        channels: channel_mode,
-        ..NlmParams::default()
-    };
-    let h2_inv_norm = params.h2_inv_norm();
-
-    let grid_x = div_ceil(WIDTH, BLOCK_X);
-    let grid_y = div_ceil(HEIGHT, BLOCK_Y);
-    let cube_count = CubeCount::new_2d(grid_x, grid_y);
-    let cube_dim = CubeDim::new_2d(BLOCK_X, BLOCK_Y);
-
-    let name = format!("dist_2d_weight_1080p_{channel_name}");
-
-    run_bench(&name, backend, client, WARMUP_KERNEL, ITERS_KERNEL, || unsafe {
-        nlm_dist_2d_weight::launch_unchecked(
-            client,
-            cube_count.clone(),
-            cube_dim,
-            channels as usize,
-            BufferArg::from_raw_parts(input.clone(), frame.len()),
-            BufferArg::from_raw_parts(output.clone(), pixels),
-            0u32,
-            0u32,
-            1i32,
-            0i32,
-            h2_inv_norm,
-            0.0f32,
-            WIDTH,
-            HEIGHT,
-            channels,
-            params.patch_radius,
-            BLOCK_X,
-            BLOCK_Y,
-        );
-    })
 }
 
 fn bench_accumulate(client: &Client, backend: &str, channels: u32, channel_name: &str) -> BenchResult {
@@ -441,13 +391,6 @@ fn run_all_benches(backend: &str, client: Client) {
         (1u32, "luma", ChannelMode::Luma),
         (2, "chroma", ChannelMode::Chroma),
     ];
-
-    for &(channels, channel_name, _) in &channel_modes {
-        let result = bench_dist_2d_weight(&client, backend, channels, channel_name);
-        result.print();
-    }
-
-    println!();
 
     for &(channels, channel_name, _) in &channel_modes {
         let result = bench_accumulate(&client, backend, channels, channel_name);

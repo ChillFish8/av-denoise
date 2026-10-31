@@ -17,7 +17,7 @@ use cubecl::server::Handle;
 pub use self::depth::{Depth, UnsupportedDepthError};
 use self::io::PlaneIo;
 pub use self::options::{Algorithm, DenoiserOptions};
-pub(crate) use self::pending::{Pending, TryWait};
+pub(crate) use self::pending::Pending;
 pub use self::timing::PlaneTiming;
 use crate::backend::accelerate::Accelerator;
 use crate::backend::{Device, DevicePlacement, build_engine};
@@ -36,7 +36,7 @@ const _: () = assert!(OUTPUT_SETS >= MAX_PENDING);
 pub enum DenoiserError {
     /// [MAX_PENDING] frames are waiting to be collected.
     ///
-    /// Call [HostDenoiser::recv] or [HostDenoiser::try_recv], then retry the same push.
+    /// Call [HostDenoiser::recv], then retry the same push.
     #[error("denoiser queue is full, collect the pending frame before pushing more")]
     QueueFull,
     /// An earlier failure means later output would not line up with its input.
@@ -73,8 +73,8 @@ impl DenoiserError {
 
 /// A stateful denoiser that cleans a stream of frames held as wire bytes.
 ///
-/// Push frames in order with [Self::push] and collect the cleaned ones with [Self::recv] or
-/// [Self::try_recv]. At the end of the stream call [Self::flush] to drain the temporal tail.
+/// Push frames in order with [Self::push] and collect the cleaned ones with [Self::recv]. At the end
+/// of the stream call [Self::flush] to drain the temporal tail.
 ///
 /// Each frame is one byte buffer per plane. Luma takes Y and chroma takes U and V. Every output
 /// frame comes back in the same layout.
@@ -116,7 +116,6 @@ pub struct HostDenoiser {
     spec: EngineSpec,
     width: u32,
     height: u32,
-    temporal_radius: u32,
     plane_count: usize,
     /// The wire byte length of one plane.
     plane_length: usize,
@@ -203,7 +202,6 @@ impl HostDenoiser {
             spec,
             width,
             height,
-            temporal_radius,
             plane_count,
             plane_length,
             device_plane_bytes,
@@ -232,18 +230,6 @@ impl HostDenoiser {
 
     pub(crate) fn spec(&self) -> EngineSpec {
         self.spec
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    pub fn temporal_radius(&self) -> u32 {
-        self.temporal_radius
     }
 
     /// How many frames behind and ahead of a target frame are needed to denoise it.
@@ -339,41 +325,6 @@ impl HostDenoiser {
         Ok(Some(planes))
     }
 
-    /// Polls the oldest frame in flight once.
-    ///
-    /// Returns `Ok(None)` both when nothing is in flight and when the readback has not landed. Only
-    /// the wgpu backends avoid blocking here.
-    ///
-    /// Once polled, a frame's readback has to finish. Dropping the denoiser or calling
-    /// [Self::reset_stream] before it lands blocks until it does.
-    pub fn try_recv(&mut self) -> Result<Option<Vec<Vec<u8>>>, DenoiserError> {
-        if self.poisoned {
-            return Err(DenoiserError::Poisoned);
-        }
-
-        let result = self.clocked(Self::try_recv_inner);
-        self.poison_on_error(result)
-    }
-
-    fn try_recv_inner(&mut self) -> Result<Option<Vec<Vec<u8>>>, DenoiserError> {
-        let Some(pending) = self.pending.pop_front() else {
-            return Ok(None);
-        };
-
-        let polled = self.output_clocked(|| pending.try_wait())?;
-
-        match polled {
-            TryWait::Ready(planes) => {
-                self.frames_emitted += 1;
-                Ok(Some(planes))
-            },
-            TryWait::NotReady(pending) => {
-                self.pending.push_front(pending);
-                Ok(None)
-            },
-        }
-    }
-
     /// Drains the frames in flight and the temporal tail, handing each frame to `sink`.
     ///
     /// The denoiser is ready for a fresh stream afterwards.
@@ -406,8 +357,7 @@ impl HostDenoiser {
 
     /// Abandons the current stream, keeping every GPU allocation, and clears any poison.
     ///
-    /// Frames in flight are dropped unread, except one [Self::try_recv] already polled, which is
-    /// settled first.
+    /// Frames in flight are dropped unread.
     pub fn reset_stream(&mut self) {
         self.pending.clear();
         self.engine.reset();

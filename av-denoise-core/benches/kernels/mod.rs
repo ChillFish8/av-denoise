@@ -6,8 +6,6 @@ pub mod collab_fused;
 pub mod collab_split;
 pub mod compilation_cache;
 pub mod copy;
-pub mod dist_2d_weight;
-pub mod dist_2d_weight_ref;
 pub mod distance;
 pub mod distance_pair;
 pub mod distance_pair_ref;

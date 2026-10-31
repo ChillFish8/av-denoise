@@ -160,8 +160,8 @@ impl Nl4dDenoiser {
         let accum_ring_len = pass.accum_ring_len;
 
         let zero_dim = 256u32;
-        // Clamped to the 65,535 workgroup limit, which a 4:4:4 4K frame or an 8K luma plane alone
-        // exceeds. `collab_zero_accum` strides, so a clamped launch still reaches every slot.
+        // Clamped to the 65,535 workgroup limit, which an 8K luma plane exceeds.
+        // `collab_zero_accum` strides, so a clamped launch still reaches every slot.
         let zero_workgroups_one_frame = (frame_len as u32).div_ceil(zero_dim).min(MAX_GRID_1D);
         let zero_grid_one_frame = CubeCount::new_1d(zero_workgroups_one_frame);
         let zero_total_threads_one_frame = zero_workgroups_one_frame * zero_dim;

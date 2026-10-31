@@ -2,8 +2,8 @@ use av_denoise_core::SampleFormat;
 
 /// Bit depth of a source's samples.
 ///
-/// Normalisation divides by [Depth::max_value], so a value in normalised units means the same thing
-/// at every depth.
+/// Normalisation divides by the largest code at this depth, so a value in normalised units means
+/// the same thing at every depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
     Eight,
@@ -44,11 +44,6 @@ impl Depth {
             Depth::Eight => 1,
             Depth::Ten | Depth::Twelve => 2,
         }
-    }
-
-    /// The largest sample value this depth can hold, which is also the normalisation divisor.
-    pub fn max_value(self) -> f32 {
-        ((1u32 << self.bits()) - 1) as f32
     }
 
     /// The sample value that means neutral chroma at this depth.
@@ -94,10 +89,6 @@ mod tests {
         assert_eq!(Depth::Eight.bytes_per_sample(), 1);
         assert_eq!(Depth::Ten.bytes_per_sample(), 2);
         assert_eq!(Depth::Twelve.bytes_per_sample(), 2);
-
-        assert_eq!(Depth::Eight.max_value(), 255.0);
-        assert_eq!(Depth::Ten.max_value(), 1023.0);
-        assert_eq!(Depth::Twelve.max_value(), 4095.0);
 
         assert_eq!(Depth::Eight.neutral_chroma(), 128);
         assert_eq!(Depth::Ten.neutral_chroma(), 512);

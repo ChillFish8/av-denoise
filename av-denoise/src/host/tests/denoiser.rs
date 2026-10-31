@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use av_denoise_core::tune::{TuningConfig, TuningMode, build_engine};
 use av_denoise_core::{
@@ -537,9 +537,6 @@ fn poisoned_denoiser_refuses_every_entry_point() {
     let received = denoiser.recv();
     assert!(matches!(received, Err(DenoiserError::Poisoned)));
 
-    let polled = denoiser.try_recv();
-    assert!(matches!(polled, Err(DenoiserError::Poisoned)));
-
     let flushed = denoiser.flush(|_| {});
     assert!(matches!(flushed, Err(DenoiserError::Poisoned)));
 
@@ -697,95 +694,6 @@ fn flush_emits_exactly_n_outputs_for_small_n() {
 }
 
 #[test]
-fn dropping_a_polled_pending_frame_does_not_poison_the_device() {
-    let create_denoiser = || {
-        let options = luma_options(DenoisingMode::Spacial);
-        create(64, 64, options).unwrap()
-    };
-    let plane = frame(64, 64);
-
-    let mut denoiser = create_denoiser();
-    denoiser.push(&[&plane]).unwrap();
-
-    // Whether the readback lands on this poll depends on the GPU, and both outcomes must survive the drop.
-    let _ = denoiser.try_recv().unwrap();
-    drop(denoiser);
-
-    // The staging pool is per device, so a fresh denoiser on the same device is handed the same buffers.
-    let mut denoiser = create_denoiser();
-    for _ in 0..4 {
-        denoiser.push(&[&plane]).unwrap();
-
-        let received = denoiser
-            .recv()
-            .expect("readback after a dropped polled frame should not fail");
-        received.expect("spatial mode emits one frame per push");
-    }
-
-    denoiser.flush(|_| {}).unwrap();
-}
-
-#[test]
-fn try_recv_observes_a_landed_readback_within_a_bounded_poll() {
-    // A deadline covers both a slow GPU and a fast CPU, where a poll count would not.
-    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-
-    let radius = 2u32;
-    let create_denoiser = || {
-        let options = luma_options(DenoisingMode::Temporal { radius });
-        create(64, 64, options).unwrap()
-    };
-
-    // `radius + 1` pushes fill the window and leave exactly one readback in flight.
-    let window: Vec<Vec<u8>> = (0..=radius as usize)
-        .map(|index| {
-            (0..64 * 64)
-                .map(|pixel| ((pixel * 7 + index * 13) % 256) as u8)
-                .collect()
-        })
-        .collect();
-
-    let mut polled = create_denoiser();
-    for plane in &window {
-        polled.push(&[plane]).unwrap();
-    }
-
-    let start = std::time::Instant::now();
-    let mut landed = None;
-    let mut polls = 0;
-    while start.elapsed() < DEADLINE {
-        polls += 1;
-
-        if let Some(planes) = polled.try_recv().unwrap() {
-            landed = Some(planes);
-            break;
-        }
-    }
-
-    let Some(landed) = landed else {
-        panic!("readback never landed within {DEADLINE:?} ({polls} polls)");
-    };
-
-    let mut blocking = create_denoiser();
-    for plane in &window {
-        blocking.push(&[plane]).unwrap();
-    }
-
-    let received = blocking.recv().unwrap();
-    let expected = received.expect("blocking denoiser should have a frame ready");
-
-    assert_eq!(landed, expected);
-}
-
-#[test]
-fn try_recv_returns_none_when_nothing_is_in_flight() {
-    let mut denoiser = luma_denoiser(DenoisingMode::Temporal { radius: 2 });
-    let polled = denoiser.try_recv().unwrap();
-
-    assert_eq!(polled, None);
-}
-
-#[test]
 fn flush_sink_time_is_left_out_of_submit_time() {
     let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
     let engine = ScriptedEngine {
@@ -817,28 +725,4 @@ fn flush_sink_time_is_left_out_of_submit_time() {
         "submit {:?} includes the sink's {total_sleep:?}",
         timing.submit
     );
-}
-
-#[test]
-fn try_recv_counts_a_frame_only_once_it_lands() {
-    let mut denoiser = luma_denoiser(DenoisingMode::Spacial);
-    let engine = ScriptedEngine::pushing(|_| Ok(1));
-    denoiser.engine = Box::new(engine);
-
-    let empty = denoiser.try_recv().expect("try_recv with nothing in flight");
-    assert!(empty.is_none());
-    assert_eq!(denoiser.timing().frames, 0);
-
-    let plane = frame(16, 16);
-    denoiser.push(&[&plane]).expect("push should land");
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut received = None;
-
-    while received.is_none() && Instant::now() < deadline {
-        received = denoiser.try_recv().expect("try_recv");
-    }
-
-    assert!(received.is_some(), "the readback never landed");
-    assert_eq!(denoiser.timing().frames, 1);
 }
