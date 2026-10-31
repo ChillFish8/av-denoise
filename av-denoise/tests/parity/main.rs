@@ -24,9 +24,24 @@ fn record_planes(entries: &mut Entries, config: &str, prefix: &str, planes: &Pla
     }
 }
 
+/// How many frames `config` runs.
+///
+/// A reseeding config needs a frame on each side of its reseed window, so the window sits
+/// mid-clip.
+fn clip_length(config: &ParityConfig, denoiser: &PlanarDenoiser) -> usize {
+    if !config.reseed {
+        return config.frames;
+    }
+
+    let span = denoiser.window_span();
+    let reseed_frames = span.frame_count() + 2;
+    config.frames.max(reseed_frames)
+}
+
 fn run(config: &ParityConfig, entries: &mut Entries) {
-    let clip = clips::clip(config.clip, config.layout, config.frames);
     let mut denoiser = PlanarDenoiser::create(&config.options, config.layout).expect("create");
+    let frame_count = clip_length(config, &denoiser);
+    let clip = clips::clip(config.clip, config.layout, frame_count);
     let mut outputs = Vec::new();
 
     for planes in &clip {
