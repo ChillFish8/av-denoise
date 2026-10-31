@@ -161,7 +161,7 @@ NL4D only runs the `base` preset. Trade speed for quality with `--temporal-radiu
 | `--lambda-ht-scale <f>`            | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                                 | `1.0`                    |
 | `--spatial-radius <N>`             | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                                  | `9`                      |
 | `--sigma-scale <f>`                | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                               | `1.0`                    |
-| `--unstable-export-av1-fgs <PATH>` | Unstable, and may change between releases. Writes an AV1 film grain table to add with `grav1synth apply`. SVT-AV1 `--fgs-table` applies only its first entry, so it suits a single-scene table only. Needs luma to be denoised. | off                      |
+| `--unstable-export-av1-fgs <PATH>` | Unstable, and may change between releases. Writes an AV1 film grain table to add with `regrain apply`, which applies each scene's entry. SVT-AV1 `--fgs-table` and `grav1synth apply` apply only its first entry, so they suit a single-scene table only. Needs luma to be denoised. | off                      |
 
 <details>
 <summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>

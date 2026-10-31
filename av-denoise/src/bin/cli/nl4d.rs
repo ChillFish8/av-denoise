@@ -205,8 +205,9 @@ pub struct Nl4dArgs {
     ///
     /// The flag and its output may change between releases. The table describes the source's
     /// luma grain, minus what the output still keeps. Add it to an AV1 encode with
-    /// `grav1synth apply`. SVT-AV1's `--fgs-table` applies only the table's first entry, so it
-    /// suits a single-scene table only. Its timestamps follow this run's output frames from 0,
+    /// `regrain apply`, which applies each scene's entry. SVT-AV1's `--fgs-table` and
+    /// `grav1synth apply` apply only the table's first entry, so they suit a single-scene table
+    /// only. Its timestamps follow this run's output frames from 0,
     /// so it suits constant frame rate sources and encodes of this output.
     #[arg(long, value_name = "PATH")]
     pub unstable_export_av1_fgs: Option<PathBuf>,

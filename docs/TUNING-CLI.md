@@ -75,10 +75,10 @@ many pixels around a strong line skip shadow soften and the flat texture cut, be
 
 **`--unstable-export-av1-fgs <PATH>` keeps the look of film grain.** It writes an AV1 film grain
 table to PATH. The flag is unstable, so its name and output may change between releases. The table describes the source's luma grain, minus whatever the output
-still keeps. Add it to a finished AV1 encode with `grav1synth apply`. The decoder then adds
-matching grain back, so the encode stays clean while the picture keeps its grain. SVT-AV1's
-`--fgs-table` applies only the table's first entry to every frame, so it suits a single-scene
-table only. The y4m output is the same with or without the flag. It is rejected with
+still keeps. Add it to a finished AV1 encode with `regrain apply`, which applies each scene's
+entry. The decoder then adds matching grain back, so the encode stays clean while the picture
+keeps its grain. SVT-AV1's `--fgs-table` and `grav1synth apply` apply only the table's first entry
+to every frame, so they suit a single-scene table only. The y4m output is the same with or without the flag. It is rejected with
 `--channel-mode chroma`, and a failed run leaves no table.
 
 The table's timestamps count this run's output frames from 0 at the source frame rate. It fits
