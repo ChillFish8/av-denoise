@@ -178,7 +178,7 @@ pub fn finish_kernel_cache_at_exit() {
 }
 
 unsafe extern "C" {
-    fn atexit(callback: extern "C" fn()) -> std::ffi::c_int;
+    pub(crate) fn atexit(callback: extern "C" fn()) -> std::ffi::c_int;
 }
 
 /// Finishes the kernel cache on a new thread.

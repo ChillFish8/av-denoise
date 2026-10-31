@@ -1,14 +1,19 @@
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use cubecl::prelude::Client;
 
 use crate::bench_api::Device;
+use crate::kernel_cache::atexit;
 
 const ACCELERATOR_ENV: &str = "AVD_TEST_ACCELERATOR";
 const DEVICE_ENV: &str = "AVD_TEST_DEVICE";
 
 /// Every accelerator name, in the order the default is picked from.
 const ACCELERATORS: &[&str] = &["cuda", "vulkan", "metal", "rocm"];
+
+/// The test device's client, synced by [drain_exit_client] when the process exits.
+static EXIT_CLIENT: OnceLock<Client> = OnceLock::new();
 
 /// Opens a client on the backend and device the test environment names.
 ///
@@ -21,12 +26,57 @@ pub fn test_client() -> Client {
 }
 
 /// The CubeCL device the test environment names.
+///
+/// It is for test processes only. When the process exits, it waits for the device thread to finish
+/// its queued tasks.
 pub fn test_device() -> cubecl::Device {
     let label = test_device_label();
     let parsed = Device::from_str(&label);
     let selector = parsed.unwrap_or_else(|message| panic!("{DEVICE_ENV}={label}: {message}"));
     let accelerator = test_accelerator();
-    device_on(accelerator, selector)
+    let device = device_on(accelerator, selector);
+    drain_at_exit(&device);
+
+    device
+}
+
+/// Waits for the device thread to finish its queued tasks when the process exits.
+///
+/// The HIP runtime tears itself down at exit, and a device thread still running a test's queued
+/// tasks then crashes inside it. This hook registers after the runtime has loaded, so it runs
+/// before that teardown.
+fn drain_at_exit(device: &cubecl::Device) {
+    EXIT_CLIENT.get_or_init(|| {
+        let client = device.client();
+
+        // SAFETY: `drain_exit_client` takes no arguments, never unwinds, and stays valid for the
+        // life of the process.
+        let failed = unsafe { atexit(drain_exit_client) };
+        if failed != 0 {
+            tracing::warn!("cannot drain the test device at exit");
+        }
+
+        client
+    });
+}
+
+/// Syncs the test device's client on a new thread.
+///
+/// The exiting thread may already have dropped its thread locals, which the client needs.
+extern "C" fn drain_exit_client() {
+    let Some(client) = EXIT_CLIENT.get() else {
+        return;
+    };
+
+    let name = String::from("test-device-exit");
+    let spawned = std::thread::Builder::new().name(name).spawn(|| {
+        let synced = client.sync();
+        let _ = cubecl::future::block_on(synced);
+    });
+
+    if let Ok(handle) = spawned {
+        let _ = handle.join();
+    }
 }
 
 /// The device selector the test environment names, such as `discrete:1`.
