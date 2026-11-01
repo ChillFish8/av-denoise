@@ -42,6 +42,11 @@ fn run_fine_block_match_single_block(
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_noise_floor);
         let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
+        let sad_placeholder = client.empty(size_of::<f32>());
+        let predictions_placeholder = client.empty(size_of::<f32>());
+        let sad_arg = BufferArg::from_raw_parts(sad_placeholder, 1);
+        let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, 1);
+
         mc_block_match_fine::launch_unchecked(
             &client,
             grid,
@@ -50,8 +55,12 @@ fn run_fine_block_match_single_block(
             neighbour_slots_arg,
             mv_field_arg,
             confidence_arg,
+            sad_arg,
+            predictions_arg,
             0u32,
             true,
+            false,
+            false,
             noise_arg,
             DERIVED_SAD_FLOOR,
             thsad,
@@ -145,6 +154,11 @@ fn block_match_fine_argmin_finds_clean_shift() {
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, 0.0);
         let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
+        let sad_placeholder = client.empty(size_of::<f32>());
+        let predictions_placeholder = client.empty(size_of::<f32>());
+        let sad_arg = BufferArg::from_raw_parts(sad_placeholder, 1);
+        let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, 1);
+
         mc_block_match_fine::launch_unchecked(
             &client,
             grid,
@@ -153,7 +167,11 @@ fn block_match_fine_argmin_finds_clean_shift() {
             neighbour_slots_arg,
             mv_field_arg,
             confidence_arg,
+            sad_arg,
+            predictions_arg,
             0u32,
+            false,
+            false,
             false,
             noise_arg,
             DERIVED_SAD_FLOOR,
@@ -216,6 +234,11 @@ fn run_coarse_block_match_single_block(
         let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, 1);
         let mv_field_arg = BufferArg::from_raw_parts(mv_field_handle, 2);
 
+        let noise_placeholder = client.empty(size_of::<f32>());
+        let predictions_placeholder = client.empty(size_of::<f32>());
+        let noise_arg = BufferArg::from_raw_parts(noise_placeholder, 1);
+        let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, 1);
+
         mc_block_match_coarse::launch_unchecked(
             &client,
             grid,
@@ -223,7 +246,11 @@ fn run_coarse_block_match_single_block(
             pyramid_arg,
             neighbour_slots_arg,
             mv_field_arg,
+            noise_arg,
+            predictions_arg,
             0u32,
+            1.0,
+            false,
             blksize,
             blksize,
             0,

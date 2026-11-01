@@ -187,6 +187,8 @@ impl NlmDenoiser {
             confidence: confidence_arg,
             conf_len,
             write_confidence,
+            predictions: None,
+            sad: None,
         };
 
         self.run_match(motion_ctx, &targets, thsad)
@@ -410,6 +412,8 @@ impl NlmDenoiser {
             confidence: confidence_buf,
             conf_len,
             write_confidence: true,
+            predictions: None,
+            sad: None,
         };
 
         run_confidence(

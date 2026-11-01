@@ -1,7 +1,17 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
+use super::candidates::{
+    BlockVector,
+    CandidateList,
+    MODEL_CANDIDATE_BIAS,
+    WindowBest,
+    beats_incumbent,
+    candidate_count,
+    model_displacement,
+};
 use super::helpers::clamp_i32;
+use crate::noise::DERIVED_SAD_FLOOR;
 
 /// The threads in one block-match workgroup.
 pub const BLOCK_MATCH_THREADS: u32 = 32;
@@ -31,15 +41,42 @@ fn window_stride(blksize: u32, search_radius: u32) -> u32 {
     reach.max(last_read)
 }
 
+/// The shared buffers one block search reuses for every candidate centre.
+#[derive(CubeType)]
+struct SearchScratch {
+    sad_scratch: Shared<[f32]>,
+    centre_smem: Shared<[f32]>,
+    window: Shared<[f32]>,
+    plane_sads: Shared<[f32]>,
+    plane_indices: Shared<[u32]>,
+}
+
+/// Where one block sits and which frames it matches.
+#[derive(CubeType, Clone, Copy)]
+struct BlockSite {
+    centre_base: u32,
+    neighbour_base: u32,
+    origin_x: i32,
+    origin_y: i32,
+    thread_id: u32,
+    threads: u32,
+}
+
 /// Finds each block's motion on one pyramid level and seeds the fine grid with it.
 ///
 /// One GPU block handles one image block. Every thread scores a share of the
 /// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked. A tie picks the first in
 /// row-major order, and the zero offset wins a tie with that pick.
 ///
+/// When `model_candidate` is set, a second window centres on the camera model's prediction in
+/// `predictions`, and its best replaces the zero window's only when it is lower by more than
+/// [MODEL_CANDIDATE_BIAS] times the derived SAD floor of `noise`. `floor_scale` converts that floor
+/// from a full-resolution block to this level's block. Otherwise `noise` and `predictions` are
+/// never read and can be placeholders.
+///
 /// `blksize` must be at most [MAX_BLKSIZE](crate::motion::MAX_BLKSIZE), so the shared centre tile
 /// stays within 1024 values. The neighbour pixels the search reaches are staged into shared memory
-/// once, clamped to the level.
+/// once per centre, clamped to the level.
 ///
 /// This level of every frame is a slot of `pyramid`, the first `level_offset` values in and
 /// `slot_pixels` values apart. The launch runs one cube per block per neighbour, with the neighbour
@@ -53,7 +90,11 @@ pub fn mc_block_match_coarse(
     pyramid: &[f32],
     neighbour_slots: &[u32],
     mv_field: &mut [i32],
+    noise: &[f32],
+    predictions: &[f32],
     centre_slot: u32,
+    floor_scale: f32,
+    #[comptime] model_candidate: bool,
     #[comptime] level_width: u32,
     #[comptime] level_height: u32,
     #[comptime] level_offset: u32,
@@ -72,132 +113,60 @@ pub fn mc_block_match_coarse(
     let neighbour_index = CUBE_POS_Z;
 
     let neighbour_slot = neighbour_slots[neighbour_index as usize];
-    let centre_base = level_offset + centre_slot * slot_pixels;
-    let neighbour_base = level_offset + neighbour_slot * slot_pixels;
     let mv_base = neighbour_index * mv_stride;
-
-    let block_origin_x = block_col as i32 * step as i32;
-    let block_origin_y = block_row as i32 * step as i32;
-
-    let local_x = UNIT_POS_X;
-    let local_y = UNIT_POS_Y;
     let threads = CUBE_DIM_X * CUBE_DIM_Y;
-    let thread_id = local_y * CUBE_DIM_X + local_x;
 
-    let window_side = comptime!(2 * search_radius + 1);
-    let candidates = comptime!(window_side * window_side);
-    let block_pixels = comptime!(blksize * blksize);
-    let mut sad_scratch = Shared::<[f32]>::new_slice(candidates as usize);
-    let mut centre_smem = Shared::<[f32]>::new_slice(block_pixels as usize);
-    let window_stride_len = comptime!(window_stride(blksize, search_radius));
-    let window_rows = comptime!(blksize + 2 * search_radius);
-    let window_area = comptime!(window_stride_len * window_rows);
-    let mut window = Shared::<[f32]>::new_slice(window_area as usize);
-    let mut plane_sads = Shared::<[f32]>::new_slice(ARGMIN_MAX_PLANES as usize);
-    let mut plane_indices = Shared::<[u32]>::new_slice(ARGMIN_MAX_PLANES as usize);
+    let site = BlockSite {
+        centre_base: level_offset + centre_slot * slot_pixels,
+        neighbour_base: level_offset + neighbour_slot * slot_pixels,
+        origin_x: block_col as i32 * step as i32,
+        origin_y: block_row as i32 * step as i32,
+        thread_id: UNIT_POS_Y * CUBE_DIM_X + UNIT_POS_X,
+        threads,
+    };
 
-    let mut pixel_y = local_y;
-    while pixel_y < blksize {
-        let mut pixel_x = local_x;
-        while pixel_x < blksize {
-            let clamped_x = clamp_i32(block_origin_x + pixel_x as i32, level_width as i32);
-            let clamped_y = clamp_i32(block_origin_y + pixel_y as i32, level_height as i32);
-            let pixel_index = (clamped_y * level_width as i32 + clamped_x) as u32;
-            centre_smem[(pixel_y * blksize + pixel_x) as usize] =
-                pyramid[(centre_base + pixel_index) as usize];
-            pixel_x += CUBE_DIM_X;
-        }
+    let mut centres = CandidateList::new();
+    centres.set(0u32, 0i32, 0i32);
 
-        pixel_y += CUBE_DIM_Y;
+    let mut bias = 0.0f32;
+    if model_candidate {
+        let model = model_displacement(
+            predictions,
+            neighbour_index,
+            site.origin_x,
+            site.origin_y,
+            blksize,
+            level_scale,
+            level_width,
+            level_height,
+        );
+        centres.set(1u32, model.dx, model.dy);
+        bias = MODEL_CANDIDATE_BIAS * noise[DERIVED_SAD_FLOOR as usize] * floor_scale;
     }
 
-    let window_x0 = block_origin_x - search_radius as i32;
-    let window_y0 = block_origin_y - search_radius as i32;
-    stage_window(
+    let count = comptime!(candidate_count(model_candidate));
+    let best = search_candidates(
         pyramid,
-        &mut window,
-        neighbour_base,
-        window_x0,
-        window_y0,
-        thread_id,
-        threads,
+        &centres,
+        bias,
+        &site,
         level_width,
         level_height,
         blksize,
         search_radius,
+        count,
     );
 
-    sync_cube();
-
-    blocked_window_sads(
-        &centre_smem,
-        &window,
-        &mut sad_scratch,
-        thread_id,
-        threads,
-        blksize,
-        search_radius,
-    );
-
-    sync_cube();
-
-    let fills_planes = threads.is_multiple_of(PLANE_DIM);
-    let best_index = parallel_argmin(
-        &sad_scratch,
-        &mut plane_sads,
-        &mut plane_indices,
-        thread_id,
-        threads,
-        fills_planes,
-        candidates,
-    );
-
-    if thread_id != 0 {
+    if site.thread_id != 0 {
         terminate!();
-    }
-
-    // A huge start rather than a negative initialiser, which cubecl's macro does not lift cleanly.
-    let mut best_sad = 1.0e30f32;
-    let mut best_dx = 0i32;
-    let mut best_dy = 0i32;
-
-    if fills_planes {
-        let last_candidate = comptime!(candidates - 1);
-        let found = best_index < candidates;
-        let safe_index = u32::min(best_index, last_candidate);
-        let found_sad = sad_scratch[safe_index as usize];
-        let offset_x = (safe_index % window_side) as i32 - search_radius as i32;
-        let offset_y = (safe_index / window_side) as i32 - search_radius as i32;
-        best_sad = select(found, found_sad, 1.0e30f32);
-        best_dx = select(found, offset_x, 0i32);
-        best_dy = select(found, offset_y, 0i32);
-    } else {
-        for dy in 0..window_side {
-            for dx in 0..window_side {
-                let candidate_sad = sad_scratch[(dy * window_side + dx) as usize];
-                if candidate_sad < best_sad {
-                    best_sad = candidate_sad;
-                    best_dx = dx as i32 - search_radius as i32;
-                    best_dy = dy as i32 - search_radius as i32;
-                }
-            }
-        }
-    }
-
-    // A tie resolves to zero motion, so a flat block never seeds the fine pass from a shifted
-    // position that no comparison preferred.
-    let zero_sad = sad_scratch[(search_radius * window_side + search_radius) as usize];
-    if zero_sad <= best_sad {
-        best_dx = 0i32;
-        best_dy = 0i32;
     }
 
     // Coarse blocks map to fine blocks by position, `col * step * level_scale / fine_step`. The two
     // block counts can round differently, so the last coarse block on each axis extends to the fine
     // grid's edge and every fine block is seeded exactly once. The count varies per block, so the
     // loops below are runtime `while` loops rather than unrolled.
-    let mvx_fine = best_dx * level_scale as i32;
-    let mvy_fine = best_dy * level_scale as i32;
+    let mvx_fine = best.dx * level_scale as i32;
+    let mvy_fine = best.dy * level_scale as i32;
 
     let fine_col_start = (block_col * step * level_scale / fine_step).min(fine_blocks_x);
     let fine_col_end = if block_col == CUBE_COUNT_X - 1 {
@@ -235,9 +204,14 @@ pub fn mc_block_match_coarse(
 /// `(2 * search_radius + 1)^2` candidates, and the lowest SAD is picked. A tie picks the first in
 /// row-major order, and the seed wins a tie with that pick.
 ///
+/// When `model_candidate` is set, a second window centres on the camera model's prediction in
+/// `predictions`, and its best replaces the seed window's only when it is lower by more than
+/// [MODEL_CANDIDATE_BIAS] times the derived SAD floor of `noise`. Otherwise `predictions` is never
+/// read and can be a placeholder.
+///
 /// Every frame is a slot of `pyramid`, `slot_pixels` values apart. The launch runs one cube per
 /// block per neighbour, with the neighbour on z. Neighbour `n` matches slot `neighbour_slots[n]`
-/// against `centre_slot`, and writes its field `n * mv_stride` values in and its confidence
+/// against `centre_slot`, and writes its field `n * mv_stride` values in and its confidence and SAD
 /// `n * conf_stride` values in.
 ///
 /// When `write_confidence` is set, each block also writes a confidence between 0 and 1 so a poor
@@ -245,17 +219,23 @@ pub fn mc_block_match_coarse(
 /// noisy copies of the same content show, and `thsad` is how far past it the confidence reaches
 /// zero. `thsad` must be positive, or a perfect match divides zero by zero.
 ///
-/// When `write_confidence` is unset, `confidence` is never touched and can be a placeholder.
+/// When `write_sad` is set, each block also writes its winning SAD to `sad`. Each output that is
+/// unset is never touched and can be a placeholder.
 ///
-/// The neighbour pixels the search reaches are staged into shared memory once, clamped to the frame.
+/// The neighbour pixels the search reaches are staged into shared memory once per centre, clamped
+/// to the frame.
 #[cube(launch_unchecked)]
 pub fn mc_block_match_fine(
     pyramid: &[f32],
     neighbour_slots: &[u32],
     mv_field: &mut [i32],
     confidence: &mut [f32],
+    sad: &mut [f32],
+    predictions: &[f32],
     centre_slot: u32,
     #[comptime] write_confidence: bool,
+    #[comptime] write_sad: bool,
+    #[comptime] model_candidate: bool,
     noise: &[f32],
     sad_field: u32,
     thsad: f32,
@@ -275,10 +255,9 @@ pub fn mc_block_match_fine(
     let neighbour_index = CUBE_POS_Z;
 
     let neighbour_slot = neighbour_slots[neighbour_index as usize];
-    let centre_base = centre_slot * slot_pixels;
-    let neighbour_base = neighbour_slot * slot_pixels;
     let mv_base = neighbour_index * mv_stride;
     let conf_base = neighbour_index * conf_stride;
+    let threads = CUBE_DIM_X * CUBE_DIM_Y;
 
     let mv_slot = (mv_base + (block_row * blocks_x + block_col) * 2) as usize;
 
@@ -289,128 +268,63 @@ pub fn mc_block_match_fine(
         0i32
     };
 
-    let block_origin_x = block_col as i32 * step as i32;
-    let block_origin_y = block_row as i32 * step as i32;
+    let site = BlockSite {
+        centre_base: centre_slot * slot_pixels,
+        neighbour_base: neighbour_slot * slot_pixels,
+        origin_x: block_col as i32 * step as i32,
+        origin_y: block_row as i32 * step as i32,
+        thread_id: UNIT_POS_Y * CUBE_DIM_X + UNIT_POS_X,
+        threads,
+    };
 
-    let local_x = UNIT_POS_X;
-    let local_y = UNIT_POS_Y;
-    let threads = CUBE_DIM_X * CUBE_DIM_Y;
-    let thread_id = local_y * CUBE_DIM_X + local_x;
+    let mut centres = CandidateList::new();
+    centres.set(0u32, seed_dx, seed_dy);
 
-    let window_side = comptime!(2 * search_radius + 1);
-    let candidates = comptime!(window_side * window_side);
-    let block_pixels = comptime!(blksize * blksize);
-    let mut sad_scratch = Shared::<[f32]>::new_slice(candidates as usize);
-    let mut centre_smem = Shared::<[f32]>::new_slice(block_pixels as usize);
-    let window_stride_len = comptime!(window_stride(blksize, search_radius));
-    let window_rows = comptime!(blksize + 2 * search_radius);
-    let window_area = comptime!(window_stride_len * window_rows);
-    let mut window = Shared::<[f32]>::new_slice(window_area as usize);
-    let mut plane_sads = Shared::<[f32]>::new_slice(ARGMIN_MAX_PLANES as usize);
-    let mut plane_indices = Shared::<[u32]>::new_slice(ARGMIN_MAX_PLANES as usize);
-
-    let mut pixel_y = local_y;
-    while pixel_y < blksize {
-        let mut pixel_x = local_x;
-        while pixel_x < blksize {
-            let clamped_x = clamp_i32(block_origin_x + pixel_x as i32, width as i32);
-            let clamped_y = clamp_i32(block_origin_y + pixel_y as i32, height as i32);
-            let pixel_index = (clamped_y * width as i32 + clamped_x) as u32;
-            centre_smem[(pixel_y * blksize + pixel_x) as usize] =
-                pyramid[(centre_base + pixel_index) as usize];
-            pixel_x += CUBE_DIM_X;
-        }
-
-        pixel_y += CUBE_DIM_Y;
+    let mut bias = 0.0f32;
+    if model_candidate {
+        let model = model_displacement(
+            predictions,
+            neighbour_index,
+            site.origin_x,
+            site.origin_y,
+            blksize,
+            1u32,
+            width,
+            height,
+        );
+        centres.set(1u32, model.dx, model.dy);
+        bias = MODEL_CANDIDATE_BIAS * noise[DERIVED_SAD_FLOOR as usize];
     }
 
-    let window_x0 = block_origin_x + seed_dx - search_radius as i32;
-    let window_y0 = block_origin_y + seed_dy - search_radius as i32;
-    stage_window(
+    let count = comptime!(candidate_count(model_candidate));
+    let best = search_candidates(
         pyramid,
-        &mut window,
-        neighbour_base,
-        window_x0,
-        window_y0,
-        thread_id,
-        threads,
+        &centres,
+        bias,
+        &site,
         width,
         height,
         blksize,
         search_radius,
+        count,
     );
 
-    sync_cube();
-
-    blocked_window_sads(
-        &centre_smem,
-        &window,
-        &mut sad_scratch,
-        thread_id,
-        threads,
-        blksize,
-        search_radius,
-    );
-
-    sync_cube();
-
-    let fills_planes = threads.is_multiple_of(PLANE_DIM);
-    let best_index = parallel_argmin(
-        &sad_scratch,
-        &mut plane_sads,
-        &mut plane_indices,
-        thread_id,
-        threads,
-        fills_planes,
-        candidates,
-    );
-
-    if thread_id != 0 {
+    if site.thread_id != 0 {
         terminate!();
     }
 
-    let mut best_sad = 1.0e30f32;
-    let mut best_dx = seed_dx;
-    let mut best_dy = seed_dy;
+    mv_field[mv_slot] = best.dx;
+    mv_field[mv_slot + 1] = best.dy;
 
-    if fills_planes {
-        let last_candidate = comptime!(candidates - 1);
-        let found = best_index < candidates;
-        let safe_index = u32::min(best_index, last_candidate);
-        let found_sad = sad_scratch[safe_index as usize];
-        let offset_x = (safe_index % window_side) as i32 - search_radius as i32;
-        let offset_y = (safe_index / window_side) as i32 - search_radius as i32;
-        best_sad = select(found, found_sad, 1.0e30f32);
-        best_dx = select(found, seed_dx + offset_x, seed_dx);
-        best_dy = select(found, seed_dy + offset_y, seed_dy);
-    } else {
-        for dy in 0..window_side {
-            for dx in 0..window_side {
-                let candidate_sad = sad_scratch[(dy * window_side + dx) as usize];
-                if candidate_sad < best_sad {
-                    best_sad = candidate_sad;
-                    best_dx = seed_dx + (dx as i32 - search_radius as i32);
-                    best_dy = seed_dy + (dy as i32 - search_radius as i32);
-                }
-            }
-        }
+    let block_slot = (conf_base + block_row * blocks_x + block_col) as usize;
+
+    if write_sad {
+        sad[block_slot] = best.sad;
     }
-
-    // A tie resolves to the seed. On a flat block every candidate ties at zero, and any other
-    // winner would warp in unpreferred pixels with a perfect confidence.
-    let seed_sad = sad_scratch[(search_radius * window_side + search_radius) as usize];
-    if seed_sad <= best_sad {
-        best_sad = seed_sad;
-        best_dx = seed_dx;
-        best_dy = seed_dy;
-    }
-
-    mv_field[mv_slot] = best_dx;
-    mv_field[mv_slot + 1] = best_dy;
 
     if write_confidence {
         let sad_noise_floor = noise[sad_field as usize];
-        let mut excess = best_sad - sad_noise_floor;
+        let mut excess = best.sad - sad_noise_floor;
         if excess < 0.0f32 {
             excess = 0.0f32;
         }
@@ -422,7 +336,226 @@ pub fn mc_block_match_fine(
             confidence_val = 0.0f32;
         }
 
-        confidence[(conf_base + block_row * blocks_x + block_col) as usize] = confidence_val;
+        confidence[block_slot] = confidence_val;
+    }
+}
+
+/// Searches a window around each of a block's `count` centres and keeps the best.
+///
+/// The first centre is the incumbent. A later one replaces it only when [beats_incumbent] prefers it
+/// under `bias`, and a later centre equal to the first is skipped. Only thread 0's result is
+/// meaningful.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the search reads"
+)]
+fn search_candidates(
+    pyramid: &[f32],
+    centres: &CandidateList,
+    bias: f32,
+    site: &BlockSite,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] blksize: u32,
+    #[comptime] search_radius: u32,
+    #[comptime] count: u32,
+) -> WindowBest {
+    let window_side = comptime!(2 * search_radius + 1);
+    let candidates = comptime!(window_side * window_side);
+    let block_pixels = comptime!(blksize * blksize);
+    let window_stride_len = comptime!(window_stride(blksize, search_radius));
+    let window_rows = comptime!(blksize + 2 * search_radius);
+    let window_area = comptime!(window_stride_len * window_rows);
+
+    let mut scratch = SearchScratch {
+        sad_scratch: Shared::<[f32]>::new_slice(candidates as usize),
+        centre_smem: Shared::<[f32]>::new_slice(block_pixels as usize),
+        window: Shared::<[f32]>::new_slice(window_area as usize),
+        plane_sads: Shared::<[f32]>::new_slice(ARGMIN_MAX_PLANES as usize),
+        plane_indices: Shared::<[u32]>::new_slice(ARGMIN_MAX_PLANES as usize),
+    };
+
+    stage_centre(pyramid, &mut scratch.centre_smem, site, width, height, blksize);
+
+    let first = centres.get(0u32);
+    let incumbent = search_window(
+        pyramid,
+        &mut scratch,
+        site,
+        &first,
+        width,
+        height,
+        blksize,
+        search_radius,
+    );
+    let mut best_sad = incumbent.sad;
+    let mut best_dx = incumbent.dx;
+    let mut best_dy = incumbent.dy;
+
+    #[unroll]
+    for candidate in 1..count {
+        let centre = centres.get(candidate);
+        let repeats_first = centre.dx == first.dx && centre.dy == first.dy;
+
+        // Every thread reads the same centre, so the branch is uniform across the cube.
+        if !repeats_first {
+            let challenger = search_window(
+                pyramid,
+                &mut scratch,
+                site,
+                &centre,
+                width,
+                height,
+                blksize,
+                search_radius,
+            );
+            let takes_challenger = beats_incumbent(challenger.sad, best_sad, bias);
+            best_sad = select(takes_challenger, challenger.sad, best_sad);
+            best_dx = select(takes_challenger, challenger.dx, best_dx);
+            best_dy = select(takes_challenger, challenger.dy, best_dy);
+        }
+    }
+
+    WindowBest {
+        sad: best_sad,
+        dx: best_dx,
+        dy: best_dy,
+    }
+}
+
+/// Loads the block's own pixels into `centre_smem`, clamped to the frame.
+#[cube]
+fn stage_centre(
+    pyramid: &[f32],
+    centre_smem: &mut Shared<[f32]>,
+    site: &BlockSite,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] blksize: u32,
+) {
+    let mut pixel_y = UNIT_POS_Y;
+    while pixel_y < blksize {
+        let mut pixel_x = UNIT_POS_X;
+        while pixel_x < blksize {
+            let clamped_x = clamp_i32(site.origin_x + pixel_x as i32, width as i32);
+            let clamped_y = clamp_i32(site.origin_y + pixel_y as i32, height as i32);
+            let pixel_index = (clamped_y * width as i32 + clamped_x) as u32;
+            centre_smem[(pixel_y * blksize + pixel_x) as usize] =
+                pyramid[(site.centre_base + pixel_index) as usize];
+            pixel_x += CUBE_DIM_X;
+        }
+
+        pixel_y += CUBE_DIM_Y;
+    }
+}
+
+/// Scores every offset in the window around `centre` and returns the lowest.
+///
+/// A tie picks the first offset in row-major order, and the centre itself wins a tie with that
+/// pick. Only thread 0's result is meaningful, and every thread must call it.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the search reads"
+)]
+fn search_window(
+    pyramid: &[f32],
+    scratch: &mut SearchScratch,
+    site: &BlockSite,
+    centre: &BlockVector,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] blksize: u32,
+    #[comptime] search_radius: u32,
+) -> WindowBest {
+    let window_side = comptime!(2 * search_radius + 1);
+    let candidates = comptime!(window_side * window_side);
+
+    let window_x0 = site.origin_x + centre.dx - search_radius as i32;
+    let window_y0 = site.origin_y + centre.dy - search_radius as i32;
+    stage_window(
+        pyramid,
+        &mut scratch.window,
+        site.neighbour_base,
+        window_x0,
+        window_y0,
+        site.thread_id,
+        site.threads,
+        width,
+        height,
+        blksize,
+        search_radius,
+    );
+
+    sync_cube();
+
+    blocked_window_sads(
+        &scratch.centre_smem,
+        &scratch.window,
+        &mut scratch.sad_scratch,
+        site.thread_id,
+        site.threads,
+        blksize,
+        search_radius,
+    );
+
+    sync_cube();
+
+    let fills_planes = site.threads.is_multiple_of(PLANE_DIM);
+    let best_index = parallel_argmin(
+        &scratch.sad_scratch,
+        &mut scratch.plane_sads,
+        &mut scratch.plane_indices,
+        site.thread_id,
+        site.threads,
+        fills_planes,
+        candidates,
+    );
+
+    // A huge start rather than a negative initialiser, which cubecl's macro does not lift cleanly.
+    let mut best_sad = 1.0e30f32;
+    let mut best_dx = centre.dx;
+    let mut best_dy = centre.dy;
+
+    if site.thread_id == 0 {
+        if fills_planes {
+            let last_candidate = comptime!(candidates - 1);
+            let found = best_index < candidates;
+            let safe_index = u32::min(best_index, last_candidate);
+            let found_sad = scratch.sad_scratch[safe_index as usize];
+            let offset_x = (safe_index % window_side) as i32 - search_radius as i32;
+            let offset_y = (safe_index / window_side) as i32 - search_radius as i32;
+            best_sad = select(found, found_sad, 1.0e30f32);
+            best_dx = select(found, centre.dx + offset_x, centre.dx);
+            best_dy = select(found, centre.dy + offset_y, centre.dy);
+        } else {
+            for dy in 0..window_side {
+                for dx in 0..window_side {
+                    let candidate_sad = scratch.sad_scratch[(dy * window_side + dx) as usize];
+                    if candidate_sad < best_sad {
+                        best_sad = candidate_sad;
+                        best_dx = centre.dx + (dx as i32 - search_radius as i32);
+                        best_dy = centre.dy + (dy as i32 - search_radius as i32);
+                    }
+                }
+            }
+        }
+
+        // A tie resolves to the centre. On a flat block every candidate ties at zero, and any other
+        // winner would warp in unpreferred pixels with a perfect confidence.
+        let centre_sad = scratch.sad_scratch[(search_radius * window_side + search_radius) as usize];
+        if centre_sad <= best_sad {
+            best_sad = centre_sad;
+            best_dx = centre.dx;
+            best_dy = centre.dy;
+        }
+    }
+
+    WindowBest {
+        sad: best_sad,
+        dx: best_dx,
+        dy: best_dy,
     }
 }
 

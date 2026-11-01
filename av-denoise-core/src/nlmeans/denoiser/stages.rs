@@ -186,6 +186,7 @@ impl NlmDenoiser {
             pair_ring,
             &self.confidence_dummy,
             &noise,
+            None,
         )
         .context("pair analyse dispatch failed")
     }

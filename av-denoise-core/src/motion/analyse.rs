@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
+use super::global::AFFINE_WORDS;
 use super::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
 use super::pyramid::{level_dims, pyramid_level_offset, pyramid_pixels_per_frame, pyramid_slot_pixels};
 #[cfg(test)]
@@ -29,6 +30,10 @@ pub(crate) fn confidence_byte_offset(motion_ctx: &MotionCtx, neighbour_idx: u32)
 /// Every frame is a slot of `pyramid`. Neighbour `n` matches slot `neighbour_slots[n]` against
 /// `centre_slot`. It writes its vectors `n` motion-field strides into `mv_field` and its
 /// confidence `n` confidence strides into `confidence`, as [MotionCtx] lays them out.
+///
+/// With `predictions`, every block also searches around its neighbour's camera model prediction,
+/// [AFFINE_WORDS] words per neighbour. With `sad`, the fine pass writes each block's winning SAD
+/// in the confidence layout.
 pub(crate) struct MatchTargets<'a> {
     pub pyramid: &'a Handle,
     /// Frame slots the pyramid holds.
@@ -44,12 +49,28 @@ pub(crate) struct MatchTargets<'a> {
     /// `f32` values `confidence` holds, 1 for a placeholder.
     pub conf_len: usize,
     pub write_confidence: bool,
+    pub predictions: Option<&'a Handle>,
+    /// Holds `neighbours` confidence strides of `f32` when set.
+    pub sad: Option<&'a Handle>,
+}
+
+/// The SAD floor's scale on a coarse block, relative to a full-resolution block.
+///
+/// A SAD sums one difference per pixel, so the floor scales with the block's area. Each pyramid
+/// level averages 2x2 pixels, which halves white noise per level, so the floor also shrinks by
+/// `coarse_scale`.
+fn coarse_floor_scale(coarse_blksize: u32, blksize: u32, coarse_scale: u32) -> f32 {
+    let coarse_area = (coarse_blksize * coarse_blksize) as f32;
+    let fine_area = (blksize * blksize) as f32;
+    let area_ratio = coarse_area / fine_area;
+    area_ratio / coarse_scale as f32
 }
 
 /// Estimates how each neighbour frame moved relative to the centre frame.
 ///
 /// A coarse pass on the smallest pyramid level seeds a fine pass at full resolution, which writes
-/// each neighbour's `mv_field` slice. With `write_confidence` set, a per-block score also lands in
+/// each neighbour's `mv_field` slice. Both passes search around the camera model's prediction too
+/// when `targets` carries one. With `write_confidence` set, a per-block score also lands in
 /// its `confidence` slice, scored against the derived word of `noise` at index `sad_field`.
 /// Otherwise `confidence` is never indexed, so a placeholder buffer works and `thsad` may stay at
 /// 0.0.
@@ -90,11 +111,17 @@ pub(crate) fn run_analyse(
         let pyramid = targets.pyramid.clone();
         let neighbour_slots = targets.neighbour_slots.clone();
         let mv_field = targets.mv_field.clone();
+        let noise_handle = noise.clone();
+        let (predictions, predictions_len) = prediction_binding(targets, noise);
+        let floor_scale = coarse_floor_scale(coarse_blksize, motion_ctx.blksize, coarse_scale);
+        let model_candidate = targets.predictions.is_some();
 
         unsafe {
             let pyramid_arg = BufferArg::from_raw_parts(pyramid, pyramid_len);
             let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, slots_len);
             let mv_field_arg = BufferArg::from_raw_parts(mv_field, targets.mv_len);
+            let noise_arg = BufferArg::from_raw_parts(noise_handle, DERIVED_WORDS as usize);
+            let predictions_arg = BufferArg::from_raw_parts(predictions, predictions_len);
 
             mc_block_match_coarse::launch_unchecked(
                 client,
@@ -103,7 +130,11 @@ pub(crate) fn run_analyse(
                 pyramid_arg,
                 neighbour_slots_arg,
                 mv_field_arg,
+                noise_arg,
+                predictions_arg,
                 targets.centre_slot,
+                floor_scale,
+                model_candidate,
                 coarse_width,
                 coarse_height,
                 level_offset,
@@ -205,6 +236,14 @@ pub(super) fn launch_fine(
     let neighbour_slots = targets.neighbour_slots.clone();
     let mv_field = targets.mv_field.clone();
     let confidence = targets.confidence.clone();
+    let (predictions, predictions_len) = prediction_binding(targets, noise);
+    let model_candidate = targets.predictions.is_some();
+    let write_sad = targets.sad.is_some();
+    // An unwritten SAD output binds the confidence buffer, which the kernel then never indexes.
+    let (sad, sad_len) = match targets.sad {
+        Some(handle) => (handle.clone(), (targets.neighbours * conf_stride) as usize),
+        None => (targets.confidence.clone(), targets.conf_len),
+    };
     let noise = noise.clone();
 
     unsafe {
@@ -212,6 +251,8 @@ pub(super) fn launch_fine(
         let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, slots_len);
         let mv_field_arg = BufferArg::from_raw_parts(mv_field, targets.mv_len);
         let confidence_arg = BufferArg::from_raw_parts(confidence, targets.conf_len);
+        let sad_arg = BufferArg::from_raw_parts(sad, sad_len);
+        let predictions_arg = BufferArg::from_raw_parts(predictions, predictions_len);
         let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
         mc_block_match_fine::launch_unchecked(
@@ -222,8 +263,12 @@ pub(super) fn launch_fine(
             neighbour_slots_arg,
             mv_field_arg,
             confidence_arg,
+            sad_arg,
+            predictions_arg,
             targets.centre_slot,
             targets.write_confidence,
+            write_sad,
+            model_candidate,
             noise_arg,
             sad_field,
             thsad,
@@ -238,6 +283,17 @@ pub(super) fn launch_fine(
             mv_stride,
             conf_stride,
         );
+    }
+}
+
+/// The predictions buffer and its length, or the noise buffer as a placeholder without one.
+fn prediction_binding(targets: &MatchTargets<'_>, noise: &Handle) -> (Handle, usize) {
+    match targets.predictions {
+        Some(handle) => {
+            let words = targets.neighbours * AFFINE_WORDS;
+            (handle.clone(), words as usize)
+        },
+        None => (noise.clone(), DERIVED_WORDS as usize),
     }
 }
 
@@ -276,6 +332,15 @@ mod tests {
         let align = align();
 
         MotionCtx::new(mode, 4, 4, align).unwrap()
+    }
+
+    #[test]
+    fn coarse_floor_scale_shrinks_with_area_and_level() {
+        let one_level = coarse_floor_scale(8, 16, 2);
+        let two_levels = coarse_floor_scale(4, 16, 4);
+
+        assert_eq!(one_level, 0.125);
+        assert_eq!(two_levels, 0.015625);
     }
 
     #[test]

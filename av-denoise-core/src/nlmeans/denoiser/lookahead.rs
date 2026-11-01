@@ -346,6 +346,7 @@ impl NlmDenoiser {
                 pair_field,
                 &self.confidence_dummy,
                 &noise,
+                None,
             )
             .context("look-ahead pair analyse dispatch failed");
         }
@@ -363,6 +364,8 @@ impl NlmDenoiser {
             confidence: &self.confidence_dummy,
             conf_len: 1,
             write_confidence: false,
+            predictions: None,
+            sad: None,
         };
 
         run_analyse(

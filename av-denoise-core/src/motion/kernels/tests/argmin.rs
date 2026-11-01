@@ -257,6 +257,11 @@ fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>>
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, 0.0);
         let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
+        let sad_placeholder = client.empty(size_of::<f32>());
+        let predictions_placeholder = client.empty(size_of::<f32>());
+        let sad_arg = BufferArg::from_raw_parts(sad_placeholder, 1);
+        let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, 1);
+
         mc_block_match_fine::launch_unchecked(
             &client,
             cube_count,
@@ -265,7 +270,11 @@ fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>>
             slots_arg,
             field_arg,
             confidence_arg,
+            sad_arg,
+            predictions_arg,
             CENTRE_SLOT,
+            false,
+            false,
             false,
             noise_arg,
             DERIVED_SAD_FLOOR,
@@ -348,6 +357,11 @@ fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32
     let field_arg = unsafe { BufferArg::from_raw_parts(mv_field_handle, field_len) };
 
     unsafe {
+        let noise_placeholder = client.empty(size_of::<f32>());
+        let predictions_placeholder = client.empty(size_of::<f32>());
+        let noise_arg = BufferArg::from_raw_parts(noise_placeholder, 1);
+        let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, 1);
+
         mc_block_match_coarse::launch_unchecked(
             &client,
             cube_count,
@@ -355,7 +369,11 @@ fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32
             pyramid_arg,
             slots_arg,
             field_arg,
+            noise_arg,
+            predictions_arg,
             CENTRE_SLOT,
+            1.0,
+            false,
             WIDTH,
             HEIGHT,
             0,

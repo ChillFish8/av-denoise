@@ -290,14 +290,18 @@ fn run_all(backend: &str, client: Client) {
 
     // Each block-match launch covers every neighbour, so they run at one neighbour and at four.
     for &neighbours in BENCH_NEIGHBOURS {
-        run(BlockMatchCoarseBench {
-            client: client.clone(),
-            neighbours,
-        });
-        run(BlockMatchFineBench {
-            client: client.clone(),
-            neighbours,
-        });
+        for model_candidate in [false, true] {
+            run(BlockMatchCoarseBench {
+                client: client.clone(),
+                neighbours,
+                model_candidate,
+            });
+            run(BlockMatchFineBench {
+                client: client.clone(),
+                neighbours,
+                model_candidate,
+            });
+        }
         run(McConfidenceBench {
             client: client.clone(),
             neighbours,

@@ -233,14 +233,18 @@ fn run_kernels(backend: &str, client: &Client) {
     });
 
     for &neighbours in BENCH_NEIGHBOURS {
-        run(BlockMatchCoarseBench {
-            client: client.clone(),
-            neighbours,
-        });
-        run(BlockMatchFineBench {
-            client: client.clone(),
-            neighbours,
-        });
+        for model_candidate in [false, true] {
+            run(BlockMatchCoarseBench {
+                client: client.clone(),
+                neighbours,
+                model_candidate,
+            });
+            run(BlockMatchFineBench {
+                client: client.clone(),
+                neighbours,
+                model_candidate,
+            });
+        }
         run(McConfidenceBench {
             client: client.clone(),
             neighbours,

@@ -1,8 +1,13 @@
 use cubecl::prelude::*;
 
-use super::pair_pyramid;
 use super::reference::{reference_block_match_coarse, reference_block_match_fine};
-use crate::motion::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
+use super::{pair_pyramid, prediction_buffer};
+use crate::motion::kernels::{
+    BLOCK_MATCH_THREADS,
+    MODEL_CANDIDATE_BIAS,
+    mc_block_match_coarse,
+    mc_block_match_fine,
+};
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 use crate::tune::tests::runtime::test_client;
@@ -10,6 +15,8 @@ use crate::tune::tests::runtime::test_client;
 const FINE_STEP: u32 = 8;
 const NOISE_FLOOR: f32 = 0.1;
 const THSAD: f32 = 5.12;
+/// The SAD floor's scale on the coarse level these tests search.
+const COARSE_FLOOR_SCALE: f32 = 0.25;
 
 #[derive(Clone, Copy)]
 enum Kernel {
@@ -61,6 +68,7 @@ fn run_fine(
     centre: &[f32],
     neighbour: &[f32],
     seeds: &[i32],
+    predictions: Option<&[f32]>,
 ) -> (Vec<i32>, Vec<u32>) {
     let client = test_client();
     let blocks_x = width.div_ceil(FINE_STEP);
@@ -76,10 +84,13 @@ fn run_fine(
     let confidence = client.create_from_slice(unwritten_bytes);
 
     let grid = CubeCount::new_2d(blocks_x, blocks_y);
+    let (prediction_words, prediction_len, model_candidate) = prediction_buffer(&client, predictions);
+    let model_bias = MODEL_CANDIDATE_BIAS * NOISE_FLOOR;
 
     unsafe {
         let mv_arg = BufferArg::from_raw_parts(mv_field.clone(), mv_len);
         let conf_arg = BufferArg::from_raw_parts(confidence.clone(), conf_len);
+        let predictions_arg = BufferArg::from_raw_parts(prediction_words, prediction_len);
 
         match kernel {
             Kernel::Reference => {
@@ -99,6 +110,9 @@ fn run_fine(
                     neighbour_arg,
                     mv_arg,
                     conf_arg,
+                    predictions_arg,
+                    model_bias,
+                    model_candidate,
                     true,
                     NOISE_FLOOR,
                     THSAD,
@@ -120,6 +134,9 @@ fn run_fine(
                 let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, NOISE_FLOOR);
                 let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
+                let sad_placeholder = client.empty(size_of::<f32>());
+                let sad_arg = BufferArg::from_raw_parts(sad_placeholder, 1);
+
                 mc_block_match_fine::launch_unchecked(
                     &client,
                     grid,
@@ -128,8 +145,12 @@ fn run_fine(
                     neighbour_slots_arg,
                     mv_arg,
                     conf_arg,
+                    sad_arg,
+                    predictions_arg,
                     0u32,
                     true,
+                    false,
+                    model_candidate,
                     noise_arg,
                     DERIVED_SAD_FLOOR,
                     THSAD,
@@ -193,6 +214,7 @@ fn blocked_fine_matches_the_reference_bit_for_bit_at_the_production_threads() {
             &centre,
             &neighbour,
             &seeds,
+            None,
         );
 
         let label =
@@ -209,6 +231,7 @@ fn blocked_fine_matches_the_reference_bit_for_bit_at_the_production_threads() {
             &centre,
             &neighbour,
             &seeds,
+            None,
         );
 
         assert_eq!(
@@ -233,6 +256,7 @@ fn run_coarse(
     search_radius: u32,
     centre: &[f32],
     neighbour: &[f32],
+    predictions: Option<&[f32]>,
 ) -> Vec<i32> {
     let client = test_client();
     let level_scale = 2u32;
@@ -248,9 +272,12 @@ fn run_coarse(
     let mv_field = client.create_from_slice(sentinel_bytes);
 
     let grid = CubeCount::new_2d(coarse_blocks_x, coarse_blocks_y);
+    let (prediction_words, prediction_len, model_candidate) = prediction_buffer(&client, predictions);
+    let model_bias = MODEL_CANDIDATE_BIAS * NOISE_FLOOR * COARSE_FLOOR_SCALE;
 
     unsafe {
         let mv_arg = BufferArg::from_raw_parts(mv_field.clone(), mv_len);
+        let predictions_arg = BufferArg::from_raw_parts(prediction_words, prediction_len);
 
         match kernel {
             Kernel::Reference => {
@@ -269,6 +296,9 @@ fn run_coarse(
                     centre_arg,
                     neighbour_arg,
                     mv_arg,
+                    predictions_arg,
+                    model_bias,
+                    model_candidate,
                     level_width,
                     level_height,
                     blksize,
@@ -286,6 +316,9 @@ fn run_coarse(
                 let pyramid_arg = BufferArg::from_raw_parts(pyramid, 2 * level_len);
                 let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, 1);
 
+                let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, NOISE_FLOOR);
+                let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+
                 mc_block_match_coarse::launch_unchecked(
                     &client,
                     grid,
@@ -293,7 +326,11 @@ fn run_coarse(
                     pyramid_arg,
                     neighbour_slots_arg,
                     mv_arg,
+                    noise_arg,
+                    predictions_arg,
                     0u32,
+                    COARSE_FLOOR_SCALE,
+                    model_candidate,
                     level_width,
                     level_height,
                     0,
@@ -339,6 +376,7 @@ fn blocked_coarse_matches_the_reference_bit_for_bit_at_the_production_threads() 
                         search_radius,
                         &centre,
                         &neighbour,
+                        None,
                     );
 
                     let got = run_coarse(
@@ -351,6 +389,7 @@ fn blocked_coarse_matches_the_reference_bit_for_bit_at_the_production_threads() 
                         search_radius,
                         &centre,
                         &neighbour,
+                        None,
                     );
 
                     assert_eq!(
@@ -359,6 +398,119 @@ fn blocked_coarse_matches_the_reference_bit_for_bit_at_the_production_threads() 
                          {step} radius {search_radius} flat {flat} dim {production_dim:?}"
                     );
                 }
+            }
+        }
+    }
+}
+
+/// A roll of 0.04 radians about `(pivot_x, pivot_y)` followed by a shift of `(shift_x, shift_y)`.
+fn roll_and_shift(pivot_x: f32, pivot_y: f32, shift_x: f32, shift_y: f32) -> [f32; 6] {
+    let (sin, cos) = 0.04f32.sin_cos();
+    let tx = pivot_x - (cos * pivot_x - sin * pivot_y) + shift_x;
+    let ty = pivot_y - (sin * pivot_x + cos * pivot_y) + shift_y;
+
+    [cos, -sin, sin, cos, tx, ty]
+}
+
+#[test]
+fn blocked_fine_with_the_model_candidate_matches_the_reference_bit_for_bit() {
+    let width = 260u32;
+    let height = 140u32;
+    let reference_dim = CubeDim::new_2d(8, 8);
+    let production_dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+    let predictions = roll_and_shift(130.0, 70.0, 11.0, -7.0);
+    let mut state = 13u64;
+
+    for search_radius in [0u32, 1, 2, 4] {
+        for use_seed in [0u32, 1] {
+            for flat in [false, true] {
+                let centre = test_frame(width, height, flat, &mut state);
+                let neighbour = test_frame(width, height, flat, &mut state);
+                let blocks = (width.div_ceil(FINE_STEP) * height.div_ceil(FINE_STEP)) as usize;
+                let seeds = test_seeds(blocks, &mut state);
+
+                let expected = run_fine(
+                    Kernel::Reference,
+                    reference_dim,
+                    width,
+                    height,
+                    16,
+                    search_radius,
+                    use_seed,
+                    &centre,
+                    &neighbour,
+                    &seeds,
+                    Some(&predictions),
+                );
+
+                let got = run_fine(
+                    Kernel::Production,
+                    production_dim,
+                    width,
+                    height,
+                    16,
+                    search_radius,
+                    use_seed,
+                    &centre,
+                    &neighbour,
+                    &seeds,
+                    Some(&predictions),
+                );
+
+                let label = format!("radius {search_radius} seed {use_seed} flat {flat}");
+
+                assert_eq!(got.0, expected.0, "motion vectors differ at {label}");
+                assert_eq!(got.1, expected.1, "confidence bits differ at {label}");
+            }
+        }
+    }
+}
+
+#[test]
+fn blocked_coarse_with_the_model_candidate_matches_the_reference_bit_for_bit() {
+    let level_width = 130u32;
+    let level_height = 70u32;
+    let reference_dim = CubeDim::new_2d(8, 8);
+    let production_dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+    let predictions = roll_and_shift(130.0, 70.0, 9.0, 5.0);
+    let mut state = 17u64;
+
+    for (blksize, step) in [(8u32, 4u32), (2, 1)] {
+        for search_radius in [1u32, 2, 4] {
+            for flat in [false, true] {
+                let centre = test_frame(level_width, level_height, flat, &mut state);
+                let neighbour = test_frame(level_width, level_height, flat, &mut state);
+
+                let expected = run_coarse(
+                    Kernel::Reference,
+                    reference_dim,
+                    level_width,
+                    level_height,
+                    blksize,
+                    step,
+                    search_radius,
+                    &centre,
+                    &neighbour,
+                    Some(&predictions),
+                );
+
+                let got = run_coarse(
+                    Kernel::Production,
+                    production_dim,
+                    level_width,
+                    level_height,
+                    blksize,
+                    step,
+                    search_radius,
+                    &centre,
+                    &neighbour,
+                    Some(&predictions),
+                );
+
+                assert_eq!(
+                    got, expected,
+                    "coarse vectors differ at blksize {blksize} step {step} radius {search_radius} flat {flat}"
+                );
             }
         }
     }

@@ -24,7 +24,8 @@ pub(crate) fn pair_byte_offset(motion_ctx: &MotionCtx, pair_slot: u32, direction
 /// `older_slot` and `newer_slot` are physical input-ring slots, and `slot_tables` holds one
 /// single-slot table per ring slot. Nothing reads confidence at the pair level, so both directions
 /// turn it off and target `confidence_dummy`, and `noise` is bound only to fill the kernel's
-/// derived noise values.
+/// derived noise values. With `predictions`, each direction also searches around its camera model
+/// prediction, older to newer first.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -43,7 +44,13 @@ pub(crate) fn run_pair_analyse(
     pair_ring: &Handle,
     confidence_dummy: &Handle,
     noise: &Handle,
+    predictions: Option<[&Handle; 2]>,
 ) -> Result<(), anyhow::Error> {
+    let (older_to_newer_predictions, newer_to_older_predictions) = match predictions {
+        Some([older_to_newer, newer_to_older]) => (Some(older_to_newer), Some(newer_to_older)),
+        None => (None, None),
+    };
+
     let direction_len = motion_ctx.pair_direction_len() as usize;
 
     let older_to_newer_offset = pair_byte_offset(motion_ctx, pair_slot, 0);
@@ -59,6 +66,8 @@ pub(crate) fn run_pair_analyse(
         confidence: confidence_dummy,
         conf_len: 1,
         write_confidence: false,
+        predictions: older_to_newer_predictions,
+        sad: None,
     };
     run_analyse(
         client,
@@ -84,6 +93,8 @@ pub(crate) fn run_pair_analyse(
         confidence: confidence_dummy,
         conf_len: 1,
         write_confidence: false,
+        predictions: newer_to_older_predictions,
+        sad: None,
     };
     run_analyse(
         client,
