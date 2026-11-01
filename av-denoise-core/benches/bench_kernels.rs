@@ -37,6 +37,7 @@ use kernels::mc_chain_compose::ChainComposeBench;
 use kernels::mc_compose_models::ComposeModelsBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
+use kernels::mc_fit_model::{FitKernel, FitModelBench};
 use kernels::mc_warp::WarpBench;
 use kernels::mv_regularise::MvRegulariseBench;
 use kernels::noise_gpu::{FoldBench, FoldStage, ReadingBench, SelectBench, SelectShape, SelectStage};
@@ -310,6 +311,13 @@ fn run_all(backend: &str, client: Client) {
     run(ComposeModelsBench {
         client: client.clone(),
     });
+
+    for &kernel in FitKernel::ALL {
+        run(FitModelBench {
+            client: client.clone(),
+            kernel,
+        });
+    }
 
     // Each regularise launch covers every neighbour, so every candidate runs at one neighbour and at four.
     for &neighbours in BENCH_NEIGHBOURS {

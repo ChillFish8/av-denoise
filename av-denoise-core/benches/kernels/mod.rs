@@ -23,6 +23,7 @@ pub mod mc_chain_compose;
 pub mod mc_compose_models;
 pub mod mc_confidence;
 pub mod mc_downscale;
+pub mod mc_fit_model;
 pub mod mc_warp;
 pub mod mv_regularise;
 pub mod nl4d_geometry;
