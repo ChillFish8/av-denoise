@@ -98,7 +98,8 @@ pub(super) fn reference_block_match_coarse(
         );
 
         let moves = reference_predicts_motion(predictions);
-        if moves && model_window.sad + model_bias < zero_window.sad {
+        let outside = reference_outside_window(model_dx, model_dy, 0i32, 0i32, search_radius);
+        if moves && outside && model_window.sad + model_bias < zero_window.sad {
             best_dx = model_window.dx;
             best_dy = model_window.dy;
         }
@@ -227,7 +228,8 @@ pub(super) fn reference_block_match_fine(
         );
 
         let moves = reference_predicts_motion(predictions);
-        if moves && model_window.sad + model_bias < seed_window.sad {
+        let outside = reference_outside_window(model_dx, model_dy, seed_dx, seed_dy, search_radius);
+        if moves && outside && model_window.sad + model_bias < seed_window.sad {
             best_sad = model_window.sad;
             best_dx = model_window.dx;
             best_dy = model_window.dy;
@@ -381,6 +383,22 @@ fn reference_predicts_motion(predictions: &[f32]) -> bool {
     }
 
     moves
+}
+
+/// Whether the model's point lies beyond `search_radius` of the seed on either axis.
+#[cube]
+fn reference_outside_window(
+    model_dx: i32,
+    model_dy: i32,
+    seed_dx: i32,
+    seed_dy: i32,
+    #[comptime] search_radius: u32,
+) -> bool {
+    let reach = comptime!(search_radius as i32);
+    let gap_x = i32::abs(model_dx - seed_dx);
+    let gap_y = i32::abs(model_dy - seed_dy);
+
+    gap_x > reach || gap_y > reach
 }
 
 /// The model's x displacement at the block centre on a level `level_scale` times smaller.

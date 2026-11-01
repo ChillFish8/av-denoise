@@ -331,6 +331,58 @@ fn a_win_beyond_the_bias_takes_the_model_candidate() {
     assert_eq!(vector, (20, 0));
 }
 
+/// One 16x16 block at the origin whose content sits 2 pixels right in the neighbour, searched 1
+/// pixel around zero, so only a model window can reach the match.
+fn match_two_pixels_away(predictions: Option<&[f32]>) -> FineOutput {
+    let search = FineSearch {
+        width: 64,
+        height: 16,
+        blksize: 16,
+        step: 16,
+        search_radius: 1,
+        sad_floor: 1.0,
+        write_sad: true,
+    };
+    let centre = texture(search.width, search.height, 7);
+    let mut neighbour = texture(search.width, search.height, 8);
+
+    for y in 0..16 {
+        for x in 0..16 {
+            neighbour[y * 64 + x + 2] = centre[y * 64 + x];
+        }
+    }
+
+    let neighbours = [neighbour];
+
+    search.run(&centre, &neighbours, predictions)
+}
+
+#[test]
+fn a_model_inside_the_seed_window_gives_the_seed_only_result() {
+    let at_reach = translation(1.0, 0.0);
+
+    let without_model = match_two_pixels_away(None);
+    let with_model = match_two_pixels_away(Some(&at_reach));
+
+    assert_ne!(
+        &without_model.vectors[..2],
+        &[2, 0],
+        "premise: the seed window cannot reach the match"
+    );
+    assert_eq!(with_model.vectors, without_model.vectors);
+    assert_eq!(bits(&with_model.confidence), bits(&without_model.confidence));
+    assert_eq!(bits(&with_model.sad), bits(&without_model.sad));
+}
+
+#[test]
+fn a_model_one_past_the_seed_window_searches_its_own_window() {
+    let past_reach = translation(2.0, 0.0);
+
+    let with_model = match_two_pixels_away(Some(&past_reach));
+
+    assert_eq!(&with_model.vectors[..2], &[2, 0]);
+}
+
 #[test]
 fn a_static_overlay_on_a_pan_keeps_its_own_seed() {
     let search = pan_search();
@@ -649,6 +701,29 @@ fn the_coarse_pass_keeps_zero_on_static_content() {
     let with_model = search.run(&centre, &centre, Some(&predictions));
 
     assert_eq!(with_model, without_model);
+}
+
+#[test]
+fn a_coarse_model_at_the_window_edge_adds_no_window() {
+    let search = coarse_search();
+    let centre = texture(search.level_width, search.level_height, 14);
+    let neighbour = frame_shifted_by(&centre, search.level_width, search.level_height, 3, 0);
+    // 4 full-resolution pixels are 2 on the level, exactly the search radius.
+    let at_reach = translation(4.0, 0.0);
+    // 6 full-resolution pixels are 3 on the level, one past it.
+    let past_reach = translation(6.0, 0.0);
+
+    let without_model = search.run(&centre, &neighbour, None);
+    let inside = search.run(&centre, &neighbour, Some(&at_reach));
+    let outside = search.run(&centre, &neighbour, Some(&past_reach));
+
+    assert_ne!(
+        &without_model[..2],
+        &[6, 0],
+        "premise: the zero window cannot reach the match"
+    );
+    assert_eq!(inside, without_model);
+    assert_eq!(&outside[..2], &[6, 0]);
 }
 
 /// Halves a frame by averaging each 2x2 square, as the pyramid build does.

@@ -247,7 +247,8 @@ impl NlmDenoiser {
     /// Builds the pyramid of stream frame `frame` and searches its motion to the frame before it.
     ///
     /// The second frame of a stream is also searched the other way, so the first frame can be read
-    /// against it. It does nothing without motion compensation.
+    /// against it, and so is every frame under `Chained` estimation. It does nothing without motion
+    /// compensation.
     fn search_lookahead(&self, frame: u32) -> Result<(), anyhow::Error> {
         let Some(motion_ctx) = self.mc_ctx.as_ref() else {
             return Ok(());
@@ -261,8 +262,8 @@ impl NlmDenoiser {
         };
 
         let previous_slot = lookahead_slot(previous);
-        let both_ways = frame == 1;
-        let seeds = self.compose_pair_seeds(previous, frame);
+        let both_ways = frame == 1 || self.is_chained();
+        let seeds = self.compose_pair_seeds(previous, frame, both_ways);
         self.search_lookahead_pair(motion_ctx, previous_slot, slot, both_ways, seeds)
     }
 
@@ -319,8 +320,7 @@ impl NlmDenoiser {
 
     /// Searches the motion between the held frames in `older_slot` and `newer_slot`.
     ///
-    /// `Chained` estimation runs the pair analyse, which searches both ways. `Direct` estimation
-    /// searches from the newer frame to the older one, and also the other way when `both_ways`.
+    /// It searches from the newer frame to the older one, and also the other way when `both_ways`.
     /// With `seeds`, each direction also searches around its camera model prediction.
     fn search_lookahead_pair(
         &self,
@@ -333,13 +333,13 @@ impl NlmDenoiser {
         let lookahead = self.lookahead();
         let pyramid = lookahead.pyramid();
         let pair_field = lookahead.pair_field();
-        let predictions = seeds.as_ref().map(|seeds| seeds.predictions);
         let noise = match seeds.as_ref() {
             Some(seeds) => seeds.noise.clone(),
             None => self.derived_handle(),
         };
 
-        if self.is_chained() || both_ways {
+        if both_ways {
+            let predictions = seeds.as_ref().and_then(PairSeeds::both_ways);
             return motion::run_pair_analyse(
                 &self.client,
                 motion_ctx,
@@ -359,7 +359,7 @@ impl NlmDenoiser {
             .context("look-ahead pair analyse dispatch failed");
         }
 
-        let newer_to_older_prediction = predictions.map(|[_, newer_to_older]| newer_to_older);
+        let newer_to_older_prediction = seeds.as_ref().map(|seeds| seeds.newer_to_older);
 
         let direction_offset = motion::pair_byte_offset(motion_ctx, 0, NEWER_TO_OLDER);
         let newer_to_older = pair_field.clone().offset_start(direction_offset);

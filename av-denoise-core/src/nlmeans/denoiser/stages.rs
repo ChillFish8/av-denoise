@@ -1,6 +1,7 @@
 use anyhow::Context;
 
 use super::NlmDenoiser;
+use super::seeds::PairSeeds;
 use crate::engine::timing::timed;
 use crate::motion::{self, MotionEstimation, run_pyramid_build};
 use crate::nlmeans::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
@@ -173,8 +174,8 @@ impl NlmDenoiser {
         let pair_slot = self.pair_slot(0);
         let older_frame = self.slot_frame(older_slot);
         let newer_frame = self.slot_frame(newer_slot);
-        let seeds = self.compose_pair_seeds(older_frame, newer_frame);
-        let predictions = seeds.as_ref().map(|seeds| seeds.predictions);
+        let seeds = self.compose_pair_seeds(older_frame, newer_frame, true);
+        let predictions = seeds.as_ref().and_then(PairSeeds::both_ways);
         let noise = match seeds.as_ref() {
             Some(seeds) => seeds.noise.clone(),
             None => self.derived_handle(),

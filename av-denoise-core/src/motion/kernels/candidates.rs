@@ -125,6 +125,29 @@ pub(super) fn predicts_motion(predictions: &[f32], neighbour_index: u32) -> bool
     scales || shears || shifts
 }
 
+/// The search centre the camera model adds, or `seed` when it adds no window.
+///
+/// An identity model adds no window. Nor does a model whose point lies within `search_radius` of
+/// `seed` on both axes, since the seed's window already holds that point.
+#[cube]
+pub(super) fn model_centre(
+    model: BlockVector,
+    seed: BlockVector,
+    moves: bool,
+    #[comptime] search_radius: u32,
+) -> BlockVector {
+    let reach = comptime!(search_radius as i32);
+    let gap_x = i32::abs(model.dx - seed.dx);
+    let gap_y = i32::abs(model.dy - seed.dy);
+    let outside = gap_x > reach || gap_y > reach;
+    let adds_window = moves && outside;
+
+    BlockVector {
+        dx: select(adds_window, model.dx, seed.dx),
+        dy: select(adds_window, model.dy, seed.dy),
+    }
+}
+
 /// Whether a later candidate's SAD beats the incumbent's.
 ///
 /// It must be lower by more than `bias`, so ties and near-ties keep the earlier candidate.

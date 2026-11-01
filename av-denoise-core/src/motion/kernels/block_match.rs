@@ -8,6 +8,7 @@ use super::candidates::{
     WindowBest,
     beats_incumbent,
     candidate_count,
+    model_centre,
     model_displacement,
     predicts_motion,
 };
@@ -30,6 +31,31 @@ const _: () = assert!(
     BLOCK_MATCH_THREADS <= ARGMIN_MAX_PLANES * 8,
     "the argmin's per-plane buffers must cover a block-match cube at a plane width of 8"
 );
+
+/// The most threads [coarse_match_threads] gives one cube.
+const MAX_COARSE_MATCH_THREADS: u32 = 256;
+
+const _: () = assert!(
+    MAX_COARSE_MATCH_THREADS <= ARGMIN_MAX_PLANES * 8,
+    "the argmin's per-plane buffers must cover the widest coarse cube at a plane width of 8"
+);
+
+/// The threads a coarse block-match cube runs for a window `search_radius` either side.
+///
+/// A wide window has many more work items than [BLOCK_MATCH_THREADS] threads, so the count
+/// doubles until each thread has at most two. The chosen offset is the same for any thread count.
+pub fn coarse_match_threads(search_radius: u32) -> u32 {
+    let window_side = 2 * search_radius + 1;
+    let groups_per_row = window_side.div_ceil(OFFSETS_PER_THREAD);
+    let work_items = window_side * groups_per_row;
+
+    let mut threads = BLOCK_MATCH_THREADS;
+    while threads * 2 < work_items && threads < MAX_COARSE_MATCH_THREADS {
+        threads *= 2;
+    }
+
+    threads
+}
 
 /// The row stride of the staged search window.
 ///
@@ -72,9 +98,9 @@ struct BlockSite {
 /// When `model_candidate` is set, a second window centres on the camera model's prediction in
 /// `predictions`, and its best replaces the zero window's only when it is lower by more than
 /// [MODEL_CANDIDATE_BIAS] times the derived SAD floor of `noise`. `floor_scale` converts that floor
-/// from a full-resolution block to this level's block. An identity prediction adds no window.
-/// When `model_candidate` is unset, `noise` and `predictions` are never read and can be
-/// placeholders.
+/// from a full-resolution block to this level's block. An identity prediction, or one within
+/// `search_radius` of zero, adds no window. When `model_candidate` is unset, `noise` and
+/// `predictions` are never read and can be placeholders.
 ///
 /// `blksize` must be at most [MAX_BLKSIZE](crate::motion::MAX_BLKSIZE), so the shared centre tile
 /// stays within 1024 values. The neighbour pixels the search reaches are staged into shared memory
@@ -143,9 +169,9 @@ pub fn mc_block_match_coarse(
             level_height,
         );
         let moves = predicts_motion(predictions, neighbour_index);
-        let model_dx = if moves { model.dx } else { 0i32 };
-        let model_dy = if moves { model.dy } else { 0i32 };
-        centres.set(1u32, model_dx, model_dy);
+        let zero = centres.get(0u32);
+        let centre = model_centre(model, zero, moves, search_radius);
+        centres.set(1u32, centre.dx, centre.dy);
         bias = MODEL_CANDIDATE_BIAS * noise[DERIVED_SAD_FLOOR as usize] * floor_scale;
     }
 
@@ -211,8 +237,9 @@ pub fn mc_block_match_coarse(
 ///
 /// When `model_candidate` is set, a second window centres on the camera model's prediction in
 /// `predictions`, and its best replaces the seed window's only when it is lower by more than
-/// [MODEL_CANDIDATE_BIAS] times the derived SAD floor of `noise`. An identity prediction adds no
-/// window. When `model_candidate` is unset, `predictions` is never read and can be a placeholder.
+/// [MODEL_CANDIDATE_BIAS] times the derived SAD floor of `noise`. An identity prediction, or one
+/// within `search_radius` of the seed, adds no window. When `model_candidate` is unset,
+/// `predictions` is never read and can be a placeholder.
 ///
 /// Every frame is a slot of `pyramid`, `slot_pixels` values apart. The launch runs one cube per
 /// block per neighbour, with the neighbour on z. Neighbour `n` matches slot `neighbour_slots[n]`
@@ -298,9 +325,9 @@ pub fn mc_block_match_fine(
             height,
         );
         let moves = predicts_motion(predictions, neighbour_index);
-        let model_dx = if moves { model.dx } else { seed_dx };
-        let model_dy = if moves { model.dy } else { seed_dy };
-        centres.set(1u32, model_dx, model_dy);
+        let seed = centres.get(0u32);
+        let centre = model_centre(model, seed, moves, search_radius);
+        centres.set(1u32, centre.dx, centre.dy);
         bias = MODEL_CANDIDATE_BIAS * noise[DERIVED_SAD_FLOOR as usize];
     }
 

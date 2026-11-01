@@ -3,7 +3,7 @@ use cubecl::server::Handle;
 
 use super::MotionCtx;
 use super::global::AFFINE_WORDS;
-use super::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
+use super::kernels::{BLOCK_MATCH_THREADS, coarse_match_threads, mc_block_match_coarse, mc_block_match_fine};
 use super::pyramid::{level_dims, pyramid_level_offset, pyramid_pixels_per_frame, pyramid_slot_pixels};
 #[cfg(test)]
 use crate::engine::align::StorageAlign;
@@ -108,7 +108,8 @@ pub(crate) fn run_analyse(
         let coarse_blocks_y = coarse_height.div_ceil(coarse_step).max(1);
         let grid = CubeCount::new_3d(coarse_blocks_x, coarse_blocks_y, targets.neighbours);
         // One cube per image block, with its threads sharing the scoring work.
-        let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+        let threads = coarse_match_threads(motion_ctx.coarse_search_radius);
+        let dim = CubeDim::new_1d(threads);
         let pyramid = targets.pyramid.clone();
         let neighbour_slots = targets.neighbour_slots.clone();
         let mv_field = targets.mv_field.clone();

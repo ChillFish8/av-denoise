@@ -9,7 +9,12 @@ mod pyramid;
 #[cfg(test)]
 mod tests;
 
-pub use self::block_match::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
+pub use self::block_match::{
+    BLOCK_MATCH_THREADS,
+    coarse_match_threads,
+    mc_block_match_coarse,
+    mc_block_match_fine,
+};
 pub use self::candidates::MODEL_CANDIDATE_BIAS;
 pub use self::chain::{mc_chain_compose, mc_pair_zero};
 pub use self::compensate::mc_warp;

@@ -1,16 +1,16 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::motion::kernels::{mc_block_match_coarse, mc_block_match_fine};
+use crate::motion::kernels::{coarse_match_threads, mc_block_match_coarse, mc_block_match_fine};
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 use crate::tune::gpu::{read_i32, zero_words};
 use crate::tune::tests::fixtures::{hashed_unit, upload};
 use crate::tune::tests::runtime::test_client;
 
-/// Cube sizes the argmin runs at. 16 threads leave a 32-wide plane partly empty, 32 is the shipped
-/// size, and 128 spans two to eight planes depending on the device.
-const CUBE_THREADS: [u32; 3] = [16, 32, 128];
+/// Cube sizes the argmin runs at. 16 threads leave a 32-wide plane partly empty, and 32 up to 256
+/// cover every size [coarse_match_threads] picks, spanning one to 32 planes depending on the device.
+const CUBE_THREADS: [u32; 5] = [16, 32, 64, 128, 256];
 
 const WIDTH: u32 = 70;
 const HEIGHT: u32 = 45;
@@ -18,7 +18,7 @@ const BLKSIZE: u32 = 16;
 const STEP: u32 = 8;
 
 /// Search radii with fewer and more candidates than the widest cube has threads.
-const SEARCH_RADII: [u32; 2] = [4, 7];
+const SEARCH_RADII: [u32; 3] = [4, 7, 12];
 
 /// Neighbours each argmin launch covers on z, each matching its own frame.
 const NEIGHBOURS: usize = 3;
@@ -456,6 +456,17 @@ fn assert_coarse_matches_the_serial_scan(content: Content) {
             }
         }
     }
+}
+
+#[test]
+fn a_wider_coarse_window_gets_more_threads() {
+    let narrow = coarse_match_threads(4);
+    let middle = coarse_match_threads(8);
+    let wide = coarse_match_threads(12);
+
+    assert_eq!(narrow, 32);
+    assert_eq!(middle, 64);
+    assert_eq!(wide, 128);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, mc_block_match_coarse};
+use av_denoise_core::bench_api::kernels::motion::{coarse_match_threads, mc_block_match_coarse};
 use av_denoise_core::bench_api::{DERIVED_WORDS, DerivedValues};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
@@ -102,7 +102,8 @@ impl Benchmark for BlockMatchCoarseBench {
         let mv_stride = fine_blocks_x * fine_blocks_y * 2;
         let mv_len = self.neighbours as usize * mv_stride as usize;
         let grid = CubeCount::new_3d(coarse_blocks_x, coarse_blocks_y, self.neighbours);
-        let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+        let threads = coarse_match_threads(SEARCH_RADIUS);
+        let dim = CubeDim::new_1d(threads);
 
         unsafe {
             let pyramid_arg = BufferArg::from_raw_parts(args.pyramid, pyramid_len);

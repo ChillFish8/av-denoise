@@ -9,12 +9,22 @@ use crate::tune::gpu::zeroed_words;
 
 /// One pair's predictions and the noise values its searches score the seed preference against.
 pub(in crate::nlmeans) struct PairSeeds<'a> {
-    /// The older-to-newer prediction, then the newer-to-older one.
-    pub predictions: [&'a Handle; 2],
+    /// The older-to-newer prediction, present when the pair was composed both ways.
+    pub older_to_newer: Option<&'a Handle>,
+    pub newer_to_older: &'a Handle,
     /// Zeroed noise values, so a pair search keeps its seed only on exact ties.
     ///
     /// The front's own noise values belong to an earlier window, or to the stream before a reset.
     pub noise: &'a Handle,
+}
+
+impl<'a> PairSeeds<'a> {
+    /// The older-to-newer prediction, then the newer-to-older one, when composed both ways.
+    pub fn both_ways(&self) -> Option<[&'a Handle; 2]> {
+        let older_to_newer = self.older_to_newer?;
+
+        Some([older_to_newer, self.newer_to_older])
+    }
 }
 
 /// The camera model predictions a front's motion searches start from.
@@ -80,10 +90,17 @@ impl ModelSeeds {
         }
     }
 
-    /// Composes the pair from stream frame `older` to `newer` both ways.
+    /// Composes the pair's prediction from stream frame `newer` back to `older`, and from `older`
+    /// to `newer` too when `both_ways`.
     ///
     /// A pair that does not step exactly one frame predicts no motion.
-    pub(super) fn compose_pair(&self, client: &Client, older: u32, newer: u32) -> PairSeeds<'_> {
+    pub(super) fn compose_pair(
+        &self,
+        client: &Client,
+        older: u32,
+        newer: u32,
+        both_ways: bool,
+    ) -> PairSeeds<'_> {
         let frames = [older, newer];
         let gaps = compose_gaps(&frames, 1, 1, &self.motion.ring);
         let table_index = match gaps[0] {
@@ -94,17 +111,20 @@ impl ModelSeeds {
         let scale_x = self.motion.scale_x;
         let scale_y = self.motion.scale_y;
 
-        run_compose_models(
-            client,
-            &self.motion.ring,
-            table,
-            &self.older_to_newer,
-            1,
-            0,
-            1,
-            scale_x,
-            scale_y,
-        );
+        if both_ways {
+            run_compose_models(
+                client,
+                &self.motion.ring,
+                table,
+                &self.older_to_newer,
+                1,
+                0,
+                1,
+                scale_x,
+                scale_y,
+            );
+        }
+
         run_compose_models(
             client,
             &self.motion.ring,
@@ -117,8 +137,11 @@ impl ModelSeeds {
             scale_y,
         );
 
+        let older_to_newer = both_ways.then_some(&self.older_to_newer);
+
         PairSeeds {
-            predictions: [&self.older_to_newer, &self.newer_to_older],
+            older_to_newer,
+            newer_to_older: &self.newer_to_older,
             noise: &self.pair_noise,
         }
     }
@@ -199,11 +222,16 @@ impl NlmDenoiser {
         Some(predictions)
     }
 
-    /// Composes both directions of the pair from stream frame `older` to `newer`, when the front
-    /// has camera models.
-    pub(in crate::nlmeans) fn compose_pair_seeds(&self, older: u32, newer: u32) -> Option<PairSeeds<'_>> {
+    /// Composes the pair's prediction from stream frame `newer` back to `older`, and from `older`
+    /// to `newer` too when `both_ways`, when the front has camera models.
+    pub(in crate::nlmeans) fn compose_pair_seeds(
+        &self,
+        older: u32,
+        newer: u32,
+        both_ways: bool,
+    ) -> Option<PairSeeds<'_>> {
         let seeds = self.seeds.as_ref()?;
-        let predictions = seeds.compose_pair(&self.client, older, newer);
+        let predictions = seeds.compose_pair(&self.client, older, newer, both_ways);
 
         Some(predictions)
     }
