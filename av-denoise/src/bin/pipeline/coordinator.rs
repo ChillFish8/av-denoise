@@ -38,7 +38,7 @@ pub fn run_coordinator<W: std::io::Write>(
 ) -> Result<(), anyhow::Error> {
     let framerate = info.details.frame_rate;
     let ratio = y4m::Ratio::new(*framerate.numer() as usize, *framerate.denom() as usize);
-    let colorspace = subsampling_to_y4m(info.layout.subsampling, info.layout.depth);
+    let colorspace = subsampling_to_y4m(info.layout.subsampling, info.layout.depth, info.chroma_siting);
 
     let mut builder = y4m::encode(info.layout.width as usize, info.layout.height as usize, ratio)
         .with_colorspace(colorspace);

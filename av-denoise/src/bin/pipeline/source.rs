@@ -3,13 +3,13 @@ use std::io::Read;
 use std::path::Path;
 
 use av_decoders::{Decoder, DecoderImpl, VideoDetails};
-use av_denoise::{Depth, FrameLayout};
-use ffms2_sys::{FFMS_ColorRanges, FFMS_GetVideoProperties};
+use av_denoise::{Depth, FrameLayout, Subsampling};
+use ffms2_sys::{FFMS_ColorRanges, FFMS_ErrorInfo, FFMS_GetFrame, FFMS_GetVideoProperties, FFMS_VideoSource};
 
 use super::convert::subsampling_from_av_decoders;
 use crate::cli::InputSource;
 use crate::frame_index;
-use crate::y4m_format::{subsampling_from_y4m, y4m_vendor_extensions};
+use crate::y4m_format::{ChromaSiting, subsampling_from_y4m, y4m_vendor_extensions};
 
 /// What the rest of a run needs to know about its input.
 #[derive(Clone)]
@@ -19,6 +19,7 @@ pub struct SourceInfo {
     /// Carried through to the output header when the input declared one.
     pub pixel_aspect: Option<y4m::Ratio>,
     pub vendor_extensions: Vec<y4m::VendorExtensionString>,
+    pub chroma_siting: ChromaSiting,
     /// Frames the run should emit, when the input knows its own length.
     pub estimated_frames: Option<usize>,
 }
@@ -65,13 +66,22 @@ pub fn open_file(path: &Path) -> Result<OpenedSource, anyhow::Error> {
     let colour = read_file_colour(&mut decoder);
     let vendor_extensions: Vec<y4m::VendorExtensionString> = colour.range.into_iter().collect();
 
-    log_forwarded_colour(colour.pixel_aspect, &vendor_extensions);
+    // Only 8-bit 4:2:0 output carries a siting, so nothing else is logged as forwarded.
+    let carries_siting = layout.subsampling == Subsampling::Yuv420 && layout.depth == Depth::Eight;
+    let logged_siting = if carries_siting {
+        colour.chroma_siting
+    } else {
+        ChromaSiting::Unknown
+    };
+
+    log_forwarded_colour(colour.pixel_aspect, &vendor_extensions, logged_siting);
 
     let info = SourceInfo {
         details,
         layout,
         pixel_aspect: colour.pixel_aspect,
         vendor_extensions,
+        chroma_siting: colour.chroma_siting,
         estimated_frames,
     };
 
@@ -82,8 +92,13 @@ pub fn open_file(path: &Path) -> Result<OpenedSource, anyhow::Error> {
     })
 }
 
-fn log_forwarded_colour(pixel_aspect: Option<y4m::Ratio>, vendor_extensions: &[y4m::VendorExtensionString]) {
-    if pixel_aspect.is_none() && vendor_extensions.is_empty() {
+fn log_forwarded_colour(
+    pixel_aspect: Option<y4m::Ratio>,
+    vendor_extensions: &[y4m::VendorExtensionString],
+    chroma_siting: ChromaSiting,
+) {
+    let siting_unknown = chroma_siting == ChromaSiting::Unknown;
+    if pixel_aspect.is_none() && vendor_extensions.is_empty() && siting_unknown {
         return;
     }
 
@@ -96,6 +111,7 @@ fn log_forwarded_colour(pixel_aspect: Option<y4m::Ratio>, vendor_extensions: &[y
     tracing::info!(
         pixel_aspect = ?aspect,
         color_range = ?range,
+        chroma_siting = ?chroma_siting,
         "forwarding colour tags from the source",
     );
 }
@@ -104,6 +120,7 @@ fn log_forwarded_colour(pixel_aspect: Option<y4m::Ratio>, vendor_extensions: &[y
 pub struct FileColour {
     pub range: Option<y4m::VendorExtensionString>,
     pub pixel_aspect: Option<y4m::Ratio>,
+    pub chroma_siting: ChromaSiting,
 }
 
 /// Maps an ffms2 colour range onto the y4m `XCOLORRANGE` tag, without its leading `X`.
@@ -135,13 +152,14 @@ pub fn pixel_aspect_from_sar(numerator: i32, denominator: i32) -> Option<y4m::Ra
     Some(ratio)
 }
 
-/// Reads the colour range and sample aspect ratio of the track behind `decoder`.
+/// Reads the colour range, sample aspect ratio and chroma siting of the track behind `decoder`.
 ///
-/// Both come back empty when the decoder is not backed by ffms2.
+/// All three come back empty when the decoder is not backed by ffms2.
 pub fn read_file_colour(decoder: &mut Decoder) -> FileColour {
     let empty = FileColour {
         range: None,
         pixel_aspect: None,
+        chroma_siting: ChromaSiting::Unknown,
     };
 
     let Some(ffms2) = decoder.get_ffms2_impl() else {
@@ -161,7 +179,31 @@ pub fn read_file_colour(decoder: &mut Decoder) -> FileColour {
     let range = color_range_extension(properties.ColorRange);
     let pixel_aspect = pixel_aspect_from_sar(properties.SARNum, properties.SARDen);
 
-    FileColour { range, pixel_aspect }
+    let chroma_siting = first_frame_siting(ffms2.video_source);
+
+    FileColour {
+        range,
+        pixel_aspect,
+        chroma_siting,
+    }
+}
+
+/// Reads the chroma siting off the first decoded frame, since ffms2 reports it per frame.
+fn first_frame_siting(video_source: *mut FFMS_VideoSource) -> ChromaSiting {
+    // SAFETY: an all-zero error info is the empty one ffms2 expects, with no message buffer.
+    let mut error = unsafe { std::mem::zeroed::<FFMS_ErrorInfo>() };
+
+    // SAFETY: `video_source` comes from a live `Ffms2Decoder`, so it is non-null and valid.
+    let frame_ptr = unsafe { FFMS_GetFrame(video_source, 0, std::ptr::addr_of_mut!(error)) };
+
+    if frame_ptr.is_null() {
+        return ChromaSiting::Unknown;
+    }
+
+    // SAFETY: checked non-null just above, and ffms2 keeps the frame alive until the next call.
+    let location = unsafe { (*frame_ptr).ChromaLocation };
+
+    ChromaSiting::from_ffms2(location)
 }
 
 /// Opens a y4m stream.
@@ -176,6 +218,7 @@ pub fn open_y4m(reader: Box<dyn Read>) -> Result<OpenedSource, anyhow::Error> {
     let pixel_aspect = y4m_decoder.get_pixel_aspect();
     let raw_params = y4m_decoder.get_raw_params();
     let vendor_extensions = y4m_vendor_extensions(raw_params);
+    let chroma_siting = ChromaSiting::from_y4m(colorspace);
 
     let decoder_impl = DecoderImpl::Y4m(y4m_decoder);
     let decoder = Decoder::from_decoder_impl(decoder_impl)?;
@@ -187,6 +230,7 @@ pub fn open_y4m(reader: Box<dyn Read>) -> Result<OpenedSource, anyhow::Error> {
         layout,
         pixel_aspect: Some(pixel_aspect),
         vendor_extensions,
+        chroma_siting,
         estimated_frames: None,
     };
 

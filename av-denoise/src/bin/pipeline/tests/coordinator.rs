@@ -1,14 +1,15 @@
 use indicatif::ProgressBar;
 
-use super::{tiny_layout, tiny_planes};
-use crate::pipeline::coordinator::{OutputMsg, emit_frames};
+use super::{tiny_layout, tiny_planes, y4m_reader};
+use crate::pipeline::coordinator::{OutputMsg, emit_frames, run_coordinator};
+use crate::pipeline::source::open_y4m;
 use crate::pipeline::stage::frame_permit_channel;
-use crate::y4m_format::subsampling_to_y4m;
+use crate::y4m_format::{ChromaSiting, subsampling_to_y4m};
 
 fn encoder(buffer: &mut Vec<u8>) -> y4m::Encoder<&mut Vec<u8>> {
     let layout = tiny_layout();
     let frame_rate = y4m::Ratio::new(30, 1);
-    let colorspace = subsampling_to_y4m(layout.subsampling, layout.depth);
+    let colorspace = subsampling_to_y4m(layout.subsampling, layout.depth, ChromaSiting::Unknown);
 
     y4m::encode(layout.width as usize, layout.height as usize, frame_rate)
         .with_colorspace(colorspace)
@@ -96,4 +97,31 @@ fn emit_frames_leaves_the_error_to_a_dispatcher_that_sent_no_count() {
 
     emit_frames(&mut encoder, &outputs, &staged, &progress, &give)
         .expect("the dispatcher reports its own failure");
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn the_coordinator_writes_the_source_siting_into_the_header() {
+    let mut header = Vec::new();
+    let frame_rate = y4m::Ratio::new(30, 1);
+    y4m::encode(8, 8, frame_rate)
+        .with_colorspace(y4m::Colorspace::C420)
+        .write_header(&mut header)
+        .expect("header write failed");
+
+    let mut info = open_y4m(y4m_reader(header)).expect("a 4:2:0 pipe opens").info;
+    info.chroma_siting = ChromaSiting::Left;
+
+    let (output_tx, output_rx) = crossbeam_channel::unbounded::<OutputMsg>();
+    drop(output_tx);
+    let staged = staged_count(Some(0));
+    let (give, _take) = frame_permit_channel(2);
+    let buffer = super::SharedBuffer::default();
+
+    run_coordinator(info, output_rx, staged, false, give, buffer.clone()).expect("zero frames written");
+
+    let written = buffer.0.lock().expect("buffer lock").clone();
+    let header_line = String::from_utf8_lossy(&written);
+
+    assert!(header_line.contains("C420mpeg2"), "got {header_line}");
 }
