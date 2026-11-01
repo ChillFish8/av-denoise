@@ -76,3 +76,7 @@ harness = false
 name = "tune_timing_check"
 harness = false
 
+[[bench]]
+name = "gmc_fit"
+harness = false
+
