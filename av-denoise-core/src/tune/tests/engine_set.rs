@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use crate::engine::{DevicePlane, EngineSpec, Geometry, SampleFormat};
+use crate::engine::{DevicePlane, PassGeometry, PassSpec, SampleFormat};
 use crate::nlmeans::{ChannelMode, DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::engine_set::EngineSet;
 use crate::tune::setup::KernelSetup;
@@ -15,8 +15,8 @@ fn fill_words(words: &mut [u32], value: u32) {
     words[ABSOLUTE_POS_X as usize] = value;
 }
 
-fn spec(mode: DenoisingMode) -> EngineSpec {
-    let geometry = Geometry {
+fn spec(mode: DenoisingMode) -> PassSpec {
+    let geometry = PassGeometry {
         width: WIDTH,
         height: HEIGHT,
         channels: ChannelMode::Luma,
@@ -28,17 +28,17 @@ fn spec(mode: DenoisingMode) -> EngineSpec {
         ..NlmeansOptions::default()
     };
 
-    EngineSpec::Nlmeans {
+    PassSpec::Nlmeans {
         algorithm: NlmeansAlgorithm::Fast(options),
         geometry,
     }
 }
 
-fn spatial() -> EngineSpec {
+fn spatial() -> PassSpec {
     spec(DenoisingMode::Spacial)
 }
 
-fn temporal() -> EngineSpec {
+fn temporal() -> PassSpec {
     spec(DenoisingMode::Temporal { radius: 1 })
 }
 
@@ -49,7 +49,7 @@ fn off() -> TuningConfig {
     }
 }
 
-fn build_set(specs: &[EngineSpec]) -> (EngineSet, Client) {
+fn build_set(specs: &[PassSpec]) -> (EngineSet, Client) {
     let device = crate::testing::test_device();
     let client = device.client();
     let setup = KernelSetup::default();
@@ -159,14 +159,14 @@ fn an_empty_set_is_an_error() {
 #[test]
 fn copies_of_an_odd_sized_plane_match_their_source_byte_for_byte() {
     let client = crate::testing::test_client();
-    let geometry = Geometry {
+    let geometry = PassGeometry {
         width: 61,
         height: 37,
         channels: ChannelMode::Luma,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
     };
-    let specs = [EngineSpec::Nlmeans {
+    let specs = [PassSpec::Nlmeans {
         algorithm: NlmeansAlgorithm::Fast(NlmeansOptions::default()),
         geometry,
     }];

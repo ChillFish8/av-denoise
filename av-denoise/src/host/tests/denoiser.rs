@@ -6,11 +6,11 @@ use av_denoise_core::{
     DenoisingMode,
     DevicePlane,
     EdgePadding,
-    Engine,
     Nl4dOptions,
     NlmTuning,
     NlmeansHqOptions,
     NlmeansOptions,
+    PassEngine,
     WindowSpan,
 };
 
@@ -206,7 +206,7 @@ impl ScriptedEngine {
     }
 }
 
-impl Engine for ScriptedEngine {
+impl PassEngine for ScriptedEngine {
     fn push(&mut self, _planes: &[DevicePlane<'_>]) -> Result<usize, av_denoise_core::Error> {
         let earlier_pushes = self.pushes;
         self.pushes += 1;

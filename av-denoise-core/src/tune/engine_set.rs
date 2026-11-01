@@ -13,7 +13,7 @@ use super::ledger::TuneLedger;
 use super::plan::PipelineProfile;
 use super::profile_key::profile_key;
 use super::setup::{KernelSetup, engine_kernels};
-use crate::engine::{DevicePlane, Engine, EngineSpec, WindowSpan};
+use crate::engine::{DevicePlane, PassEngine, PassSpec, WindowSpan};
 use crate::error::Error;
 
 /// The engines of one group, driven together on one device.
@@ -21,8 +21,8 @@ pub(crate) struct EngineSet {
     client: Client,
     device: cubecl::Device,
     profile: DeviceProfile,
-    specs: Vec<EngineSpec>,
-    engines: Vec<Box<dyn Engine>>,
+    specs: Vec<PassSpec>,
+    engines: Vec<Box<dyn PassEngine>>,
     scratch: Vec<Vec<Handle>>,
     ledger: Option<Arc<TuneLedger>>,
 }
@@ -35,7 +35,7 @@ impl EngineSet {
     pub(crate) fn build(
         device: &cubecl::Device,
         client: &Client,
-        specs: &[EngineSpec],
+        specs: &[PassSpec],
         config: &TuningConfig,
         setup: &KernelSetup,
     ) -> Result<Self, Error> {
@@ -145,12 +145,12 @@ impl EngineSet {
         }
     }
 
-    pub(crate) fn specs(&self) -> &[EngineSpec] {
+    pub(crate) fn specs(&self) -> &[PassSpec] {
         &self.specs
     }
 
     #[cfg(test)]
-    pub(crate) fn engines_mut(&mut self) -> &mut [Box<dyn Engine>] {
+    pub(crate) fn engines_mut(&mut self) -> &mut [Box<dyn PassEngine>] {
         &mut self.engines
     }
 
@@ -181,7 +181,7 @@ impl EngineSet {
     }
 }
 
-fn scratch_planes(client: &Client, spec: &EngineSpec) -> Vec<Handle> {
+fn scratch_planes(client: &Client, spec: &PassSpec) -> Vec<Handle> {
     let geometry = spec.geometry();
     let bytes = geometry.output.plane_bytes(geometry.pixels()) as usize;
     let count = geometry.channels.count() as usize;

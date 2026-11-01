@@ -2,12 +2,12 @@ use crate::tune::{TUNE_EXTRA_FRAMES, profile_key, tuning_frame_count};
 use crate::{
     ChannelMode,
     DenoisingMode,
-    EngineSpec,
-    Geometry,
     Nl4dOptions,
     NlmeansAlgorithm,
     NlmeansHqOptions,
     NlmeansOptions,
+    PassGeometry,
+    PassSpec,
     SampleFormat,
 };
 
@@ -17,8 +17,8 @@ fn geometry(
     output: SampleFormat,
     width: u32,
     height: u32,
-) -> Geometry {
-    Geometry {
+) -> PassGeometry {
+    PassGeometry {
         width,
         height,
         channels,
@@ -34,20 +34,20 @@ fn nl4d_spec(
     output: SampleFormat,
     width: u32,
     height: u32,
-) -> EngineSpec {
+) -> PassSpec {
     let options = Nl4dOptions {
         temporal_radius: radius,
         ..Nl4dOptions::default()
     };
     let geometry = geometry(channels, input, output, width, height);
 
-    EngineSpec::Nl4d { options, geometry }
+    PassSpec::Nl4d { options, geometry }
 }
 
-fn nlmeans_spec(algorithm: NlmeansAlgorithm) -> EngineSpec {
+fn nlmeans_spec(algorithm: NlmeansAlgorithm) -> PassSpec {
     let geometry = geometry(ChannelMode::Luma, SampleFormat::U8, SampleFormat::U8, 64, 64);
 
-    EngineSpec::Nlmeans { algorithm, geometry }
+    PassSpec::Nlmeans { algorithm, geometry }
 }
 
 fn temporal_nlm(radius: u32) -> NlmeansOptions {

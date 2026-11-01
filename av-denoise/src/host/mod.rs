@@ -10,7 +10,7 @@ mod tests;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use av_denoise_core::{DevicePlane, Engine, EngineSpec, GrainChunk, WindowSpan};
+use av_denoise_core::{DevicePlane, GrainChunk, PassEngine, PassSpec, WindowSpan};
 use cubecl::prelude::Client;
 use cubecl::server::Handle;
 
@@ -107,13 +107,13 @@ impl DenoiserError {
 /// # }
 /// ```
 pub struct HostDenoiser {
-    engine: Box<dyn Engine>,
+    engine: Box<dyn PassEngine>,
     io: Box<dyn PlaneIo>,
     accelerator: Accelerator,
     /// The device the engine was asked for, which names its stored tuning results.
     selected: cubecl::Device,
     client: Client,
-    spec: EngineSpec,
+    spec: PassSpec,
     width: u32,
     height: u32,
     plane_count: usize,
@@ -228,7 +228,7 @@ impl HostDenoiser {
         &self.client
     }
 
-    pub(crate) fn spec(&self) -> EngineSpec {
+    pub(crate) fn spec(&self) -> PassSpec {
         self.spec
     }
 

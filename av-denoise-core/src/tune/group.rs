@@ -11,7 +11,7 @@ use super::identity::describe;
 use super::profile_key::{profile_key, tuning_frame_count};
 use super::search::SearchMode;
 use super::setup::{KernelSetup, engine_kernels};
-use crate::engine::{DevicePlane, Engine, EngineSpec, EngineTiming, Geometry, WindowSpan};
+use crate::engine::{DevicePlane, EngineTiming, PassEngine, PassGeometry, PassSpec, WindowSpan};
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
 
@@ -34,15 +34,15 @@ enum State {
 /// through engines built from the new result. Otherwise it builds those engines straight away.
 ///
 /// Every call takes one list of planes per engine, in the order of the specs, and follows the
-/// [Engine](crate::Engine) contract. A failed tune is logged and the stream carries on with the
+/// [PassEngine](crate::PassEngine) contract. A failed tune is logged and the stream carries on with the
 /// stored results.
 pub struct TunedGroup {
     device: cubecl::Device,
     client: Client,
     profile: DeviceProfile,
-    specs: Vec<EngineSpec>,
+    specs: Vec<PassSpec>,
     config: TuningConfig,
-    engines: Vec<Box<dyn Engine>>,
+    engines: Vec<Box<dyn PassEngine>>,
     state: State,
     report: Option<TuneReport>,
     sample_every: Option<u32>,
@@ -56,7 +56,7 @@ impl TunedGroup {
     pub fn new(
         device: &cubecl::Device,
         client: &Client,
-        specs: Vec<EngineSpec>,
+        specs: Vec<PassSpec>,
         config: TuningConfig,
     ) -> Result<Self, Error> {
         if specs.is_empty() {
@@ -243,7 +243,7 @@ impl TunedGroup {
 
     /// The widest window any engine of the group reads.
     pub fn window_span(&self) -> WindowSpan {
-        let spans = self.specs.iter().map(EngineSpec::window_span);
+        let spans = self.specs.iter().map(PassSpec::window_span);
         let widest = spans.max_by_key(WindowSpan::frame_count);
 
         widest.expect("a tuned group holds at least one engine")
@@ -251,7 +251,7 @@ impl TunedGroup {
 
     /// The most frames any engine of the group holds before it emits one.
     pub fn max_held_frames(&self) -> usize {
-        let held = self.specs.iter().map(EngineSpec::max_held_frames);
+        let held = self.specs.iter().map(PassSpec::max_held_frames);
 
         held.max().expect("a tuned group holds at least one engine")
     }
@@ -278,7 +278,7 @@ impl TunedGroup {
     }
 
     /// Builds an engine per spec from the store's picks under `mode`, with no tuning ledger.
-    fn build_engines(&self, mode: TuningMode) -> Result<Vec<Box<dyn Engine>>, Error> {
+    fn build_engines(&self, mode: TuningMode) -> Result<Vec<Box<dyn PassEngine>>, Error> {
         let config = TuningConfig {
             mode,
             ..self.config.clone()
@@ -458,7 +458,7 @@ impl TunedGroup {
     }
 }
 
-fn check_output_planes(specs: &[EngineSpec], planes: &[&[DevicePlane<'_>]]) -> Result<(), Error> {
+fn check_output_planes(specs: &[PassSpec], planes: &[&[DevicePlane<'_>]]) -> Result<(), Error> {
     check_engine_count(specs, planes)?;
 
     for (spec, engine_planes) in specs.iter().zip(planes) {
@@ -481,7 +481,7 @@ fn in_step(counts: &[usize]) -> Result<usize, Error> {
 }
 
 /// New handles for one emitted frame of an engine with `geometry`, whole words each.
-fn output_planes(client: &Client, geometry: Geometry) -> Vec<Handle> {
+fn output_planes(client: &Client, geometry: PassGeometry) -> Vec<Handle> {
     let bytes = geometry.output.plane_bytes(geometry.pixels()) as usize;
     let count = geometry.channels.count() as usize;
 
@@ -489,7 +489,7 @@ fn output_planes(client: &Client, geometry: Geometry) -> Vec<Handle> {
 }
 
 /// Copies a replayed frame, every engine's planes back to back, into the caller's `planes`.
-fn copy_frame(client: &Client, specs: &[EngineSpec], frame: &[Handle], planes: &[&[DevicePlane<'_>]]) {
+fn copy_frame(client: &Client, specs: &[PassSpec], frame: &[Handle], planes: &[&[DevicePlane<'_>]]) {
     let mut sources = frame.iter();
 
     for (spec, engine_planes) in specs.iter().zip(planes) {

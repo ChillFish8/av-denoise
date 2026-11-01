@@ -9,8 +9,8 @@ pub(crate) mod timing;
 mod tests;
 
 pub(crate) use self::io::{EgressSource, IngestTarget, egress, ingest};
-pub use self::plane::{DevicePlane, Geometry, SampleFormat};
-pub use self::spec::EngineSpec;
+pub use self::plane::{DevicePlane, PassGeometry, SampleFormat};
+pub use self::spec::PassSpec;
 pub use self::timing::EngineTiming;
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
@@ -50,20 +50,20 @@ impl WindowSpan {
 
 /// A stateful denoiser that reads and writes GPU planes.
 ///
-/// Push frames in order with [Engine::push]. It returns how many frames are ready, and every ready frame
-/// must be written out with [Engine::emit_into] before the next push. At the end of a stream call
-/// [Engine::finish] and emit the frames it reports. The next push then starts a new stream.
+/// Push frames in order with [PassEngine::push]. It returns how many frames are ready, and every ready frame
+/// must be written out with [PassEngine::emit_into] before the next push. At the end of a stream call
+/// [PassEngine::finish] and emit the frames it reports. The next push then starts a new stream.
 ///
-/// Any GPU error leaves the engine refusing calls with [Error::NeedsReset] until [Engine::reset].
-pub trait Engine: Send {
+/// Any GPU error leaves the engine refusing calls with [Error::NeedsReset] until [PassEngine::reset].
+pub trait PassEngine: Send {
     /// Ingests one frame and returns how many frames are ready to emit.
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error>;
 
     /// Ingests one frame as context only, producing no output from this call.
     ///
     /// A stream that starts with this picks up mid-clip instead of at a scene start. Context frames
-    /// still fill the window, so a later push or [Engine::finish] may emit them, and `finish` alone
-    /// reports at most [Engine::max_held_frames] of them. It returns [Error::ContextAfterPush] once the
+    /// still fill the window, so a later push or [PassEngine::finish] may emit them, and `finish` alone
+    /// reports at most [PassEngine::max_held_frames] of them. It returns [Error::ContextAfterPush] once the
     /// stream has had a real push.
     fn push_context(&mut self, planes: &[DevicePlane<'_>]) -> Result<(), Error>;
 
@@ -88,7 +88,7 @@ pub trait Engine: Send {
 
     /// Device time spent so far.
     ///
-    /// Device time is only gathered after [Engine::sample_device_time] turns it on.
+    /// Device time is only gathered after [PassEngine::sample_device_time] turns it on.
     fn timing(&mut self) -> EngineTiming {
         EngineTiming::default()
     }

@@ -1,13 +1,13 @@
 use super::consts::TUNE_EXTRA_FRAMES;
 use super::key::bucket_dim;
-use crate::engine::{EngineSpec, SampleFormat};
+use crate::engine::{PassSpec, SampleFormat};
 use crate::nlmeans::DenoisingMode;
 
 /// The key a plane's profile ranking is stored under.
 ///
 /// It names the algorithm with its settings, the channels, the input and output formats and the
 /// plane size rounded up to powers of two.
-pub fn profile_key(spec: &EngineSpec) -> String {
+pub fn profile_key(spec: &PassSpec) -> String {
     let geometry = spec.geometry();
     let width_bucket = bucket_dim(geometry.width);
     let height_bucket = bucket_dim(geometry.height);
@@ -24,15 +24,15 @@ pub fn profile_key(spec: &EngineSpec) -> String {
 ///
 /// It is the widest temporal span in the group plus [TUNE_EXTRA_FRAMES]. Nl4d spans `4 * radius + 1`
 /// frames and NLMeans spans `2 * radius + 1`.
-pub fn tuning_frame_count(specs: &[EngineSpec]) -> usize {
+pub fn tuning_frame_count(specs: &[PassSpec]) -> usize {
     let widest = specs.iter().map(temporal_span).max().unwrap_or(1);
 
     widest + TUNE_EXTRA_FRAMES
 }
 
-fn temporal_span(spec: &EngineSpec) -> usize {
+fn temporal_span(spec: &PassSpec) -> usize {
     match spec {
-        EngineSpec::Nlmeans { algorithm, .. } => {
+        PassSpec::Nlmeans { algorithm, .. } => {
             let radius = match algorithm.mode() {
                 DenoisingMode::Spacial => 0,
                 DenoisingMode::Temporal { radius } => radius as usize,
@@ -40,15 +40,15 @@ fn temporal_span(spec: &EngineSpec) -> usize {
 
             2 * radius + 1
         },
-        EngineSpec::Nl4d { options, .. } => 4 * options.temporal_radius as usize + 1,
+        PassSpec::Nl4d { options, .. } => 4 * options.temporal_radius as usize + 1,
     }
 }
 
 /// The algorithm's name with its settings.
-fn algorithm_name(spec: &EngineSpec) -> String {
+fn algorithm_name(spec: &PassSpec) -> String {
     match spec {
-        EngineSpec::Nlmeans { algorithm, .. } => format!("Nlmeans({algorithm:?})"),
-        EngineSpec::Nl4d { options, .. } => format!("Nl4d({options:?})"),
+        PassSpec::Nlmeans { algorithm, .. } => format!("Nlmeans({algorithm:?})"),
+        PassSpec::Nl4d { options, .. } => format!("Nl4d({options:?})"),
     }
 }
 

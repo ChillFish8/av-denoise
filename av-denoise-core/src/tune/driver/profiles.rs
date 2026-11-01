@@ -15,7 +15,7 @@ use super::pass::{
     timed_frame,
     tune_keys,
 };
-use crate::engine::EngineSpec;
+use crate::engine::PassSpec;
 use crate::tune::budget::{Budget, can_afford, pending_keys, profile_wins, site_min_cost};
 use crate::tune::consts::{PROFILE_BLOCK_FRAMES, PROFILE_MIN_BLOCKS, WARM_WINDOW};
 use crate::tune::decide::median;
@@ -115,7 +115,7 @@ fn alternative_profiles(set: &EngineSet) -> Vec<PipelineProfile> {
     let is_nl4d = set
         .specs()
         .iter()
-        .any(|spec| matches!(spec, EngineSpec::Nl4d { .. }));
+        .any(|spec| matches!(spec, PassSpec::Nl4d { .. }));
     let device = set.device();
     let table = device_priority(device);
 

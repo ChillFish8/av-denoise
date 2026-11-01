@@ -1,4 +1,4 @@
-use av_denoise_core::{EngineSpec, NlmeansAlgorithm};
+use av_denoise_core::{NlmeansAlgorithm, PassSpec};
 
 use super::*;
 
@@ -81,7 +81,7 @@ fn no_overrides_hq_leaves_strength_to_the_per_plane_table() {
         let options = plane_options.denoiser_options(channels, Depth::Eight);
         let spec = options.algorithm.engine_spec(&options, 16, 16);
 
-        let EngineSpec::Nlmeans {
+        let PassSpec::Nlmeans {
             algorithm: NlmeansAlgorithm::Hq(hq),
             geometry,
         } = spec

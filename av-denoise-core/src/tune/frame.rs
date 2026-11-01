@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::engine::kernels::copy_words;
-use crate::engine::{BLOCK_1D, DevicePlane, EngineSpec, Geometry, MAX_GRID_1D};
+use crate::engine::{BLOCK_1D, DevicePlane, MAX_GRID_1D, PassGeometry, PassSpec};
 use crate::error::Error;
 
 /// One frame on the GPU, as each engine of a group reads it.
@@ -27,7 +27,7 @@ impl TuningFrame {
     /// does not match its engine's planes is a [Error::PlaneMismatch].
     pub fn copy_from(
         client: &Client,
-        specs: &[EngineSpec],
+        specs: &[PassSpec],
         planes: &[&[DevicePlane<'_>]],
     ) -> Result<Self, Error> {
         check_engine_count(specs, planes)?;
@@ -50,7 +50,7 @@ impl TuningFrame {
         Ok(Self::new(copied))
     }
 
-    pub(crate) fn planes_for(&self, engine: usize, geometry: Geometry) -> Vec<DevicePlane<'_>> {
+    pub(crate) fn planes_for(&self, engine: usize, geometry: PassGeometry) -> Vec<DevicePlane<'_>> {
         self.planes[engine]
             .iter()
             .map(|handle| DevicePlane::new(handle, geometry.width, geometry.height))
@@ -59,7 +59,7 @@ impl TuningFrame {
 }
 
 /// Checks every frame holds the planes each engine in `specs` reads, with handles large enough.
-pub(crate) fn check_frames(specs: &[EngineSpec], frames: &[TuningFrame]) -> Result<(), Error> {
+pub(crate) fn check_frames(specs: &[PassSpec], frames: &[TuningFrame]) -> Result<(), Error> {
     for frame in frames {
         let expected = specs.len();
         let given = frame.planes.len();
@@ -79,7 +79,7 @@ pub(crate) fn check_frames(specs: &[EngineSpec], frames: &[TuningFrame]) -> Resu
 }
 
 /// Checks there is one list of planes per engine in `specs`.
-pub(crate) fn check_engine_count(specs: &[EngineSpec], planes: &[&[DevicePlane<'_>]]) -> Result<(), Error> {
+pub(crate) fn check_engine_count(specs: &[PassSpec], planes: &[&[DevicePlane<'_>]]) -> Result<(), Error> {
     let expected = specs.len();
     let given = planes.len();
     if expected == given {

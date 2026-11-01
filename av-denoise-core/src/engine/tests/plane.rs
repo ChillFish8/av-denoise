@@ -1,4 +1,4 @@
-use crate::engine::{Geometry, SampleFormat};
+use crate::engine::{PassGeometry, SampleFormat};
 use crate::error::Error;
 use crate::nlmeans::ChannelMode;
 
@@ -34,8 +34,8 @@ fn plane_bytes_round_up_to_whole_words() {
     assert_eq!(SampleFormat::F32.plane_bytes(3), 12);
 }
 
-fn sized_geometry(width: u32, height: u32, channels: ChannelMode) -> Geometry {
-    Geometry {
+fn sized_geometry(width: u32, height: u32, channels: ChannelMode) -> PassGeometry {
+    PassGeometry {
         width,
         height,
         channels,
@@ -84,8 +84,8 @@ mod with_handles {
         crate::testing::test_client()
     }
 
-    fn geometry(channels: ChannelMode) -> Geometry {
-        Geometry {
+    fn geometry(channels: ChannelMode) -> PassGeometry {
+        PassGeometry {
             width: 3,
             height: 3,
             channels,

@@ -11,12 +11,12 @@ use av_denoise_core::tune::{TuningConfig, TuningFrame, tune_frames};
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
-    EngineSpec,
     GrainChunk,
     Nl4dOptions,
     NlmTuning,
     NlmeansHqOptions,
     NlmeansOptions,
+    PassSpec,
     WindowSpan,
 };
 use cubecl::prelude::Client;
@@ -276,7 +276,7 @@ fn denoised_planes(options: &PlaneOptions, layout: FrameLayout) -> Vec<(ChannelM
 }
 
 /// The engine spec of every plane `options` denoises at `layout`, in luma, chroma order.
-pub(crate) fn plane_specs(options: &PlaneOptions, layout: FrameLayout) -> Vec<EngineSpec> {
+pub(crate) fn plane_specs(options: &PlaneOptions, layout: FrameLayout) -> Vec<PassSpec> {
     let planes = denoised_planes(options, layout);
 
     planes
@@ -344,7 +344,7 @@ type WirePush = fn(&mut HostDenoiser, &[&[u8]]) -> Result<(), DenoiserError>;
 struct TuningPass {
     device: cubecl::Device,
     client: Client,
-    specs: Vec<EngineSpec>,
+    specs: Vec<PassSpec>,
     frames: Vec<TuningFrame>,
 }
 
@@ -560,7 +560,7 @@ impl PlanarDenoiser {
 
         let device = first.selected().clone();
         let client = first.client().clone();
-        let specs: Vec<EngineSpec> = hosts.iter().map(|host| host.spec()).collect();
+        let specs: Vec<PassSpec> = hosts.iter().map(|host| host.spec()).collect();
         let mut uploaded = Vec::with_capacity(frames.len());
 
         for planes in frames {

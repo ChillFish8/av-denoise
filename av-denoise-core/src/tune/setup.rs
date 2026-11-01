@@ -12,7 +12,7 @@ use super::priority::{PriorityTable, priority_for};
 use super::profile_key::profile_key;
 use super::selector::EngineKernels;
 use super::store::resolve;
-use crate::engine::{Engine, EngineSpec};
+use crate::engine::{PassEngine, PassSpec};
 use crate::error::Error;
 
 /// How the engines of one group are wired for tuning.
@@ -78,9 +78,9 @@ pub(crate) fn device_priority(device: &DeviceProfile) -> &'static PriorityTable 
 pub fn build_engine(
     device: &cubecl::Device,
     client: &Client,
-    spec: EngineSpec,
+    spec: PassSpec,
     config: &TuningConfig,
-) -> Result<Box<dyn Engine>, Error> {
+) -> Result<Box<dyn PassEngine>, Error> {
     let identity = describe(device, client);
     let limits = DeviceLimits::from_client(client);
     let profile = DeviceProfile { identity, limits };

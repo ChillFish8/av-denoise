@@ -19,7 +19,7 @@ use av_denoise_core::tune::{
     build_engine as build_settled_engine,
     describe,
 };
-use av_denoise_core::{Engine, EngineSpec};
+use av_denoise_core::{PassEngine, PassSpec};
 use cubecl::prelude::Client;
 
 use self::accelerate::Accelerator;
@@ -33,7 +33,7 @@ use crate::tune::default_store_dir;
 
 /// An engine and the plane I/O for the runtime it was built on.
 pub(crate) struct BuiltEngine {
-    pub engine: Box<dyn Engine>,
+    pub engine: Box<dyn PassEngine>,
     pub io: Box<dyn PlaneIo>,
     pub accelerator: Accelerator,
     /// The device the engine was asked for, which names its stored tuning results.
@@ -61,7 +61,7 @@ trait OnClient {
 
 /// Builds an engine for `spec` on the client from the stored tuning results.
 struct BuildEngine {
-    spec: EngineSpec,
+    spec: PassSpec,
     tuning: TuningMode,
     deterministic: bool,
 }
@@ -183,7 +183,7 @@ pub(crate) fn build_engine(
     accelerators: &[Accelerator],
     device: &Device,
     placement: &DevicePlacement,
-    spec: EngineSpec,
+    spec: PassSpec,
     tuning: TuningMode,
     deterministic: bool,
 ) -> Result<BuiltEngine, DenoiserError> {

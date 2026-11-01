@@ -19,7 +19,7 @@ use super::profile_key::profile_key;
 use super::search::SearchMode;
 use super::setup::{KernelSetup, device_priority};
 use super::store::{reload, resolve};
-use crate::engine::EngineSpec;
+use crate::engine::PassSpec;
 
 /// What a tuning pass asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +113,7 @@ impl TuneReport {
 pub fn tune_frames(
     device: &cubecl::Device,
     client: &Client,
-    specs: &[EngineSpec],
+    specs: &[PassSpec],
     frames: &[TuningFrame],
     config: &TuningConfig,
     request: &TuneRequest,
@@ -150,12 +150,7 @@ pub fn tune_frames(
 /// Whether the store already holds a complete result for every engine `specs` describe.
 ///
 /// Answers `true` when there is nothing to tune, because tuning is not [TuningMode::Auto].
-pub fn is_tuned(
-    device: &cubecl::Device,
-    client: &Client,
-    specs: &[EngineSpec],
-    config: &TuningConfig,
-) -> bool {
+pub fn is_tuned(device: &cubecl::Device, client: &Client, specs: &[PassSpec], config: &TuningConfig) -> bool {
     if config.mode != TuningMode::Auto {
         return true;
     }
@@ -169,7 +164,7 @@ pub fn is_tuned(
 /// describe.
 ///
 /// Answers `true` when tuning is not [TuningMode::Auto].
-pub(crate) fn is_tuned_on(identity: &DeviceIdentity, specs: &[EngineSpec], config: &TuningConfig) -> bool {
+pub(crate) fn is_tuned_on(identity: &DeviceIdentity, specs: &[PassSpec], config: &TuningConfig) -> bool {
     if config.mode != TuningMode::Auto {
         return true;
     }

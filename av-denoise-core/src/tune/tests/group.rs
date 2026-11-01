@@ -3,7 +3,7 @@ use std::path::Path;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::engine::{DevicePlane, Engine, EngineSpec, Geometry, SampleFormat};
+use crate::engine::{DevicePlane, PassEngine, PassGeometry, PassSpec, SampleFormat};
 use crate::error::Error;
 use crate::nl4d::Nl4dOptions;
 use crate::nlmeans::{ChannelMode, DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
@@ -30,8 +30,8 @@ type FrameHandles = Vec<Vec<Handle>>;
 /// The read-back planes of one emitted frame, every engine's planes in group order.
 type FrameBytes = Vec<Vec<u8>>;
 
-fn geometry() -> Geometry {
-    Geometry {
+fn geometry() -> PassGeometry {
+    PassGeometry {
         width: WIDTH,
         height: HEIGHT,
         channels: ChannelMode::Luma,
@@ -40,34 +40,34 @@ fn geometry() -> Geometry {
     }
 }
 
-fn nlmeans_spec(mode: DenoisingMode) -> EngineSpec {
+fn nlmeans_spec(mode: DenoisingMode) -> PassSpec {
     let options = NlmeansOptions {
         mode,
         ..NlmeansOptions::default()
     };
 
-    EngineSpec::Nlmeans {
+    PassSpec::Nlmeans {
         algorithm: NlmeansAlgorithm::Fast(options),
         geometry: geometry(),
     }
 }
 
-fn spatial() -> Vec<EngineSpec> {
+fn spatial() -> Vec<PassSpec> {
     let spec = nlmeans_spec(DenoisingMode::Spacial);
     vec![spec]
 }
 
-fn temporal() -> Vec<EngineSpec> {
+fn temporal() -> Vec<PassSpec> {
     let spec = nlmeans_spec(DenoisingMode::Temporal { radius: 1 });
     vec![spec]
 }
 
-fn nl4d() -> Vec<EngineSpec> {
+fn nl4d() -> Vec<PassSpec> {
     let options = Nl4dOptions {
         temporal_radius: 1,
         ..Nl4dOptions::default()
     };
-    let spec = EngineSpec::Nl4d {
+    let spec = PassSpec::Nl4d {
         options,
         geometry: geometry(),
     };
@@ -105,7 +105,7 @@ fn plane_bytes(frame: u32) -> Vec<u8> {
         .collect()
 }
 
-fn upload_frame(client: &Client, specs: &[EngineSpec], frame: u32) -> FrameHandles {
+fn upload_frame(client: &Client, specs: &[PassSpec], frame: u32) -> FrameHandles {
     let bytes = plane_bytes(frame);
 
     specs
@@ -117,7 +117,7 @@ fn upload_frame(client: &Client, specs: &[EngineSpec], frame: u32) -> FrameHandl
         .collect()
 }
 
-fn upload_clip(client: &Client, specs: &[EngineSpec], count: usize) -> Vec<FrameHandles> {
+fn upload_clip(client: &Client, specs: &[PassSpec], count: usize) -> Vec<FrameHandles> {
     (0..count as u32)
         .map(|frame| upload_frame(client, specs, frame))
         .collect()
@@ -148,7 +148,7 @@ fn push_context(group: &mut TunedGroup, frame: &[Vec<Handle>]) -> Result<(), Err
     group.push_context(&planes)
 }
 
-fn output_handles(client: &Client, specs: &[EngineSpec]) -> FrameHandles {
+fn output_handles(client: &Client, specs: &[PassSpec]) -> FrameHandles {
     let geometry = geometry();
     let bytes = geometry.output.plane_bytes(geometry.pixels()) as usize;
 
@@ -173,7 +173,7 @@ fn read_frame(client: &Client, frame: &FrameHandles) -> FrameBytes {
 }
 
 /// Emits `count` frames from `group` and reads each back.
-fn emit(group: &mut TunedGroup, client: &Client, specs: &[EngineSpec], count: usize) -> Vec<FrameBytes> {
+fn emit(group: &mut TunedGroup, client: &Client, specs: &[PassSpec], count: usize) -> Vec<FrameBytes> {
     let mut emitted = Vec::with_capacity(count);
 
     for _ in 0..count {
@@ -190,7 +190,7 @@ fn emit(group: &mut TunedGroup, client: &Client, specs: &[EngineSpec], count: us
 }
 
 /// Emits `count` frames from a lone luma `engine` and reads each back.
-fn emit_engine(engine: &mut dyn Engine, client: &Client, count: usize) -> Vec<FrameBytes> {
+fn emit_engine(engine: &mut dyn PassEngine, client: &Client, count: usize) -> Vec<FrameBytes> {
     let luma_only = spatial();
     let mut emitted = Vec::with_capacity(count);
 
@@ -210,7 +210,7 @@ fn emit_engine(engine: &mut dyn Engine, client: &Client, count: usize) -> Vec<Fr
 fn baseline_output(
     device: &cubecl::Device,
     client: &Client,
-    spec: EngineSpec,
+    spec: PassSpec,
     clip: &[FrameHandles],
 ) -> Vec<FrameBytes> {
     let off = TuningConfig {
@@ -243,7 +243,7 @@ fn assert_frames_match(emitted: &[FrameBytes], expected: &[FrameBytes]) {
     }
 }
 
-fn assert_nothing_to_emit(group: &mut TunedGroup, client: &Client, specs: &[EngineSpec]) {
+fn assert_nothing_to_emit(group: &mut TunedGroup, client: &Client, specs: &[PassSpec]) {
     let handles = output_handles(client, specs);
     let lists = engine_planes(&handles);
     let planes: Vec<&[DevicePlane<'_>]> = lists.iter().map(Vec::as_slice).collect();

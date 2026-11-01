@@ -25,10 +25,10 @@ pub mod tune;
 pub use self::engine::{
     DevicePlane,
     EdgePadding,
-    Engine,
-    EngineSpec,
     EngineTiming,
-    Geometry,
+    PassEngine,
+    PassGeometry,
+    PassSpec,
     SampleFormat,
     WindowSpan,
 };

@@ -9,9 +9,9 @@ use crate::engine::{
     DevicePlane,
     EdgePadding,
     EgressSource,
-    Engine,
     EngineTiming,
-    Geometry,
+    PassEngine,
+    PassGeometry,
     WindowSpan,
     egress,
 };
@@ -26,7 +26,7 @@ fn held_frames(temporal_radius: u32, lookahead: usize) -> usize {
 /// Non-local means over GPU planes.
 pub struct Nlmeans {
     front: NlmDenoiser,
-    geometry: Geometry,
+    geometry: PassGeometry,
     /// The finished frame waiting for `emit_into`, if any.
     ready: Option<Handle>,
     /// Tail frames still to produce after `finish`.
@@ -38,7 +38,7 @@ pub struct Nlmeans {
 
 impl Nlmeans {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
-    pub fn new(client: &Client, algorithm: NlmeansAlgorithm, geometry: Geometry) -> Result<Self, Error> {
+    pub fn new(client: &Client, algorithm: NlmeansAlgorithm, geometry: PassGeometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
         Self::with_kernels(client, algorithm, geometry, kernels)
     }
@@ -47,7 +47,7 @@ impl Nlmeans {
     pub fn with_kernels(
         client: &Client,
         algorithm: NlmeansAlgorithm,
-        geometry: Geometry,
+        geometry: PassGeometry,
         kernels: EngineKernels,
     ) -> Result<Self, Error> {
         geometry.validate()?;
@@ -167,7 +167,7 @@ impl Nlmeans {
     }
 }
 
-impl Engine for Nlmeans {
+impl PassEngine for Nlmeans {
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error> {
         self.check_usable()?;
         self.check_nothing_pending()?;

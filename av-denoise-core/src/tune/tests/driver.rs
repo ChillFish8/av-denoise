@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::engine::{DevicePlane, EngineSpec, Geometry, SampleFormat};
+use crate::engine::{DevicePlane, PassGeometry, PassSpec, SampleFormat};
 use crate::nl4d::Nl4dOptions;
 use crate::nlmeans::{ChannelMode, DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::driver::pass::{FrameCycle, tune_keys};
@@ -49,8 +49,8 @@ const COLD_NL4D_SECONDS: f64 = 1200.0;
 /// The read-back planes of one emitted frame.
 type FramePlanes = Vec<Vec<u8>>;
 
-fn geometry(width: u32, height: u32, channels: ChannelMode) -> Geometry {
-    Geometry {
+fn geometry(width: u32, height: u32, channels: ChannelMode) -> PassGeometry {
+    PassGeometry {
         width,
         height,
         channels,
@@ -59,39 +59,39 @@ fn geometry(width: u32, height: u32, channels: ChannelMode) -> Geometry {
     }
 }
 
-fn nlmeans_spec(width: u32, height: u32, channels: ChannelMode) -> EngineSpec {
+fn nlmeans_spec(width: u32, height: u32, channels: ChannelMode) -> PassSpec {
     let options = NlmeansOptions {
         mode: DenoisingMode::Temporal { radius: 1 },
         ..NlmeansOptions::default()
     };
 
-    EngineSpec::Nlmeans {
+    PassSpec::Nlmeans {
         algorithm: NlmeansAlgorithm::Fast(options),
         geometry: geometry(width, height, channels),
     }
 }
 
-fn nl4d_spec(options: Nl4dOptions, width: u32, height: u32, channels: ChannelMode) -> EngineSpec {
+fn nl4d_spec(options: Nl4dOptions, width: u32, height: u32, channels: ChannelMode) -> PassSpec {
     let options = Nl4dOptions {
         temporal_radius: 1,
         ..options
     };
 
-    EngineSpec::Nl4d {
+    PassSpec::Nl4d {
         options,
         geometry: geometry(width, height, channels),
     }
 }
 
 /// The luma and chroma engines of a 64x48 4:2:0 frame.
-fn nlmeans_specs() -> Vec<EngineSpec> {
+fn nlmeans_specs() -> Vec<PassSpec> {
     let luma = nlmeans_spec(WIDTH, HEIGHT, ChannelMode::Luma);
     let chroma = nlmeans_spec(CHROMA_WIDTH, CHROMA_HEIGHT, ChannelMode::Chroma);
 
     vec![luma, chroma]
 }
 
-fn nl4d_specs(options: Nl4dOptions) -> Vec<EngineSpec> {
+fn nl4d_specs(options: Nl4dOptions) -> Vec<PassSpec> {
     let luma = nl4d_spec(options, WIDTH, HEIGHT, ChannelMode::Luma);
     let chroma = nl4d_spec(options, CHROMA_WIDTH, CHROMA_HEIGHT, ChannelMode::Chroma);
 
@@ -121,7 +121,7 @@ fn plane_bytes(channels: ChannelMode, frame: u32, width: u32, height: u32) -> Ve
 }
 
 /// Frame `frame` for `specs`, uploaded to `client`, one list of planes per engine.
-fn frame_planes(client: &Client, specs: &[EngineSpec], frame: u32) -> Vec<Vec<Handle>> {
+fn frame_planes(client: &Client, specs: &[PassSpec], frame: u32) -> Vec<Vec<Handle>> {
     let mut planes = Vec::with_capacity(specs.len());
 
     for spec in specs {
@@ -136,7 +136,7 @@ fn frame_planes(client: &Client, specs: &[EngineSpec], frame: u32) -> Vec<Vec<Ha
 }
 
 /// `count` frames for `specs`, uploaded to `client`.
-fn frames(client: &Client, specs: &[EngineSpec], count: usize) -> Vec<TuningFrame> {
+fn frames(client: &Client, specs: &[PassSpec], count: usize) -> Vec<TuningFrame> {
     let mut frames = Vec::with_capacity(count);
 
     for frame in 0..count as u32 {
@@ -188,12 +188,7 @@ fn stored_site_count(device: &cubecl::Device, client: &Client, store: &Path) -> 
 }
 
 /// Tunes `specs` on fresh frames, returning the report.
-fn tune(
-    specs: &[EngineSpec],
-    frame_count: usize,
-    config: &TuningConfig,
-    request: &TuneRequest,
-) -> TuneReport {
+fn tune(specs: &[PassSpec], frame_count: usize, config: &TuningConfig, request: &TuneRequest) -> TuneReport {
     let device = crate::testing::test_device();
     let client = device.client();
     let clip = frames(&client, specs, frame_count);
@@ -204,7 +199,7 @@ fn tune(
 fn tuning_set(
     device: &cubecl::Device,
     client: &Client,
-    specs: &[EngineSpec],
+    specs: &[PassSpec],
     config: &TuningConfig,
 ) -> EngineSet {
     let ledger = TuneLedger::new(config.deterministic);
@@ -230,7 +225,7 @@ fn read_planes(client: &Client, handles: &[Handle]) -> FramePlanes {
 fn emit_frames(
     set: &mut EngineSet,
     client: &Client,
-    spec: &EngineSpec,
+    spec: &PassSpec,
     index: usize,
     count: usize,
 ) -> Vec<FramePlanes> {
@@ -260,7 +255,7 @@ fn emit_frames(
 fn denoise_clip(
     set: &mut EngineSet,
     client: &Client,
-    specs: &[EngineSpec],
+    specs: &[PassSpec],
     clip: &[TuningFrame],
 ) -> Vec<Vec<FramePlanes>> {
     let mut outputs = vec![Vec::new(); specs.len()];

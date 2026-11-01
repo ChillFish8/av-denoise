@@ -1,30 +1,30 @@
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
-    EngineSpec,
     Nl4dOptions,
     NlmeansAlgorithm,
     NlmeansHqOptions,
     NlmeansOptions,
+    PassSpec,
     SampleFormat,
 };
 
 use crate::host::{Algorithm, DenoiserOptions, Depth};
 
-fn spec_for(options: &DenoiserOptions) -> EngineSpec {
+fn spec_for(options: &DenoiserOptions) -> PassSpec {
     options.algorithm.engine_spec(options, 32, 16)
 }
 
-fn expect_nlmeans(spec: EngineSpec) -> NlmeansAlgorithm {
+fn expect_nlmeans(spec: PassSpec) -> NlmeansAlgorithm {
     match spec {
-        EngineSpec::Nlmeans { algorithm, .. } => algorithm,
+        PassSpec::Nlmeans { algorithm, .. } => algorithm,
         other => panic!("expected an nlmeans spec, got {other:?}"),
     }
 }
 
-fn expect_nl4d(spec: EngineSpec) -> Nl4dOptions {
+fn expect_nl4d(spec: PassSpec) -> Nl4dOptions {
     match spec {
-        EngineSpec::Nl4d { options, .. } => options,
+        PassSpec::Nl4d { options, .. } => options,
         other => panic!("expected an nl4d spec, got {other:?}"),
     }
 }
@@ -44,7 +44,7 @@ fn the_geometry_carries_the_size_planes_and_depth() {
         .depth(Depth::Ten)
         .build();
 
-    let EngineSpec::Nlmeans { geometry, .. } = spec_for(&options) else {
+    let PassSpec::Nlmeans { geometry, .. } = spec_for(&options) else {
         panic!("expected an nlmeans spec");
     };
 

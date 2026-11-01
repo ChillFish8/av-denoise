@@ -1,12 +1,12 @@
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
-    EngineSpec,
-    Geometry,
     Nl4dOptions,
     NlmeansAlgorithm,
     NlmeansHqOptions,
     NlmeansOptions,
+    PassGeometry,
+    PassSpec,
 };
 
 use super::Depth;
@@ -75,9 +75,9 @@ impl Algorithm {
     /// The engine to build for `options`, at `width` by `height`.
     ///
     /// `options.mode` is copied into the algorithm's own options, so it wins over whatever they hold.
-    pub(crate) fn engine_spec(&self, options: &DenoiserOptions, width: u32, height: u32) -> EngineSpec {
+    pub(crate) fn engine_spec(&self, options: &DenoiserOptions, width: u32, height: u32) -> PassSpec {
         let format = options.depth.sample_format();
-        let geometry = Geometry {
+        let geometry = PassGeometry {
             width,
             height,
             channels: options.channel_mode,
@@ -93,7 +93,7 @@ impl Algorithm {
                 };
                 let algorithm = NlmeansAlgorithm::Fast(nlm);
 
-                EngineSpec::Nlmeans { algorithm, geometry }
+                PassSpec::Nlmeans { algorithm, geometry }
             },
             Algorithm::NlmeansHq(hq) => {
                 let nlm = NlmeansOptions {
@@ -103,7 +103,7 @@ impl Algorithm {
                 let hq = NlmeansHqOptions { nlm, ..hq };
                 let algorithm = NlmeansAlgorithm::Hq(hq);
 
-                EngineSpec::Nlmeans { algorithm, geometry }
+                PassSpec::Nlmeans { algorithm, geometry }
             },
             Algorithm::Nl4d(nl4d) => {
                 let nl4d = Nl4dOptions {
@@ -111,7 +111,7 @@ impl Algorithm {
                     ..nl4d
                 };
 
-                EngineSpec::Nl4d {
+                PassSpec::Nl4d {
                     options: nl4d,
                     geometry,
                 }

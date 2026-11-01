@@ -11,9 +11,9 @@ use crate::engine::{
     DevicePlane,
     EdgePadding,
     EgressSource,
-    Engine,
     EngineTiming,
-    Geometry,
+    PassEngine,
+    PassGeometry,
     WindowSpan,
     egress,
 };
@@ -33,7 +33,7 @@ fn held_frames(temporal_radius: u32, lookahead: usize) -> usize {
 pub struct Nl4d {
     inner: Nl4dDenoiser,
     client: Client,
-    geometry: Geometry,
+    geometry: PassGeometry,
     temporal_radius: u32,
     /// Regions finished but not yet emitted, oldest first.
     pending: VecDeque<CompletedRegion>,
@@ -48,7 +48,7 @@ pub struct Nl4d {
 
 impl Nl4d {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
-    pub fn new(client: &Client, options: Nl4dOptions, geometry: Geometry) -> Result<Self, Error> {
+    pub fn new(client: &Client, options: Nl4dOptions, geometry: PassGeometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
         Self::with_kernels(client, options, geometry, kernels)
     }
@@ -57,7 +57,7 @@ impl Nl4d {
     pub fn with_kernels(
         client: &Client,
         options: Nl4dOptions,
-        geometry: Geometry,
+        geometry: PassGeometry,
         kernels: EngineKernels,
     ) -> Result<Self, Error> {
         if geometry.width < PATCH_SIZE || geometry.height < PATCH_SIZE {
@@ -201,7 +201,7 @@ impl Nl4d {
     }
 }
 
-impl Engine for Nl4d {
+impl PassEngine for Nl4d {
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error> {
         self.check_usable()?;
         self.check_nothing_pending()?;
