@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use super::*;
+use crate::{Nl4dOptions, PlaneTiming};
 
 const SIZE: u32 = 64;
 

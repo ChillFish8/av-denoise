@@ -9,7 +9,8 @@ mod configs;
 mod fixture;
 
 use av_denoise::{
-    ChannelMode,
+    ChannelIntent,
+    ChromaLayout,
     DenoiserError,
     DenoiserOptions,
     HostDenoiser,
@@ -149,7 +150,8 @@ fn record_reseeded(entries: &mut Entries, config: &str, reseeded: &[Planes]) {
 
 fn run_greyscale(config: &ParityConfig, entries: &mut Entries) {
     let options = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
+        .intent(ChannelIntent::Luma)
+        .chroma(ChromaLayout::Gray)
         .mode(config.options.mode)
         .algorithm(config.options.algorithm)
         .depth(config.layout.depth)

@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use av_denoise::accelerate::Accelerator;
 use av_denoise::{
     Algorithm,
-    ChannelMode,
+    ChannelIntent,
+    ChromaLayout,
     DenoiserError,
     DenoiserOptions,
     DenoisingMode,
@@ -83,9 +84,22 @@ impl BenchResult {
     }
 }
 
-fn options(channel_mode: ChannelMode, mode: DenoisingMode, algorithm: Algorithm) -> DenoiserOptions {
+/// The frame layout a bench row runs on.
+///
+/// A luma row runs a gray frame. A chroma row runs full-size chroma planes, with luma passed through.
+fn chroma_layout(intent: ChannelIntent) -> ChromaLayout {
+    match intent {
+        ChannelIntent::Luma => ChromaLayout::Gray,
+        ChannelIntent::Chroma | ChannelIntent::LumaChroma => ChromaLayout::Yuv444,
+    }
+}
+
+fn options(intent: ChannelIntent, mode: DenoisingMode, algorithm: Algorithm) -> DenoiserOptions {
+    let chroma = chroma_layout(intent);
+
     DenoiserOptions::builder()
-        .channel_mode(channel_mode)
+        .intent(intent)
+        .chroma(chroma)
         .mode(mode)
         .algorithm(algorithm)
         .build()
@@ -105,15 +119,16 @@ fn bench_push_recv(
     name: &str,
     accelerators: &[Accelerator],
     device: &Device,
-    channel_mode: ChannelMode,
+    intent: ChannelIntent,
     mode: DenoisingMode,
     algorithm: Algorithm,
 ) -> Result<BenchResult, anyhow::Error> {
-    let channels = channel_mode.count();
+    let layout = chroma_layout(intent);
+    let channels = layout.plane_count() as u32;
     let planes = make_synthetic_planes(WIDTH, HEIGHT, channels);
     let frame: Vec<&[u8]> = planes.iter().map(Vec::as_slice).collect();
 
-    let denoiser_options = options(channel_mode, mode, algorithm);
+    let denoiser_options = options(intent, mode, algorithm);
     let mut denoiser = HostDenoiser::create(accelerators, device, WIDTH, HEIGHT, denoiser_options)?;
     let accelerator = denoiser.selected_accelerator();
 
@@ -193,85 +208,78 @@ fn main() {
 
     // Each temporal config is followed by its motion-compensation variant, so the cost of
     // `--motion-compensation` shows on adjacent rows.
-    let configs: &[(&str, ChannelMode, DenoisingMode, Algorithm)] = &[
-        ("spatial_luma", ChannelMode::Luma, DenoisingMode::Spacial, plain),
+    let configs: &[(&str, ChannelIntent, DenoisingMode, Algorithm)] = &[
+        ("spatial_luma", ChannelIntent::Luma, DenoisingMode::Spacial, plain),
         (
             "spatial_chroma",
-            ChannelMode::Chroma,
+            ChannelIntent::Chroma,
             DenoisingMode::Spacial,
             plain,
         ),
         (
             "temporal_r1_luma",
-            ChannelMode::Luma,
+            ChannelIntent::Luma,
             DenoisingMode::Temporal { radius: 1 },
             plain,
         ),
         (
             "temporal_r1_luma+mc",
-            ChannelMode::Luma,
+            ChannelIntent::Luma,
             DenoisingMode::Temporal { radius: 1 },
             plain_mc,
         ),
         (
             "temporal_r2_luma",
-            ChannelMode::Luma,
+            ChannelIntent::Luma,
             DenoisingMode::Temporal { radius: 2 },
             plain,
         ),
         (
             "temporal_r2_luma+mc",
-            ChannelMode::Luma,
+            ChannelIntent::Luma,
             DenoisingMode::Temporal { radius: 2 },
             plain_mc,
         ),
         (
             "spatial_luma+bilateral",
-            ChannelMode::Luma,
+            ChannelIntent::Luma,
             DenoisingMode::Spacial,
             bilateral_only,
         ),
         (
             "spatial_chroma+bilateral",
-            ChannelMode::Chroma,
+            ChannelIntent::Chroma,
             DenoisingMode::Spacial,
             bilateral_only,
         ),
         (
             "temporal_r1_luma+bilateral",
-            ChannelMode::Luma,
+            ChannelIntent::Luma,
             DenoisingMode::Temporal { radius: 1 },
             bilateral_only,
         ),
         (
             "temporal_r1_luma+bilateral+mc",
-            ChannelMode::Luma,
+            ChannelIntent::Luma,
             DenoisingMode::Temporal { radius: 1 },
             bilateral_mc,
         ),
         (
             "temporal_r2_luma+bilateral",
-            ChannelMode::Luma,
+            ChannelIntent::Luma,
             DenoisingMode::Temporal { radius: 2 },
             bilateral_only,
         ),
         (
             "temporal_r2_luma+bilateral+mc",
-            ChannelMode::Luma,
+            ChannelIntent::Luma,
             DenoisingMode::Temporal { radius: 2 },
             bilateral_mc,
         ),
     ];
 
-    for (name, channel_mode, mode, algorithm) in configs {
-        let outcome = bench_push_recv(
-            name,
-            &cli.accelerators,
-            &cli.device,
-            *channel_mode,
-            *mode,
-            *algorithm,
-        );
+    for (name, intent, mode, algorithm) in configs {
+        let outcome = bench_push_recv(name, &cli.accelerators, &cli.device, *intent, *mode, *algorithm);
         match outcome {
             Ok(result) => result.print(),
             Err(error) => eprintln!("[{name}] failed: {error:?}"),

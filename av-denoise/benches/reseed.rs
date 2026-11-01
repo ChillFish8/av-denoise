@@ -4,13 +4,10 @@ use av_denoise::accelerate::Accelerator;
 use av_denoise::{
     Algorithm,
     ChannelIntent,
-    ChannelMode,
-    DenoiserOptions,
     DenoisingMode,
     Depth,
     Device,
     FrameLayout,
-    HostDenoiser,
     PlanarDenoiser,
     PlaneOptions,
     Planes,
@@ -116,19 +113,6 @@ fn make_clip(layout: &FrameLayout, count: usize) -> Vec<Planes> {
     (0..count).map(|i| make_planes(layout, i)).collect()
 }
 
-/// The accelerator a real denoiser would pick, read from a throwaway probe.
-///
-/// `PlanarDenoiser` may own up to three inner denoisers and exposes no single accelerator getter.
-fn selected_accelerator(accelerators: &[Accelerator], device: &Device) -> Result<Accelerator, anyhow::Error> {
-    let probe_options = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
-        .mode(DenoisingMode::Spacial)
-        .algorithm(Algorithm::default())
-        .build();
-    let probe = HostDenoiser::create(accelerators, device, 4, 4, probe_options)?;
-    Ok(probe.selected_accelerator())
-}
-
 /// The `2r+1` frames centred on `clip[centre]`.
 fn window_at(clip: &[Planes], centre: usize, radius: usize) -> Vec<Planes> {
     (0..(2 * radius + 1))
@@ -175,7 +159,7 @@ fn bench_sequential(accelerators: &[Accelerator], device: &Device) -> Result<Ben
     let layout = layout();
     let options = plane_options(accelerators, device);
     let mut denoiser = PlanarDenoiser::create(&options, layout)?;
-    let accelerator = selected_accelerator(accelerators, device)?;
+    let accelerator = denoiser.selected_accelerator();
 
     let radius = denoiser.temporal_radius();
     let window = 2 * radius + 1;
@@ -224,7 +208,7 @@ fn bench_reseed(accelerators: &[Accelerator], device: &Device) -> Result<BenchRe
     let layout = layout();
     let options = plane_options(accelerators, device);
     let mut denoiser = PlanarDenoiser::create(&options, layout)?;
-    let accelerator = selected_accelerator(accelerators, device)?;
+    let accelerator = denoiser.selected_accelerator();
 
     let radius = denoiser.temporal_radius() as usize;
     let clip = make_clip(&layout, 2 * radius + WARMUP + ITERS);

@@ -132,7 +132,7 @@ fn frame_planes(client: &Client, specs: &[EngineSpec], frame: u32) -> Vec<Vec<Ha
     let mut planes = Vec::with_capacity(specs.len());
 
     for spec in specs {
-        let unit = TuneUnit::Frame(*spec);
+        let unit = TuneUnit(*spec);
         let handles = (0..unit.plane_count())
             .map(|plane| {
                 let (width, height) = unit.plane_dims(plane);

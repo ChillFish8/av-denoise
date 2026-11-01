@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use av_denoise_core::EngineTiming;
+use av_denoise_core::{EngineTiming, PassTimings};
 
-use crate::host::PlaneTiming;
+use crate::host::{PlanarTiming, PlaneTiming};
 
 fn engine_timing(device_time: Duration, device_samples: u64) -> EngineTiming {
     EngineTiming {
@@ -49,4 +49,45 @@ fn device_busy_is_unset_without_samples() {
     let timing = PlaneTiming::new(Duration::ZERO, Duration::ZERO, 10, engine);
 
     assert_eq!(timing.device_busy, None);
+}
+
+fn pass_timings(luma: Option<EngineTiming>, chroma: Option<EngineTiming>) -> PassTimings {
+    PassTimings { luma, chroma }
+}
+
+#[test]
+fn host_time_is_counted_once_on_the_luma_plane() {
+    let calls = Duration::from_millis(50);
+    let output_wait = Duration::from_millis(7);
+    let luma_engine = engine_timing(Duration::from_millis(4), 2);
+    let chroma_engine = engine_timing(Duration::from_millis(2), 2);
+    let passes = pass_timings(Some(luma_engine), Some(chroma_engine));
+    let timing = PlanarTiming::new(calls, output_wait, 10, passes);
+
+    let luma = timing.luma.expect("luma is denoised");
+    let chroma = timing.chroma.expect("chroma is denoised");
+
+    assert_eq!(luma.blocked, output_wait);
+    assert_eq!(luma.submit, Duration::from_millis(43));
+    assert_eq!(chroma.blocked, Duration::ZERO);
+    assert_eq!(chroma.submit, Duration::ZERO);
+    assert_eq!(luma.frames, 10);
+    assert_eq!(chroma.frames, 10);
+    assert_eq!(luma.device_busy, Some(Duration::from_millis(20)));
+    assert_eq!(chroma.device_busy, Some(Duration::from_millis(10)));
+}
+
+#[test]
+fn a_chroma_only_run_counts_host_time_on_chroma() {
+    let calls = Duration::from_millis(50);
+    let output_wait = Duration::from_millis(7);
+    let engine = engine_timing(Duration::ZERO, 0);
+    let passes = pass_timings(None, Some(engine));
+    let timing = PlanarTiming::new(calls, output_wait, 10, passes);
+
+    let chroma = timing.chroma.expect("chroma is denoised");
+
+    assert_eq!(timing.luma, None);
+    assert_eq!(chroma.blocked, output_wait);
+    assert_eq!(chroma.submit, Duration::from_millis(43));
 }

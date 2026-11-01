@@ -82,14 +82,14 @@ fn tuning_rebuilds_an_own_device_denoiser_on_its_device() {
     let shares_placement = Arc::ptr_eq(planar.placement(), &placement);
     let handed_out = placement.handed_out();
 
-    assert_eq!(built_hosts, 2);
+    assert_eq!(built_hosts, 1);
     assert!(shares_placement);
     assert_eq!(reopened.device, own_device);
     assert_eq!(handed_out, 2 * built_hosts);
 }
 
 #[test]
-fn a_skipped_pass_keeps_the_hosts() {
+fn a_skipped_pass_keeps_the_host() {
     let plane_options = options();
     let frame_layout = layout();
     let mut planar =
@@ -111,14 +111,14 @@ fn a_skipped_pass_keeps_the_hosts() {
 }
 
 #[test]
-fn a_denoiser_without_hosts_rejects_reseeds_instead_of_panicking() {
+fn a_denoiser_without_a_host_rejects_reseeds_instead_of_panicking() {
     let plane_options = options();
     let frame_layout = layout();
     let mut planar = PlanarDenoiser::create(&plane_options, frame_layout).expect("the denoiser builds");
     let span = planar.window_span();
     let frame = grey_frame(frame_layout);
     let frames = vec![frame; span.frame_count()];
-    planar.drop_hosts();
+    planar.drop_host();
 
     let reseeded = planar.reseed(&frames);
     let window = ReseedWindow {

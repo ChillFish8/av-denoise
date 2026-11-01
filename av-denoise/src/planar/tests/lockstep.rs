@@ -1,10 +1,10 @@
 use super::*;
 use crate::{Algorithm, DenoisingMode};
 
-/// Runs `luma` and `chroma` as two real `HostDenoiser`s in spatial mode.
+/// Cleans luma and chroma in spatial mode.
 ///
 /// Spatial mode passes a uniform-valued plane through unchanged, so each plane can carry its own
-/// marker value and the two halves drifting apart shows up.
+/// marker value and the two plane groups drifting apart shows up.
 fn luma_chroma_options() -> PlaneOptions {
     PlaneOptions {
         accelerators: vec![crate::testing::test_accelerator()],

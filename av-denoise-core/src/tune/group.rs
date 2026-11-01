@@ -404,7 +404,7 @@ impl TunedGroup {
         let mut owned = Vec::new();
 
         for (spec, engine) in self.specs.iter().zip(&mut self.engines) {
-            let unit = TuneUnit::Frame(*spec);
+            let unit = TuneUnit(*spec);
             let handles = output_planes(&self.client, &unit);
             let planes: Vec<DevicePlane<'_>> = handles
                 .iter()
@@ -504,7 +504,7 @@ fn copy_frame(client: &Client, specs: &[EngineSpec], frame: &[Handle], planes: &
     let mut sources = frame.iter();
 
     for (spec, engine_planes) in specs.iter().zip(planes) {
-        let unit = TuneUnit::Frame(*spec);
+        let unit = TuneUnit(*spec);
         let output = unit.output();
 
         for (index, plane) in engine_planes.iter().enumerate() {

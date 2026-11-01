@@ -1,5 +1,5 @@
 use crate::tune::unit::{TuneUnit, unit_profile_keys};
-use crate::tune::{TUNE_EXTRA_FRAMES, pass_tuning_frame_count, profile_key, tuning_frame_count};
+use crate::tune::{TUNE_EXTRA_FRAMES, profile_key, tuning_frame_count};
 use crate::{
     ChannelMode,
     ChromaLayout,
@@ -149,17 +149,6 @@ fn fast_and_hq_nlmeans_give_different_keys() {
     assert!(fast_key.ends_with("|Luma|in-u8|out-u8|w64|h64"), "{fast_key}");
     assert!(hq_key.ends_with("|Luma|in-u8|out-u8|w64|h64"), "{hq_key}");
     assert_ne!(fast_key, hq_key);
-}
-
-#[test]
-fn the_pass_frame_count_follows_the_widest_span() {
-    let nl4d = nl4d_spec(ChannelMode::Luma, 2, SampleFormat::U8, SampleFormat::U8, 64, 64);
-    let nlm = temporal_nlm(1);
-    let nlmeans = nlmeans_spec(NlmeansAlgorithm::Fast(nlm));
-
-    let frames = pass_tuning_frame_count(&[nl4d, nlmeans]);
-
-    assert_eq!(frames, 9 + TUNE_EXTRA_FRAMES);
 }
 
 #[test]

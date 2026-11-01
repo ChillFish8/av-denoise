@@ -30,12 +30,6 @@ pub fn tuning_frame_count(specs: &[EngineSpec]) -> usize {
     frame_count_for(&units)
 }
 
-/// How many frames a tuning pass over the single passes `specs` needs, as [tuning_frame_count] counts.
-pub fn pass_tuning_frame_count(specs: &[PassSpec]) -> usize {
-    let units = TuneUnit::passes_of(specs);
-    frame_count_for(&units)
-}
-
 fn frame_count_for(units: &[TuneUnit]) -> usize {
     let spans = units
         .iter()

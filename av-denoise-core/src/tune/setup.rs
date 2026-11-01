@@ -12,7 +12,7 @@ use super::priority::{PriorityTable, priority_for};
 use super::profile_key::profile_key;
 use super::selector::EngineKernels;
 use super::store::resolve;
-use crate::engine::{Engine, EngineSpec, PassEngine, PassSpec};
+use crate::engine::{Engine, EngineSpec};
 use crate::error::Error;
 
 /// How the engines of one group are wired for tuning.
@@ -89,21 +89,6 @@ pub fn build_engine(
         let key = profile_key(pass);
         engine_kernels(&setup, config, &key, &profile)
     })
-}
-
-/// Builds the single pass `spec` on `client`, as [build_engine] builds a whole frame's engine.
-pub fn build_pass_engine(
-    device: &cubecl::Device,
-    client: &Client,
-    spec: PassSpec,
-    config: &TuningConfig,
-) -> Result<Box<dyn PassEngine>, Error> {
-    let profile = device_profile(device, client);
-    let setup = KernelSetup::default();
-    let key = profile_key(&spec);
-    let kernels = engine_kernels(&setup, config, &key, &profile);
-
-    spec.build(client, kernels)
 }
 
 fn device_profile(device: &cubecl::Device, client: &Client) -> DeviceProfile {

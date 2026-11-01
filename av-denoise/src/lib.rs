@@ -14,6 +14,7 @@ pub mod warmup;
 
 pub use av_denoise_core::{
     ChannelMode,
+    ChromaLayout,
     DEFAULT_PILOT_STRENGTH_SCALE,
     DenoisingMode,
     DevicePlane,
@@ -62,19 +63,19 @@ pub use self::cache::{
 };
 pub use self::host::{
     Algorithm,
+    ChannelIntent,
     DenoiserError,
     DenoiserOptions,
     Depth,
     HostDenoiser,
     MAX_PENDING,
+    PlanarTiming,
     PlaneTiming,
     UnsupportedDepthError,
 };
 pub use self::planar::{
-    ChannelIntent,
     FrameLayout,
     PlanarDenoiser,
-    PlanarTiming,
     PlaneOptions,
     Planes,
     ReseedWindow,

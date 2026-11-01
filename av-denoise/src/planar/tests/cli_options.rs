@@ -1,6 +1,15 @@
-use av_denoise_core::{NlmeansAlgorithm, PassSpec};
+use av_denoise_core::{ChannelMode, Nl4dOptions, NlmeansAlgorithm, NlmeansHqOptions, NlmeansOptions};
 
 use super::*;
+
+fn layout() -> FrameLayout {
+    FrameLayout {
+        width: 16,
+        height: 16,
+        subsampling: Subsampling::Yuv420,
+        depth: Depth::Eight,
+    }
+}
 
 /// A `PlaneOptions` with every field other than the four arguments at a neutral default.
 fn base_options(
@@ -24,15 +33,51 @@ fn base_options(
     }
 }
 
+/// The luma and chroma nlmeans options `plane_options` resolves to.
+fn nlmeans_planes(plane_options: &PlaneOptions) -> (NlmeansAlgorithm, NlmeansAlgorithm) {
+    let spec = plane_spec(plane_options, layout());
+    let EngineSpec::Nlmeans {
+        luma: Some(luma),
+        chroma: Some(chroma),
+        ..
+    } = spec
+    else {
+        panic!("expected an nlmeans spec cleaning both plane groups, got {spec:?}");
+    };
+
+    (luma, chroma)
+}
+
+/// The luma and chroma nl4d options `plane_options` resolves to.
+fn nl4d_planes(plane_options: &PlaneOptions) -> (Nl4dOptions, Nl4dOptions) {
+    let spec = plane_spec(plane_options, layout());
+    let EngineSpec::Nl4d {
+        luma: Some(luma),
+        chroma: Some(chroma),
+        ..
+    } = spec
+    else {
+        panic!("expected an nl4d spec cleaning both plane groups, got {spec:?}");
+    };
+
+    (luma, chroma)
+}
+
+fn expect_fast(algorithm: NlmeansAlgorithm) -> NlmeansOptions {
+    match algorithm {
+        NlmeansAlgorithm::Fast(options) => options,
+        other => panic!("expected the fast nlmeans path, got {other:?}"),
+    }
+}
+
 #[test]
 fn luma_strength_alone_overrides_only_the_luma_plane() {
     let algorithm = Algorithm::default();
     let plane_options = base_options(DenoisingMode::Spacial, algorithm, Some(0.7), None);
 
-    let luma_options = plane_options.denoiser_options(ChannelMode::Luma, Depth::Eight);
-    let chroma_options = plane_options.denoiser_options(ChannelMode::Chroma, Depth::Eight);
-    let luma = expect_nlmeans(luma_options.algorithm);
-    let chroma = expect_nlmeans(chroma_options.algorithm);
+    let (luma_algorithm, chroma_algorithm) = nlmeans_planes(&plane_options);
+    let luma = expect_fast(luma_algorithm);
+    let chroma = expect_fast(chroma_algorithm);
 
     assert!(
         matches!(luma.tuning.strength, Some(strength) if (strength - 0.7).abs() < f32::EPSILON),
@@ -50,10 +95,9 @@ fn both_per_plane_strengths_set_independently() {
     let algorithm = Algorithm::default();
     let plane_options = base_options(DenoisingMode::Spacial, algorithm, Some(0.7), Some(0.3));
 
-    let luma_options = plane_options.denoiser_options(ChannelMode::Luma, Depth::Eight);
-    let chroma_options = plane_options.denoiser_options(ChannelMode::Chroma, Depth::Eight);
-    let luma = expect_nlmeans(luma_options.algorithm);
-    let chroma = expect_nlmeans(chroma_options.algorithm);
+    let (luma_algorithm, chroma_algorithm) = nlmeans_planes(&plane_options);
+    let luma = expect_fast(luma_algorithm);
+    let chroma = expect_fast(chroma_algorithm);
 
     assert!(
         matches!(luma.tuning.strength, Some(strength) if (strength - 0.7).abs() < f32::EPSILON),
@@ -77,24 +121,38 @@ fn no_overrides_hq_leaves_strength_to_the_per_plane_table() {
         None,
     );
 
-    for channels in [ChannelMode::Luma, ChannelMode::Chroma] {
-        let options = plane_options.denoiser_options(channels, Depth::Eight);
-        let spec = options.algorithm.engine_spec(&options, 16, 16);
+    let (luma, chroma) = nlmeans_planes(&plane_options);
 
-        let PassSpec::Nlmeans {
-            algorithm: NlmeansAlgorithm::Hq(hq),
-            geometry,
-        } = spec
-        else {
-            panic!("expected an HQ nlmeans spec for {channels:?}, got {spec:?}");
+    for (name, algorithm) in [("luma", luma), ("chroma", chroma)] {
+        let NlmeansAlgorithm::Hq(hq) = algorithm else {
+            panic!("expected HQ nlmeans for {name}, got {algorithm:?}");
         };
 
-        assert_eq!(geometry.channels, channels);
         assert_eq!(hq.nlm.mode, DenoisingMode::Temporal { radius: 4 });
         assert_eq!(
             hq.nlm.tuning.strength, None,
-            "{channels:?} should use the calibrated table"
+            "{name} should use the calibrated table"
         );
+    }
+}
+
+#[test]
+fn the_spec_follows_the_layouts_chroma_planes() {
+    let plane_options = base_options(DenoisingMode::Spacial, Algorithm::default(), None, None);
+    let layouts = [
+        (Subsampling::Yuv420, ChromaLayout::Yuv420),
+        (Subsampling::Yuv422, ChromaLayout::Yuv422),
+        (Subsampling::Yuv444, ChromaLayout::Yuv444),
+    ];
+
+    for (subsampling, chroma) in layouts {
+        let frame_layout = FrameLayout {
+            subsampling,
+            ..layout()
+        };
+        let spec = plane_spec(&plane_options, frame_layout);
+
+        assert_eq!(spec.geometry().chroma, chroma);
     }
 }
 
@@ -117,29 +175,12 @@ fn nl4d_options(luma_lambda_ht: Option<f32>, chroma_lambda_ht: Option<f32>) -> P
     }
 }
 
-fn expect_nlmeans(algorithm: Algorithm) -> NlmeansOptions {
-    match algorithm {
-        Algorithm::Nlmeans(options) => options,
-        other => panic!("expected Algorithm::Nlmeans, got {other:?}"),
-    }
-}
-
-fn expect_nl4d(algorithm: Algorithm) -> Nl4dOptions {
-    match algorithm {
-        Algorithm::Nl4d(options) => options,
-        other => panic!("expected Algorithm::Nl4d, got {other:?}"),
-    }
-}
-
 #[test]
 fn luma_lambda_ht_alone_overrides_only_the_luma_instance_for_nl4d() {
     let plane_options = nl4d_options(Some(4.0), None);
     let default_lambda_ht = Nl4dOptions::default().lambda_ht;
 
-    let luma_algorithm = plane_options.algorithm_for(ChannelMode::Luma);
-    let chroma_algorithm = plane_options.algorithm_for(ChannelMode::Chroma);
-    let luma = expect_nl4d(luma_algorithm);
-    let chroma = expect_nl4d(chroma_algorithm);
+    let (luma, chroma) = nl4d_planes(&plane_options);
 
     assert!((luma.lambda_ht.unwrap() - 4.0).abs() < f32::EPSILON);
     assert_eq!(
@@ -155,10 +196,7 @@ fn chroma_lambda_ht_alone_overrides_only_the_chroma_instance_for_nl4d() {
     let plane_options = nl4d_options(None, Some(4.0));
     let default_lambda_ht = Nl4dOptions::default().lambda_ht;
 
-    let luma_algorithm = plane_options.algorithm_for(ChannelMode::Luma);
-    let chroma_algorithm = plane_options.algorithm_for(ChannelMode::Chroma);
-    let luma = expect_nl4d(luma_algorithm);
-    let chroma = expect_nl4d(chroma_algorithm);
+    let (luma, chroma) = nl4d_planes(&plane_options);
 
     assert_eq!(
         luma.lambda_ht, default_lambda_ht,
@@ -173,10 +211,7 @@ fn chroma_lambda_ht_alone_overrides_only_the_chroma_instance_for_nl4d() {
 fn both_planes_lambda_ht_set_independently_for_nl4d() {
     let plane_options = nl4d_options(Some(2.0), Some(3.5));
 
-    let luma_algorithm = plane_options.algorithm_for(ChannelMode::Luma);
-    let chroma_algorithm = plane_options.algorithm_for(ChannelMode::Chroma);
-    let luma = expect_nl4d(luma_algorithm);
-    let chroma = expect_nl4d(chroma_algorithm);
+    let (luma, chroma) = nl4d_planes(&plane_options);
 
     assert!((luma.lambda_ht.unwrap() - 2.0).abs() < f32::EPSILON);
     assert!((chroma.lambda_ht.unwrap() - 3.5).abs() < f32::EPSILON);
@@ -191,10 +226,7 @@ fn both_planes_lambda_ht_set_independently_for_nl4d() {
 fn unset_nl4d_overrides_resolve_to_different_lambda_ht_per_plane_end_to_end() {
     let plane_options = nl4d_options(None, None);
 
-    let luma_algorithm = plane_options.algorithm_for(ChannelMode::Luma);
-    let chroma_algorithm = plane_options.algorithm_for(ChannelMode::Chroma);
-    let luma = expect_nl4d(luma_algorithm);
-    let chroma = expect_nl4d(chroma_algorithm);
+    let (luma, chroma) = nl4d_planes(&plane_options);
 
     // Neither plane has anything set, so both stay unresolved at this layer.
     assert_eq!(luma.lambda_ht, None);

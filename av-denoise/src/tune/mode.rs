@@ -1,6 +1,6 @@
-use av_denoise_core::tune::{TuningMode, pass_tuning_frame_count};
+use av_denoise_core::tune::{TuningMode, tuning_frame_count as spec_frame_count};
 
-use crate::planar::{FrameLayout, PlaneOptions, plane_specs};
+use crate::planar::{FrameLayout, PlaneOptions, plane_spec};
 
 /// The environment variable that overrides the tuning mode a caller asked for.
 pub const TUNE_ENV: &str = "AV_DENOISE_TUNE";
@@ -28,6 +28,7 @@ pub(crate) fn resolve_mode(flag: TuningMode, env: Option<&str>) -> TuningMode {
 
 /// How many frames a tuning pass for the planes `options` denoises at `layout` reads.
 pub fn tuning_frame_count(options: &PlaneOptions, layout: FrameLayout) -> usize {
-    let specs = plane_specs(options, layout);
-    pass_tuning_frame_count(&specs)
+    let spec = plane_spec(options, layout);
+    let specs = [spec];
+    spec_frame_count(&specs)
 }

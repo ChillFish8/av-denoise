@@ -35,7 +35,7 @@ impl TuningFrame {
         let mut copied = Vec::with_capacity(specs.len());
 
         for (spec, engine_planes) in specs.iter().zip(planes) {
-            let unit = TuneUnit::Frame(*spec);
+            let unit = TuneUnit(*spec);
             let input = unit.input();
             unit.check_planes(engine_planes, input)?;
 

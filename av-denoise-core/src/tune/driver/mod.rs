@@ -19,7 +19,7 @@ use super::search::SearchMode;
 use super::setup::{KernelSetup, device_priority};
 use super::store::{reload, resolve};
 use super::unit::{TuneUnit, unit_profile_keys};
-use crate::engine::{EngineSpec, PassSpec};
+use crate::engine::EngineSpec;
 
 /// What a tuning pass asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,21 +122,6 @@ pub fn tune_frames(
     tune_units(device, client, &units, frames, config, request)
 }
 
-/// Tunes the single passes `specs` describe on `frames`, as [tune_frames] tunes whole frames.
-///
-/// Each frame holds one list of planes per pass, holding the planes that pass reads.
-pub fn tune_pass_frames(
-    device: &cubecl::Device,
-    client: &Client,
-    specs: &[PassSpec],
-    frames: &[TuningFrame],
-    config: &TuningConfig,
-    request: &TuneRequest,
-) -> TuneReport {
-    let units = TuneUnit::passes_of(specs);
-    tune_units(device, client, &units, frames, config, request)
-}
-
 fn tune_units(
     device: &cubecl::Device,
     client: &Client,
@@ -184,19 +169,6 @@ pub fn is_tuned(
     config: &TuningConfig,
 ) -> bool {
     let units = TuneUnit::frames(specs);
-    are_units_tuned(device, client, &units, config)
-}
-
-/// Whether the store already holds a complete result for every single pass `specs` describe.
-///
-/// Answers `true` when there is nothing to tune, because tuning is not [TuningMode::Auto].
-pub fn is_pass_tuned(
-    device: &cubecl::Device,
-    client: &Client,
-    specs: &[PassSpec],
-    config: &TuningConfig,
-) -> bool {
-    let units = TuneUnit::passes_of(specs);
     are_units_tuned(device, client, &units, config)
 }
 

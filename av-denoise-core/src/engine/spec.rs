@@ -53,6 +53,7 @@ impl PassSpec {
     }
 
     /// Builds the engine on `client`, picking each launch site's candidate from `kernels`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests build a lone pass"))]
     pub(crate) fn build(
         &self,
         client: &Client,

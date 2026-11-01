@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use av_denoise_core::EngineTiming;
+use av_denoise_core::{EngineTiming, PassTimings};
 
 /// Where one plane's host time went since its denoiser was built.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -29,6 +29,45 @@ impl PlaneTiming {
             device_busy,
             frames,
         }
+    }
+}
+
+/// Where each denoised plane's time went.
+///
+/// One denoiser cleans every plane, so its host time is counted once, on the first denoised plane.
+/// Each plane keeps its own device time.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlanarTiming {
+    pub luma: Option<PlaneTiming>,
+    pub chroma: Option<PlaneTiming>,
+}
+
+impl PlanarTiming {
+    /// Splits the host's clocks and the engine's per-pass counters into per-plane timings.
+    pub(crate) fn new(calls: Duration, output_wait: Duration, frames: u64, passes: PassTimings) -> Self {
+        let plane = |engine: EngineTiming, holds_host_time: bool| {
+            if holds_host_time {
+                PlaneTiming::new(calls, output_wait, frames, engine)
+            } else {
+                PlaneTiming::new(Duration::ZERO, Duration::ZERO, frames, engine)
+            }
+        };
+
+        let luma = passes.luma.map(|engine| plane(engine, true));
+        let chroma_holds_host_time = luma.is_none();
+        let chroma = passes.chroma.map(|engine| plane(engine, chroma_holds_host_time));
+
+        Self { luma, chroma }
+    }
+
+    /// Each denoised plane's name and timing, in luma, chroma order.
+    pub fn planes(&self) -> Vec<(&'static str, PlaneTiming)> {
+        let named = [("luma", self.luma), ("chroma", self.chroma)];
+
+        named
+            .into_iter()
+            .filter_map(|(name, timing)| timing.map(|timing| (name, timing)))
+            .collect()
     }
 }
 

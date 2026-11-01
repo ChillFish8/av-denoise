@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
-use crate::engine::{ChromaLayout, DevicePlane, EngineSpec, Geometry, PassGeometry, PassSpec, SampleFormat};
-use crate::nlmeans::{ChannelMode, DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
+use crate::engine::{ChromaLayout, DevicePlane, EngineSpec, Geometry, SampleFormat};
+use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::engine_set::EngineSet;
 use crate::tune::setup::KernelSetup;
 use crate::tune::unit::TuneUnit;
@@ -119,7 +119,7 @@ fn copied_frames_are_independent_of_their_source() {
         );
     }
 
-    let unit = TuneUnit::Frame(specs[0]);
+    let unit = TuneUnit(specs[0]);
     let copied = frame.planes_for(0, &unit);
     let read = client
         .read_one(copied[0].handle().clone())
@@ -171,7 +171,7 @@ fn copies_of_an_odd_sized_plane_match_their_source_byte_for_byte() {
         chroma: None,
         geometry: gray_geometry(61, 37),
     }];
-    let unit = TuneUnit::Frame(specs[0]);
+    let unit = TuneUnit(specs[0]);
     let bytes = unit.plane_bytes(0, SampleFormat::U8);
     let pattern: Vec<u8> = (0..bytes).map(|index| (index * 7 + index / 251) as u8).collect();
     let source = client.create_from_slice(&pattern);
@@ -199,7 +199,7 @@ fn copies_of_a_yuv_frame_keep_each_planes_size() {
         chroma: None,
         geometry,
     }];
-    let unit = TuneUnit::Frame(specs[0]);
+    let unit = TuneUnit(specs[0]);
     let patterns: Vec<Vec<u8>> = (0..3)
         .map(|plane| {
             let bytes = unit.plane_bytes(plane, SampleFormat::U8);
@@ -229,31 +229,4 @@ fn copies_of_a_yuv_frame_keep_each_planes_size() {
         let read = client.read_one(plane.handle().clone()).expect("the copy reads");
         assert_eq!(&read.to_vec(), pattern);
     }
-}
-
-#[test]
-fn a_set_of_single_passes_times_every_frame() {
-    let device = crate::testing::test_device();
-    let client = device.client();
-    let setup = KernelSetup::default();
-    let geometry = PassGeometry {
-        width: WIDTH,
-        height: HEIGHT,
-        channels: ChannelMode::Chroma,
-        input: SampleFormat::U8,
-        output: SampleFormat::U8,
-    };
-    let pass = PassSpec::Nlmeans {
-        algorithm: NlmeansAlgorithm::Fast(NlmeansOptions::default()),
-        geometry,
-    };
-    let units = TuneUnit::passes_of(&[pass]);
-    let mut set = EngineSet::build(&device, &client, &units, &off(), &setup).expect("the set builds");
-    let bytes = vec![100u8; PLANE_BYTES];
-    let chroma: Vec<_> = (0..2).map(|_| client.create_from_slice(&bytes)).collect();
-    let frame = TuningFrame::new(vec![chroma]);
-
-    let timed = set.timed_frame(&frame).expect("the frame runs");
-
-    assert!(timed.is_some());
 }

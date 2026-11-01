@@ -1,7 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
-use av_denoise::{ChannelMode, Nl4d, Nl4dOptions};
+use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Device, Nl4dOptions, PlaneOptions, TuningMode};
 
 use super::{tiny_layout, tiny_planes};
 use crate::pipeline::decode::PREFETCH_FRAMES;
@@ -196,12 +196,24 @@ const UHD_10_BIT_FRAME_BYTES: usize = 24_883_200;
 
 /// The frames an nl4d luma plane holds at `temporal_radius`.
 fn nl4d_held_frames(temporal_radius: u32) -> usize {
-    let options = Nl4dOptions {
-        temporal_radius,
-        ..Nl4dOptions::default()
+    let nl4d = Nl4dOptions::default();
+    let options = PlaneOptions {
+        accelerators: Vec::new(),
+        device: Device::Default,
+        intent: ChannelIntent::Luma,
+        mode: DenoisingMode::Temporal {
+            radius: temporal_radius,
+        },
+        algorithm: Algorithm::Nl4d(nl4d),
+        luma_strength: None,
+        chroma_strength: None,
+        luma_lambda_ht: None,
+        chroma_lambda_ht: None,
+        tuning: TuningMode::Off,
+        deterministic: false,
     };
 
-    Nl4d::held_frames_for(&options, ChannelMode::Luma)
+    options.max_held_frames(tiny_layout())
 }
 
 #[test]

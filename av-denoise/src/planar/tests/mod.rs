@@ -27,7 +27,7 @@ use super::*;
 #[cfg(feature = "vulkan")]
 mod reseed {
     use super::*;
-    use crate::HqParams;
+    use crate::{HqParams, Nl4dOptions, NlmeansHqOptions, NlmeansOptions};
 
     pub(super) fn layout() -> FrameLayout {
         FrameLayout {
@@ -182,14 +182,13 @@ mod reseed {
     }
 
     #[test]
-    fn reseed_recovers_a_half_poisoned_by_an_earlier_failure() {
+    fn reseed_recovers_a_host_poisoned_by_an_earlier_failure() {
         let frame_layout = layout();
         let options = test_plane_options(2);
         let frames = ramp_clip(&frame_layout, 12);
 
         let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
-        denoiser.luma.as_mut().unwrap().poison_for_test();
-        denoiser.chroma.as_mut().unwrap().poison_for_test();
+        denoiser.host_mut().unwrap().poison_for_test();
 
         let window = window_of(&frames, 6, 2);
         let got = denoiser.reseed(&window).unwrap();
@@ -333,11 +332,9 @@ mod reseed {
         assert_eq!(got.v, expected.v);
     }
 
-    /// `ChannelIntent::Luma` sends chroma through the passthrough queue, and a reseed queues one
-    /// entry per window frame.
+    /// `ChannelIntent::Luma` passes chroma through, and a reseed primes every window frame.
     ///
-    /// The entry paired with the denoised centre must be the centre frame's own chroma, not a
-    /// neighbour's.
+    /// The chroma paired with the denoised centre must be the centre frame's own, not a neighbour's.
     #[test]
     fn reseed_pairs_the_passthrough_plane_with_the_centre_frame() {
         let frame_layout = layout();
@@ -376,10 +373,9 @@ mod reseed {
         );
     }
 
-    /// A single reseed only checks the first passthrough entry `recv` pops.
+    /// A single reseed only checks the plane paired with the target.
     ///
-    /// An extra or missing entry that still leaves the right one at the front only misaligns the
-    /// plane paired with the next frame, once streaming resumes.
+    /// A pairing that drifts by a frame only shows on the next frame, once streaming resumes.
     #[test]
     fn reseed_then_streaming_keeps_the_passthrough_plane_aligned_on_the_next_frame() {
         let frame_layout = layout();
@@ -645,10 +641,9 @@ mod reseed {
         }
     }
 
-    /// nl4d drains after every emission during a reseed, not only the last, and each drain pops one
-    /// passthrough entry.
+    /// nl4d emits several frames during a reseed, not only the last.
     ///
-    /// The walk must still land on the target's own entry rather than an earlier, discarded one.
+    /// The target must still come out with its own chroma rather than an earlier frame's.
     #[test]
     fn nl4d_reseed_pairs_the_passthrough_plane_with_the_centre_frame() {
         let frame_layout = layout();
@@ -689,10 +684,10 @@ mod reseed {
         );
     }
 
-    /// A single-shot pairing test only checks the first entry `recv` pops after the drop.
+    /// A single-shot pairing test only checks the plane paired with the target.
     ///
-    /// An extra or missing entry that still leaves the right one at the front only misaligns the
-    /// plane paired with the frame after the target, once streaming resumes.
+    /// A pairing that drifts by a frame only shows on the frame after the target, once streaming
+    /// resumes.
     #[test]
     fn nl4d_reseed_then_streaming_keeps_the_passthrough_plane_aligned_on_the_next_frame() {
         let frame_layout = layout();

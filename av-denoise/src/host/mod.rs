@@ -10,22 +10,22 @@ mod tests;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use av_denoise_core::{DevicePlane, GrainChunk, PassEngine, PassSpec, WindowSpan};
+use av_denoise_core::{ChromaLayout, DevicePlane, Engine, EngineSpec, GrainChunk, WindowSpan};
 use cubecl::prelude::Client;
 use cubecl::server::Handle;
 
 pub use self::depth::{Depth, UnsupportedDepthError};
 use self::io::PlaneIo;
-pub use self::options::{Algorithm, DenoiserOptions};
+pub use self::options::{Algorithm, ChannelIntent, DenoiserOptions};
 pub(crate) use self::pending::Pending;
-pub use self::timing::PlaneTiming;
+pub use self::timing::{PlanarTiming, PlaneTiming};
 use crate::backend::accelerate::Accelerator;
 use crate::backend::{Device, DevicePlacement, build_engine};
 
 /// How many readbacks a [HostDenoiser] keeps in flight at once.
 pub const MAX_PENDING: usize = 2;
 
-/// How many output plane sets a [HostDenoiser] rotates through.
+/// How many output frames a [HostDenoiser] rotates through, each holding every plane.
 const OUTPUT_SETS: usize = 2;
 
 /// Each frame in flight reads its own output set, so a set is never rewritten before its readback lands.
@@ -76,16 +76,17 @@ impl DenoiserError {
 /// Push frames in order with [Self::push] and collect the cleaned ones with [Self::recv]. At the end
 /// of the stream call [Self::flush] to drain the temporal tail.
 ///
-/// Each frame is one byte buffer per plane. Luma takes Y and chroma takes U and V. Every output
-/// frame comes back in the same layout.
+/// Each frame is one byte buffer per plane, Y then U and V, each at its own size. A gray frame has
+/// only Y. Every output frame comes back in the same layout.
 ///
 /// ```no_run
 /// use av_denoise::accelerate::Accelerator;
-/// use av_denoise::{ChannelMode, DenoiserOptions, DenoisingMode, Device, HostDenoiser};
+/// use av_denoise::{ChannelIntent, ChromaLayout, DenoiserOptions, DenoisingMode, Device, HostDenoiser};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let options = DenoiserOptions::builder()
-///     .channel_mode(ChannelMode::Luma)
+///     .intent(ChannelIntent::Luma)
+///     .chroma(ChromaLayout::Gray)
 ///     .mode(DenoisingMode::Temporal { radius: 2 })
 ///     .build();
 ///
@@ -107,21 +108,20 @@ impl DenoiserError {
 /// # }
 /// ```
 pub struct HostDenoiser {
-    engine: Box<dyn PassEngine>,
+    engine: Box<dyn Engine>,
     io: Box<dyn PlaneIo>,
     accelerator: Accelerator,
     /// The device the engine was asked for, which names its stored tuning results.
     selected: cubecl::Device,
     client: Client,
-    spec: PassSpec,
-    width: u32,
-    height: u32,
-    plane_count: usize,
-    /// The wire byte length of one plane.
-    plane_length: usize,
-    /// The bytes one device plane takes up, rounded up to whole words.
-    device_plane_bytes: usize,
-    /// Output plane sets, allocated on first use.
+    spec: EngineSpec,
+    /// Each plane's width and height, luma first.
+    plane_dims: Vec<(u32, u32)>,
+    /// Each plane's wire byte length.
+    plane_lengths: Vec<usize>,
+    /// The bytes each device plane takes up, rounded up to whole words.
+    device_plane_bytes: Vec<usize>,
+    /// Output plane sets, one per frame in flight, allocated on first use.
     outputs: Vec<Vec<Handle>>,
     next_output: usize,
     pending: VecDeque<Pending>,
@@ -177,7 +177,7 @@ impl HostDenoiser {
             return Err(DenoiserError::Other(error));
         }
 
-        let spec = options.algorithm.engine_spec(&options, width, height);
+        let spec = options.engine_spec(width, height);
         let built = build_engine(
             accelerators,
             device,
@@ -188,10 +188,20 @@ impl HostDenoiser {
         )?;
 
         let format = options.depth.sample_format();
-        let pixels = width as usize * height as usize;
-        let device_plane_bytes = format.plane_bytes(pixels as u64) as usize;
-        let plane_length = pixels * options.depth.bytes_per_sample();
-        let plane_count = options.channel_mode.count() as usize;
+        let plane_dims = frame_plane_dims(width, height, options.chroma);
+        let plane_pixels: Vec<usize> = plane_dims
+            .iter()
+            .map(|&(plane_width, plane_height)| plane_width as usize * plane_height as usize)
+            .collect();
+        let device_plane_bytes = plane_pixels
+            .iter()
+            .map(|&pixels| format.plane_bytes(pixels as u64) as usize)
+            .collect();
+        let bytes_per_sample = options.depth.bytes_per_sample();
+        let plane_lengths = plane_pixels
+            .iter()
+            .map(|&pixels| pixels * bytes_per_sample)
+            .collect();
 
         Ok(Self {
             engine: built.engine,
@@ -200,10 +210,8 @@ impl HostDenoiser {
             selected: built.selected,
             client: built.client,
             spec,
-            width,
-            height,
-            plane_count,
-            plane_length,
+            plane_dims,
+            plane_lengths,
             device_plane_bytes,
             outputs: Vec::with_capacity(OUTPUT_SETS),
             next_output: 0,
@@ -228,7 +236,7 @@ impl HostDenoiser {
         &self.client
     }
 
-    pub(crate) fn spec(&self) -> PassSpec {
+    pub(crate) fn spec(&self) -> EngineSpec {
         self.spec
     }
 
@@ -237,7 +245,7 @@ impl HostDenoiser {
         self.engine.window_span()
     }
 
-    /// Uploads one frame and starts denoising any frame it completes.
+    /// Uploads one frame, every plane at its own size, and starts denoising any frame it completes.
     ///
     /// Returns [DenoiserError::QueueFull] once [MAX_PENDING] frames wait to be collected, which does
     /// not poison the denoiser. A rejected plane leaves it usable too. Any other failure poisons it
@@ -259,7 +267,7 @@ impl HostDenoiser {
 
     fn push_inner(&mut self, planes: &[&[u8]]) -> Result<(), DenoiserError> {
         let handles = self.upload_frame(planes);
-        let device_planes = device_planes(&handles, self.width, self.height);
+        let device_planes = device_planes(&handles, &self.plane_dims);
         let ready = self.engine.push(&device_planes)?;
 
         // Emitting past the free output sets would overwrite a set whose readback has not landed.
@@ -298,7 +306,7 @@ impl HostDenoiser {
 
     fn push_priming_inner(&mut self, planes: &[&[u8]]) -> Result<(), DenoiserError> {
         let handles = self.upload_frame(planes);
-        let device_planes = device_planes(&handles, self.width, self.height);
+        let device_planes = device_planes(&handles, &self.plane_dims);
         self.engine.push_context(&device_planes)?;
 
         Ok(())
@@ -370,17 +378,17 @@ impl HostDenoiser {
         self.engine.sample_device_time(every);
     }
 
-    /// Where this plane's host time went so far.
+    /// Where each denoised plane's time went so far.
     ///
     /// It waits for any device-time spans still in flight.
-    pub fn timing(&mut self) -> PlaneTiming {
-        let engine = self.engine.timing();
+    pub fn timing(&mut self) -> PlanarTiming {
+        let passes = self.engine.timing();
         let calls = self.call_time.saturating_sub(self.sink_time);
 
-        PlaneTiming::new(calls, self.output_wait, self.frames_emitted, engine)
+        PlanarTiming::new(calls, self.output_wait, self.frames_emitted, passes)
     }
 
-    /// Reads back the grain chunks measured since the last call, in frame order.
+    /// Reads back the luma grain chunks measured since the last call, in frame order.
     ///
     /// Empty unless grain export is on.
     pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, DenoiserError> {
@@ -444,19 +452,16 @@ impl HostDenoiser {
 
     /// Rejects a frame with the wrong number of planes or a plane of the wrong length.
     fn check_planes(&self, planes: &[&[u8]]) -> Result<(), DenoiserError> {
-        if planes.len() != self.plane_count {
-            let message = format!("expected {} planes, got {}", self.plane_count, planes.len());
+        let plane_count = self.plane_lengths.len();
+        if planes.len() != plane_count {
+            let message = format!("expected {plane_count} planes, got {}", planes.len());
             let error = av_denoise_core::Error::PlaneMismatch(message);
             return Err(DenoiserError::Engine(error));
         }
 
-        for (index, plane) in planes.iter().enumerate() {
-            if plane.len() != self.plane_length {
-                let message = format!(
-                    "plane {index} holds {} bytes, expected {}",
-                    plane.len(),
-                    self.plane_length
-                );
+        for (index, (plane, &expected)) in planes.iter().zip(&self.plane_lengths).enumerate() {
+            if plane.len() != expected {
+                let message = format!("plane {index} holds {} bytes, expected {expected}", plane.len());
                 let error = av_denoise_core::Error::PlaneMismatch(message);
                 return Err(DenoiserError::Engine(error));
             }
@@ -469,12 +474,12 @@ impl HostDenoiser {
     pub(crate) fn upload_frame(&self, planes: &[&[u8]]) -> Vec<Handle> {
         let mut handles = Vec::with_capacity(planes.len());
 
-        for plane in planes {
-            let handle = if plane.len() == self.device_plane_bytes {
+        for (plane, &device_bytes) in planes.iter().zip(&self.device_plane_bytes) {
+            let handle = if plane.len() == device_bytes {
                 self.io.upload(plane)
             } else {
                 let mut padded = plane.to_vec();
-                padded.resize(self.device_plane_bytes, 0);
+                padded.resize(device_bytes, 0);
                 self.io.upload(&padded)
             };
             handles.push(handle);
@@ -486,27 +491,42 @@ impl HostDenoiser {
     /// Writes the oldest ready frame into output set `slot` and starts reading it back.
     fn emit_into_slot(&mut self, slot: usize) -> Result<Pending, DenoiserError> {
         while self.outputs.len() <= slot {
-            let set = (0..self.plane_count)
-                .map(|_| self.io.allocate(self.device_plane_bytes))
+            let set = self
+                .device_plane_bytes
+                .iter()
+                .map(|&bytes| self.io.allocate(bytes))
                 .collect();
             self.outputs.push(set);
         }
 
         let handles = self.outputs[slot].clone();
-        let device_planes = device_planes(&handles, self.width, self.height);
+        let device_planes = device_planes(&handles, &self.plane_dims);
         self.engine.emit_into(&device_planes)?;
 
         let future = self.io.read(handles);
-        let plane_lengths = vec![self.plane_length; self.plane_count];
+        let plane_lengths = self.plane_lengths.clone();
         let pending = Pending::new(future, plane_lengths);
 
         Ok(pending)
     }
 }
 
-fn device_planes(handles: &[Handle], width: u32, height: u32) -> Vec<DevicePlane<'_>> {
+/// Each plane's width and height in a `width` by `height` frame, luma first.
+fn frame_plane_dims(width: u32, height: u32, chroma: ChromaLayout) -> Vec<(u32, u32)> {
+    let mut dims = vec![(width, height)];
+
+    if let Some(chroma_dims) = chroma.chroma_dims(width, height) {
+        dims.push(chroma_dims);
+        dims.push(chroma_dims);
+    }
+
+    dims
+}
+
+fn device_planes<'a>(handles: &'a [Handle], dims: &[(u32, u32)]) -> Vec<DevicePlane<'a>> {
     handles
         .iter()
-        .map(|handle| DevicePlane::new(handle, width, height))
+        .zip(dims)
+        .map(|(handle, &(width, height))| DevicePlane::new(handle, width, height))
         .collect()
 }
