@@ -6,7 +6,6 @@
 //!
 //! - [Nl4d], the engine
 //! - [Nl4dOptions] and the per-preset defaults it is built from
-//! - [PsyParams], the perceptual tuning that filters each area by what it looks like
 //! - film grain measurement for AV1 grain tables
 
 mod collab_pass;
@@ -17,7 +16,6 @@ pub(crate) mod harness;
 pub(crate) mod kernels;
 mod options;
 pub(crate) mod params;
-mod psy;
 mod regularise;
 pub(crate) mod snapshot;
 
@@ -35,5 +33,4 @@ pub use self::options::{Nl4dOptions, nl4d_default_lambda_ht};
 #[cfg(test)]
 pub(crate) use self::params::MAX_KAISER_BETA;
 pub(crate) use self::params::Nl4dParams;
-pub use self::psy::PsyParams;
 pub(crate) use self::snapshot::MotionSnapshot;

@@ -4,7 +4,7 @@ use super::helpers::{make_client, seeded_unit_gaussian};
 use crate::bench_api::HostIo;
 use crate::collab::kernels::aggregate::weight_scale_with_g_max;
 use crate::motion::sad_noise_floor;
-use crate::nl4d::{Nl4dDenoiser, Nl4dParams, PsyParams};
+use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::dispatch::{mc_sad_noise_floor_sigma, pilot_h2_inv_norm};
 use crate::nlmeans::params::sigma_eff;
 use crate::nlmeans::*;
@@ -92,7 +92,6 @@ fn nl4d_params(channels: ChannelMode) -> Nl4dParams {
     Nl4dParams {
         nlm,
         noise_map: true,
-        psy: Some(PsyParams::default()),
         ..defaults
     }
 }

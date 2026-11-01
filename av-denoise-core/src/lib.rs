@@ -41,7 +41,7 @@ pub use self::kernel_cache::{
     refill_kernel_cache,
 };
 pub use self::nl4d::grain::{GrainChunk, SceneGrain, build_table};
-pub use self::nl4d::{Nl4d, Nl4dOptions, PsyParams, nl4d_default_lambda_ht};
+pub use self::nl4d::{Nl4d, Nl4dOptions, nl4d_default_lambda_ht};
 pub use self::nlmeans::{
     ChannelMode,
     DEFAULT_PILOT_STRENGTH_SCALE,

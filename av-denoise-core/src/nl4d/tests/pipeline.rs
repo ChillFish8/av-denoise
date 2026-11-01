@@ -319,7 +319,7 @@ fn flush_emits_exactly_the_pushed_frame_count() {
     );
 }
 
-/// Every output of a fresh luma denoiser with the noise map and psy over `frames`.
+/// Every output of a fresh luma denoiser with the noise map over `frames`.
 fn ramp_outputs(frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
     let client = make_client();
     let params = ramp_params(ChannelMode::Luma, true, 1.0);

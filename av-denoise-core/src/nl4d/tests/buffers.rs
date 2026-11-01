@@ -21,14 +21,7 @@ use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::{ChannelMode, HqParams, NlmDenoiser, mc_sad_noise_floor_sigma};
 use crate::noise::tests::fold_reference::{SnapshotGap, relative_gap};
 use crate::noise::tests::frames::MAX_RELATIVE;
-use crate::noise::{
-    DerivedValues,
-    NOISE_CURVE_BINS,
-    NoiseSnapshot,
-    STRENGTH_MAP_ALL,
-    STRENGTH_MAP_LUMA,
-    STRENGTH_MAP_OFF,
-};
+use crate::noise::{DerivedValues, NOISE_CURVE_BINS, NoiseSnapshot, STRENGTH_MAP_OFF};
 
 const SIZE: u32 = 64;
 /// Ten frames run as centres while the stream is pushed, after the noise look-ahead fills.
@@ -240,8 +233,8 @@ fn the_curve_buffer_holds_the_gpu_curve() {
 }
 
 #[test]
-fn a_luma_front_with_the_noise_map_and_psy_applies_the_curve_and_the_luma_map() {
-    assert_curve_flag_and_map_mode(ChannelMode::Luma, true, (true, STRENGTH_MAP_LUMA));
+fn a_luma_front_with_the_noise_map_applies_the_curve_without_a_map() {
+    assert_curve_flag_and_map_mode(ChannelMode::Luma, true, (true, STRENGTH_MAP_OFF));
 }
 
 #[test]
@@ -250,8 +243,8 @@ fn a_luma_front_without_the_noise_map_applies_neither_the_curve_nor_a_map() {
 }
 
 #[test]
-fn a_chroma_front_with_the_flat_boost_maps_every_channel_without_a_curve() {
-    assert_curve_flag_and_map_mode(ChannelMode::Chroma, true, (false, STRENGTH_MAP_ALL));
+fn a_chroma_front_applies_neither_the_curve_nor_a_map() {
+    assert_curve_flag_and_map_mode(ChannelMode::Chroma, true, (false, STRENGTH_MAP_OFF));
 }
 
 #[test]

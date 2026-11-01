@@ -250,7 +250,6 @@ impl Nl4dArgs {
             kaiser_beta: self.kaiser_beta.unwrap_or(defaults.kaiser_beta),
             field_lambda: self.field_lambda.unwrap_or(defaults.field_lambda),
             noise_map: defaults.noise_map && !self.no_noise_map,
-            psy: None,
             pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
             grain_export: exports_grain,
         };

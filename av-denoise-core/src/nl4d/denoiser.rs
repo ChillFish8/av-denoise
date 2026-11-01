@@ -13,9 +13,9 @@ use crate::engine::timing::{DeviceTimed, DeviceTimer, timed};
 use crate::engine::{DevicePlane, EngineTiming, SampleFormat};
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, PrefilterMode, RingView};
+use crate::noise::NoiseConsumer;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::noise::NoiseSnapshot;
-use crate::noise::{NoiseConsumer, StrengthMapKind, StrengthMapParams};
 use crate::tune::{KernelSelector, PipelineProfile, check_plane_size};
 
 /// Which accumulator regions a pass zeroes before scattering.
@@ -192,33 +192,7 @@ impl Nl4dDenoiser {
 
         let channels = params.nlm.channels;
         let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma;
-        let psy = params.psy.filter(|_| params.noise_map);
-        let luma_psy = psy.filter(|_| channels != ChannelMode::Chroma);
-        let chroma_psy = psy.filter(|_| channels == ChannelMode::Chroma);
-
-        let luma_map = luma_psy
-            .map(|psy| StrengthMapParams {
-                flat_boost: psy.flat_boost,
-                shadow_soften: psy.shadow_soften,
-            })
-            .filter(|map| !map.is_identity());
-        let chroma_map_boost = chroma_psy
-            .map(|psy| psy.chroma_flat_boost)
-            .filter(|&boost| boost != 1.0);
-        front.set_luma_noise_fields(apply_noise_map || chroma_map_boost.is_some());
-
-        let texture_cut = luma_psy.map(|psy| psy.flat_texture_cut).filter(|&cut| cut < 1.0);
-        front.set_flat_texture_cut(texture_cut);
-
-        let line_ring = luma_psy.map(|psy| psy.line_ring);
-        front.set_line_ring(line_ring);
-
-        let strength_map = match (luma_map, chroma_map_boost) {
-            (Some(map), _) => StrengthMapKind::Luma(map),
-            (None, Some(flat_boost)) => StrengthMapKind::Chroma { flat_boost },
-            (None, None) => StrengthMapKind::Off,
-        };
-        front.set_strength_map(strength_map);
+        front.set_luma_noise_fields(apply_noise_map);
 
         front.set_shifted_edges(true);
 

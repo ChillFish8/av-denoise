@@ -1,4 +1,3 @@
-use super::psy::PsyParams;
 use crate::collab::MAX_TEMPORAL_RADIUS;
 use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
 
@@ -65,10 +64,6 @@ pub struct Nl4dParams {
     ///
     /// On by default.
     pub noise_map: bool,
-    /// Perceptual tuning by area, see [PsyParams](crate::PsyParams).
-    ///
-    /// Only takes effect with `noise_map` on. `None`, the default, filters every area alike.
-    pub psy: Option<PsyParams>,
     /// Judges each transform coefficient together with its frequency neighbours instead of alone.
     ///
     /// Faint texture spreads over several neighbouring frequencies, so it survives where each
@@ -105,7 +100,6 @@ impl Default for Nl4dParams {
             kaiser_beta: 2.0,
             field_lambda: 1.0,
             noise_map: true,
-            psy: None,
             pooled_threshold: true,
             grain_export: false,
         }
@@ -191,10 +185,6 @@ impl Nl4dParams {
             return Err(message);
         }
 
-        if let Some(psy) = &self.psy {
-            psy.validate()?;
-        }
-
         Ok(())
     }
 }
@@ -216,24 +206,9 @@ mod tests {
     }
 
     #[test]
-    fn psy_is_off_by_default() {
+    fn pooled_threshold_is_on_by_default() {
         let params = Nl4dParams::default();
-        assert_eq!(params.psy, None);
         assert!(params.pooled_threshold);
-    }
-
-    #[test]
-    fn validate_checks_the_psy_params() {
-        let psy = PsyParams {
-            line_ring: 65,
-            ..PsyParams::default()
-        };
-        let params = Nl4dParams {
-            psy: Some(psy),
-            ..Nl4dParams::default()
-        };
-        let error = params.validate().expect_err("line_ring out of range");
-        assert!(error.contains("psy_line_ring"), "got {error}");
     }
 
     #[test]

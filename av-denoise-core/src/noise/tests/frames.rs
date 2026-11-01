@@ -6,7 +6,6 @@ use super::records::{hashed_unit, ulp_gap};
 use super::y4m::read_y4m;
 use crate::collab::geometry::strength_map_dims;
 use crate::engine::align::StorageAlign;
-use crate::nl4d::PsyParams;
 use crate::noise::NOISE_CHANNELS;
 use crate::noise::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS, curve_bin_counts};
 use crate::noise::derived::DerivedValues;
@@ -76,7 +75,7 @@ impl Plane {
     }
 }
 
-/// The luma plane's settings with the curve and no map, as nl4d reads luma without psy.
+/// The luma plane's settings with the curve and no map.
 fn luma_off() -> ReadingSettings {
     ReadingSettings {
         luma_fields: true,
@@ -84,16 +83,15 @@ fn luma_off() -> ReadingSettings {
     }
 }
 
-/// The luma plane's settings with the map, the texture cut and the line ring at the psy defaults.
+/// The luma plane's settings with the map, the texture cut and the line ring.
 pub(super) fn luma_map() -> ReadingSettings {
-    let psy = PsyParams::default();
     let params = StrengthMapParams {
-        flat_boost: psy.flat_boost,
-        shadow_soften: psy.shadow_soften,
+        flat_boost: 1.75,
+        shadow_soften: 0.65,
     };
-    let ring = psy.line_ring.div_ceil(TEMPORAL_QUARTER_SIZE) as usize;
+    let ring = 16u32.div_ceil(TEMPORAL_QUARTER_SIZE) as usize;
     let quarter = QuarterSettings {
-        texture_cut: Some(psy.flat_texture_cut),
+        texture_cut: Some(0.21),
         line_ring: Some(ring),
     };
 
@@ -104,17 +102,14 @@ pub(super) fn luma_map() -> ReadingSettings {
     }
 }
 
-/// The chroma plane's settings without a map, as nl4d reads chroma without psy.
+/// The chroma plane's settings without a map.
 fn chroma_off() -> ReadingSettings {
     ReadingSettings::default()
 }
 
-/// The chroma plane's settings with the chroma map at the psy default boost.
+/// The chroma plane's settings with the chroma map.
 pub(super) fn chroma_map() -> ReadingSettings {
-    let psy = PsyParams::default();
-    let map = StrengthMapKind::Chroma {
-        flat_boost: psy.chroma_flat_boost,
-    };
+    let map = StrengthMapKind::Chroma { flat_boost: 1.5 };
 
     ReadingSettings {
         luma_fields: true,
