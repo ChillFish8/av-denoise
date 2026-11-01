@@ -264,13 +264,11 @@ impl<S: Float> VariantSite for CollabSearchSite<S> {
 
     /// The exact compile-time shape and the search type, which the bucketed key leaves out.
     ///
-    /// The strength map and pooling are left out because the search never reads them.
+    /// Pooling is left out because the search never reads it.
     fn compile_identity(&self) -> String {
         let search = std::any::type_name::<S>();
         let shape = CollabShape {
             pooled: false,
-            map_cols: 0,
-            map_rows: 0,
             ..self.shape
         };
 
@@ -539,7 +537,6 @@ impl CollabFilterSite {
         let neighbour_slots = bind(&inputs.neighbour_slots, inputs.neighbour_slots_len);
         let noise = bind(&inputs.noise, DERIVED_WORDS as usize);
         let noise_curve = bind(&inputs.noise_curve, NOISE_CURVE_BINS);
-        let strength_map = bind(&inputs.strength_map, inputs.map_len);
         let dct_profile = bind(&inputs.dct_profile, 8);
         let kaiser = bind(&inputs.kaiser, PATCH_SIZE as usize);
         let accum = bind(&outputs.accum, outputs.accum_len);
@@ -558,7 +555,6 @@ impl CollabFilterSite {
                 neighbour_slots,
                 noise,
                 noise_curve,
-                strength_map,
                 dct_profile,
                 kaiser,
                 accum,
@@ -573,8 +569,6 @@ impl CollabFilterSite {
                 shape.height,
                 shape.channels,
                 shape.refs_x,
-                shape.map_cols,
-                shape.map_rows,
                 shape.k_max,
                 shape.pooled,
                 groups,

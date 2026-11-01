@@ -362,7 +362,6 @@ fn run_all(backend: &str, client: Client) {
                 channel_name,
                 split_mv: false,
                 noise_curve: false,
-                strength_map: false,
                 pooled: false,
                 candidate,
             });
@@ -390,7 +389,6 @@ fn run_all(backend: &str, client: Client) {
         channel_name: "luma",
         split_mv: false,
         noise_curve: true,
-        strength_map: false,
         pooled: false,
         candidate: collab_baseline,
     });
@@ -400,17 +398,6 @@ fn run_all(backend: &str, client: Client) {
         channel_name: "luma",
         split_mv: false,
         noise_curve: true,
-        strength_map: true,
-        pooled: false,
-        candidate: collab_baseline,
-    });
-    run(CollabFusedBench {
-        client: client.clone(),
-        channels: 1,
-        channel_name: "luma",
-        split_mv: false,
-        noise_curve: true,
-        strength_map: true,
         pooled: true,
         candidate: collab_baseline,
     });
@@ -422,7 +409,6 @@ fn run_all(backend: &str, client: Client) {
             channel_name,
             split_mv: true,
             noise_curve: false,
-            strength_map: false,
             pooled: false,
             candidate: collab_baseline,
         });

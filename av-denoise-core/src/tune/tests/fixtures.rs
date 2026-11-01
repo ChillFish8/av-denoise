@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::collab::geometry::{ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{ref_count, refs_along};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{MAX_K, grid_frames, needs_warp_uniform_search};
@@ -12,13 +12,7 @@ use crate::motion::THSAD_PIXEL;
 use crate::nl4d::nl4d_pool_ratio;
 use crate::nlmeans::ChannelMode;
 use crate::noise::tests::{CollabNoise, collab_noise_buffer, nlm_noise_buffer};
-use crate::noise::{
-    DERIVED_H2_INV_NORM,
-    DERIVED_PILOT_H2_INV_NORM,
-    DerivedValues,
-    NOISE_CURVE_BINS,
-    STRENGTH_MAP_OFF,
-};
+use crate::noise::{DERIVED_H2_INV_NORM, DERIVED_PILOT_H2_INV_NORM, DerivedValues, NOISE_CURVE_BINS};
 use crate::tune::SiteCandidate;
 use crate::tune::gpu::zero_words;
 use crate::tune::sites::{
@@ -356,16 +350,11 @@ pub(crate) fn collab_site(client: &Client, spec: &CollabSpec) -> CollabSite<f32>
         sigma: &sigma_values,
         weight_scale: weight_norm,
         curve_valid: false,
-        map_mode: STRENGTH_MAP_OFF,
     };
     let noise = collab_noise_buffer(client, noise_values);
 
     let curve_values = [0.0f32; NOISE_CURVE_BINS];
     let noise_curve = upload(client, &curve_values);
-    let (map_cols, map_rows) = strength_map_dims(spec.width, spec.height);
-    let map_len = (map_cols * map_rows) as usize;
-    let map_values = vec![1.0f32; map_len];
-    let strength_map = upload(client, &map_values);
     let dct_profile = upload(client, &profile);
     let kaiser_taps = kaiser_window(0.0);
     let kaiser = upload(client, &kaiser_taps);
@@ -394,8 +383,6 @@ pub(crate) fn collab_site(client: &Client, spec: &CollabSpec) -> CollabSite<f32>
         neighbour_slots_len: slot_values.len(),
         noise,
         noise_curve,
-        strength_map,
-        map_len,
         dct_profile,
         kaiser,
     };
@@ -434,8 +421,6 @@ pub(crate) fn collab_site(client: &Client, spec: &CollabSpec) -> CollabSite<f32>
         spatial_radius,
         refs_x,
         refs_y,
-        map_cols,
-        map_rows,
         pooled: spec.pooled,
         uniform_walk_only,
     };

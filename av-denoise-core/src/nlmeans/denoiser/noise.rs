@@ -348,11 +348,6 @@ impl NlmDenoiser {
         self.noise.curve().clone()
     }
 
-    /// The strength map buffer the kernels bind, one multiplier per map quarter.
-    pub(crate) fn strength_map_handle(&self) -> Handle {
-        self.noise.strength_map().clone()
-    }
-
     /// The derived values of a front with no estimate, at the pinned sigma or at zero.
     ///
     /// A pinned or fast front keeps these values. There is no curve and no map, and the grain reads

@@ -4,7 +4,7 @@ use cubecl::server::Handle;
 use super::grain::{GrainChunk, GrainExport, GrainGeometry};
 use super::params::Nl4dParams;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
-use crate::collab::geometry::{ref_count, strength_map_dims};
+use crate::collab::geometry::ref_count;
 use crate::collab::kernels::aggregate::{collab_normalise, cross_frame_accum_scale, kaiser_window};
 use crate::collab::kernels::fused::MEMBER_WORDS;
 use crate::collab::kernels::transforms::{RECIPROCAL_FLOOR, dct_noise_profile};
@@ -112,8 +112,6 @@ pub struct Nl4dDenoiser {
     /// The regularised motion field, allocated only when `field_lambda > 0.0`.
     pub(super) reg_mv: Option<Handle>,
     pub(super) reg_conf: Option<Handle>,
-    pub(super) map_cols: u32,
-    pub(super) map_rows: u32,
     /// Present only when grain export is on.
     grain: Option<GrainExport>,
 }
@@ -245,8 +243,6 @@ impl Nl4dDenoiser {
         let kaiser_bytes = f32::as_bytes(&kaiser_taps);
         let kaiser_buf = client.create_from_slice(kaiser_bytes);
 
-        let (map_cols, map_rows) = strength_map_dims(width, height);
-
         // `client.empty` memory is not zeroed, so a stream's first pass zeroes the whole ring.
         let ring_frames = 1 + 2 * params.temporal_radius;
         let (accum_len, wsum_len) = accumulator_lens(pixels, channel_count, ring_frames);
@@ -324,8 +320,6 @@ impl Nl4dDenoiser {
             field_lambda: params.field_lambda,
             reg_mv,
             reg_conf,
-            map_cols,
-            map_rows,
             grain,
         })
     }

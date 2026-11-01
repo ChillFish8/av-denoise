@@ -16,7 +16,7 @@ use super::helpers::{
     textured_base,
 };
 use crate::bench_api::HostIo;
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     collab_normalise,
@@ -33,7 +33,7 @@ use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::noisy_field_over;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams};
 use crate::noise::tests::{CollabNoise, collab_noise_buffer};
-use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS};
 
 #[test]
 fn denoises_a_static_noisy_clip() {
@@ -402,7 +402,6 @@ fn run_spatial_only(
         sigma: &sigma_values,
         weight_scale: weight_norm,
         curve_valid: false,
-        map_mode: STRENGTH_MAP_OFF,
     };
     let noise_buf = collab_noise_buffer(client, noise_values);
 
@@ -415,11 +414,6 @@ fn run_spatial_only(
     let curve_bytes = f32::as_bytes(&zeroed_curve);
     let zero_curve = client.create_from_slice(curve_bytes);
 
-    let (map_cols, map_rows) = strength_map_dims(width, height);
-    let map_len = (map_cols * map_rows) as usize;
-    let unit_map = vec![1.0f32; map_len];
-    let unit_map_bytes = f32::as_bytes(&unit_map);
-    let unit_map_buf = client.create_from_slice(unit_map_bytes);
     let accum = client.empty(frame_len * size_of::<i32>());
     let wsum = client.empty(pixels * size_of::<i32>());
     let output = client.empty(frame_len * size_of::<f32>());
@@ -466,7 +460,6 @@ fn run_spatial_only(
             BufferArg::from_raw_parts(neighbour_slots_dummy, 1),
             BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
             BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-            BufferArg::from_raw_parts(unit_map_buf, map_len),
             BufferArg::from_raw_parts(dct_profile_buf, 8),
             BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             BufferArg::from_raw_parts(accum.clone(), frame_len),
@@ -492,8 +485,6 @@ fn run_spatial_only(
             k_max,
             spatial_radius,
             refs_x,
-            map_cols,
-            map_rows,
             0.0f32,
             false,
             variant,
@@ -658,7 +649,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
             sigma: &sigma,
             weight_scale: weight_norm,
             curve_valid: false,
-            map_mode: STRENGTH_MAP_OFF,
         };
         let noise_buf = collab_noise_buffer(&client, noise_values);
 
@@ -671,11 +661,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let curve_bytes = f32::as_bytes(&zeroed_curve);
         let zero_curve = client.create_from_slice(curve_bytes);
 
-        let (map_cols, map_rows) = strength_map_dims(width, height);
-        let map_len = (map_cols * map_rows) as usize;
-        let unit_map = vec![1.0f32; map_len];
-        let unit_map_bytes = f32::as_bytes(&unit_map);
-        let unit_map_buf = client.create_from_slice(unit_map_bytes);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, radius);
 
         let group_weight = client.empty(refs * size_of::<f32>());
@@ -719,7 +704,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 BufferArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
                 BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-                BufferArg::from_raw_parts(unit_map_buf, map_len),
                 BufferArg::from_raw_parts(profile_buf, 8),
                 BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
                 BufferArg::from_raw_parts(accum.clone(), pixels * total_frames as usize),
@@ -745,8 +729,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 k_max,
                 SPATIAL_RADIUS,
                 refs_x,
-                map_cols,
-                map_rows,
                 0.0f32,
                 false,
                 variant,

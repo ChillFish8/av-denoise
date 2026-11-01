@@ -362,11 +362,6 @@ impl NoiseState {
         &self.curve_ratios
     }
 
-    /// The current threshold multiplier per map quarter.
-    pub(crate) fn strength_map(&self) -> &Handle {
-        &self.current_map
-    }
-
     /// The main pass's noise-floor table, one entry per search candidate, `None` without tables.
     pub(crate) fn spatial_offsets(&self) -> Option<&Handle> {
         self.offset_tables.as_ref().map(|tables| &tables.spatial)

@@ -4,7 +4,6 @@ mod corpus;
 mod noise_curve;
 mod pooled;
 mod recorded;
-mod strength_map;
 mod variants;
 mod walks;
 
@@ -12,14 +11,14 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::{make_client, make_unique_frame, noisy_flat_field};
-use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along, strength_map_dims};
+use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along};
 use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::{CollabVariant, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames};
 use crate::nlmeans::ChannelMode;
 use crate::noise::tests::{CollabNoise, collab_noise_buffer};
-use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS};
 use crate::tune::SiteCandidate;
 
 /// The spatial search radius most runs use.
@@ -97,8 +96,6 @@ pub(super) struct Setup {
     pub(super) kaiser_beta: f32,
     /// The frame's noise curve. `None` launches with `curve_valid = 0` and a zeroed buffer.
     pub(super) noise_curve: Option<[f32; NOISE_CURVE_BINS]>,
-    /// A strength map and the mode it applies in. `None` launches a unit map with the map off.
-    pub(super) strength_map: Option<(Vec<f32>, u32)>,
     /// The pooled threshold's ratio to lambda. `None` launches the plain per-coefficient test.
     pub(super) pooled: Option<f32>,
     /// The channels the ring interleaves per pixel.
@@ -139,7 +136,6 @@ impl Setup {
             profile_override: None,
             kaiser_beta: 0.0,
             noise_curve: None,
-            strength_map: None,
             pooled: None,
             channel_mode: ChannelMode::Luma,
             f16_search: false,
@@ -328,8 +324,6 @@ pub(super) struct Buffers {
     neighbour_slots: Handle,
     noise: Handle,
     curve: Handle,
-    strength_map: Handle,
-    map_len: usize,
     dct_profile: Handle,
     kaiser: Handle,
     accum: Handle,
@@ -360,23 +354,10 @@ pub(super) fn buffers(setup: &Setup) -> Buffers {
     let profile = setup.profile();
     let scale = weight_scale(sigma[0], &profile);
 
-    let (map_cols, map_rows) = strength_map_dims(setup.width, setup.height);
-    let map_len = (map_cols * map_rows) as usize;
-    let (map_values, map_mode) = match &setup.strength_map {
-        Some((values, mode)) => (values.clone(), *mode),
-        None => (vec![1.0f32; map_len], STRENGTH_MAP_OFF),
-    };
-    assert_eq!(
-        map_values.len(),
-        map_len,
-        "a strength map must cover the frame's quarter grid"
-    );
-
     let noise_values = CollabNoise {
         sigma: &sigma,
         weight_scale: scale,
         curve_valid: setup.noise_curve.is_some(),
-        map_mode,
     };
     let noise = collab_noise_buffer(&client, noise_values);
     let curve = setup.noise_curve.unwrap_or([0.0f32; NOISE_CURVE_BINS]);
@@ -391,7 +372,6 @@ pub(super) fn buffers(setup: &Setup) -> Buffers {
     let conf_bytes = f32::as_bytes(&setup.confidence);
     let slots_bytes = u32::as_bytes(&setup.neighbour_slots);
     let curve_bytes = f32::as_bytes(&curve);
-    let map_bytes = f32::as_bytes(&map_values);
     let profile_bytes = f32::as_bytes(&profile);
     let kaiser_bytes = f32::as_bytes(&kaiser);
     let accum_bytes = i32::as_bytes(&zeroed_accum);
@@ -401,7 +381,6 @@ pub(super) fn buffers(setup: &Setup) -> Buffers {
     let confidence = client.create_from_slice(conf_bytes);
     let neighbour_slots = client.create_from_slice(slots_bytes);
     let curve = client.create_from_slice(curve_bytes);
-    let strength_map = client.create_from_slice(map_bytes);
     let dct_profile = client.create_from_slice(profile_bytes);
     let kaiser = client.create_from_slice(kaiser_bytes);
     let accum = client.create_from_slice(accum_bytes);
@@ -424,8 +403,6 @@ pub(super) fn buffers(setup: &Setup) -> Buffers {
         neighbour_slots,
         noise,
         curve,
-        strength_map,
-        map_len,
         dct_profile,
         kaiser,
         accum,
@@ -500,7 +477,6 @@ pub(super) fn assert_listed_variants_match_recorded(
 
 /// Launches [collab_fused] with its search ring read as `S`.
 fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle, variant: CollabVariant) {
-    let (map_cols, map_rows) = strength_map_dims(setup.width, setup.height);
     let channels = setup.channels();
 
     let cubes_x = fused_cubes_x(setup.width, variant.groups);
@@ -525,7 +501,6 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             BufferArg::from_raw_parts(handles.neighbour_slots.clone(), setup.neighbour_slots.len()),
             BufferArg::from_raw_parts(handles.noise.clone(), DERIVED_WORDS as usize),
             BufferArg::from_raw_parts(handles.curve.clone(), NOISE_CURVE_BINS),
-            BufferArg::from_raw_parts(handles.strength_map.clone(), handles.map_len),
             BufferArg::from_raw_parts(handles.dct_profile.clone(), 8),
             BufferArg::from_raw_parts(handles.kaiser.clone(), PATCH_SIZE as usize),
             BufferArg::from_raw_parts(handles.accum.clone(), handles.accum_len),
@@ -551,8 +526,6 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             setup.k_max,
             setup.spatial_radius,
             handles.refs_x,
-            map_cols,
-            map_rows,
             pooled_ratio,
             setup.pooled.is_some(),
             variant,

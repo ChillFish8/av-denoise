@@ -278,7 +278,7 @@ impl NoiseState {
 
     /// Reads the current strength map back.
     pub(crate) fn read_current_map(&self) -> Vec<f32> {
-        let handle = self.strength_map().clone();
+        let handle = self.current_map.clone();
         let bytes = self.client.read_one(handle).expect("the current map reads back");
         let map = f32::from_bytes(&bytes);
 

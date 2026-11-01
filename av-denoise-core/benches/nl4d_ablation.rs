@@ -4,7 +4,7 @@
 //! axis. A bench that ran chroma at full resolution would report four times the real work, so both
 //! planes are measured and summed into one frame's kernel cost.
 
-use av_denoise_core::bench_api::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use av_denoise_core::bench_api::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use av_denoise_core::bench_api::collab::kernels::aggregate::{
     collab_normalise,
     collab_zero_accum,
@@ -107,14 +107,11 @@ struct Rig {
     wsum: Handle,
     output: Handle,
     group_weight: Handle,
-    /// The derived noise values, with the curve and the strength map off.
+    /// The derived noise values, with the curve off.
     noise: Handle,
     dct_profile: Handle,
     /// An all-zero noise curve, bound with the curve flag unset so the kernel never applies it.
     zero_curve: Handle,
-    /// A strength map of ones, passed with the map off.
-    unit_map: Handle,
-    map_len: usize,
     /// The uniform aggregation window, which the `fused` row runs with.
     kaiser_off: Handle,
     /// A `beta = 2` window, which the `fused_kaiser` and `fused_prod` rows run with.
@@ -168,10 +165,6 @@ impl Rig {
         let pixels = (geometry.width * geometry.height) as usize;
         let frame_len = pixels * geometry.channels as usize;
 
-        let (map_cols, map_rows) = strength_map_dims(geometry.width, geometry.height);
-        let map_len = (map_cols * map_rows) as usize;
-        let unit_map_host = vec![1.0f32; map_len];
-
         let mv_host = vec![0i32; mv_len];
         let mv_bytes = i32::as_bytes(&mv_host);
         let mv_field = client.create_from_slice(mv_bytes);
@@ -201,8 +194,6 @@ impl Rig {
         let zero_curve_host = [0.0f32; NOISE_CURVE_BINS];
         let zero_curve_bytes = f32::as_bytes(&zero_curve_host);
         let zero_curve = client.create_from_slice(zero_curve_bytes);
-        let unit_map_bytes = f32::as_bytes(&unit_map_host);
-        let unit_map = client.create_from_slice(unit_map_bytes);
         let kaiser_off_host = kaiser_window(0.0);
         let kaiser_off_bytes = f32::as_bytes(&kaiser_off_host);
         let kaiser_off = client.create_from_slice(kaiser_off_bytes);
@@ -221,8 +212,6 @@ impl Rig {
             noise,
             dct_profile,
             zero_curve,
-            unit_map,
-            map_len,
             kaiser_off,
             kaiser_on,
             ring_len: ring_data.len(),
@@ -281,7 +270,6 @@ impl Rig {
         let refs_x = refs_along(geometry.width);
         let pixels = (geometry.width * geometry.height) as usize;
         let frame_len = pixels * geometry.channels as usize;
-        let (map_cols, map_rows) = strength_map_dims(geometry.width, geometry.height);
 
         let variant = CollabVariant::for_client(&self.client);
         let cubes_x = fused_cubes_x(geometry.width, variant.groups);
@@ -305,7 +293,6 @@ impl Rig {
                 BufferArg::from_raw_parts(self.neighbour_slots.clone(), NEIGHBOUR_SLOTS.len()),
                 BufferArg::from_raw_parts(self.noise.clone(), DERIVED_WORDS as usize),
                 BufferArg::from_raw_parts(self.zero_curve.clone(), NOISE_CURVE_BINS),
-                BufferArg::from_raw_parts(self.unit_map.clone(), self.map_len),
                 BufferArg::from_raw_parts(self.dct_profile.clone(), 8),
                 BufferArg::from_raw_parts(kaiser.clone(), PATCH_SIZE as usize),
                 BufferArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
@@ -331,8 +318,6 @@ impl Rig {
                 K_MAX,
                 SPATIAL_RADIUS,
                 refs_x,
-                map_cols,
-                map_rows,
                 POOL_RATIO,
                 pooled,
                 variant,

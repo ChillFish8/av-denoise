@@ -30,7 +30,6 @@ struct FusedPass {
     confidence: Handle,
     neighbour_slots: Handle,
     noise_curve: Handle,
-    strength_map: Handle,
     channels: u32,
     /// Values in the frame ring, which the f16 search ring matches.
     ring_len: usize,
@@ -60,7 +59,6 @@ impl Nl4dDenoiser {
 
         let neighbour_slots_buf = view.neighbour_slots_buf.clone();
         let noise_curve_buf = self.front.noise_curve_handle();
-        let strength_map_buf = self.front.strength_map_handle();
 
         let cleared_slots = match clear {
             AccumClear::WholeRing => 0..total_frames,
@@ -105,7 +103,6 @@ impl Nl4dDenoiser {
             confidence,
             neighbour_slots: neighbour_slots_buf,
             noise_curve: noise_curve_buf,
-            strength_map: strength_map_buf,
             channels,
             ring_len,
             accum_ring_len,
@@ -223,7 +220,6 @@ impl Nl4dDenoiser {
         let mv_len = (neighbours * view.mv_stride) as usize;
         let conf_len = (neighbours * view.conf_stride) as usize;
         let neighbour_slots_len = view.neighbour_slots.len();
-        let map_len = (self.map_cols * self.map_rows) as usize;
         let refs_x = refs_along(self.width);
         let refs_y = refs_along(self.height);
         let refs = ref_count(self.width, self.height);
@@ -244,8 +240,6 @@ impl Nl4dDenoiser {
             neighbour_slots_len: neighbour_slots_len.max(1),
             noise: self.front.derived_handle(),
             noise_curve: pass.noise_curve,
-            strength_map: pass.strength_map,
-            map_len,
             dct_profile: self.dct_profile_buf.clone(),
             kaiser: self.kaiser_buf.clone(),
         };
@@ -277,8 +271,6 @@ impl Nl4dDenoiser {
             spatial_radius: self.spatial_radius,
             refs_x,
             refs_y,
-            map_cols: self.map_cols,
-            map_rows: self.map_rows,
             pooled: self.pooled_threshold,
             uniform_walk_only: self.uniform_walk_only,
         };

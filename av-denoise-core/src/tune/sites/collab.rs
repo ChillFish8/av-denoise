@@ -319,8 +319,6 @@ pub struct CollabInputs {
     pub noise: Handle,
     /// [NOISE_CURVE_BINS](crate::nlmeans::NOISE_CURVE_BINS) ratios.
     pub noise_curve: Handle,
-    pub strength_map: Handle,
-    pub map_len: usize,
     /// Eight profile values.
     pub dct_profile: Handle,
     /// [PATCH_SIZE](crate::collab::PATCH_SIZE) taps.
@@ -357,8 +355,6 @@ pub struct CollabShape {
     pub spatial_radius: u32,
     pub refs_x: u32,
     pub refs_y: u32,
-    pub map_cols: u32,
-    pub map_rows: u32,
     pub pooled: bool,
     /// Only `Walk::Uniform` may run, on CUDA and on devices without independent thread scheduling.
     pub uniform_walk_only: bool,
@@ -515,7 +511,6 @@ impl<S: Float> CollabSite<S> {
         let neighbour_slots = bind(&inputs.neighbour_slots, inputs.neighbour_slots_len);
         let noise = bind(&inputs.noise, DERIVED_WORDS as usize);
         let noise_curve = bind(&inputs.noise_curve, NOISE_CURVE_BINS);
-        let strength_map = bind(&inputs.strength_map, inputs.map_len);
         let dct_profile = bind(&inputs.dct_profile, 8);
         let kaiser = bind(&inputs.kaiser, PATCH_SIZE as usize);
         let accum = bind(&outputs.accum, outputs.accum_len);
@@ -536,7 +531,6 @@ impl<S: Float> CollabSite<S> {
                 neighbour_slots,
                 noise,
                 noise_curve,
-                strength_map,
                 dct_profile,
                 kaiser,
                 accum,
@@ -562,8 +556,6 @@ impl<S: Float> CollabSite<S> {
                 shape.k_max,
                 shape.spatial_radius,
                 shape.refs_x,
-                shape.map_cols,
-                shape.map_rows,
                 values.pool_ratio,
                 shape.pooled,
                 candidate,
@@ -624,8 +616,6 @@ pub(crate) fn blank_collab_inputs(client: &Client) -> CollabInputs {
         neighbour_slots_len: 1,
         noise: zeroed_words(client, DERIVED_WORDS as usize),
         noise_curve: zeroed_words(client, NOISE_CURVE_BINS),
-        strength_map: zeroed_words(client, 1),
-        map_len: 1,
         dct_profile: zeroed_words(client, 8),
         kaiser: zeroed_words(client, PATCH_SIZE as usize),
     }

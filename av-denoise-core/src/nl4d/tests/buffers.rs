@@ -11,7 +11,6 @@ use super::helpers::{
     static_clip_params,
 };
 use crate::bench_api::HostIo;
-use crate::collab::geometry::strength_map_dims;
 use crate::collab::kernels::aggregate::weight_scale;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::motion::sad_noise_floor;
@@ -100,23 +99,16 @@ fn read_words<T: CubeElement>(mirror: &MirroredBuffer) -> Vec<T> {
 }
 
 #[test]
-fn a_pinned_sigma_binds_a_zero_curve_and_a_unit_map() {
+fn a_pinned_sigma_binds_a_zero_curve() {
     let params = static_clip_params(1);
     let denoiser = run_stream(params, STREAM_FRAMES);
     let front = denoiser.front_for_test();
 
     let curve_handle = front.noise_curve_handle();
-    let map_handle = front.strength_map_handle();
     let curve: Vec<f32> = read_handle(curve_handle);
-    let map: Vec<f32> = read_handle(map_handle);
-
-    let (map_cols, map_rows) = strength_map_dims(SIZE, SIZE);
-    let map_len = (map_cols * map_rows) as usize;
     let zero_curve = vec![0.0f32; NOISE_CURVE_BINS];
-    let unit_map = vec![1.0f32; map_len];
 
     assert_eq!(curve, zero_curve);
-    assert_eq!(map, unit_map);
 }
 
 #[test]

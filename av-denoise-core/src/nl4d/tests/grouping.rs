@@ -1,14 +1,14 @@
 use cubecl::prelude::*;
 
 use super::helpers::{BLK_STEP, RingFixture, deterministic_texture, make_client, noisy_ring, planted_ring};
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
 use crate::collab::kernels::fused::{CollabVariant, Walk, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, STEP, grid_frames};
 use crate::motion::neighbour_idx_for_k;
 use crate::noise::tests::{CollabNoise, collab_noise_buffer};
-use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS};
 
 /// The motion block side length these fixtures score confidence against.
 ///
@@ -118,15 +118,8 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
         sigma: &sigma,
         weight_scale: scale,
         curve_valid: false,
-        map_mode: STRENGTH_MAP_OFF,
     };
     let noise_buf = collab_noise_buffer(&client, noise_values);
-
-    let (map_cols, map_rows) = strength_map_dims(width, height);
-    let map_len = (map_cols * map_rows) as usize;
-    let unit_map = vec![1.0f32; map_len];
-    let unit_map_bytes = f32::as_bytes(&unit_map);
-    let unit_map_buf = client.create_from_slice(unit_map_bytes);
 
     let accum_bytes = i32::as_bytes(&zeroed_accum);
     let wsum_bytes = i32::as_bytes(&zeroed_wsum);
@@ -161,7 +154,6 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             BufferArg::from_raw_parts(slots_buf, fixture.neighbour_slots.len()),
             BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
             BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-            BufferArg::from_raw_parts(unit_map_buf, map_len),
             BufferArg::from_raw_parts(profile_buf, 8),
             BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             BufferArg::from_raw_parts(accum, pixels * frames),
@@ -187,8 +179,6 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
             knobs.k_max,
             knobs.spatial_radius,
             refs_x,
-            map_cols,
-            map_rows,
             0.0f32,
             false,
             variant,

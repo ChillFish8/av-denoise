@@ -6,7 +6,6 @@ pub(crate) mod pooled;
 pub(crate) mod shape;
 pub(crate) mod sliding;
 mod split;
-pub(crate) mod strength_map;
 pub(crate) mod tile;
 pub(crate) mod trajectory;
 pub(crate) mod variant;
@@ -18,7 +17,6 @@ use self::grid::{grid_fwd, grid_inv, grid_variance};
 use self::pooled::pooled_threshold;
 use self::shape::{SearchCursor, SearchShape};
 pub use self::split::{MEMBER_WORDS, collab_filter, collab_search};
-use self::strength_map::strength_map_scale;
 use self::tile::load_centre_tile;
 use self::trajectory::trajectory_search;
 pub use self::variant::{
@@ -46,15 +44,7 @@ use super::transforms::{
 use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE, STEP};
 use crate::engine::kernels::read_line;
 use crate::nlmeans::kernels::helpers::channel_scale;
-use crate::noise::{
-    DERIVED_CURVE_VALID,
-    DERIVED_MAP_MODE,
-    DERIVED_SIGMA,
-    DERIVED_WEIGHT_SCALE,
-    NOISE_CURVE_BINS,
-    STRENGTH_MAP_ALL,
-    STRENGTH_MAP_LUMA,
-};
+use crate::noise::{DERIVED_CURVE_VALID, DERIVED_SIGMA, DERIVED_WEIGHT_SCALE, NOISE_CURVE_BINS};
 
 /// The smallest factor the noise curve may scale the luma threshold by.
 const NOISE_CURVE_SCALE_MIN: f32 = 0.33;
@@ -122,12 +112,9 @@ const _: () = assert!(
 /// always survives, because a group's mean brightness is signal. Both transforms then invert.
 ///
 /// Channel 0's threshold is scaled by the noise curve at the reference's mean luma, interpolated
-/// between bin centres and clamped to 0.33..=3, while the group weight keeps the plain sigma. The
-/// strength map multiplier is the mean of the four 8x8 quarters the reference overlaps.
-/// [STRENGTH_MAP_LUMA] scales channel 0's curve ratio before the clamp. [STRENGTH_MAP_ALL] scales
-/// the chroma thresholds, and channel 0's too when there is no curve. [STRENGTH_MAP_OFF] leaves
-/// every threshold alone. With `pooled` set, `pooled_threshold` keeps a coefficient on the mean
-/// energy of itself and its four frequency neighbours, against `channel_lambda * pool_ratio`.
+/// between bin centres and clamped to 0.33..=3, while the group weight keeps the plain sigma. With
+/// `pooled` set, `pooled_threshold` keeps a coefficient on the mean energy of itself and its four
+/// frequency neighbours, against `channel_lambda * pool_ratio`.
 ///
 /// `group_weight` gets `1 / sum(v_j)` over the kept coefficients, the inverse-variance weight, so
 /// a group that keeps more coefficients is trusted more. It comes from channel 0 only, because
@@ -138,16 +125,13 @@ const _: () = assert!(
 /// `centre_slot` is the slot the pass is centred on. `neighbour_slots` maps a packed neighbour
 /// index to its slot. `accum` and `wsum` hold one region per slot, so a neighbour-frame member
 /// scatters into its own frame's region. `accum_scale` is the fixed-point scale of that scatter.
-/// `noise` is the derived noise buffer, which gives the sigma of each channel, the weight scale,
-/// the curve flag and the strength map mode. `noise_curve` holds `NOISE_CURVE_BINS` ratios and is
-/// read only when the curve flag is set.
-/// `strength_map` holds `map_cols * map_rows` row-major multipliers laid out by
-/// [strength_map_dims](crate::collab::geometry::strength_map_dims). `kaiser` holds
-/// [kaiser_window](crate::collab::kernels::aggregate::kaiser_window)'s taps. `dct_profile` holds
-/// [dct_noise_profile](crate::collab::kernels::transforms::dct_noise_profile)'s values, and
-/// coefficient `(u, v)`'s variance scales by `dct_profile[u] * dct_profile[v]`. `grid_frames` is
-/// the frames per volume from [grid_frames](crate::collab::grid_frames), and 1 compiles the grid
-/// out.
+/// `noise` is the derived noise buffer, which gives the sigma of each channel, the weight scale
+/// and the curve flag. `noise_curve` holds `NOISE_CURVE_BINS` ratios and is read only when the
+/// curve flag is set. `kaiser` holds [kaiser_window](crate::collab::kernels::aggregate::kaiser_window)'s
+/// taps. `dct_profile` holds [dct_noise_profile](crate::collab::kernels::transforms::dct_noise_profile)'s
+/// values, and coefficient `(u, v)`'s variance scales by `dct_profile[u] * dct_profile[v]`.
+/// `grid_frames` is the frames per volume from [grid_frames](crate::collab::grid_frames), and 1
+/// compiles the grid out.
 ///
 /// `variant` picks how the searches run, and every variant gives the same output.
 /// [Walk::Uniform](crate::collab::kernels::fused::Walk::Uniform) walks both searches over fixed
@@ -180,7 +164,6 @@ pub fn collab_fused<S: Float, N: Size>(
     neighbour_slots: &[u32],
     noise: &[f32],
     noise_curve: &[f32],
-    strength_map: &[f32],
     dct_profile: &[f32],
     kaiser: &[f32],
     accum: &mut [Atomic<i32>],
@@ -206,8 +189,6 @@ pub fn collab_fused<S: Float, N: Size>(
     #[comptime] k_max: u32,
     #[comptime] spatial_radius: u32,
     #[comptime] refs_x: u32,
-    #[comptime] map_cols: u32,
-    #[comptime] map_rows: u32,
     pool_ratio: f32,
     #[comptime] pooled: bool,
     #[comptime] variant: CollabVariant,
@@ -320,7 +301,6 @@ pub fn collab_fused<S: Float, N: Size>(
         neighbour_slots,
         noise,
         noise_curve,
-        strength_map,
         dct_profile,
         kaiser,
         accum,
@@ -331,8 +311,6 @@ pub fn collab_fused<S: Float, N: Size>(
         k_use,
         use_grid,
         column_luma,
-        ref_x,
-        ref_y,
         ref_idx,
         live,
         centre_slot,
@@ -345,8 +323,6 @@ pub fn collab_fused<S: Float, N: Size>(
         width,
         height,
         channels,
-        map_cols,
-        map_rows,
         pooled,
     );
 }
@@ -565,7 +541,6 @@ pub(crate) fn filter_group(
     neighbour_slots: &[u32],
     noise: &[f32],
     noise_curve: &[f32],
-    strength_map: &[f32],
     dct_profile: &[f32],
     kaiser: &[f32],
     accum: &mut [Atomic<i32>],
@@ -576,8 +551,6 @@ pub(crate) fn filter_group(
     k_use: u32,
     use_grid: bool,
     column_luma: f32,
-    ref_x: u32,
-    ref_y: u32,
     ref_idx: u32,
     live: bool,
     centre_slot: u32,
@@ -590,8 +563,6 @@ pub(crate) fn filter_group(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] map_cols: u32,
-    #[comptime] map_rows: u32,
     #[comptime] pooled: bool,
 ) {
     let mut member_slot = Array::<u32>::new(MAX_K as usize);
@@ -623,14 +594,10 @@ pub(crate) fn filter_group(
     let ratio = lower_ratio + (upper_ratio - lower_ratio) * fraction;
 
     let curve_valid = noise[DERIVED_CURVE_VALID as usize] != 0.0f32;
-    let map_mode = u32::cast_from(noise[DERIVED_MAP_MODE as usize]);
     let weight_scale = noise[DERIVED_WEIGHT_SCALE as usize];
 
-    let map_scale = strength_map_scale(strength_map, ref_x, ref_y, map_cols, map_rows);
-    let mapped_ratio = select(map_mode == STRENGTH_MAP_LUMA, ratio * map_scale, ratio);
-    let curve_scale = f32::clamp(mapped_ratio, NOISE_CURVE_SCALE_MIN, NOISE_CURVE_SCALE_MAX);
-    let other_lambda = select(map_mode == STRENGTH_MAP_ALL, lambda_ht * map_scale, lambda_ht);
-    let luma_lambda = select(curve_valid, lambda_ht * curve_scale, other_lambda);
+    let curve_scale = f32::clamp(ratio, NOISE_CURVE_SCALE_MIN, NOISE_CURVE_SCALE_MAX);
+    let luma_lambda = select(curve_valid, lambda_ht * curve_scale, lambda_ht);
 
     // Computed from channel 0 and reused by every later channel's scatter.
     let mut scaled_weight = 0.0f32;
@@ -703,7 +670,7 @@ pub(crate) fn filter_group(
             stack_haar_fwd(stack.as_mut_slice(), k_use);
         }
 
-        let channel_lambda = select(c == 0u32, luma_lambda, other_lambda);
+        let channel_lambda = select(c == 0u32, luma_lambda, lambda_ht);
         let mut retained_v = 0.0f32;
         if comptime!(pooled) {
             let threshold = channel_lambda * pool_ratio;

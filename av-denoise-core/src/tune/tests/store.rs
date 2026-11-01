@@ -540,3 +540,20 @@ fn a_version_two_store_is_ignored() {
 
     assert_eq!(loaded, TuneResult::default());
 }
+
+#[test]
+fn a_version_three_store_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TuneStore::at(dir.path());
+    let device = identity();
+    let result = sample_result();
+    let path = store.save(&device, &result).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let current = format!("\"format_version\": {FORMAT_VERSION}");
+    let version_three = text.replace(&current, "\"format_version\": 3");
+    std::fs::write(&path, version_three).unwrap();
+
+    let loaded = store.load(&device);
+
+    assert_eq!(loaded, TuneResult::default());
+}

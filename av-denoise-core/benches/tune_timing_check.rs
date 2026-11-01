@@ -138,7 +138,6 @@ fn collab_site(client: &Client) -> CollabSite<f32> {
         channel_name: "luma",
         split_mv: false,
         noise_curve: false,
-        strength_map: false,
         pooled: false,
         candidate: CollabVariant::BASELINE,
     };

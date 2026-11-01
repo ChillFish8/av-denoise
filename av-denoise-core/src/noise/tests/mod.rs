@@ -22,14 +22,7 @@ use cubecl::server::Handle;
 
 #[cfg(any(feature = "vulkan", feature = "metal"))]
 use super::temporal::temporal_stats_slot_view;
-use super::{
-    DERIVED_CURVE_VALID,
-    DERIVED_MAP_MODE,
-    DERIVED_NOISE_OFFSET,
-    DERIVED_SIGMA,
-    DERIVED_WEIGHT_SCALE,
-    DERIVED_WORDS,
-};
+use super::{DERIVED_CURVE_VALID, DERIVED_NOISE_OFFSET, DERIVED_SIGMA, DERIVED_WEIGHT_SCALE, DERIVED_WORDS};
 #[cfg(any(feature = "vulkan", feature = "metal"))]
 use crate::engine::align::StorageAlign;
 
@@ -74,8 +67,6 @@ pub(crate) struct CollabNoise<'a> {
     pub(crate) sigma: &'a [f32],
     pub(crate) weight_scale: f32,
     pub(crate) curve_valid: bool,
-    /// One of the `STRENGTH_MAP_*` modes.
-    pub(crate) map_mode: u32,
 }
 
 /// A derived buffer holding `noise` in the words the collab filter reads.
@@ -92,7 +83,6 @@ pub(crate) fn collab_noise_buffer(client: &Client, noise: CollabNoise) -> Handle
 
     words[DERIVED_WEIGHT_SCALE as usize] = noise.weight_scale;
     words[DERIVED_CURVE_VALID as usize] = if noise.curve_valid { 1.0 } else { 0.0 };
-    words[DERIVED_MAP_MODE as usize] = noise.map_mode as f32;
     let bytes = f32::as_bytes(&words);
 
     client.create_from_slice(bytes)
