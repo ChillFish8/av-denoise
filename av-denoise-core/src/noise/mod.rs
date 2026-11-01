@@ -84,6 +84,7 @@ pub(crate) use self::temporal::{
     accepted_static_blocks,
     aggregate_temporal_noise_stats,
     run_temporal_noise_stats,
+    texture_lane,
 };
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::temporal::{temporal_noise_reading, temporal_stats_buf_bytes};

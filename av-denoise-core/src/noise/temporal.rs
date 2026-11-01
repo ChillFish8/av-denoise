@@ -23,6 +23,7 @@ pub(crate) const TEMPORAL_QUARTER_SIZE: u32 = TEMPORAL_NOISE_BLOCK / 2;
 ///
 /// It is the mean squared difference between adjacent 4x4-cell means of the new frame, over the
 /// cells fully inside the frame. Averaging each cell first keeps the noise from reading as texture.
+/// Every other channel's texture sits at [texture_lane].
 pub(crate) const BLOCK_TEXTURE_LANE: u32 = 1;
 /// The offset of the block's moved flag past `2 * channels`.
 ///
@@ -111,10 +112,22 @@ pub(crate) const SIGMA_OUTLIER_FACTOR: f32 = 5.0;
 
 /// How many `f32`s one block's stats record holds.
 ///
-/// That is a sum and a sum of squares per channel, one lag-1 total, the texture and moved
-/// lanes, and the four quarter records.
-pub(crate) fn temporal_stats_record_len(channels: u32) -> u32 {
-    2 * channels + TEMPORAL_QUARTER_BASE + TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS
+/// That is a sum and a sum of squares per channel, one lag-1 total, channel 0's texture and the
+/// moved lane, the four quarter records, then the texture of every other channel.
+pub(crate) const fn temporal_stats_record_len(channels: u32) -> u32 {
+    2 * channels + TEMPORAL_QUARTER_BASE + TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS + channels - 1
+}
+
+/// The record lane of channel `channel`'s texture.
+///
+/// Channel 0's sits at [BLOCK_TEXTURE_LANE] past `2 * channels`. Every other channel's follows the
+/// quarter records, so a single-channel record keeps the same layout.
+pub(crate) const fn texture_lane(channels: u32, channel: u32) -> u32 {
+    if channel == 0 {
+        return 2 * channels + BLOCK_TEXTURE_LANE;
+    }
+
+    2 * channels + TEMPORAL_QUARTER_BASE + TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS + channel - 1
 }
 
 /// The row-major block grid covering a frame, with ragged edges truncated rather than padded.
@@ -327,7 +340,7 @@ struct BlockStats {
     var_ch0: f32,
     mean_lag: f32,
     n_pairs: f32,
-    texture: f32,
+    textures: [f32; NOISE_CHANNELS as usize],
     moved: bool,
 }
 
@@ -338,9 +351,10 @@ impl BlockStats {
         self.means[channel].abs() < STATIC_GATE
     }
 
-    /// Whether the block's sigma joins the sample, which a moved block above `threshold` does not.
-    fn keeps_sigma(&self, threshold: Option<f32>) -> bool {
-        let textured = threshold.is_some_and(|threshold| self.texture > threshold);
+    /// Whether the block's sigma in `channel` joins the sample, which a moved block whose texture
+    /// in `channel` sits above `threshold` does not.
+    fn keeps_sigma(&self, channel: usize, threshold: Option<f32>) -> bool {
+        let textured = threshold.is_some_and(|threshold| self.textures[channel] > threshold);
 
         !(self.moved && textured)
     }
@@ -459,16 +473,17 @@ fn channel_accepted_blocks(blocks: &[BlockStats], channel: usize) -> Option<Vec<
     Some(accepted)
 }
 
-/// The texture above which a moved block's sigma is left out of the sample.
+/// The texture in `channel` above which a moved block's sigma in that channel is left out of the
+/// sample.
 ///
-/// It is the 40th percentile of the moved blocks channel 0 holds candidates above
+/// It is the 40th percentile of the moved blocks `channel` holds candidates above
 /// [RHO_SIGMA_GATE], or `None` when no such block exists.
 #[cfg(test)]
-fn moved_texture_threshold(blocks: &[BlockStats]) -> Option<f32> {
+fn moved_texture_threshold(blocks: &[BlockStats], channel: usize) -> Option<f32> {
     let mut textures: Vec<f32> = blocks
         .iter()
-        .filter(|block| block.is_candidate(0) && block.moved && block.sigmas[0] > RHO_SIGMA_GATE)
-        .map(|block| block.texture)
+        .filter(|block| block.is_candidate(channel) && block.moved && block.sigmas[channel] > RHO_SIGMA_GATE)
+        .map(|block| block.textures[channel])
         .collect();
     sort_ascending(&mut textures);
 
@@ -488,7 +503,6 @@ fn moved_texture_threshold(blocks: &[BlockStats]) -> Option<f32> {
 fn block_stats(records: &[f32], channels: u32, width: u32, height: u32) -> Vec<BlockStats> {
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
     let record_len = temporal_stats_record_len(channels) as usize;
-    let texture_lane = (2 * channels + BLOCK_TEXTURE_LANE) as usize;
     let moved_lane = (2 * channels + BLOCK_MOVED_LANE) as usize;
     let channel_count = channels as usize;
 
@@ -508,6 +522,7 @@ fn block_stats(records: &[f32], channels: u32, width: u32, height: u32) -> Vec<B
 
             let mut means = [0.0f32; NOISE_CHANNELS as usize];
             let mut sigmas = [0.0f32; NOISE_CHANNELS as usize];
+            let mut textures = [0.0f32; NOISE_CHANNELS as usize];
             let mut var_ch0 = 0.0f32;
             for channel in 0..channel_count {
                 let mean = record[channel] / pixel_count;
@@ -515,6 +530,8 @@ fn block_stats(records: &[f32], channels: u32, width: u32, height: u32) -> Vec<B
                 let sigma_block = variance.sqrt() / std::f32::consts::SQRT_2;
                 means[channel] = mean;
                 sigmas[channel] = sigma_block;
+                let lane = texture_lane(channels, channel as u32) as usize;
+                textures[channel] = record[lane];
                 if channel == 0 {
                     var_ch0 = variance;
                 }
@@ -525,7 +542,6 @@ fn block_stats(records: &[f32], channels: u32, width: u32, height: u32) -> Vec<B
             } else {
                 0.0
             };
-            let texture = record[texture_lane];
             let moved = record[moved_lane] != 0.0;
 
             blocks.push(BlockStats {
@@ -537,7 +553,7 @@ fn block_stats(records: &[f32], channels: u32, width: u32, height: u32) -> Vec<B
                 var_ch0,
                 mean_lag,
                 n_pairs,
-                texture,
+                textures,
                 moved,
             });
         }
@@ -546,7 +562,8 @@ fn block_stats(records: &[f32], channels: u32, width: u32, height: u32) -> Vec<B
     blocks
 }
 
-/// The median and lower quartile of the sigmas channel `channel` keeps from its `accepted` blocks.
+/// The median and lower quartile of the sigmas channel `channel` keeps from its `accepted` blocks,
+/// leaving out moved blocks whose texture in that channel sits above `threshold`.
 ///
 /// It returns `None` when the accepted blocks fall below [STATIC_FRACTION_MIN] of the frame's
 /// `total_blocks`, or when the channel keeps no sigma.
@@ -564,7 +581,7 @@ fn channel_sigma(
 
     let mut sigmas: Vec<f32> = accepted
         .iter()
-        .filter(|block| block.keeps_sigma(threshold))
+        .filter(|block| block.keeps_sigma(channel, threshold))
         .map(|block| block.sigmas[channel])
         .collect();
 
@@ -613,11 +630,12 @@ impl TemporalNoiseReading {
 /// Builds one centre slot's [TemporalNoiseReading].
 ///
 /// Each channel's `sigma` and `sigma_low` come from the blocks that channel accepts on its own
-/// numbers. A moved block whose texture is above [moved_texture_threshold] leaves them but still
-/// counts everywhere else. A channel has its own sample when its outlier ceiling can be trusted,
-/// its accepted blocks reach [STATIC_FRACTION_MIN] of the frame and it keeps a sigma. Channel 0 also
-/// needs a block with a correlation. A channel without a sample reads 0. The sample is `None` when
-/// no channel has one, as in a zero-filled duplicate slot.
+/// numbers. A moved block whose texture in that channel is above that channel's
+/// [moved_texture_threshold] leaves them but still counts everywhere else. A channel has its own
+/// sample when its outlier ceiling can be trusted, its accepted blocks reach [STATIC_FRACTION_MIN]
+/// of the frame and it keeps a sigma. Channel 0 also needs a block with a correlation. A channel
+/// without a sample reads 0. The sample is `None` when no channel has one, as in a zero-filled
+/// duplicate slot.
 ///
 /// Channel 0's [channel_accepted_blocks] selection sets the correlation, the static fraction and the
 /// curve, which keeps the scalar sample and the curve agreeing on which blocks are static noise.
@@ -638,7 +656,6 @@ pub(crate) fn temporal_noise_reading(
 
     let blocks = block_stats(records, channels, width, height);
     let accepted = channel_accepted_blocks(&blocks, 0).unwrap_or_default();
-    let threshold = moved_texture_threshold(&blocks);
     let channel_count = channels as usize;
 
     let mut rho_samples = Vec::new();
@@ -652,7 +669,8 @@ pub(crate) fn temporal_noise_reading(
     }
 
     let mut sigmas = [None; NOISE_CHANNELS as usize];
-    let channel_0 = channel_sigma(&accepted, 0, threshold, total_blocks);
+    let threshold_0 = moved_texture_threshold(&blocks, 0);
+    let channel_0 = channel_sigma(&accepted, 0, threshold_0, total_blocks);
     sigmas[0] = channel_0.filter(|_| !rho_samples.is_empty());
 
     #[expect(
@@ -661,6 +679,7 @@ pub(crate) fn temporal_noise_reading(
     )]
     for channel in 1..channel_count {
         let channel_accepted = channel_accepted_blocks(&blocks, channel).unwrap_or_default();
+        let threshold = moved_texture_threshold(&blocks, channel);
         sigmas[channel] = channel_sigma(&channel_accepted, channel, threshold, total_blocks);
     }
 

@@ -74,7 +74,7 @@ fn temporal_stats_blocks_and_slot_len() {
     assert_eq!(exact_blocks, (2, 1));
     assert_eq!(ragged_blocks, (3, 2)); // ragged on both axes
     assert_eq!(single_record_len, 29);
-    assert_eq!(chroma_record_len, 31);
+    assert_eq!(chroma_record_len, 32);
     assert_eq!(slot_len, 58); // 2 blocks x record_len 29
 }
 

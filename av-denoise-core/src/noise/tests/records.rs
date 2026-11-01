@@ -2,7 +2,6 @@ use crate::noise::NOISE_CHANNELS;
 use crate::noise::spatial::partials_len;
 use crate::noise::temporal::{
     BLOCK_MOVED_LANE,
-    BLOCK_TEXTURE_LANE,
     QUARTER_FLATNESS,
     QUARTER_LUMA_MAX,
     QUARTER_LUMA_MIN,
@@ -17,6 +16,7 @@ use crate::noise::temporal::{
     TEMPORAL_QUARTERS,
     temporal_stats_blocks,
     temporal_stats_record_len,
+    texture_lane,
 };
 
 /// The target statistics of one 8x8 quarter of a block record.
@@ -32,13 +32,14 @@ pub(crate) struct QuarterSpec {
 
 /// The target statistics of one block record.
 ///
-/// `mean` is each channel's mean residual and `rho` channel 0's lag-1 correlation.
+/// `mean` is each channel's mean residual, `rho` channel 0's lag-1 correlation and `texture` each
+/// channel's texture.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct BlockSpec {
     pub mean: [f32; NOISE_CHANNELS as usize],
     pub sigma: [f32; NOISE_CHANNELS as usize],
     pub rho: f32,
-    pub texture: f32,
+    pub texture: [f32; NOISE_CHANNELS as usize],
     pub moved: bool,
     pub quarters: [QuarterSpec; 4],
 }
@@ -50,7 +51,7 @@ impl BlockSpec {
             mean: [mean; NOISE_CHANNELS as usize],
             sigma: [sigma; NOISE_CHANNELS as usize],
             rho,
-            texture: 0.0,
+            texture: [0.0; NOISE_CHANNELS as usize],
             moved: false,
             quarters: [QuarterSpec::default(); 4],
         }
@@ -117,7 +118,11 @@ pub(crate) fn frame_records(width: u32, height: u32, channels: u32, blocks: &[Bl
         let variance = 2.0 * spec.sigma[0] * spec.sigma[0];
         let mean_square = spec.mean[0] * spec.mean[0];
         record[2 * channel_count] = (spec.rho * variance + mean_square) * pairs;
-        record[2 * channel_count + BLOCK_TEXTURE_LANE as usize] = spec.texture;
+        for channel in 0..channels {
+            let lane = texture_lane(channels, channel) as usize;
+            record[lane] = spec.texture[channel as usize];
+        }
+
         record[2 * channel_count + BLOCK_MOVED_LANE as usize] = if spec.moved { 1.0 } else { 0.0 };
 
         for quarter_index in 0..TEMPORAL_QUARTERS {

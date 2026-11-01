@@ -56,7 +56,6 @@ use crate::noise::state::{
 };
 use crate::noise::temporal::{
     BLOCK_MOVED_LANE,
-    BLOCK_TEXTURE_LANE,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
     RHO_SIGMA_GATE,
@@ -68,6 +67,7 @@ use crate::noise::temporal::{
     TEMPORAL_QUARTER_SIZE,
     TEMPORAL_QUARTERS,
     temporal_stats_record_len,
+    texture_lane,
 };
 use crate::noise::{IMMERKAER_BLOCK_X, IMMERKAER_BLOCK_Y, NOISE_CHANNELS};
 
@@ -129,8 +129,9 @@ pub(crate) fn median_from_pair(low: f32, high: f32) -> f32 {
 /// `c` when that channel's mean residual passes the static gate, which sets its candidate flag for
 /// `c`. Channel `c`'s sigma is written at `n * cubes + c * blocks + i`, for `n` channel lanes per
 /// cube. A candidate above the measurable-noise gate joins channel `c`'s reference set and one at or
-/// below it channel `c`'s excluded set. Its texture is written after every channel's sigma lanes,
-/// and joins the moved texture set when it moved and channel 0 holds it a candidate above the gate.
+/// below it channel `c`'s excluded set. Channel `c`'s texture is written at
+/// `n * cubes + (channels + c) * blocks + i`, after every channel's sigma lanes. It joins channel
+/// `c`'s moved texture set when the block moved and channel `c` holds it a candidate above the gate.
 /// Without `temporal`, `records`, `block_values` and `block_flags` are never touched.
 ///
 /// The grid then clears the histogram and state of the immerkaer batch and, with `temporal` and
@@ -172,7 +173,6 @@ pub fn noise_block_derive(
     let blocks_x = comptime!(width.div_ceil(TEMPORAL_NOISE_BLOCK));
     let blocks = comptime!(blocks_x * height.div_ceil(TEMPORAL_NOISE_BLOCK));
     let record_len = comptime!(temporal_stats_record_len(channels));
-    let texture_offset = comptime!(2 * channels + BLOCK_TEXTURE_LANE);
     let moved_offset = comptime!(2 * channels + BLOCK_MOVED_LANE);
     let sample_tag_count = comptime!(sample_tags(channels));
     let sample_queries = comptime!(sample_query_count(channels));
@@ -223,7 +223,7 @@ pub fn noise_block_derive(
         let mut mean0 = 0.0f32;
         let mut var0 = 0.0f32;
         let mut flags = 0u32;
-        let mut measurable_candidate = false;
+        let moved = records[(base + moved_offset) as usize] != 0.0f32;
 
         #[unroll]
         for channel in 0..NOISE_CHANNELS {
@@ -245,10 +245,18 @@ pub fn noise_block_derive(
                 tags[lane as usize] = select(candidate, set_tag, UNTAGGED);
                 flags |= select(candidate, candidate_flag, 0u32);
 
+                let texture_offset = comptime!(texture_lane(channels, channel));
+                let texture = records[(base + texture_offset) as usize];
+                let texture_joins = candidate && measurable && moved;
+                let texture_tag = comptime!(tag_moved_texture(channels) + channel);
+                let texture_slot = NOISE_CHANNELS * cubes + (channels + channel) * blocks + index;
+
+                keys[texture_slot as usize] = order_key(texture);
+                tags[texture_slot as usize] = select(texture_joins, texture_tag, UNTAGGED);
+
                 if comptime!(channel == 0) {
                     mean0 = mean;
                     var0 = variance;
-                    measurable_candidate = candidate && measurable;
                 }
             } else {
                 block_values[(value_base + channel) as usize] = 0.0f32;
@@ -265,15 +273,6 @@ pub fn noise_block_derive(
         block_values[(value_base + BLOCK_VALUE_VAR0) as usize] = var0;
         block_values[(value_base + BLOCK_VALUE_PAIRS) as usize] = pairs;
         block_flags[index as usize] = flags;
-
-        let texture = records[(base + texture_offset) as usize];
-        let moved = records[(base + moved_offset) as usize] != 0.0f32;
-        let texture_joins = measurable_candidate && moved;
-        let texture_tag = comptime!(tag_moved_texture(channels));
-        let texture_lane = NOISE_CHANNELS * cubes + channels * blocks + index;
-
-        keys[texture_lane as usize] = order_key(texture);
-        tags[texture_lane as usize] = select(texture_joins, texture_tag, UNTAGGED);
     }
 
     let stride = CUBE_COUNT_X * CUBE_DIM_X;
@@ -341,15 +340,35 @@ fn channel_accepts(out: &Shared<[u32]>, flags: u32, sigma: f32, #[comptime] chan
     trusted && candidate && under_ceiling && measurable
 }
 
+/// Whether channel `channel`'s texture in the block at record `base` sits above that channel's
+/// moved texture threshold, resolved into `out`.
+///
+/// A channel with no moved texture set has no threshold, so no block is textured.
+#[cube]
+fn channel_textured(
+    out: &Shared<[u32]>,
+    records: &[f32],
+    base: u32,
+    #[comptime] channel: u32,
+    #[comptime] channels: u32,
+) -> bool {
+    let query = comptime!(immerkaer_query_texture(channels) + channel);
+    let (threshold, moved_count) = select_result(out, query);
+    let texture_offset = comptime!(texture_lane(channels, channel));
+    let texture = records[(base + texture_offset) as usize];
+
+    moved_count > 0u32 && texture > threshold
+}
+
 /// Accepts each channel's candidate blocks under its outlier ceiling and writes every lane of the
 /// sample batch.
 ///
-/// Each cube resolves every active channel's reference set and excluded count, and the moved
-/// texture threshold, from the immerkaer batch. Thread `b` then writes block `b`'s lanes. Each
-/// active channel accepts the block by [channel_accepts], which sets the channel's accepted flag and
-/// joins the block to the channel's accepted set. The block's sigma in that channel joins the
-/// channel's set unless the block moved with a texture above the threshold. An empty texture set
-/// sets no threshold.
+/// Each cube resolves every active channel's reference set, excluded count and moved texture
+/// threshold from the immerkaer batch. Thread `b` then writes block `b`'s lanes. Each active
+/// channel accepts the block by [channel_accepts], which sets the channel's accepted flag and joins
+/// the block to the channel's accepted set. The block's sigma in that channel joins the channel's
+/// set unless the block moved with that channel's texture above that channel's threshold. An empty
+/// texture set sets no threshold.
 ///
 /// Channel 0's acceptance is the block's acceptance. Its clamped correlation joins the correlation
 /// set when channel 0 accepts it and it has pixel pairs, and, with `luma_fields`, each quarter that
@@ -382,8 +401,6 @@ pub fn noise_block_accept(
     let record_len = comptime!(temporal_stats_record_len(channels));
     let quarters_base = comptime!(2 * channels + TEMPORAL_QUARTER_BASE);
     let resolved = comptime!(immerkaer_query_count(channels) - IMMERKAER_QUERY_REFERENCE_BASE);
-    let texture_query = comptime!(immerkaer_query_texture(channels));
-    let texture_offset = comptime!(2 * channels + BLOCK_TEXTURE_LANE);
     let moved_offset = comptime!(2 * channels + BLOCK_MOVED_LANE);
 
     let thread = UNIT_POS_X;
@@ -411,9 +428,6 @@ pub fn noise_block_accept(
         SELECT_CUBE_THREADS,
     );
 
-    let (texture_threshold, moved_count) = select_result(&out, texture_query);
-    let has_threshold = moved_count > 0u32;
-
     let index = ABSOLUTE_POS_X;
 
     if index < blocks {
@@ -425,10 +439,7 @@ pub fn noise_block_accept(
         let value_base = index * BLOCK_FIELDS;
         let flags = block_flags[index as usize];
 
-        let texture = records[(base + texture_offset) as usize];
         let moved = records[(base + moved_offset) as usize] != 0.0f32;
-        let textured = has_threshold && texture > texture_threshold;
-        let moved_textured = moved && textured;
 
         let mut accepted = false;
         let mut accepted_flags = 0u32;
@@ -442,6 +453,7 @@ pub fn noise_block_accept(
 
             if comptime!(channel < channels) {
                 let channel_accepted = channel_accepts(&out, flags, sigma, channel);
+                let moved_textured = moved && channel_textured(&out, records, base, channel, channels);
                 let sigma_kept = channel_accepted && !moved_textured;
                 let accepted_tag = comptime!(TAG_ACCEPTED + channel);
                 let accepted_flag = comptime!(channel_flag(BLOCK_ACCEPTED, channel));

@@ -183,25 +183,30 @@ pub(crate) const IMMERKAER_QUERY_REFERENCE_BASE: u32 = NOISE_CHANNELS * IMMERKAE
 pub(crate) const IMMERKAER_QUERY_EXCLUDED_BASE: u32 =
     IMMERKAER_QUERY_REFERENCE_BASE + REFERENCE_RULES.len() as u32;
 
-/// The immerkaer batch tag of a moved candidate block's texture, after each channel's block sets.
+/// The immerkaer batch tag of a moved candidate block's channel-0 texture, after each channel's
+/// block sets.
+///
+/// Channel `c`'s tag is `c` past it.
 pub(crate) const fn tag_moved_texture(channels: u32) -> u32 {
     TAG_REFERENCE_BASE + BLOCK_SET_TAGS * channels
 }
 
 /// The immerkaer batch's tags with temporal stats, one per channel, each channel's block sets and
-/// the moved texture set.
+/// each channel's moved texture set.
 pub(crate) const fn immerkaer_tags(channels: u32) -> u32 {
-    tag_moved_texture(channels) + 1
+    tag_moved_texture(channels) + channels
 }
 
-/// The query of the moved blocks' texture threshold, after each channel's block set queries.
+/// The query of channel 0's moved texture threshold, after each channel's block set queries.
+///
+/// Channel `c`'s query is `c` past it.
 pub(crate) const fn immerkaer_query_texture(channels: u32) -> u32 {
     IMMERKAER_QUERY_REFERENCE_BASE + BLOCK_SET_QUERIES * channels
 }
 
 /// The immerkaer batch's queries with temporal stats.
 pub(crate) const fn immerkaer_query_count(channels: u32) -> u32 {
-    immerkaer_query_texture(channels) + 1
+    immerkaer_query_texture(channels) + channels
 }
 
 /// The sample batch tag of an accepted block's clamped correlation.
@@ -238,7 +243,7 @@ pub(crate) const CURVE_TAGS: u32 = NOISE_CURVE_BINS as u32;
 pub(crate) const CURVE_QUERIES: u32 = 2 * CURVE_TAGS;
 
 /// The immerkaer batch's queries, a quartile pair per channel and, with temporal stats, each active
-/// channel's block set queries, then the moved texture set's 40th percentile.
+/// channel's block set queries, then each active channel's moved texture set's 40th percentile.
 ///
 /// A channel's block set queries are its reference set's quartile pair, first and last element,
 /// then its excluded set's first.
@@ -269,10 +274,12 @@ pub(crate) fn immerkaer_queries(temporal: bool, channels: u32) -> Vec<SelectQuer
         });
     }
 
-    queries.push(SelectQuery {
-        tag: tag_moved_texture(channels),
-        rule: RankRule::TextureShare,
-    });
+    for channel in 0..channels {
+        queries.push(SelectQuery {
+            tag: tag_moved_texture(channels) + channel,
+            rule: RankRule::TextureShare,
+        });
+    }
 
     queries
 }

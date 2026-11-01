@@ -409,12 +409,12 @@ pub(super) fn block_count(shape: NoiseShape) -> u32 {
     blocks_x * blocks_y
 }
 
-/// The immerkaer batch's lanes, one per cube for each channel plus, with temporal stats, one per
-/// block for each active channel and one per block for the texture.
+/// The immerkaer batch's lanes, one per cube for each channel plus, with temporal stats, two per
+/// block for each active channel, its sigma and its texture.
 fn immerkaer_lanes(shape: NoiseShape) -> u32 {
     let cubes = cube_count(shape);
     let block_lanes = if shape.temporal {
-        (shape.channels + 1) * block_count(shape)
+        2 * shape.channels * block_count(shape)
     } else {
         0
     };
