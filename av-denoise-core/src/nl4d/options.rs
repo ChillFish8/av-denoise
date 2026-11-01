@@ -29,8 +29,8 @@ pub struct Nl4dOptions {
     pub spatial_radius: u32,
     /// Hard-threshold multiplier on the propagated coefficient sigma.
     ///
-    /// Higher removes more noise and more fine detail. `None` resolves per plane to
-    /// the plane's own default.
+    /// Higher removes more noise and more fine detail. `None` resolves per plane to the plane's own
+    /// default.
     pub lambda_ht: Option<f32>,
     /// A multiplier on the resolved `lambda_ht`, in `0.1..=10.0`. Defaults to 1.0.
     ///

@@ -31,6 +31,7 @@ pub use self::engine::{
     EngineTiming,
     Geometry,
     PassTimings,
+    PlaneSource,
     SampleFormat,
     WindowSpan,
 };

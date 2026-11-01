@@ -73,11 +73,13 @@ pub struct DenoiserOptions {
     pub chroma_strength: Option<f32>,
     /// Luma override for nl4d's `lambda_ht`, which wins over the algorithm's value.
     ///
-    /// When neither is set, the engine picks a calibrated per-plane default.
+    /// When this and the algorithm's `lambda_ht` are both unset, the engine picks a calibrated luma
+    /// default.
     pub luma_lambda_ht: Option<f32>,
     /// Chroma override for nl4d's `lambda_ht`, which wins over the algorithm's value.
     ///
-    /// When neither is set, the engine picks a calibrated per-plane default.
+    /// When this and the algorithm's `lambda_ht` are both unset, the engine picks a calibrated chroma
+    /// default.
     pub chroma_lambda_ht: Option<f32>,
     /// The bit depth of the wire bytes going in and coming out.
     #[builder(default = Depth::Eight)]
@@ -152,16 +154,16 @@ impl DenoiserOptions {
     }
 
     /// Picks the luma or chroma value of a per-plane setting.
-    fn per_plane<T>(channels: PlaneGroup, luma: T, chroma: T) -> T {
-        match channels {
+    fn per_plane<T>(group: PlaneGroup, luma: T, chroma: T) -> T {
+        match group {
             PlaneGroup::Luma => luma,
             PlaneGroup::Chroma => chroma,
         }
     }
 
-    /// `nlm` with this run's mode and the strength override of `channels`.
-    fn plane_nlm(&self, nlm: NlmeansOptions, channels: PlaneGroup) -> NlmeansOptions {
-        let strength = Self::per_plane(channels, self.luma_strength, self.chroma_strength);
+    /// `nlm` with this run's mode and the strength override of `group`.
+    fn plane_nlm(&self, nlm: NlmeansOptions, group: PlaneGroup) -> NlmeansOptions {
+        let strength = Self::per_plane(group, self.luma_strength, self.chroma_strength);
         let with_strength = with_plane_strength(nlm, strength);
 
         NlmeansOptions {
@@ -170,29 +172,29 @@ impl DenoiserOptions {
         }
     }
 
-    fn plane_fast(&self, nlm: NlmeansOptions, channels: PlaneGroup) -> NlmeansAlgorithm {
-        let options = self.plane_nlm(nlm, channels);
+    fn plane_fast(&self, nlm: NlmeansOptions, group: PlaneGroup) -> NlmeansAlgorithm {
+        let options = self.plane_nlm(nlm, group);
         NlmeansAlgorithm::Fast(options)
     }
 
-    fn plane_hq(&self, hq: NlmeansHqOptions, channels: PlaneGroup) -> NlmeansAlgorithm {
-        let nlm = self.plane_nlm(hq.nlm, channels);
+    fn plane_hq(&self, hq: NlmeansHqOptions, group: PlaneGroup) -> NlmeansAlgorithm {
+        let nlm = self.plane_nlm(hq.nlm, group);
         let options = NlmeansHqOptions { nlm, ..hq };
 
         NlmeansAlgorithm::Hq(options)
     }
 
-    /// `nl4d` with this run's temporal radius and the `lambda_ht` override of `channels`.
+    /// `nl4d` with this run's temporal radius and the `lambda_ht` override of `group`.
     ///
     /// An unset `lambda_ht` stays `None`, so the engine resolves it to the plane's own default.
     /// Grain is only exported from luma.
-    fn plane_nl4d(&self, nl4d: Nl4dOptions, channels: PlaneGroup) -> Nl4dOptions {
-        let plane_lambda_ht = Self::per_plane(channels, self.luma_lambda_ht, self.chroma_lambda_ht);
+    fn plane_nl4d(&self, nl4d: Nl4dOptions, group: PlaneGroup) -> Nl4dOptions {
+        let plane_lambda_ht = Self::per_plane(group, self.luma_lambda_ht, self.chroma_lambda_ht);
 
         Nl4dOptions {
             temporal_radius: self.temporal_radius(),
             lambda_ht: plane_lambda_ht.or(nl4d.lambda_ht),
-            grain_export: nl4d.grain_export && channels == PlaneGroup::Luma,
+            grain_export: nl4d.grain_export && group == PlaneGroup::Luma,
             ..nl4d
         }
     }

@@ -11,7 +11,6 @@ use super::identity::describe;
 use super::profile_key::{profile_key, tuning_frame_count};
 use super::search::SearchMode;
 use super::setup::{KernelSetup, engine_kernels};
-use super::unit::TuneUnit;
 use crate::engine::{DevicePlane, Engine, EngineSpec, PassTimings, WindowSpan, copy_words_into};
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
@@ -82,8 +81,7 @@ impl TunedGroup {
             poisoned: false,
         };
 
-        let units = TuneUnit::frames(&group.specs);
-        let tuned = is_tuned_on(&group.profile.identity, &units, &group.config);
+        let tuned = is_tuned_on(&group.profile.identity, &group.specs, &group.config);
         if !tuned {
             group.state = State::Buffering { frames: Vec::new() };
             return Ok(group);
@@ -383,11 +381,11 @@ impl TunedGroup {
 
     /// Pushes one buffered frame through the engines, returning how many frames are ready.
     fn push_buffered(&mut self, frame: &TuningFrame, context: bool) -> Result<usize, Error> {
-        let units = TuneUnit::frames(&self.specs);
-        let lists: Vec<Vec<DevicePlane<'_>>> = units
+        let lists: Vec<Vec<DevicePlane<'_>>> = self
+            .specs
             .iter()
             .enumerate()
-            .map(|(index, unit)| frame.planes_for(index, unit))
+            .map(|(index, spec)| frame.planes_for(index, spec))
             .collect();
         let planes: Vec<&[DevicePlane<'_>]> = lists.iter().map(Vec::as_slice).collect();
 
@@ -404,16 +402,9 @@ impl TunedGroup {
         let mut owned = Vec::new();
 
         for (spec, engine) in self.specs.iter().zip(&mut self.engines) {
-            let unit = TuneUnit(*spec);
-            let handles = output_planes(&self.client, &unit);
-            let planes: Vec<DevicePlane<'_>> = handles
-                .iter()
-                .enumerate()
-                .map(|(index, handle)| {
-                    let (width, height) = unit.plane_dims(index);
-                    DevicePlane::new(handle, width, height)
-                })
-                .collect();
+            let geometry = spec.geometry();
+            let handles = geometry.empty_planes(&self.client, geometry.output);
+            let planes = geometry.device_planes(0, &handles);
 
             engine.emit_into(&planes)?;
             owned.extend(handles);
@@ -487,31 +478,19 @@ fn in_step(counts: &[usize]) -> Result<usize, Error> {
     Err(Error::InvalidOptions(message))
 }
 
-/// New handles for one emitted frame of the engine `unit` describes, whole words each.
-fn output_planes(client: &Client, unit: &TuneUnit) -> Vec<Handle> {
-    let output = unit.output();
-
-    (0..unit.plane_count())
-        .map(|index| {
-            let bytes = unit.plane_bytes(index, output);
-            client.empty(bytes)
-        })
-        .collect()
-}
-
 /// Copies a replayed frame, every engine's planes back to back, into the caller's `planes`.
 fn copy_frame(client: &Client, specs: &[EngineSpec], frame: &[Handle], planes: &[&[DevicePlane<'_>]]) {
     let mut sources = frame.iter();
 
     for (spec, engine_planes) in specs.iter().zip(planes) {
-        let unit = TuneUnit(*spec);
-        let output = unit.output();
+        let geometry = spec.geometry();
+        let output = geometry.output;
 
         for (index, plane) in engine_planes.iter().enumerate() {
             let source = sources
                 .next()
                 .expect("a replayed frame holds every engine's planes");
-            let words = unit.plane_bytes(index, output) / 4;
+            let words = geometry.plane_bytes(index, output) / 4;
             copy_words_into(client, source, plane.handle(), words);
         }
     }

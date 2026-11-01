@@ -1,7 +1,6 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::unit::TuneUnit;
 use crate::engine::{DevicePlane, EngineSpec, copy_words_into};
 use crate::error::Error;
 
@@ -35,15 +34,15 @@ impl TuningFrame {
         let mut copied = Vec::with_capacity(specs.len());
 
         for (spec, engine_planes) in specs.iter().zip(planes) {
-            let unit = TuneUnit(*spec);
-            let input = unit.input();
-            unit.check_planes(engine_planes, input)?;
+            let geometry = spec.geometry();
+            let input = geometry.input;
+            geometry.check_planes(engine_planes, input)?;
 
             let handles: Vec<Handle> = engine_planes
                 .iter()
                 .enumerate()
                 .map(|(index, plane)| {
-                    let bytes = unit.plane_bytes(index, input);
+                    let bytes = geometry.plane_bytes(index, input);
                     copy_plane(client, plane, bytes)
                 })
                 .collect();
@@ -54,33 +53,27 @@ impl TuningFrame {
         Ok(Self::new(copied))
     }
 
-    /// The planes engine `engine` reads, each at the size `unit` gives it.
-    pub(crate) fn planes_for(&self, engine: usize, unit: &TuneUnit) -> Vec<DevicePlane<'_>> {
-        self.planes[engine]
-            .iter()
-            .enumerate()
-            .map(|(index, handle)| {
-                let (width, height) = unit.plane_dims(index);
-                DevicePlane::new(handle, width, height)
-            })
-            .collect()
+    /// The planes engine `engine` reads, each at the size `spec` gives it.
+    pub(crate) fn planes_for(&self, engine: usize, spec: &EngineSpec) -> Vec<DevicePlane<'_>> {
+        let geometry = spec.geometry();
+        geometry.device_planes(0, &self.planes[engine])
     }
 }
 
-/// Checks every frame holds the planes each engine of `units` reads, with handles large enough.
-pub(crate) fn check_frames(units: &[TuneUnit], frames: &[TuningFrame]) -> Result<(), Error> {
+/// Checks every frame holds the planes each engine of `specs` reads, with handles large enough.
+pub(crate) fn check_frames(specs: &[EngineSpec], frames: &[TuningFrame]) -> Result<(), Error> {
     for frame in frames {
-        let expected = units.len();
+        let expected = specs.len();
         let given = frame.planes.len();
         if expected != given {
             let message = format!("expected a tuning frame for {expected} engines, got {given}");
             return Err(Error::PlaneMismatch(message));
         }
 
-        for (index, unit) in units.iter().enumerate() {
-            let planes = frame.planes_for(index, unit);
-            let input = unit.input();
-            unit.check_planes(&planes, input)?;
+        for (index, spec) in specs.iter().enumerate() {
+            let planes = frame.planes_for(index, spec);
+            let geometry = spec.geometry();
+            geometry.check_planes(&planes, geometry.input)?;
         }
     }
 

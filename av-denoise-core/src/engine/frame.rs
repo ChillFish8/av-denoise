@@ -1,3 +1,6 @@
+use cubecl::prelude::*;
+use cubecl::server::Handle;
+
 use super::{DevicePlane, SampleFormat};
 use crate::error::Error;
 
@@ -58,13 +61,43 @@ impl Geometry {
     }
 
     /// The width and height of plane `index`, where plane 0 is luma.
-    pub(crate) fn plane_dims(&self, index: usize) -> (u32, u32) {
+    pub fn plane_dims(&self, index: usize) -> (u32, u32) {
         if index == 0 {
             return (self.width, self.height);
         }
 
         let chroma = self.chroma.chroma_dims(self.width, self.height);
         chroma.unwrap_or((self.width, self.height))
+    }
+
+    /// The bytes plane `index` takes in `format`, rounded up to whole words.
+    pub(crate) fn plane_bytes(&self, index: usize, format: SampleFormat) -> usize {
+        let (width, height) = self.plane_dims(index);
+        let pixels = u64::from(width) * u64::from(height);
+
+        format.plane_bytes(pixels) as usize
+    }
+
+    /// New handles for every plane of one frame in `format`, whole words each.
+    pub(crate) fn empty_planes(&self, client: &Client, format: SampleFormat) -> Vec<Handle> {
+        (0..self.chroma.plane_count())
+            .map(|index| {
+                let bytes = self.plane_bytes(index, format);
+                client.empty(bytes)
+            })
+            .collect()
+    }
+
+    /// `handles` as planes `first` onwards, each at its own size.
+    pub(crate) fn device_planes<'a>(&self, first: usize, handles: &'a [Handle]) -> Vec<DevicePlane<'a>> {
+        handles
+            .iter()
+            .enumerate()
+            .map(|(offset, handle)| {
+                let (width, height) = self.plane_dims(first + offset);
+                DevicePlane::new(handle, width, height)
+            })
+            .collect()
     }
 
     /// Checks there is one plane per frame plane, each at its own size and covering its whole words.
@@ -75,7 +108,18 @@ impl Geometry {
             return Err(Error::PlaneMismatch(message));
         }
 
-        for (index, plane) in planes.iter().enumerate() {
+        self.check_plane_sizes(planes, 0, format)
+    }
+
+    /// Checks each of `planes`, taken as planes `first` onwards, is at its size and covers its whole words.
+    pub(crate) fn check_plane_sizes(
+        &self,
+        planes: &[DevicePlane<'_>],
+        first: usize,
+        format: SampleFormat,
+    ) -> Result<(), Error> {
+        for (offset, plane) in planes.iter().enumerate() {
+            let index = first + offset;
             let (width, height) = self.plane_dims(index);
             let matches_size = plane.width() == width && plane.height() == height;
             if !matches_size {
@@ -87,8 +131,7 @@ impl Geometry {
                 return Err(Error::PlaneMismatch(message));
             }
 
-            let pixels = u64::from(width) * u64::from(height);
-            let needed = format.plane_bytes(pixels);
+            let needed = self.plane_bytes(index, format) as u64;
             let available = plane.handle().size_in_used();
             if available < needed {
                 let message = format!("plane {index} handle holds {available} bytes, needs {needed}");

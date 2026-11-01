@@ -6,15 +6,15 @@ use std::time::{Duration, Instant};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::engine::{ChromaLayout, DevicePlane, EngineSpec, Geometry, SampleFormat};
+use crate::engine::{ChromaLayout, EngineSpec, Geometry, SampleFormat};
 use crate::nl4d::Nl4dOptions;
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::driver::pass::{FrameCycle, tune_keys};
 use crate::tune::driver::profiles::alternative_profiles_for;
 use crate::tune::driver::{TuneOutcome, TuneReport, TuneRequest, is_tuned, tune_frames, tune_set};
 use crate::tune::engine_set::EngineSet;
+use crate::tune::profile_key::spec_profile_keys;
 use crate::tune::setup::{KernelSetup, device_priority};
-use crate::tune::unit::{TuneUnit, unit_profile_keys};
 use crate::tune::{
     Budget,
     BudgetRequest,
@@ -132,10 +132,10 @@ fn frame_planes(client: &Client, specs: &[EngineSpec], frame: u32) -> Vec<Vec<Ha
     let mut planes = Vec::with_capacity(specs.len());
 
     for spec in specs {
-        let unit = TuneUnit(*spec);
-        let handles = (0..unit.plane_count())
+        let geometry = spec.geometry();
+        let handles = (0..geometry.chroma.plane_count())
             .map(|plane| {
-                let (width, height) = unit.plane_dims(plane);
+                let (width, height) = geometry.plane_dims(plane);
                 let bytes = plane_bytes(plane, frame, width, height);
                 client.create_from_slice(&bytes)
             })
@@ -219,8 +219,7 @@ fn build_set(
     config: &TuningConfig,
     setup: &KernelSetup,
 ) -> EngineSet {
-    let units = TuneUnit::frames(specs);
-    EngineSet::build(device, client, &units, config, setup).expect("the set builds")
+    EngineSet::build(device, client, specs, config, setup).expect("the set builds")
 }
 
 fn tuning_set(
@@ -252,28 +251,16 @@ fn read_planes(client: &Client, handles: &[Handle]) -> FramePlanes {
 fn emit_frames(
     set: &mut EngineSet,
     client: &Client,
-    unit: &TuneUnit,
+    spec: &EngineSpec,
     index: usize,
     count: usize,
 ) -> Vec<FramePlanes> {
-    let output = unit.output();
+    let geometry = spec.geometry();
     let mut emitted = Vec::with_capacity(count);
 
     for _ in 0..count {
-        let handles: Vec<Handle> = (0..unit.plane_count())
-            .map(|plane| {
-                let bytes = unit.plane_bytes(plane, output);
-                client.empty(bytes)
-            })
-            .collect();
-        let planes: Vec<DevicePlane<'_>> = handles
-            .iter()
-            .enumerate()
-            .map(|(plane, handle)| {
-                let (width, height) = unit.plane_dims(plane);
-                DevicePlane::new(handle, width, height)
-            })
-            .collect();
+        let handles = geometry.empty_planes(client, geometry.output);
+        let planes = geometry.device_planes(0, &handles);
 
         let engine = &mut set.engines_mut()[index];
         engine.emit_into(&planes).expect("the frame emits");
@@ -292,23 +279,22 @@ fn denoise_clip(
     specs: &[EngineSpec],
     clip: &[TuningFrame],
 ) -> Vec<Vec<FramePlanes>> {
-    let units = TuneUnit::frames(specs);
-    let mut outputs = vec![Vec::new(); units.len()];
+    let mut outputs = vec![Vec::new(); specs.len()];
 
     for frame in clip {
-        for (index, unit) in units.iter().enumerate() {
-            let planes = frame.planes_for(index, unit);
+        for (index, spec) in specs.iter().enumerate() {
+            let planes = frame.planes_for(index, spec);
             let engine = &mut set.engines_mut()[index];
             let ready = engine.push(&planes).expect("the push succeeds");
-            let emitted = emit_frames(set, client, unit, index, ready);
+            let emitted = emit_frames(set, client, spec, index, ready);
             outputs[index].extend(emitted);
         }
     }
 
-    for (index, unit) in units.iter().enumerate() {
+    for (index, spec) in specs.iter().enumerate() {
         let engine = &mut set.engines_mut()[index];
         let tail = engine.finish().expect("the stream finishes");
-        let emitted = emit_frames(set, client, unit, index, tail);
+        let emitted = emit_frames(set, client, spec, index, tail);
         outputs[index].extend(emitted);
     }
 
@@ -743,8 +729,7 @@ fn an_nl4d_pass_records_a_ranking_for_every_plane() {
     let stored = TuneStore::at(store.path()).load(&profile.identity);
     let table = device_priority(&profile);
     let alternatives = alternative_profiles_for(true, &profile, table);
-    let units = TuneUnit::frames(&specs);
-    let profile_keys = unit_profile_keys(&units);
+    let profile_keys = spec_profile_keys(&specs);
     assert_eq!(profile_keys.len(), 2, "{profile_keys:?}");
 
     for profile_key in &profile_keys {

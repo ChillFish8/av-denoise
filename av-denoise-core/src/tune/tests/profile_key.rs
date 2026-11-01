@@ -1,6 +1,6 @@
 use crate::engine::{PassGeometry, PassSpec};
 use crate::nlmeans::ChannelMode;
-use crate::tune::unit::{TuneUnit, unit_profile_keys};
+use crate::tune::profile_key::spec_profile_keys;
 use crate::tune::{TUNE_EXTRA_FRAMES, profile_key, tuning_frame_count};
 use crate::{
     ChromaLayout,
@@ -185,9 +185,7 @@ fn a_chroma_only_spec_counts_its_chroma_span() {
 #[test]
 fn an_engine_spec_keys_each_pass_as_its_pass_spec() {
     let spec = nl4d_engine_spec(2, ChromaLayout::Yuv420);
-    let units = TuneUnit::frames(&[spec]);
-
-    let keys = unit_profile_keys(&units);
+    let keys = spec_profile_keys(&[spec]);
 
     let luma = nl4d_spec(ChannelMode::Luma, 2, SampleFormat::U8, SampleFormat::U8, 960, 540);
     let chroma = nl4d_spec(
@@ -206,9 +204,7 @@ fn an_engine_spec_keys_each_pass_as_its_pass_spec() {
 #[test]
 fn a_luma_only_engine_spec_has_one_key() {
     let spec = nl4d_engine_spec(2, ChromaLayout::Gray);
-    let units = TuneUnit::frames(&[spec]);
-
-    let keys = unit_profile_keys(&units);
+    let keys = spec_profile_keys(&[spec]);
 
     assert_eq!(keys.len(), 1);
     assert!(keys[0].ends_with("|Luma|in-u8|out-u8|w1024|h1024"), "{keys:?}");

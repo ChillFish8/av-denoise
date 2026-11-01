@@ -1,6 +1,5 @@
 use super::consts::TUNE_EXTRA_FRAMES;
 use super::key::bucket_dim;
-use super::unit::TuneUnit;
 use crate::engine::{EngineSpec, PassSpec, SampleFormat};
 use crate::nlmeans::DenoisingMode;
 
@@ -21,19 +20,23 @@ pub(crate) fn profile_key(spec: &PassSpec) -> String {
     format!("{algorithm}|{channels:?}|in-{input}|out-{output}|w{width_bucket}|h{height_bucket}")
 }
 
+/// The profile key of every pass of `specs`, in spec order and luma before chroma.
+pub(crate) fn spec_profile_keys(specs: &[EngineSpec]) -> Vec<String> {
+    specs
+        .iter()
+        .flat_map(EngineSpec::pass_specs)
+        .map(|pass| profile_key(&pass))
+        .collect()
+}
+
 /// How many frames a tuning pass over `specs` needs.
 ///
 /// It is the widest temporal span of any pass in the group plus [TUNE_EXTRA_FRAMES]. Nl4d spans
 /// `4 * radius + 1` frames and NLMeans spans `2 * radius + 1`.
 pub fn tuning_frame_count(specs: &[EngineSpec]) -> usize {
-    let units = TuneUnit::frames(specs);
-    frame_count_for(&units)
-}
-
-fn frame_count_for(units: &[TuneUnit]) -> usize {
-    let spans = units
+    let spans = specs
         .iter()
-        .flat_map(TuneUnit::passes)
+        .flat_map(EngineSpec::pass_specs)
         .map(|pass| temporal_span(&pass));
     let widest = spans.max().unwrap_or(1);
 

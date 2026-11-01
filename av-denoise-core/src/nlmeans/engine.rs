@@ -47,7 +47,7 @@ impl Nlmeans {
         Self::with_kernels(client, algorithm, geometry, kernels)
     }
 
-    /// Builds the engine like the default, with each launch site's candidate picked from `kernels`.
+    /// Builds the engine with each launch site's candidate picked from `kernels`.
     ///
     /// Returns [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
     pub fn with_kernels(

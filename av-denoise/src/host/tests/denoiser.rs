@@ -14,6 +14,7 @@ use av_denoise_core::{
     NlmeansHqOptions,
     NlmeansOptions,
     PassTimings,
+    PlaneSource,
     WindowSpan,
 };
 
@@ -334,6 +335,10 @@ impl Engine for ScriptedEngine {
         self.pushes += 1;
 
         (self.push_outcome)(earlier_pushes)
+    }
+
+    fn push_from(&mut self, _source: &mut dyn PlaneSource) -> Result<usize, av_denoise_core::Error> {
+        self.push(&[])
     }
 
     fn push_context(&mut self, _planes: &[DevicePlane<'_>]) -> Result<(), av_denoise_core::Error> {
@@ -857,7 +862,6 @@ fn flush_sink_time_is_left_out_of_submit_time() {
         .expect("flush");
 
     let timing = denoiser.timing();
-    let timing = timing.luma.expect("luma is denoised");
     let total_sleep = sink_sleep * flushed;
 
     assert_eq!(flushed, 3);

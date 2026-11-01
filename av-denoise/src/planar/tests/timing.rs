@@ -85,7 +85,7 @@ fn denoise_all(denoiser: &mut PlanarDenoiser, frames: &[Planes]) -> Vec<Planes> 
 }
 
 #[test]
-fn both_planes_report_their_frames_and_blocked_time() {
+fn the_shared_host_time_counts_every_frame() {
     let frames = noisy_frames(10);
     let mut denoiser = PlanarDenoiser::create(&nl4d_options(), layout()).expect("create");
     denoise_all(&mut denoiser, &frames);
@@ -94,11 +94,11 @@ fn both_planes_report_their_frames_and_blocked_time() {
     let luma = timing.luma.expect("luma is denoised");
     let chroma = timing.chroma.expect("chroma is denoised");
 
-    assert_eq!(luma.frames, 10);
-    assert_eq!(chroma.frames, 10);
-    assert!(luma.blocked > Duration::ZERO);
-    assert!(luma.submit > Duration::ZERO);
+    assert_eq!(timing.frames, 10);
+    assert!(timing.blocked > Duration::ZERO);
+    assert!(timing.submit > Duration::ZERO);
     assert_eq!(luma.device_busy, None, "device time is off by default");
+    assert_eq!(chroma.device_busy, None, "device time is off by default");
 }
 
 #[test]
@@ -124,6 +124,7 @@ fn planes_are_listed_in_luma_chroma_order() {
     let timing = PlanarTiming {
         luma: Some(plane),
         chroma: Some(plane),
+        ..PlanarTiming::default()
     };
 
     let planes = timing.planes();
@@ -137,6 +138,7 @@ fn unset_planes_are_left_out_of_the_listing() {
     let timing = PlanarTiming {
         luma: None,
         chroma: Some(plane),
+        ..PlanarTiming::default()
     };
 
     let planes = timing.planes();

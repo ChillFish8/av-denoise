@@ -15,6 +15,7 @@ use super::pass::{
     timed_frame,
     tune_keys,
 };
+use crate::engine::EngineSpec;
 use crate::tune::budget::{Budget, can_afford, pending_keys, profile_wins, site_min_cost};
 use crate::tune::consts::{PROFILE_BLOCK_FRAMES, PROFILE_MIN_BLOCKS, WARM_WINDOW};
 use crate::tune::decide::median;
@@ -27,7 +28,6 @@ use crate::tune::priority::PriorityTable;
 use crate::tune::result::ProfileRecord;
 use crate::tune::search::SearchMode;
 use crate::tune::setup::device_priority;
-use crate::tune::unit::TuneUnit;
 
 /// Where the profile comparison ended.
 #[derive(Debug, Clone, PartialEq)]
@@ -112,7 +112,7 @@ fn differs_from_baseline(profile: PipelineProfile, device: &DeviceProfile) -> bo
 
 /// The alternative profiles for `set`, which has some when any of its engines is nl4d.
 fn alternative_profiles(set: &EngineSet) -> Vec<PipelineProfile> {
-    let is_nl4d = set.units().iter().any(TuneUnit::is_nl4d);
+    let is_nl4d = set.specs().iter().any(EngineSpec::is_nl4d);
     let device = set.device();
     let table = device_priority(device);
 

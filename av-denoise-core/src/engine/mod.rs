@@ -11,6 +11,10 @@ pub(crate) mod timing;
 #[cfg(test)]
 mod tests;
 
+use std::ops::Range;
+
+use cubecl::server::Handle;
+
 pub use self::frame::{ChromaLayout, Geometry};
 pub(crate) use self::io::{EgressSource, IngestTarget, copy_words_into, egress, ingest};
 pub(crate) use self::plane::PassGeometry;
@@ -119,6 +123,12 @@ pub(crate) trait FramePass: PassEngine {
     fn emitted_frame(&self) -> Option<u32>;
 }
 
+/// Uploads a frame's planes when an [Engine] asks for them.
+pub trait PlaneSource {
+    /// Uploads the planes at indices `planes`, luma first, and returns their handles in order.
+    fn upload(&mut self, planes: Range<usize>) -> Vec<Handle>;
+}
+
 /// A stateful denoiser that reads and writes every plane of a frame on the GPU.
 ///
 /// Push frames in order with [Engine::push]. It returns how many frames are ready, and every ready frame
@@ -132,6 +142,12 @@ pub(crate) trait FramePass: PassEngine {
 pub trait Engine: Send {
     /// Ingests one frame and returns how many frames are ready to emit.
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error>;
+
+    /// [Engine::push] with the frame's planes taken from `source` one plane group at a time.
+    ///
+    /// The luma pass is recorded before the chroma planes are asked for, so the device can start on
+    /// luma while they upload.
+    fn push_from(&mut self, source: &mut dyn PlaneSource) -> Result<usize, Error>;
 
     /// Ingests one frame as context only, producing no output from this call.
     ///

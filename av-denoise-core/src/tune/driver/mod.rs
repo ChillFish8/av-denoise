@@ -15,10 +15,10 @@ use super::frame::{TuningFrame, check_frames};
 use super::identity::describe;
 use super::ledger::{TuneLedger, TunePhase};
 use super::lock::{TuneLock, TuneLockOutcome};
+use super::profile_key::spec_profile_keys;
 use super::search::SearchMode;
 use super::setup::{KernelSetup, device_priority};
 use super::store::{reload, resolve};
-use super::unit::{TuneUnit, unit_profile_keys};
 use crate::engine::EngineSpec;
 
 /// What a tuning pass asks for.
@@ -118,25 +118,13 @@ pub fn tune_frames(
     config: &TuningConfig,
     request: &TuneRequest,
 ) -> TuneReport {
-    let units = TuneUnit::frames(specs);
-    tune_units(device, client, &units, frames, config, request)
-}
-
-fn tune_units(
-    device: &cubecl::Device,
-    client: &Client,
-    units: &[TuneUnit],
-    frames: &[TuningFrame],
-    config: &TuningConfig,
-    request: &TuneRequest,
-) -> TuneReport {
     let started = Instant::now();
 
     if config.mode == TuningMode::Off {
         return TuneReport::skipped_since("tuning is off", started);
     }
 
-    let checked = check_frames(units, frames);
+    let checked = check_frames(specs, frames);
     if let Err(error) = checked {
         let reason = error.to_string();
         return TuneReport::skipped_since(reason, started);
@@ -147,7 +135,7 @@ fn tune_units(
         ledger: Some(ledger),
         profile_override: None,
     };
-    let built = EngineSet::build(device, client, units, config, &setup);
+    let built = EngineSet::build(device, client, specs, config, &setup);
     let mut set = match built {
         Ok(set) => set,
         Err(error) => {
@@ -168,35 +156,25 @@ pub fn is_tuned(
     specs: &[EngineSpec],
     config: &TuningConfig,
 ) -> bool {
-    let units = TuneUnit::frames(specs);
-    are_units_tuned(device, client, &units, config)
-}
-
-fn are_units_tuned(
-    device: &cubecl::Device,
-    client: &Client,
-    units: &[TuneUnit],
-    config: &TuningConfig,
-) -> bool {
     if config.mode != TuningMode::Auto {
         return true;
     }
 
     let identity = describe(device, client);
 
-    is_tuned_on(&identity, units, config)
+    is_tuned_on(&identity, specs, config)
 }
 
 /// Whether the store holds a complete result on the device `identity` names for every engine of
-/// `units`.
+/// `specs`.
 ///
 /// Answers `true` when tuning is not [TuningMode::Auto].
-pub(crate) fn is_tuned_on(identity: &DeviceIdentity, units: &[TuneUnit], config: &TuningConfig) -> bool {
+pub(crate) fn is_tuned_on(identity: &DeviceIdentity, specs: &[EngineSpec], config: &TuningConfig) -> bool {
     if config.mode != TuningMode::Auto {
         return true;
     }
 
-    let profile_keys = unit_profile_keys(units);
+    let profile_keys = spec_profile_keys(specs);
     let stored = resolve(config.store.as_deref(), identity);
 
     stored.is_complete(&profile_keys)

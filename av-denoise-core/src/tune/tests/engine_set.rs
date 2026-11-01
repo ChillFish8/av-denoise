@@ -4,7 +4,6 @@ use crate::engine::{ChromaLayout, DevicePlane, EngineSpec, Geometry, SampleForma
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::engine_set::EngineSet;
 use crate::tune::setup::KernelSetup;
-use crate::tune::unit::TuneUnit;
 use crate::tune::{TuningConfig, TuningFrame, TuningMode};
 
 const WIDTH: u32 = 64;
@@ -58,8 +57,7 @@ fn build_set(specs: &[EngineSpec]) -> (EngineSet, Client) {
     let device = crate::testing::test_device();
     let client = device.client();
     let setup = KernelSetup::default();
-    let units = TuneUnit::frames(specs);
-    let set = EngineSet::build(&device, &client, &units, &off(), &setup).expect("the set builds");
+    let set = EngineSet::build(&device, &client, specs, &off(), &setup).expect("the set builds");
 
     (set, client)
 }
@@ -119,8 +117,7 @@ fn copied_frames_are_independent_of_their_source() {
         );
     }
 
-    let unit = TuneUnit(specs[0]);
-    let copied = frame.planes_for(0, &unit);
+    let copied = frame.planes_for(0, &specs[0]);
     let read = client
         .read_one(copied[0].handle().clone())
         .expect("the copy reads");
@@ -171,15 +168,15 @@ fn copies_of_an_odd_sized_plane_match_their_source_byte_for_byte() {
         chroma: None,
         geometry: gray_geometry(61, 37),
     }];
-    let unit = TuneUnit(specs[0]);
-    let bytes = unit.plane_bytes(0, SampleFormat::U8);
+    let geometry = specs[0].geometry();
+    let bytes = geometry.plane_bytes(0, SampleFormat::U8);
     let pattern: Vec<u8> = (0..bytes).map(|index| (index * 7 + index / 251) as u8).collect();
     let source = client.create_from_slice(&pattern);
     let planes = [DevicePlane::new(&source, 61, 37)];
 
     let frame = TuningFrame::copy_from(&client, &specs, &[&planes]).expect("the frame copies");
 
-    let copied = frame.planes_for(0, &unit);
+    let copied = frame.planes_for(0, &specs[0]);
     let read = client
         .read_one(copied[0].handle().clone())
         .expect("the copy reads");
@@ -199,10 +196,9 @@ fn copies_of_a_yuv_frame_keep_each_planes_size() {
         chroma: None,
         geometry,
     }];
-    let unit = TuneUnit(specs[0]);
     let patterns: Vec<Vec<u8>> = (0..3)
         .map(|plane| {
-            let bytes = unit.plane_bytes(plane, SampleFormat::U8);
+            let bytes = geometry.plane_bytes(plane, SampleFormat::U8);
             (0..bytes).map(|index| (index * 3 + plane) as u8).collect()
         })
         .collect();
@@ -218,7 +214,7 @@ fn copies_of_a_yuv_frame_keep_each_planes_size() {
 
     let frame = TuningFrame::copy_from(&client, &specs, &[&planes]).expect("the frame copies");
 
-    let copied = frame.planes_for(0, &unit);
+    let copied = frame.planes_for(0, &specs[0]);
     let sizes: Vec<(u32, u32)> = copied
         .iter()
         .map(|plane| (plane.width(), plane.height()))

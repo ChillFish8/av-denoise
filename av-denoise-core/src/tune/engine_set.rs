@@ -11,10 +11,9 @@ use super::gpu::sync;
 use super::identity::describe;
 use super::ledger::TuneLedger;
 use super::plan::PipelineProfile;
-use super::profile_key::profile_key;
+use super::profile_key::{profile_key, spec_profile_keys};
 use super::setup::{KernelSetup, engine_kernels};
-use super::unit::{TuneUnit, unit_profile_keys};
-use crate::engine::{DevicePlane, Engine, WindowSpan};
+use crate::engine::{Engine, EngineSpec, WindowSpan};
 use crate::error::Error;
 
 /// The engines of one group, driven together on one device.
@@ -22,25 +21,25 @@ pub(crate) struct EngineSet {
     client: Client,
     device: cubecl::Device,
     profile: DeviceProfile,
-    units: Vec<TuneUnit>,
+    specs: Vec<EngineSpec>,
     engines: Vec<Box<dyn Engine>>,
     scratch: Vec<Vec<Handle>>,
     ledger: Option<Arc<TuneLedger>>,
 }
 
 impl EngineSet {
-    /// Builds an engine per unit from the store's picks, wired to `setup`.
+    /// Builds an engine per spec from the store's picks, wired to `setup`.
     ///
     /// On a Vulkan device with a ledger, the ledger also compiles candidates on helper clients.
-    /// Empty `units` are an [Error::InvalidOptions].
+    /// Empty `specs` are an [Error::InvalidOptions].
     pub(crate) fn build(
         device: &cubecl::Device,
         client: &Client,
-        units: &[TuneUnit],
+        specs: &[EngineSpec],
         config: &TuningConfig,
         setup: &KernelSetup,
     ) -> Result<Self, Error> {
-        if units.is_empty() {
+        if specs.is_empty() {
             let message = "an engine set needs at least one engine".to_string();
             return Err(Error::InvalidOptions(message));
         }
@@ -56,17 +55,18 @@ impl EngineSet {
             super::compile_helpers::install_compile_helpers(ledger, wgpu_device);
         }
 
-        let mut engines = Vec::with_capacity(units.len());
-        let mut scratch = Vec::with_capacity(units.len());
+        let mut engines = Vec::with_capacity(specs.len());
+        let mut scratch = Vec::with_capacity(specs.len());
 
-        for unit in units {
-            let engine = unit.build(client, |pass| {
+        for spec in specs {
+            let engine = spec.build_quiet(client, |pass| {
                 let key = profile_key(pass);
                 engine_kernels(setup, config, &key, &profile)
             })?;
             engines.push(engine);
 
-            let handles = scratch_planes(client, unit);
+            let geometry = spec.geometry();
+            let handles = geometry.empty_planes(client, geometry.output);
             scratch.push(handles);
         }
 
@@ -74,7 +74,7 @@ impl EngineSet {
             client: client.clone(),
             device: device.clone(),
             profile,
-            units: units.to_vec(),
+            specs: specs.to_vec(),
             engines,
             scratch,
             ledger: setup.ledger.clone(),
@@ -92,7 +92,7 @@ impl EngineSet {
         let mut ready_counts = Vec::with_capacity(self.engines.len());
 
         for (index, engine) in self.engines.iter_mut().enumerate() {
-            let planes = frame.planes_for(index, &self.units[index]);
+            let planes = frame.planes_for(index, &self.specs[index]);
             let ready = engine.push(&planes)?;
             ready_counts.push(ready);
         }
@@ -109,7 +109,8 @@ impl EngineSet {
         }
 
         for (index, engine) in self.engines.iter_mut().enumerate() {
-            let planes = scratch_device_planes(&self.scratch[index], &self.units[index]);
+            let geometry = self.specs[index].geometry();
+            let planes = geometry.device_planes(0, &self.scratch[index]);
 
             for _ in 0..ready {
                 engine.emit_into(&planes)?;
@@ -145,8 +146,8 @@ impl EngineSet {
         }
     }
 
-    pub(crate) fn units(&self) -> &[TuneUnit] {
-        &self.units
+    pub(crate) fn specs(&self) -> &[EngineSpec] {
+        &self.specs
     }
 
     #[cfg(test)]
@@ -155,7 +156,7 @@ impl EngineSet {
     }
 
     pub(crate) fn profile_keys(&self) -> Vec<String> {
-        unit_profile_keys(&self.units)
+        spec_profile_keys(&self.specs)
     }
 
     pub(crate) fn device(&self) -> &DeviceProfile {
@@ -177,28 +178,6 @@ impl EngineSet {
             profile_override: Some(profile),
         };
 
-        Self::build(&self.device, &self.client, &self.units, config, &setup)
+        Self::build(&self.device, &self.client, &self.specs, config, &setup)
     }
-}
-
-fn scratch_planes(client: &Client, unit: &TuneUnit) -> Vec<Handle> {
-    let output = unit.output();
-
-    (0..unit.plane_count())
-        .map(|index| {
-            let bytes = unit.plane_bytes(index, output);
-            client.empty(bytes)
-        })
-        .collect()
-}
-
-fn scratch_device_planes<'a>(handles: &'a [Handle], unit: &TuneUnit) -> Vec<DevicePlane<'a>> {
-    handles
-        .iter()
-        .enumerate()
-        .map(|(index, handle)| {
-            let (width, height) = unit.plane_dims(index);
-            DevicePlane::new(handle, width, height)
-        })
-        .collect()
 }

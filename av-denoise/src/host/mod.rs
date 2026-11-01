@@ -8,9 +8,10 @@ mod timing;
 mod tests;
 
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use av_denoise_core::{ChromaLayout, DevicePlane, Engine, EngineSpec, GrainChunk, WindowSpan};
+use av_denoise_core::{DevicePlane, Engine, EngineSpec, GrainChunk, PlaneSource, WindowSpan};
 use cubecl::prelude::Client;
 use cubecl::server::Handle;
 
@@ -188,7 +189,9 @@ impl HostDenoiser {
         )?;
 
         let format = options.depth.sample_format();
-        let plane_dims = frame_plane_dims(width, height, options.chroma);
+        let geometry = spec.geometry();
+        let plane_count = geometry.chroma.plane_count();
+        let plane_dims: Vec<(u32, u32)> = (0..plane_count).map(|index| geometry.plane_dims(index)).collect();
         let plane_pixels: Vec<usize> = plane_dims
             .iter()
             .map(|&(plane_width, plane_height)| plane_width as usize * plane_height as usize)
@@ -266,9 +269,12 @@ impl HostDenoiser {
     }
 
     fn push_inner(&mut self, planes: &[&[u8]]) -> Result<(), DenoiserError> {
-        let handles = self.upload_frame(planes);
-        let device_planes = device_planes(&handles, &self.plane_dims);
-        let ready = self.engine.push(&device_planes)?;
+        let mut source = WireFrame {
+            io: self.io.as_ref(),
+            planes,
+            device_plane_bytes: &self.device_plane_bytes,
+        };
+        let ready = self.engine.push_from(&mut source)?;
 
         // Emitting past the free output sets would overwrite a set whose readback has not landed.
         let in_flight = self.pending.len();
@@ -472,20 +478,13 @@ impl HostDenoiser {
 
     /// Uploads each plane, padded to whole words.
     pub(crate) fn upload_frame(&self, planes: &[&[u8]]) -> Vec<Handle> {
-        let mut handles = Vec::with_capacity(planes.len());
+        let mut source = WireFrame {
+            io: self.io.as_ref(),
+            planes,
+            device_plane_bytes: &self.device_plane_bytes,
+        };
 
-        for (plane, &device_bytes) in planes.iter().zip(&self.device_plane_bytes) {
-            let handle = if plane.len() == device_bytes {
-                self.io.upload(plane)
-            } else {
-                let mut padded = plane.to_vec();
-                padded.resize(device_bytes, 0);
-                self.io.upload(&padded)
-            };
-            handles.push(handle);
-        }
-
-        handles
+        source.upload(0..planes.len())
     }
 
     /// Writes the oldest ready frame into output set `slot` and starts reading it back.
@@ -511,16 +510,34 @@ impl HostDenoiser {
     }
 }
 
-/// Each plane's width and height in a `width` by `height` frame, luma first.
-fn frame_plane_dims(width: u32, height: u32, chroma: ChromaLayout) -> Vec<(u32, u32)> {
-    let mut dims = vec![(width, height)];
+/// A frame of wire bytes that uploads its planes as the engine asks for them.
+struct WireFrame<'a> {
+    io: &'a dyn PlaneIo,
+    planes: &'a [&'a [u8]],
+    /// The bytes each device plane takes up, rounded up to whole words.
+    device_plane_bytes: &'a [usize],
+}
 
-    if let Some(chroma_dims) = chroma.chroma_dims(width, height) {
-        dims.push(chroma_dims);
-        dims.push(chroma_dims);
+impl PlaneSource for WireFrame<'_> {
+    /// Uploads each plane in `planes`, padded to whole words.
+    fn upload(&mut self, planes: Range<usize>) -> Vec<Handle> {
+        let mut handles = Vec::with_capacity(planes.len());
+
+        for index in planes {
+            let plane = self.planes[index];
+            let device_bytes = self.device_plane_bytes[index];
+            let handle = if plane.len() == device_bytes {
+                self.io.upload(plane)
+            } else {
+                let mut padded = plane.to_vec();
+                padded.resize(device_bytes, 0);
+                self.io.upload(&padded)
+            };
+            handles.push(handle);
+        }
+
+        handles
     }
-
-    dims
 }
 
 fn device_planes<'a>(handles: &'a [Handle], dims: &[(u32, u32)]) -> Vec<DevicePlane<'a>> {

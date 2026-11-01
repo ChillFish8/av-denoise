@@ -1,6 +1,15 @@
+use std::fmt::Debug;
+use std::ops::Range;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use cubecl::prelude::*;
 use cubecl::server::Handle;
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::{Event, Level, Metadata, Subscriber};
 
+use crate::engine::planar::{GRAY_WARNING, stream_warning};
 use crate::engine::{
     ChromaLayout,
     DevicePlane,
@@ -9,6 +18,7 @@ use crate::engine::{
     Geometry,
     PassEngine,
     PassSpec,
+    PlaneSource,
     SampleFormat,
 };
 use crate::error::Error;
@@ -431,4 +441,191 @@ fn a_chroma_plane_below_the_patch_size_is_rejected() {
         panic!("the merged engine accepted a 7 sample wide chroma plane");
     };
     assert_eq!(message, expected);
+}
+
+/// One frame's planes, uploaded on request, remembering which planes each request asked for.
+struct RecordingSource<'a> {
+    client: &'a Client,
+    frame: &'a Planes,
+    requests: Vec<Range<usize>>,
+}
+
+impl PlaneSource for RecordingSource<'_> {
+    fn upload(&mut self, planes: Range<usize>) -> Vec<Handle> {
+        self.requests.push(planes.clone());
+
+        self.frame[planes]
+            .iter()
+            .map(|plane| self.client.create_from_slice(plane))
+            .collect()
+    }
+}
+
+/// Pushes `frames` through [Engine::push_from], then the tail, returning the output and every
+/// frame's upload requests.
+fn drive_from(
+    engine: &mut Box<dyn Engine>,
+    client: &Client,
+    frames: &[Planes],
+) -> (Vec<Planes>, Vec<Vec<Range<usize>>>) {
+    let dims = plane_dims(frames[0].len(), true);
+    let mut outputs = Vec::new();
+    let mut requests = Vec::new();
+
+    for frame in frames {
+        let mut source = RecordingSource {
+            client,
+            frame,
+            requests: Vec::new(),
+        };
+        let ready = engine.push_from(&mut source).expect("push_from");
+        requests.push(source.requests);
+        emit(engine, client, &dims, ready, &mut outputs);
+    }
+
+    let tail = engine.finish().expect("finish");
+    emit(engine, client, &dims, tail, &mut outputs);
+
+    (outputs, requests)
+}
+
+#[test]
+fn push_from_matches_push_and_uploads_the_cleaned_luma_first() {
+    let client = client();
+    let clip = clip();
+    let geometry = geometry(ChromaLayout::Yuv420);
+    let cases = [(true, true), (true, false), (false, true)];
+
+    for (luma, chroma) in cases {
+        for spec in specs(geometry, luma, chroma) {
+            let mut pushed = build(&client, &spec).expect("build");
+            let expected = drive(&mut pushed, &client, &clip, 0, true);
+
+            let mut staged = build(&client, &spec).expect("build");
+            let (actual, requests) = drive_from(&mut staged, &client, &clip);
+
+            assert_eq!(actual, expected, "{spec:?}");
+
+            let order = if luma { [0..1, 1..3] } else { [1..3, 0..1] };
+            for frame_requests in requests {
+                assert_eq!(frame_requests, order, "{spec:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn push_from_rejects_a_plane_of_the_wrong_size_before_any_pass_moves() {
+    let client = client();
+    let geometry = geometry(ChromaLayout::Yuv420);
+    let [spec, _] = specs(geometry, true, true);
+    let mut engine = build(&client, &spec).expect("build");
+    let short_luma = vec![0u8; 4];
+    let frame = vec![short_luma, vec![0u8; 16], vec![0u8; 16]];
+    let mut source = RecordingSource {
+        client: &client,
+        frame: &frame,
+        requests: Vec::new(),
+    };
+
+    let result = engine.push_from(&mut source);
+
+    assert!(matches!(result, Err(Error::PlaneMismatch(_))), "{result:?}");
+    let luma_only = 0..1;
+    assert_eq!(source.requests.len(), 1, "chroma is never asked for");
+    assert_eq!(source.requests[0], luma_only);
+}
+
+/// Counts the warnings logged with one message.
+struct WarningCounter {
+    message: &'static str,
+    count: Arc<AtomicUsize>,
+}
+
+/// Reads an event's message.
+#[derive(Default)]
+struct MessageVisitor {
+    message: String,
+}
+
+impl Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        }
+    }
+}
+
+impl Subscriber for WarningCounter {
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        if *event.metadata().level() != Level::WARN {
+            return;
+        }
+
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+        if visitor.message == self.message {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
+}
+
+#[test]
+fn only_gray_frames_have_a_stream_warning() {
+    let gray = geometry(ChromaLayout::Gray);
+    let yuv = geometry(ChromaLayout::Yuv420);
+
+    assert_eq!(stream_warning(&gray), Some(GRAY_WARNING));
+    assert_eq!(stream_warning(&yuv), None);
+}
+
+#[test]
+fn a_gray_engine_warns_once_per_stream() {
+    let client = client();
+    let clip = clip();
+    let luma_frames = luma_of(&clip);
+    let geometry = geometry(ChromaLayout::Gray);
+    let [spec, _] = specs(geometry, true, false);
+    let count = Arc::new(AtomicUsize::new(0));
+    let counter = WarningCounter {
+        message: GRAY_WARNING,
+        count: Arc::clone(&count),
+    };
+
+    tracing::subscriber::with_default(counter, || {
+        let mut engine = build(&client, &spec).expect("build");
+        let mut quiet = spec.build_quiet(&client, default_kernels).expect("build");
+        assert_eq!(count.load(Ordering::SeqCst), 0, "building logs nothing");
+
+        drive(&mut engine, &client, &luma_frames, 0, true);
+        drive(&mut quiet, &client, &luma_frames, 0, true);
+        assert_eq!(count.load(Ordering::SeqCst), 1, "one stream");
+
+        drive(&mut engine, &client, &luma_frames, CONTEXT_FRAMES, true);
+        assert_eq!(count.load(Ordering::SeqCst), 2, "a second stream after finish");
+
+        let handles = upload(&client, &luma_frames[0]);
+        let dims = plane_dims(1, true);
+        let planes = as_planes(&handles, &dims);
+        engine.push(&planes).expect("push");
+        engine.reset();
+        engine.push(&planes).expect("push");
+        assert_eq!(count.load(Ordering::SeqCst), 4, "a stream each side of the reset");
+    });
 }

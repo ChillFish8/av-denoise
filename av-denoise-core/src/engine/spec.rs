@@ -156,6 +156,16 @@ impl EngineSpec {
         }
     }
 
+    /// Every pass the spec runs, luma before chroma.
+    pub(crate) fn pass_specs(&self) -> Vec<PassSpec> {
+        let (luma, chroma) = self.passes();
+        luma.into_iter().chain(chroma).collect()
+    }
+
+    pub(crate) fn is_nl4d(&self) -> bool {
+        matches!(self, EngineSpec::Nl4d { .. })
+    }
+
     /// The first pass the spec runs, luma before chroma.
     fn first_pass(&self) -> Option<PassSpec> {
         let (luma, chroma) = self.passes();
@@ -233,10 +243,30 @@ impl EngineSpec {
     }
 
     /// Builds the engine on `client`, picking each pass's launch site candidates from `kernels`.
+    ///
+    /// A stream of gray frames logs a warning once, as it starts.
     pub(crate) fn build(
         &self,
         client: &Client,
+        kernels: impl FnMut(&PassSpec) -> EngineKernels,
+    ) -> Result<Box<dyn Engine>, Error> {
+        self.build_planar(client, kernels, true)
+    }
+
+    /// [Self::build] without the stream warnings, for engines that only time kernels.
+    pub(crate) fn build_quiet(
+        &self,
+        client: &Client,
+        kernels: impl FnMut(&PassSpec) -> EngineKernels,
+    ) -> Result<Box<dyn Engine>, Error> {
+        self.build_planar(client, kernels, false)
+    }
+
+    fn build_planar(
+        &self,
+        client: &Client,
         mut kernels: impl FnMut(&PassSpec) -> EngineKernels,
+        warns: bool,
     ) -> Result<Box<dyn Engine>, Error> {
         self.validate()?;
 
@@ -255,7 +285,7 @@ impl EngineSpec {
             .transpose()?;
 
         let geometry = self.geometry();
-        let engine = PlanarEngine::new(client, geometry, luma_pass, chroma_pass);
+        let engine = PlanarEngine::new(client, geometry, luma_pass, chroma_pass, warns);
 
         Ok(Box::new(engine))
     }
