@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use av_denoise_core::tune::{TuningConfig, TuningMode, build_engine};
+use av_denoise_core::tune::{TuningConfig, TuningMode, build_pass_engine};
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
@@ -103,7 +103,7 @@ fn a_host_keeps_what_core_needs_to_rebuild_its_engine() {
         ..TuningConfig::default()
     };
 
-    let rebuilt = build_engine(denoiser.selected(), denoiser.client(), spec, &config);
+    let rebuilt = build_pass_engine(denoiser.selected(), denoiser.client(), spec, &config);
     let rebuilt = rebuilt.expect("core rebuilds the engine");
 
     assert_eq!(spec.geometry().width, 16);

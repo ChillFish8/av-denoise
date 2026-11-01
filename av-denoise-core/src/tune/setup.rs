@@ -12,7 +12,7 @@ use super::priority::{PriorityTable, priority_for};
 use super::profile_key::profile_key;
 use super::selector::EngineKernels;
 use super::store::resolve;
-use crate::engine::{PassEngine, PassSpec};
+use crate::engine::{Engine, EngineSpec, PassEngine, PassSpec};
 use crate::error::Error;
 
 /// How the engines of one group are wired for tuning.
@@ -73,21 +73,42 @@ pub(crate) fn device_priority(device: &DeviceProfile) -> &'static PriorityTable 
 
 /// Builds `spec` on `client` from the store's picks, with no tuning ledger.
 ///
-/// `device` is the device `client` runs on, and names the stored result to read. With
-/// [TuningMode::Off] every launch site runs its baseline under the device's legality rules.
+/// `device` is the device `client` runs on, and names the stored result to read. Each pass reads
+/// the profile stored under its own [profile_key]. With [TuningMode::Off] every launch site runs its
+/// baseline under the device's legality rules.
 pub fn build_engine(
+    device: &cubecl::Device,
+    client: &Client,
+    spec: EngineSpec,
+    config: &TuningConfig,
+) -> Result<Box<dyn Engine>, Error> {
+    let profile = device_profile(device, client);
+    let setup = KernelSetup::default();
+
+    spec.build(client, |pass| {
+        let key = profile_key(pass);
+        engine_kernels(&setup, config, &key, &profile)
+    })
+}
+
+/// Builds the single pass `spec` on `client`, as [build_engine] builds a whole frame's engine.
+pub fn build_pass_engine(
     device: &cubecl::Device,
     client: &Client,
     spec: PassSpec,
     config: &TuningConfig,
 ) -> Result<Box<dyn PassEngine>, Error> {
-    let identity = describe(device, client);
-    let limits = DeviceLimits::from_client(client);
-    let profile = DeviceProfile { identity, limits };
-
+    let profile = device_profile(device, client);
     let setup = KernelSetup::default();
     let key = profile_key(&spec);
     let kernels = engine_kernels(&setup, config, &key, &profile);
 
     spec.build(client, kernels)
+}
+
+fn device_profile(device: &cubecl::Device, client: &Client) -> DeviceProfile {
+    let identity = describe(device, client);
+    let limits = DeviceLimits::from_client(client);
+
+    DeviceProfile { identity, limits }
 }

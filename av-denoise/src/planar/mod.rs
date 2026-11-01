@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use anyhow::Context;
-use av_denoise_core::tune::{TuningConfig, TuningFrame, tune_frames};
+use av_denoise_core::tune::{TuningConfig, TuningFrame, tune_pass_frames};
 use av_denoise_core::{
     ChannelMode,
     DenoisingMode,
@@ -350,7 +350,7 @@ struct TuningPass {
 
 impl TuningPass {
     fn run(&self, config: &TuningConfig, request: &TuneRequest) -> TuneReport {
-        tune_frames(
+        tune_pass_frames(
             &self.device,
             &self.client,
             &self.specs,

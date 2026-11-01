@@ -1,4 +1,4 @@
-use av_denoise_core::tune::{TuningMode, tuning_frame_count as group_frame_count};
+use av_denoise_core::tune::{TuningMode, pass_tuning_frame_count};
 
 use crate::planar::{FrameLayout, PlaneOptions, plane_specs};
 
@@ -29,5 +29,5 @@ pub(crate) fn resolve_mode(flag: TuningMode, env: Option<&str>) -> TuningMode {
 /// How many frames a tuning pass for the planes `options` denoises at `layout` reads.
 pub fn tuning_frame_count(options: &PlaneOptions, layout: FrameLayout) -> usize {
     let specs = plane_specs(options, layout);
-    group_frame_count(&specs)
+    pass_tuning_frame_count(&specs)
 }

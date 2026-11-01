@@ -16,7 +16,7 @@ use av_denoise_core::tune::{
     DeviceProfile,
     TuningConfig,
     TuningMode,
-    build_engine as build_settled_engine,
+    build_pass_engine as build_settled_engine,
     describe,
 };
 use av_denoise_core::{PassEngine, PassSpec};

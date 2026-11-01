@@ -1,7 +1,11 @@
-use crate::tune::{TUNE_EXTRA_FRAMES, profile_key, tuning_frame_count};
+use crate::tune::unit::{TuneUnit, unit_profile_keys};
+use crate::tune::{TUNE_EXTRA_FRAMES, pass_tuning_frame_count, profile_key, tuning_frame_count};
 use crate::{
     ChannelMode,
+    ChromaLayout,
     DenoisingMode,
+    EngineSpec,
+    Geometry,
     Nl4dOptions,
     NlmeansAlgorithm,
     NlmeansHqOptions,
@@ -48,6 +52,35 @@ fn nlmeans_spec(algorithm: NlmeansAlgorithm) -> PassSpec {
     let geometry = geometry(ChannelMode::Luma, SampleFormat::U8, SampleFormat::U8, 64, 64);
 
     PassSpec::Nlmeans { algorithm, geometry }
+}
+
+fn frame_geometry(chroma: ChromaLayout) -> Geometry {
+    Geometry {
+        width: 960,
+        height: 540,
+        chroma,
+        input: SampleFormat::U8,
+        output: SampleFormat::U8,
+    }
+}
+
+/// An nl4d spec over a 960x540 frame, cleaning chroma unless `chroma` is [ChromaLayout::Gray].
+fn nl4d_engine_spec(radius: u32, chroma: ChromaLayout) -> EngineSpec {
+    let options = Nl4dOptions {
+        temporal_radius: radius,
+        ..Nl4dOptions::default()
+    };
+    let chroma_options = if chroma == ChromaLayout::Gray {
+        None
+    } else {
+        Some(options)
+    };
+
+    EngineSpec::Nl4d {
+        luma: Some(options),
+        chroma: chroma_options,
+        geometry: frame_geometry(chroma),
+    }
 }
 
 fn temporal_nlm(radius: u32) -> NlmeansOptions {
@@ -119,12 +152,76 @@ fn fast_and_hq_nlmeans_give_different_keys() {
 }
 
 #[test]
-fn the_frame_count_follows_the_widest_span() {
+fn the_pass_frame_count_follows_the_widest_span() {
     let nl4d = nl4d_spec(ChannelMode::Luma, 2, SampleFormat::U8, SampleFormat::U8, 64, 64);
     let nlm = temporal_nlm(1);
     let nlmeans = nlmeans_spec(NlmeansAlgorithm::Fast(nlm));
 
+    let frames = pass_tuning_frame_count(&[nl4d, nlmeans]);
+
+    assert_eq!(frames, 9 + TUNE_EXTRA_FRAMES);
+}
+
+#[test]
+fn the_frame_count_follows_the_widest_span() {
+    let nl4d = nl4d_engine_spec(2, ChromaLayout::Gray);
+    let nlm = temporal_nlm(1);
+    let nlmeans = EngineSpec::Nlmeans {
+        luma: Some(NlmeansAlgorithm::Fast(nlm)),
+        chroma: None,
+        geometry: frame_geometry(ChromaLayout::Gray),
+    };
+
     let frames = tuning_frame_count(&[nl4d, nlmeans]);
 
     assert_eq!(frames, 9 + TUNE_EXTRA_FRAMES);
+}
+
+#[test]
+fn a_chroma_only_spec_counts_its_chroma_span() {
+    let options = Nl4dOptions {
+        temporal_radius: 1,
+        ..Nl4dOptions::default()
+    };
+    let spec = EngineSpec::Nl4d {
+        luma: None,
+        chroma: Some(options),
+        geometry: frame_geometry(ChromaLayout::Yuv420),
+    };
+
+    let frames = tuning_frame_count(&[spec]);
+
+    assert_eq!(frames, 5 + TUNE_EXTRA_FRAMES);
+}
+
+#[test]
+fn an_engine_spec_keys_each_pass_as_its_pass_spec() {
+    let spec = nl4d_engine_spec(2, ChromaLayout::Yuv420);
+    let units = TuneUnit::frames(&[spec]);
+
+    let keys = unit_profile_keys(&units);
+
+    let luma = nl4d_spec(ChannelMode::Luma, 2, SampleFormat::U8, SampleFormat::U8, 960, 540);
+    let chroma = nl4d_spec(
+        ChannelMode::Chroma,
+        2,
+        SampleFormat::U8,
+        SampleFormat::U8,
+        480,
+        270,
+    );
+    let luma_key = profile_key(&luma);
+    let chroma_key = profile_key(&chroma);
+    assert_eq!(keys, [luma_key, chroma_key]);
+}
+
+#[test]
+fn a_luma_only_engine_spec_has_one_key() {
+    let spec = nl4d_engine_spec(2, ChromaLayout::Gray);
+    let units = TuneUnit::frames(&[spec]);
+
+    let keys = unit_profile_keys(&units);
+
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].ends_with("|Luma|in-u8|out-u8|w1024|h1024"), "{keys:?}");
 }

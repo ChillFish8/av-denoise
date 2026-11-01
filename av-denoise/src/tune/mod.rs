@@ -108,5 +108,5 @@ pub fn is_tuned(options: &PlaneOptions, layout: FrameLayout) -> bool {
     };
 
     let specs = plane_specs(options, layout);
-    av_denoise_core::tune::is_tuned(&device, &client, &specs, &config)
+    av_denoise_core::tune::is_pass_tuned(&device, &client, &specs, &config)
 }

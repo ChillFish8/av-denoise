@@ -15,11 +15,11 @@ use super::frame::{TuningFrame, check_frames};
 use super::identity::describe;
 use super::ledger::{TuneLedger, TunePhase};
 use super::lock::{TuneLock, TuneLockOutcome};
-use super::profile_key::profile_key;
 use super::search::SearchMode;
 use super::setup::{KernelSetup, device_priority};
 use super::store::{reload, resolve};
-use crate::engine::PassSpec;
+use super::unit::{TuneUnit, unit_profile_keys};
+use crate::engine::{EngineSpec, PassSpec};
 
 /// What a tuning pass asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,11 +109,38 @@ impl TuneReport {
 ///
 /// The pass builds its own engines and drops them afterwards. [TuningMode::Off] tunes nothing, and
 /// any other mode tunes. A frame that does not match `specs` skips the pass, with the mismatch as the
-/// reason.
+/// reason. Each pass of an engine is tuned at its own plane size, and keeps its own stored profile.
 pub fn tune_frames(
     device: &cubecl::Device,
     client: &Client,
+    specs: &[EngineSpec],
+    frames: &[TuningFrame],
+    config: &TuningConfig,
+    request: &TuneRequest,
+) -> TuneReport {
+    let units = TuneUnit::frames(specs);
+    tune_units(device, client, &units, frames, config, request)
+}
+
+/// Tunes the single passes `specs` describe on `frames`, as [tune_frames] tunes whole frames.
+///
+/// Each frame holds one list of planes per pass, holding the planes that pass reads.
+pub fn tune_pass_frames(
+    device: &cubecl::Device,
+    client: &Client,
     specs: &[PassSpec],
+    frames: &[TuningFrame],
+    config: &TuningConfig,
+    request: &TuneRequest,
+) -> TuneReport {
+    let units = TuneUnit::passes_of(specs);
+    tune_units(device, client, &units, frames, config, request)
+}
+
+fn tune_units(
+    device: &cubecl::Device,
+    client: &Client,
+    units: &[TuneUnit],
     frames: &[TuningFrame],
     config: &TuningConfig,
     request: &TuneRequest,
@@ -124,7 +151,7 @@ pub fn tune_frames(
         return TuneReport::skipped_since("tuning is off", started);
     }
 
-    let checked = check_frames(specs, frames);
+    let checked = check_frames(units, frames);
     if let Err(error) = checked {
         let reason = error.to_string();
         return TuneReport::skipped_since(reason, started);
@@ -135,7 +162,7 @@ pub fn tune_frames(
         ledger: Some(ledger),
         profile_override: None,
     };
-    let built = EngineSet::build(device, client, specs, config, &setup);
+    let built = EngineSet::build(device, client, units, config, &setup);
     let mut set = match built {
         Ok(set) => set,
         Err(error) => {
@@ -150,26 +177,54 @@ pub fn tune_frames(
 /// Whether the store already holds a complete result for every engine `specs` describe.
 ///
 /// Answers `true` when there is nothing to tune, because tuning is not [TuningMode::Auto].
-pub fn is_tuned(device: &cubecl::Device, client: &Client, specs: &[PassSpec], config: &TuningConfig) -> bool {
+pub fn is_tuned(
+    device: &cubecl::Device,
+    client: &Client,
+    specs: &[EngineSpec],
+    config: &TuningConfig,
+) -> bool {
+    let units = TuneUnit::frames(specs);
+    are_units_tuned(device, client, &units, config)
+}
+
+/// Whether the store already holds a complete result for every single pass `specs` describe.
+///
+/// Answers `true` when there is nothing to tune, because tuning is not [TuningMode::Auto].
+pub fn is_pass_tuned(
+    device: &cubecl::Device,
+    client: &Client,
+    specs: &[PassSpec],
+    config: &TuningConfig,
+) -> bool {
+    let units = TuneUnit::passes_of(specs);
+    are_units_tuned(device, client, &units, config)
+}
+
+fn are_units_tuned(
+    device: &cubecl::Device,
+    client: &Client,
+    units: &[TuneUnit],
+    config: &TuningConfig,
+) -> bool {
     if config.mode != TuningMode::Auto {
         return true;
     }
 
     let identity = describe(device, client);
 
-    is_tuned_on(&identity, specs, config)
+    is_tuned_on(&identity, units, config)
 }
 
-/// Whether the store holds a complete result on the device `identity` names for every engine `specs`
-/// describe.
+/// Whether the store holds a complete result on the device `identity` names for every engine of
+/// `units`.
 ///
 /// Answers `true` when tuning is not [TuningMode::Auto].
-pub(crate) fn is_tuned_on(identity: &DeviceIdentity, specs: &[PassSpec], config: &TuningConfig) -> bool {
+pub(crate) fn is_tuned_on(identity: &DeviceIdentity, units: &[TuneUnit], config: &TuningConfig) -> bool {
     if config.mode != TuningMode::Auto {
         return true;
     }
 
-    let profile_keys: Vec<String> = specs.iter().map(profile_key).collect();
+    let profile_keys = unit_profile_keys(units);
     let stored = resolve(config.store.as_deref(), identity);
 
     stored.is_complete(&profile_keys)

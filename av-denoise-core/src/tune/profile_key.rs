@@ -1,6 +1,7 @@
 use super::consts::TUNE_EXTRA_FRAMES;
 use super::key::bucket_dim;
-use crate::engine::{PassSpec, SampleFormat};
+use super::unit::TuneUnit;
+use crate::engine::{EngineSpec, PassSpec, SampleFormat};
 use crate::nlmeans::DenoisingMode;
 
 /// The key a plane's profile ranking is stored under.
@@ -22,10 +23,25 @@ pub fn profile_key(spec: &PassSpec) -> String {
 
 /// How many frames a tuning pass over `specs` needs.
 ///
-/// It is the widest temporal span in the group plus [TUNE_EXTRA_FRAMES]. Nl4d spans `4 * radius + 1`
-/// frames and NLMeans spans `2 * radius + 1`.
-pub fn tuning_frame_count(specs: &[PassSpec]) -> usize {
-    let widest = specs.iter().map(temporal_span).max().unwrap_or(1);
+/// It is the widest temporal span of any pass in the group plus [TUNE_EXTRA_FRAMES]. Nl4d spans
+/// `4 * radius + 1` frames and NLMeans spans `2 * radius + 1`.
+pub fn tuning_frame_count(specs: &[EngineSpec]) -> usize {
+    let units = TuneUnit::frames(specs);
+    frame_count_for(&units)
+}
+
+/// How many frames a tuning pass over the single passes `specs` needs, as [tuning_frame_count] counts.
+pub fn pass_tuning_frame_count(specs: &[PassSpec]) -> usize {
+    let units = TuneUnit::passes_of(specs);
+    frame_count_for(&units)
+}
+
+fn frame_count_for(units: &[TuneUnit]) -> usize {
+    let spans = units
+        .iter()
+        .flat_map(TuneUnit::passes)
+        .map(|pass| temporal_span(&pass));
+    let widest = spans.max().unwrap_or(1);
 
     widest + TUNE_EXTRA_FRAMES
 }

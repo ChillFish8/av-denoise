@@ -53,6 +53,7 @@ mod setup;
 mod site;
 pub(crate) mod sites;
 mod store;
+mod unit;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -86,7 +87,15 @@ pub use self::decide::{
     sample_until_settled,
 };
 pub use self::device::{DeviceIdentity, DeviceLimits, DeviceProfile};
-pub use self::driver::{TuneOutcome, TuneReport, TuneRequest, is_tuned, tune_frames};
+pub use self::driver::{
+    TuneOutcome,
+    TuneReport,
+    TuneRequest,
+    is_pass_tuned,
+    is_tuned,
+    tune_frames,
+    tune_pass_frames,
+};
 pub use self::family::{
     BASELINE_FAMILY,
     Dimension,
@@ -143,7 +152,7 @@ pub use self::legality::{
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::precompile::Precompiled;
 pub use self::priority::{Basis, PriorityTable, SitePriority, family_order, priority_for, skipped};
-pub use self::profile_key::{profile_key, tuning_frame_count};
+pub use self::profile_key::{pass_tuning_frame_count, profile_key, tuning_frame_count};
 pub use self::result::{
     CandidateRecord,
     CompileProgress,
@@ -169,7 +178,7 @@ pub use self::search::{
 };
 pub(crate) use self::selector::{EngineKernels, KernelSelector};
 pub(crate) use self::session::{calibrate, rewarm};
-pub use self::setup::build_engine;
+pub use self::setup::{build_engine, build_pass_engine};
 pub use self::site::{FitError, LaunchShape, SiteCandidate, VariantSite, fit_candidates, legal_candidates};
 #[cfg_attr(
     not(test),

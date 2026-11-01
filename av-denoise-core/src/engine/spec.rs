@@ -230,7 +230,6 @@ impl EngineSpec {
     }
 
     /// Builds the engine on `client`, picking each pass's launch site candidates from `kernels`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only tests build a merged engine"))]
     pub(crate) fn build(
         &self,
         client: &Client,
