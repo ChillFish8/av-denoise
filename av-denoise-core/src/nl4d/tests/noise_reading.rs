@@ -337,6 +337,51 @@ fn chroma_denoiser_pan_reading_does_not_rise() {
 }
 
 #[test]
+fn chroma_only_mode_reads_cb_and_cr_independently() {
+    let width = PAN_WIDTH / 2;
+    let height = PAN_HEIGHT / 2;
+    let flat_cb = vec![0.5f32; (width * height) as usize];
+    let cr_planes = panning_frames(width, height, PAN_SHIFT, PAN_FRAMES, PAN_SIGMA, 23);
+    let frames: Vec<Vec<f32>> = cr_planes
+        .iter()
+        .map(|cr_plane| interleave_planes(&[&flat_cb, cr_plane]))
+        .collect();
+    let params = reading_params(ChannelMode::Chroma, mvtools(16, 8));
+    let last = frames.len() - 1;
+
+    let mut cr_samples = 0;
+    let mut folded = None;
+    run_pushes(params, width, height, &frames, |frame, denoiser| {
+        let noise = denoiser
+            .front_for_test()
+            .measured_noise()
+            .expect("the noise is measured");
+        let (reading, _) = noise.read_history_frame(frame as u32);
+
+        if let Some(sample) = reading.sample {
+            assert!(!sample.valid[0], "frame {frame}: the flat Cb plane has a sample");
+            assert!(sample.valid[1], "frame {frame}: a sample without Cr");
+            assert!(sample.sigma[1] > 0.0, "frame {frame}: Cr reads no noise");
+            cr_samples += 1;
+        }
+
+        if frame == last {
+            folded = denoiser.front_for_test().noise_snapshot();
+        }
+    });
+
+    let snapshot = folded.expect("the last push folds");
+    let temporal = snapshot.temporal_only.expect("Cr holds the temporal chain");
+    let low_unboosted = snapshot.low_unboosted.expect("the low chain is written");
+    let sigma = snapshot.derived.sigma;
+
+    assert!(cr_samples > 0, "no frame read Cr on its own");
+    assert_eq!(temporal[0], low_unboosted[0], "Cb's temporal value falls back");
+    assert_eq!(sigma[0], low_unboosted[0], "Cb's sigma falls back");
+    assert!(sigma[1].is_finite() && sigma[1] > 0.0, "Cr folds to {}", sigma[1]);
+}
+
+#[test]
 fn static_flat_noise_map_clip_reads_as_raw() {
     let frames = ramp_clip(1);
     let params = ramp_params(ChannelMode::Luma, true, 1.0);

@@ -57,6 +57,14 @@ impl BlockSpec {
     }
 }
 
+/// A sample validity mask with the first `channels` channels set.
+pub(crate) fn valid_channels(channels: u32) -> [bool; NOISE_CHANNELS as usize] {
+    let mut valid = [false; NOISE_CHANNELS as usize];
+    valid[..channels as usize].fill(true);
+
+    valid
+}
+
 /// A value between 0 and 1 from a hash of `seed` and `index`.
 pub(crate) fn hashed_unit(seed: u32, index: u32) -> f32 {
     let mut hash = index.wrapping_mul(0x9E37_79B9) ^ seed.wrapping_mul(0x85EB_CA6B);

@@ -8,6 +8,7 @@ use crate::noise::fold::NoiseSettings;
 use crate::noise::history::WindowBounds;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::snapshot::NoiseSnapshot;
+use crate::noise::temporal::TemporalNoiseSample;
 
 /// One value per channel slot.
 type ChannelValues = [f32; NOISE_CHANNELS as usize];
@@ -260,7 +261,7 @@ pub(crate) struct HostDerived {
     pub(crate) median: ChannelValues,
     pub(crate) low: ChannelValues,
     pub(crate) low_unboosted: ChannelValues,
-    /// `None` when no frame of the window has a sample.
+    /// `None` when no frame of the window has a sample of any channel.
     pub(crate) temporal_only: Option<ChannelValues>,
     pub(crate) rho: Option<f32>,
     /// The curve's ratios and quarter median.
@@ -315,6 +316,10 @@ fn frame_readings(record: &HostRecord, sigma_scale: f32) -> [ChannelValues; 3] {
     if let Some(sample) = reading.sample {
         let factor = correlation_factor(sample.rho);
         for channel in 0..NOISE_CHANNELS as usize {
+            if !sample.valid[channel] {
+                continue;
+            }
+
             raw[channel] = raw[channel].max(sample.sigma[channel] * factor);
             raw_low[channel] = raw_low[channel].max(sample.sigma_low[channel] * factor);
             raw_unboosted[channel] = raw_unboosted[channel].max(sample.sigma_low[channel]);
@@ -349,7 +354,7 @@ pub(crate) fn fold_window(records: &[HostRecord], bounds: WindowBounds, sigma_sc
     let window = &records[first..=last];
     let sampled: Vec<&HostRecord> = window
         .iter()
-        .filter(|record| record.reading.sample.is_some())
+        .filter(|record| channel_sample(record, 0).is_some())
         .collect();
     let curved: Vec<&HostRecord> = sampled
         .iter()
@@ -364,11 +369,8 @@ pub(crate) fn fold_window(records: &[HostRecord], bounds: WindowBounds, sigma_sc
     let medians: Vec<ChannelValues> = readings.iter().map(|reading| reading[0]).collect();
     let lows: Vec<ChannelValues> = readings.iter().map(|reading| reading[1]).collect();
     let unboosted: Vec<ChannelValues> = readings.iter().map(|reading| reading[2]).collect();
-    let temporal: Vec<ChannelValues> = sampled
-        .iter()
-        .map(|record| record.reading.sample.unwrap().sigma)
-        .map(|sigma| sigma.map(|value| value * sigma_scale))
-        .collect();
+    let low_unboosted = chain_median(&unboosted).expect("the window holds a frame");
+    let temporal_only = temporal_chain(window, low_unboosted, sigma_scale);
 
     let mut rhos: Vec<f32> = sampled
         .iter()
@@ -382,11 +384,46 @@ pub(crate) fn fold_window(records: &[HostRecord], bounds: WindowBounds, sigma_sc
     HostDerived {
         median: chain_median(&medians).expect("the window holds a frame"),
         low: chain_median(&lows).expect("the window holds a frame"),
-        low_unboosted: chain_median(&unboosted).expect("the window holds a frame"),
-        temporal_only: chain_median(&temporal),
+        low_unboosted,
+        temporal_only,
         rho,
         curve,
     }
+}
+
+/// The record's sample when it holds one of channel `channel`.
+fn channel_sample(record: &HostRecord, channel: usize) -> Option<TemporalNoiseSample> {
+    record.reading.sample.filter(|sample| sample.valid[channel])
+}
+
+/// Each channel's floored median of its scaled sigma over the frames with a sample of it.
+///
+/// A channel with no such frame takes its `low_unboosted` value. It is `None` when no channel has
+/// a sampled frame.
+fn temporal_chain(
+    window: &[HostRecord],
+    low_unboosted: ChannelValues,
+    sigma_scale: f32,
+) -> Option<ChannelValues> {
+    let mut chain = low_unboosted;
+    let mut sampled = false;
+
+    for (channel, value) in chain.iter_mut().enumerate() {
+        let mut sigmas: Vec<f32> = window
+            .iter()
+            .filter_map(|record| channel_sample(record, channel))
+            .map(|sample| sample.sigma[channel] * sigma_scale)
+            .collect();
+        if sigmas.is_empty() {
+            continue;
+        }
+
+        let median = window_median(&mut sigmas);
+        *value = median.max(SIGMA_FLOOR);
+        sampled = true;
+    }
+
+    sampled.then_some(chain)
 }
 
 /// The elementwise median ratios and quarter median of `curved`, which all hold a curve.

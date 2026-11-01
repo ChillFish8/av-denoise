@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::fold_reference::{COEFFICIENTS, CONSUMER, relative_gap};
+use super::records::valid_channels;
 use crate::engine::align::StorageAlign;
 use crate::noise::correlation::{build_spatial_offset_lut, spatial_offset_index};
 use crate::noise::derived::{DerivedCoefficients, DerivedValues};
@@ -62,6 +63,7 @@ fn settings(radius: u32, coefficients: DerivedCoefficients) -> NoiseSettings {
 /// A reading with a sample of correlation `rho` and no curve.
 fn sampled_reading(rho: f32) -> ReadingRecord {
     let sample = TemporalNoiseSample {
+        valid: valid_channels(1),
         sigma: [3.0 / 255.0, 0.0],
         sigma_low: [2.5 / 255.0, 0.0],
         rho,

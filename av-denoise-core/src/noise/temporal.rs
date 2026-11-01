@@ -295,6 +295,10 @@ pub(crate) fn temporal_stats_slot_view(
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TemporalNoiseSample {
+    /// Whether each channel has its own sample.
+    ///
+    /// Entries past the active channel count stay false.
+    pub valid: [bool; NOISE_CHANNELS as usize],
     /// The per-channel median sigma over the static blocks with measurable noise, in normalised
     /// units.
     ///
@@ -542,10 +546,22 @@ fn block_stats(records: &[f32], channels: u32, width: u32, height: u32) -> Vec<B
     blocks
 }
 
-/// The median and lower quartile of the sigmas channel `channel` keeps from its `accepted` blocks,
-/// both 0 when it keeps none.
+/// The median and lower quartile of the sigmas channel `channel` keeps from its `accepted` blocks.
+///
+/// It returns `None` when the accepted blocks fall below [STATIC_FRACTION_MIN] of the frame's
+/// `total_blocks`, or when the channel keeps no sigma.
 #[cfg(test)]
-fn channel_sigma(accepted: &[&BlockStats], channel: usize, threshold: Option<f32>) -> (f32, f32) {
+fn channel_sigma(
+    accepted: &[&BlockStats],
+    channel: usize,
+    threshold: Option<f32>,
+    total_blocks: usize,
+) -> Option<(f32, f32)> {
+    let static_fraction = accepted.len() as f32 / total_blocks as f32;
+    if static_fraction < STATIC_FRACTION_MIN {
+        return None;
+    }
+
     let mut sigmas: Vec<f32> = accepted
         .iter()
         .filter(|block| block.keeps_sigma(threshold))
@@ -553,14 +569,14 @@ fn channel_sigma(accepted: &[&BlockStats], channel: usize, threshold: Option<f32
         .collect();
 
     if sigmas.is_empty() {
-        return (0.0, 0.0);
+        return None;
     }
 
     sort_ascending(&mut sigmas);
     let sigma = median(&sigmas);
     let sigma_low = lower_quartile(&sigmas);
 
-    (sigma, sigma_low)
+    Some((sigma, sigma_low))
 }
 
 /// The scalar sample [temporal_noise_reading] builds, without a curve.
@@ -596,19 +612,19 @@ impl TemporalNoiseReading {
 
 /// Builds one centre slot's [TemporalNoiseReading].
 ///
-/// Channel 0's [channel_accepted_blocks] selection sets the correlation, the static fraction and the
-/// curve, which keeps the scalar sample and the curve agreeing on which blocks are static noise.
-/// The sample is `None` when channel 0's outlier ceiling cannot be trusted, when the static fraction
-/// falls below [STATIC_FRACTION_MIN], or when no static block carries measurable noise, as in a
-/// zero-filled duplicate slot.
-///
 /// Each channel's `sigma` and `sigma_low` come from the blocks that channel accepts on its own
 /// numbers. A moved block whose texture is above [moved_texture_threshold] leaves them but still
-/// counts everywhere else. The sample is also `None` when that leaves channel 0 no sigma. Another
-/// channel left with no sigma, or with an untrusted ceiling, reads 0.
+/// counts everywhere else. A channel has its own sample when its outlier ceiling can be trusted,
+/// its accepted blocks reach [STATIC_FRACTION_MIN] of the frame and it keeps a sigma. Channel 0 also
+/// needs a block with a correlation. A channel without a sample reads 0. The sample is `None` when
+/// no channel has one, as in a zero-filled duplicate slot.
 ///
-/// The curve needs `with_curve` and a sample, since a frame too unreliable for a scalar sample is
-/// too unreliable for a curve.
+/// Channel 0's [channel_accepted_blocks] selection sets the correlation, the static fraction and the
+/// curve, which keeps the scalar sample and the curve agreeing on which blocks are static noise.
+/// They read 0 without a sample of channel 0.
+///
+/// The curve needs `with_curve` and a sample of channel 0, since a frame too unreliable for a scalar
+/// sample is too unreliable for a curve.
 #[cfg(test)]
 pub(crate) fn temporal_noise_reading(
     records: &[f32],
@@ -617,16 +633,11 @@ pub(crate) fn temporal_noise_reading(
     height: u32,
     with_curve: bool,
 ) -> TemporalNoiseReading {
-    let none = TemporalNoiseReading::empty();
-
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
     let total_blocks = (blocks_x * blocks_y) as usize;
 
     let blocks = block_stats(records, channels, width, height);
-    let Some(accepted) = channel_accepted_blocks(&blocks, 0) else {
-        return none;
-    };
-
+    let accepted = channel_accepted_blocks(&blocks, 0).unwrap_or_default();
     let threshold = moved_texture_threshold(&blocks);
     let channel_count = channels as usize;
 
@@ -640,41 +651,44 @@ pub(crate) fn temporal_noise_reading(
         }
     }
 
-    let kept_ch0 = accepted
-        .iter()
-        .filter(|block| block.keeps_sigma(threshold))
-        .count();
+    let mut sigmas = [None; NOISE_CHANNELS as usize];
+    let channel_0 = channel_sigma(&accepted, 0, threshold, total_blocks);
+    sigmas[0] = channel_0.filter(|_| !rho_samples.is_empty());
 
-    let static_fraction = accepted.len() as f32 / total_blocks as f32;
-    let below_fraction = static_fraction < STATIC_FRACTION_MIN;
-    if below_fraction || rho_samples.is_empty() || kept_ch0 == 0 {
-        return none;
-    }
-
-    let mut sigma = [0.0f32; NOISE_CHANNELS as usize];
-    let mut sigma_low = [0.0f32; NOISE_CHANNELS as usize];
-    let (sigma_ch0, sigma_low_ch0) = channel_sigma(&accepted, 0, threshold);
-    sigma[0] = sigma_ch0;
-    sigma_low[0] = sigma_low_ch0;
-
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "the channel index also selects the blocks and the sigma lane"
+    )]
     for channel in 1..channel_count {
         let channel_accepted = channel_accepted_blocks(&blocks, channel).unwrap_or_default();
-        let (channel_median, channel_low) = channel_sigma(&channel_accepted, channel, threshold);
-        sigma[channel] = channel_median;
-        sigma_low[channel] = channel_low;
+        sigmas[channel] = channel_sigma(&channel_accepted, channel, threshold, total_blocks);
     }
 
-    sort_ascending(&mut rho_samples);
-    let rho = median(&rho_samples);
+    let valid = sigmas.map(|channel_sigmas| channel_sigmas.is_some());
+    if !valid.contains(&true) {
+        return TemporalNoiseReading::empty();
+    }
+
+    let sigma = sigmas.map(|channel_sigmas| channel_sigmas.map_or(0.0, |pair| pair.0));
+    let sigma_low = sigmas.map(|channel_sigmas| channel_sigmas.map_or(0.0, |pair| pair.1));
+
+    let mut rho = 0.0;
+    let mut static_fraction = 0.0;
+    if valid[0] {
+        sort_ascending(&mut rho_samples);
+        rho = median(&rho_samples);
+        static_fraction = accepted.len() as f32 / total_blocks as f32;
+    }
 
     let sample = TemporalNoiseSample {
+        valid,
         sigma,
         sigma_low,
         rho,
         static_fraction,
     };
 
-    let curve = if with_curve {
+    let curve = if with_curve && valid[0] {
         let accepted_blocks: Vec<AcceptedBlock> = accepted.into_iter().map(BlockStats::to_accepted).collect();
         build_noise_curve(records, channels, &accepted_blocks, sample.sigma[0])
     } else {

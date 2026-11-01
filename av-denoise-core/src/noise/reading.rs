@@ -8,15 +8,15 @@ use super::temporal::TemporalNoiseSample;
 
 /// The per-channel lower quartile of the Immerkær cube sigmas, one word per channel.
 pub(crate) const READING_IMMERKAER_LOW: u32 = 0;
-/// 1.0 when the slot has a temporal sample, else 0.0.
-pub(crate) const READING_SAMPLE_VALID: u32 = READING_IMMERKAER_LOW + NOISE_CHANNELS;
+/// 1.0 when the slot has a temporal sample of a channel, else 0.0, one word per channel.
+pub(crate) const READING_SAMPLE_VALID_BASE: u32 = READING_IMMERKAER_LOW + NOISE_CHANNELS;
 /// The sample's per-channel median sigma, one word per channel.
-pub(crate) const READING_SIGMA: u32 = READING_SAMPLE_VALID + 1;
+pub(crate) const READING_SIGMA: u32 = READING_SAMPLE_VALID_BASE + NOISE_CHANNELS;
 /// The sample's per-channel lower-quartile sigma, one word per channel.
 pub(crate) const READING_SIGMA_LOW: u32 = READING_SIGMA + NOISE_CHANNELS;
-/// The sample's median lag-1 correlation.
+/// The sample's median lag-1 correlation, 0.0 without a sample of channel 0.
 pub(crate) const READING_RHO: u32 = READING_SIGMA_LOW + NOISE_CHANNELS;
-/// The sample's fraction of accepted blocks.
+/// The sample's fraction of accepted blocks, 0.0 without a sample of channel 0.
 pub(crate) const READING_STATIC_FRACTION: u32 = READING_RHO + 1;
 /// How many blocks were accepted as static noise.
 pub(crate) const READING_ACCEPTED: u32 = READING_STATIC_FRACTION + 1;
@@ -33,7 +33,8 @@ pub(crate) const READING_WORDS: u32 = READING_RATIOS + NOISE_CURVE_BINS as u32;
 
 /// One slot's reading as a readback sees it.
 ///
-/// Flags read as 0.0 or 1.0 and counts as exact `f32` values.
+/// Flags read as 0.0 or 1.0 and counts as exact `f32` values. The sample is present when any
+/// channel has one.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReadingRecord {
@@ -51,8 +52,11 @@ impl ReadingRecord {
         assert_eq!(word_count, READING_WORDS as usize, "one reading's words");
 
         let immerkaer_low = channel_words(words, READING_IMMERKAER_LOW);
-        let sample_valid = words[READING_SAMPLE_VALID as usize] != 0.0;
-        let sample = sample_valid.then(|| TemporalNoiseSample {
+        let valid_words = channel_words(words, READING_SAMPLE_VALID_BASE);
+        let valid = valid_words.map(|word| word != 0.0);
+        let sampled = valid.contains(&true);
+        let sample = sampled.then(|| TemporalNoiseSample {
+            valid,
             sigma: channel_words(words, READING_SIGMA),
             sigma_low: channel_words(words, READING_SIGMA_LOW),
             rho: words[READING_RHO as usize],
@@ -88,7 +92,8 @@ impl ReadingRecord {
         set_channel_words(&mut words, READING_IMMERKAER_LOW, self.immerkaer_low);
 
         if let Some(sample) = self.sample {
-            words[READING_SAMPLE_VALID as usize] = 1.0;
+            let valid = sample.valid.map(|valid| if valid { 1.0 } else { 0.0 });
+            set_channel_words(&mut words, READING_SAMPLE_VALID_BASE, valid);
             set_channel_words(&mut words, READING_SIGMA, sample.sigma);
             set_channel_words(&mut words, READING_SIGMA_LOW, sample.sigma_low);
             words[READING_RHO as usize] = sample.rho;

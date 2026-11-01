@@ -25,7 +25,7 @@ use crate::noise::reading::{
     READING_QUARTER_MEDIAN,
     READING_RATIOS,
     READING_RHO,
-    READING_SAMPLE_VALID,
+    READING_SAMPLE_VALID_BASE,
     READING_SIGMA,
     READING_SIGMA_LOW,
     READING_WORDS,
@@ -59,9 +59,9 @@ const _: () = assert!(
 
 /// The frame qualifies with any reading.
 const GATE_ANY: u32 = 0;
-/// The frame qualifies with a sample.
+/// The frame qualifies with a sample of the channel.
 const GATE_SAMPLE: u32 = 1;
-/// The frame qualifies with a sample and a curve.
+/// The frame qualifies with a sample of the channel and a curve.
 const GATE_CURVE: u32 = 2;
 
 /// Where a window fold reads its frames from.
@@ -71,11 +71,14 @@ struct Window {
     last: u32,
 }
 
-/// Whether the frame in history slot `slot` passes `gate`.
+/// Whether the frame in history slot `slot` passes `gate` on channel `channel`.
+///
+/// The sample gate takes the channel's own sample. The curve gate takes the channel's sample and
+/// the frame's curve.
 #[cube]
-fn passes(records: &[f32], slot: u32, gate: u32) -> bool {
+fn passes(records: &[f32], slot: u32, gate: u32, channel: u32) -> bool {
     let base = slot * READING_WORDS;
-    let has_sample = records[(base + READING_SAMPLE_VALID) as usize] != 0.0f32;
+    let has_sample = records[(base + READING_SAMPLE_VALID_BASE + channel) as usize] != 0.0f32;
     let has_curve = records[(base + READING_CURVE_VALID) as usize] != 0.0f32;
     let curve_passes = has_sample && has_curve;
     let sample_passes = select(gate == GATE_SAMPLE, has_sample, curve_passes);
@@ -83,15 +86,21 @@ fn passes(records: &[f32], slot: u32, gate: u32) -> bool {
     select(gate == GATE_ANY, true, sample_passes)
 }
 
-/// The frames of `window` that pass `gate`.
+/// The frames of `window` that pass `gate` on channel `channel`.
 #[cube]
-fn passing_frames(records: &[f32], window: &Window, gate: u32, #[comptime] capacity: u32) -> u32 {
+fn passing_frames(
+    records: &[f32],
+    window: &Window,
+    gate: u32,
+    channel: u32,
+    #[comptime] capacity: u32,
+) -> u32 {
     let mut count = 0u32;
     let mut frame = window.first;
 
     while frame <= window.last {
         let slot = frame % capacity;
-        let counted = passes(records, slot, gate);
+        let counted = passes(records, slot, gate, channel);
 
         count += select(counted, 1u32, 0u32);
         frame += 1u32;
@@ -138,7 +147,7 @@ fn sorted_median(values: &mut Array<f32>, count: u32) -> f32 {
 }
 
 /// The median of word `offset` of each frame's `stride`-word row of `source`, over the frames of
-/// `window` that pass `gate`.
+/// `window` that pass `gate` on channel 0.
 #[cube]
 fn gated_median(
     source: &[f32],
@@ -156,7 +165,7 @@ fn gated_median(
     while frame <= window.last {
         let slot = frame % capacity;
 
-        if passes(records, slot, gate) {
+        if passes(records, slot, gate, 0u32) {
             values[count as usize] = source[(slot * stride + offset) as usize];
             count += 1u32;
         }
@@ -168,6 +177,8 @@ fn gated_median(
 }
 
 /// One frame's reading for `chain` on `channel`, as the fold combines and scales it.
+///
+/// A frame without a sample of `channel` gives the channel's Immerkær reading alone.
 #[cube]
 fn chain_reading(
     records: &[f32],
@@ -178,7 +189,7 @@ fn chain_reading(
     channel: u32,
 ) -> f32 {
     let base = slot * READING_WORDS;
-    let has_sample = records[(base + READING_SAMPLE_VALID) as usize] != 0.0f32;
+    let has_sample = records[(base + READING_SAMPLE_VALID_BASE + channel) as usize] != 0.0f32;
     let rho = records[(base + READING_RHO) as usize];
     let factor = correlation_factor(rho, fold_settings);
     let sigma_scale = fold_settings[FOLD_SIGMA_SCALE as usize];
@@ -207,7 +218,8 @@ fn chain_reading(
 
 /// The median of `chain` on `channel` over `window`, floored at the sigma floor.
 ///
-/// The temporal-only chain takes only the frames with a sample, and gives 0 without one.
+/// The temporal-only chain takes only the frames with a sample of `channel`, and gives 0 without
+/// one.
 #[cube]
 fn chain_median(
     records: &[f32],
@@ -226,7 +238,7 @@ fn chain_median(
     while frame <= window.last {
         let slot = frame % capacity;
 
-        if passes(records, slot, gate) {
+        if passes(records, slot, gate, channel) {
             values[count as usize] = chain_reading(records, results, fold_settings, slot, chain, channel);
             count += 1u32;
         }
@@ -280,7 +292,35 @@ fn window_median_task(
     }
 }
 
+/// One bit per active channel, set when a frame of `window` has a sample of that channel.
+///
+/// `sampled` is channel 0's count of such frames.
+#[cube]
+fn sampled_channels(
+    records: &[f32],
+    window: &Window,
+    sampled: u32,
+    #[comptime] capacity: u32,
+    #[comptime] channels: u32,
+) -> u32 {
+    let mut mask = select(sampled > 0u32, 1u32, 0u32);
+
+    #[unroll]
+    for channel in 1..channels {
+        let count = passing_frames(records, window, GATE_SAMPLE, channel, capacity);
+        let bit = comptime!(1u32 << channel);
+
+        mask |= select(count > 0u32, bit, 0u32);
+    }
+
+    mask
+}
+
 /// Writes the windowed chains, rho and curve into `state`, and every derived value.
+///
+/// A channel without a sampled frame takes its unboosted low chain as its sigma. Its temporal-only
+/// value is the same while another channel holds the chain, and 0 while no channel does. The rho
+/// follows channel 0's samples.
 ///
 /// Run by thread 0 of cube 0 once every median is in `medians`.
 #[cube]
@@ -295,12 +335,13 @@ fn write_window_state(
     derived: &mut [f32],
     curve: &mut [f32],
     table_inputs: &mut Shared<[f32]>,
-    sampled: u32,
+    sampled_mask: u32,
     curve_present: bool,
     #[comptime] channels: u32,
     #[comptime] table_radius: u32,
 ) {
-    let temporal_valid = sampled > 0u32;
+    let rho_valid = (sampled_mask & 1u32) != 0u32;
+    let any_sampled = sampled_mask != 0u32;
     let mut median_sum = 0.0f32;
     let mut low_sum = 0.0f32;
 
@@ -310,12 +351,15 @@ fn write_window_state(
         let low = medians[(CHAIN_LOW * NOISE_CHANNELS + channel) as usize];
         let unboosted = medians[(CHAIN_LOW_UNBOOSTED * NOISE_CHANNELS + channel) as usize];
         let temporal = medians[(CHAIN_TEMPORAL_ONLY * NOISE_CHANNELS + channel) as usize];
+        let bit = comptime!(1u32 << channel);
+        let channel_sampled = (sampled_mask & bit) != 0u32;
+        let fallback = select(any_sampled, unboosted, 0.0f32);
 
         state[(STATE_MEDIAN + 1 + channel) as usize] = median;
         state[(STATE_LOW + 1 + channel) as usize] = low;
         state[(STATE_LOW_UNBOOSTED + 1 + channel) as usize] = unboosted;
-        state[(STATE_TEMPORAL_ONLY + 1 + channel) as usize] = temporal;
-        derived[(DERIVED_SIGMA + channel) as usize] = select(temporal_valid, temporal, unboosted);
+        state[(STATE_TEMPORAL_ONLY + 1 + channel) as usize] = select(channel_sampled, temporal, fallback);
+        derived[(DERIVED_SIGMA + channel) as usize] = select(channel_sampled, temporal, unboosted);
     }
 
     #[unroll]
@@ -327,16 +371,17 @@ fn write_window_state(
         low_sum += low * low;
     }
 
-    let temporal_flag = select(temporal_valid, 1.0f32, 0.0f32);
+    let temporal_flag = select(any_sampled, 1.0f32, 0.0f32);
+    let rho_flag = select(rho_valid, 1.0f32, 0.0f32);
     let curve_flag = select(curve_present, 1.0f32, 0.0f32);
-    let rho = select(temporal_valid, medians[MEDIAN_RHO as usize], 0.0f32);
+    let rho = select(rho_valid, medians[MEDIAN_RHO as usize], 0.0f32);
     let quarter_median = select(curve_present, medians[MEDIAN_QUARTER as usize], 0.0f32);
 
     state[STATE_MEDIAN as usize] = 1.0f32;
     state[STATE_LOW as usize] = 1.0f32;
     state[STATE_LOW_UNBOOSTED as usize] = 1.0f32;
     state[STATE_TEMPORAL_ONLY as usize] = temporal_flag;
-    state[STATE_RHO_VALID as usize] = temporal_flag;
+    state[STATE_RHO_VALID as usize] = rho_flag;
     state[STATE_RHO as usize] = rho;
     state[STATE_CURVE_VALID as usize] = curve_flag;
     state[STATE_QUARTER_MEDIAN as usize] = quarter_median;
@@ -376,10 +421,10 @@ fn write_window_state(
 ///
 /// Stream frame `frame` sits in history slot `frame % capacity`. Each chain is the median over the
 /// window of each frame's reading, combined and scaled as one fold of that frame alone would, and
-/// floored at the sigma floor. Every frame feeds the median and low chains. Only frames with a
-/// sample feed the temporal-only chain and the rho. The window holds a curve when at least half
-/// its sampled frames have one, and the ratios and the quarter median are then the elementwise
-/// median over those frames.
+/// floored at the sigma floor. Every frame feeds the median and low chains. Each channel's
+/// temporal-only chain takes only the frames with a sample of that channel. The rho takes only the
+/// frames with a sample of channel 0. The window holds a curve when at least half of those frames
+/// have one, and the ratios and the quarter median are then the elementwise median over them.
 ///
 /// Cube 0's threads each take one median between them, then thread 0 writes the state and the
 /// derived values. With a `table_radius` above 0, cube 0 then writes both offset tables. A
@@ -411,8 +456,8 @@ pub fn noise_window_fold(
     let mut table_inputs = Shared::<[f32]>::new_slice(TABLE_INPUTS as usize);
     let mut medians = Shared::<[f32]>::new_slice(MEDIAN_WORDS as usize);
     let window = Window { first, last };
-    let sampled = passing_frames(records, &window, GATE_SAMPLE, capacity);
-    let curved = passing_frames(records, &window, GATE_CURVE, capacity);
+    let sampled = passing_frames(records, &window, GATE_SAMPLE, 0u32, capacity);
+    let curved = passing_frames(records, &window, GATE_CURVE, 0u32, capacity);
     let curve_present = sampled > 0u32 && 2u32 * curved >= sampled;
 
     if CUBE_POS_X == 0 {
@@ -430,6 +475,8 @@ pub fn noise_window_fold(
         sync_cube();
 
         if UNIT_POS_X == 0 {
+            let sampled_mask = sampled_channels(records, &window, sampled, capacity, channels);
+
             write_window_state(
                 &medians,
                 fold_settings,
@@ -437,7 +484,7 @@ pub fn noise_window_fold(
                 derived,
                 curve,
                 &mut table_inputs,
-                sampled,
+                sampled_mask,
                 curve_present,
                 channels,
                 table_radius,

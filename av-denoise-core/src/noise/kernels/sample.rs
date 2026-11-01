@@ -19,7 +19,7 @@ use crate::noise::reading::{
     READING_QUARTER_MEDIAN,
     READING_RATIOS,
     READING_RHO,
-    READING_SAMPLE_VALID,
+    READING_SAMPLE_VALID_BASE,
     READING_SIGMA,
     READING_SIGMA_LOW,
     READING_STATIC_FRACTION,
@@ -501,25 +501,53 @@ pub fn noise_block_accept(
     }
 }
 
+/// Whether channel `channel` has its own sample, from the resolved sample batch.
+///
+/// The channel's accepted blocks must make up at least `min_accepted` and at least one of its
+/// sigmas must remain. A channel past the active ones, or any channel without `temporal`, has no
+/// sample.
+#[cube]
+fn channel_valid(
+    sample_out: &Shared<[u32]>,
+    min_accepted: u32,
+    #[comptime] channel: u32,
+    #[comptime] channels: u32,
+    #[comptime] temporal: bool,
+) -> bool {
+    let mut valid = false;
+
+    if comptime!(temporal && channel < channels) {
+        let accepted_query = comptime!(SAMPLE_QUERY_ACCEPTED + channel);
+        let sigma_query = comptime!(SAMPLE_CHANNEL_QUERIES * channel);
+        let (_, accepted) = select_result(sample_out, accepted_query);
+        let (_, sigma_count) = select_result(sample_out, sigma_query);
+
+        valid = accepted >= min_accepted && sigma_count > 0u32;
+    }
+
+    valid
+}
+
 /// Resolves every query of a slot's batches into the slot's reading.
 ///
-/// The Immerkær words take each channel's lower quartile of its cube sigmas. With `temporal`, the
-/// sample is valid when the accepted blocks make up at least
-/// [STATIC_FRACTION_MIN](crate::noise::temporal::STATIC_FRACTION_MIN) of the frame, at least
-/// one of them has a correlation and at least one sigma remains. It then holds each channel's
-/// median and lower quartile, the correlation median and the static fraction.
+/// The Immerkær words take each channel's lower quartile of its cube sigmas. With `temporal`, each
+/// channel has its own sample by [channel_valid], where `min_accepted` makes up
+/// [STATIC_FRACTION_MIN](crate::noise::temporal::STATIC_FRACTION_MIN) of the frame. Channel 0 also
+/// needs at least one accepted block with a correlation. A channel's sample holds its median and
+/// lower quartile, and each word of a channel without one is 0. The correlation median and the
+/// static fraction need a sample of channel 0.
 ///
 /// With `curve`, each bin holding at least
 /// [MIN_QUARTERS_PER_BIN](crate::noise::curve::MIN_QUARTERS_PER_BIN) quarters takes their median.
-/// The curve is valid with a sample, a positive static quarter median and at least
+/// The curve is valid with a sample of channel 0, a positive static quarter median and at least
 /// [MIN_POPULATED_BINS](crate::noise::curve::MIN_POPULATED_BINS) such bins. Each ratio is then the
 /// bin's sigma, interpolated between populated bins and held flat past the outer ones, over the
 /// quarter median. The populated bin count is always written. Every other word of a missing sample
 /// or curve is written as 0.
 ///
 /// `blocks` is the frame's block count and `min_accepted` the fewest accepted blocks that reach the
-/// static fraction, both from the host. The accepted blocks are channel 0's. Bindings of a batch the
-/// comptime flags leave out are never touched.
+/// static fraction, both from the host. The accepted count word is channel 0's. Bindings of a batch
+/// the comptime flags leave out are never touched.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -619,19 +647,16 @@ pub fn noise_sample_finish(
     let base = slot * READING_WORDS;
     let mut accepted = 0u32;
     let mut correlated = 0u32;
-    let mut sigma_count = 0u32;
 
     if comptime!(temporal) {
         let (_, accepted_count) = select_result(&sample_out, SAMPLE_QUERY_ACCEPTED);
         let (_, rho_count) = select_result(&sample_out, SAMPLE_QUERY_RHO);
-        let (_, channel_count) = select_result(&sample_out, 0u32);
 
         accepted = accepted_count;
         correlated = rho_count;
-        sigma_count = channel_count;
     }
 
-    let valid = accepted >= min_accepted && correlated > 0u32 && sigma_count > 0u32;
+    let valid = correlated > 0u32 && channel_valid(&sample_out, min_accepted, 0u32, channels, temporal);
 
     if thread == 0 {
         #[unroll]
@@ -645,7 +670,6 @@ pub fn noise_sample_finish(
         }
 
         let static_fraction = f32::cast_from(accepted) / blocks;
-        let kept = select(valid, 1.0f32, 0.0f32);
 
         #[unroll]
         for channel in 0..NOISE_CHANNELS {
@@ -656,16 +680,23 @@ pub fn noise_sample_finish(
             let (quartile_high, _) = select_result(&sample_out, comptime!(first + 3));
             let sigma = median_from_pair(median_low, median_high);
             let sigma_low = quartile_from_pair(quartile_low, quartile_high, count);
+            let mut channel_kept = valid;
 
-            readings[(base + READING_SIGMA + channel) as usize] = select(valid, sigma, 0.0f32);
-            readings[(base + READING_SIGMA_LOW + channel) as usize] = select(valid, sigma_low, 0.0f32);
+            if comptime!(channel > 0) {
+                channel_kept = channel_valid(&sample_out, min_accepted, channel, channels, temporal);
+            }
+
+            let kept_word = select(channel_kept, 1.0f32, 0.0f32);
+
+            readings[(base + READING_SAMPLE_VALID_BASE + channel) as usize] = kept_word;
+            readings[(base + READING_SIGMA + channel) as usize] = select(channel_kept, sigma, 0.0f32);
+            readings[(base + READING_SIGMA_LOW + channel) as usize] = select(channel_kept, sigma_low, 0.0f32);
         }
 
         let (rho_low, _) = select_result(&sample_out, SAMPLE_QUERY_RHO);
         let (rho_high, _) = select_result(&sample_out, comptime!(SAMPLE_QUERY_RHO + 1));
         let rho = median_from_pair(rho_low, rho_high);
 
-        readings[(base + READING_SAMPLE_VALID) as usize] = kept;
         readings[(base + READING_RHO) as usize] = select(valid, rho, 0.0f32);
         readings[(base + READING_STATIC_FRACTION) as usize] = select(valid, static_fraction, 0.0f32);
         readings[(base + READING_ACCEPTED) as usize] = f32::cast_from(accepted);

@@ -10,7 +10,7 @@ use super::fold_reference::{
     largest_relative,
     state_pairs,
 };
-use super::records::{hashed_unit, ulp_gap};
+use super::records::{hashed_unit, ulp_gap, valid_channels};
 use crate::engine::align::StorageAlign;
 use crate::noise::NOISE_CHANNELS;
 use crate::noise::correlation::{CORRELATION_FACTOR_TABLE, correlation_factor};
@@ -79,6 +79,7 @@ fn hashed_sample(seed: u32, channels: u32) -> TemporalNoiseSample {
     let rho_unit = hashed_unit(seed, 40);
 
     TemporalNoiseSample {
+        valid: valid_channels(channels),
         sigma,
         sigma_low,
         rho: 0.75 * rho_unit,
@@ -424,6 +425,7 @@ fn the_correlation_factor_matches_the_host_table() {
 
     for rho in rhos {
         let sample = TemporalNoiseSample {
+            valid: valid_channels(1),
             sigma: [1.0, 0.0],
             sigma_low: [1.0, 0.0],
             rho,

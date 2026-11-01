@@ -45,9 +45,12 @@ pub(crate) const STATE_MEDIAN: u32 = 0;
 pub(crate) const STATE_LOW: u32 = STATE_MEDIAN + STATE_CHAIN_WORDS;
 /// The low chain without the correlation boost.
 pub(crate) const STATE_LOW_UNBOOSTED: u32 = STATE_LOW + STATE_CHAIN_WORDS;
-/// The temporal median alone, over the frames with a sample.
+/// The temporal median alone, each channel over the frames with a sample of that channel.
+///
+/// The flag is set when any channel has a sampled frame. A channel with none holds its unboosted
+/// low value.
 pub(crate) const STATE_TEMPORAL_ONLY: u32 = STATE_LOW_UNBOOSTED + STATE_CHAIN_WORDS;
-/// 1.0 when a frame of the window has a sample, which sets the correlation.
+/// 1.0 when a frame of the window has a sample of channel 0, which sets the correlation.
 pub(crate) const STATE_RHO_VALID: u32 = STATE_TEMPORAL_ONLY + STATE_CHAIN_WORDS;
 pub(crate) const STATE_RHO: u32 = STATE_RHO_VALID + 1;
 /// 1.0 while the state holds a curve.

@@ -11,7 +11,7 @@ use super::fold_reference::{
     relative_gap,
     state_pairs,
 };
-use super::records::hashed_unit;
+use super::records::{hashed_unit, valid_channels};
 use crate::engine::align::StorageAlign;
 use crate::noise::NOISE_CHANNELS;
 use crate::noise::correlation::build_spatial_offset_lut;
@@ -80,6 +80,7 @@ fn hashed_record(seed: u32, channels: u32, sampled: bool, curved: bool) -> HostR
     }
 
     let sample = sampled.then_some(TemporalNoiseSample {
+        valid: valid_channels(channels),
         sigma,
         sigma_low,
         rho: 0.75 * hashed_unit(seed, 40),
@@ -118,6 +119,7 @@ fn hashed_records(count: u32, channels: u32, seed: u32) -> Vec<HostRecord> {
 /// 0.2.
 fn level_record(level: f32) -> HostRecord {
     let sample = TemporalNoiseSample {
+        valid: valid_channels(1),
         sigma: [level, 0.0],
         sigma_low: [level * 0.8, 0.0],
         rho: 0.2,
@@ -390,4 +392,229 @@ fn the_window_fold_is_byte_identical_across_runs() {
     let second = run_window(1, case_settings, &records, bounds, bounds.last());
 
     assert_eq!(first.bits(), second.bits());
+}
+
+/// Clears channel `channel`'s sample from `record`, as a reading writes a starved channel.
+///
+/// A starved channel 0 also clears the correlation, the static fraction and the curve.
+fn starve_channel(record: &mut HostRecord, channel: usize) {
+    let reading = &mut record.reading;
+    let Some(sample) = reading.sample.as_mut() else {
+        return;
+    };
+
+    sample.valid[channel] = false;
+    sample.sigma[channel] = 0.0;
+    sample.sigma_low[channel] = 0.0;
+
+    if channel == 0 {
+        sample.rho = 0.0;
+        sample.static_fraction = 0.0;
+        reading.curve = None;
+        reading.populated_bins = 0;
+    }
+
+    if !sample.valid.contains(&true) {
+        reading.sample = None;
+    }
+}
+
+/// The floored median of `values`, the mean of the two middle values for an even count.
+fn floored_median(mut values: Vec<f32>) -> f32 {
+    values.sort_by(f32::total_cmp);
+
+    let count = values.len();
+    let lower = values[(count - 1) / 2];
+    let upper = values[count / 2];
+    let median = (lower + upper) * 0.5;
+
+    median.max(SIGMA_FLOOR)
+}
+
+/// Channel `channel`'s sigma over the frames of `records` with a sample of it.
+fn sampled_sigmas(records: &[HostRecord], channel: usize) -> Vec<f32> {
+    records
+        .iter()
+        .filter_map(|record| record.reading.sample)
+        .filter(|sample| sample.valid[channel])
+        .map(|sample| sample.sigma[channel])
+        .collect()
+}
+
+/// Two-channel records where some frames starve channel 1 and some starve channel 0.
+fn starved_records(count: u32, seed: u32) -> Vec<HostRecord> {
+    let mut records = hashed_records(count, 2, seed);
+
+    for (frame, record) in records.iter_mut().enumerate() {
+        if frame % 5 == 3 {
+            starve_channel(record, 1);
+        }
+
+        if frame % 7 == 0 {
+            starve_channel(record, 0);
+        }
+    }
+
+    records
+}
+
+#[test]
+fn per_channel_samples_match_the_host_model() {
+    let newest = RECORD_COUNT - 1;
+    let records = starved_records(RECORD_COUNT, 37);
+    let case_settings = settings(1.05);
+
+    for centre in [0, 7, RECORD_COUNT / 2, newest] {
+        let bounds = WindowBounds::around(centre, newest);
+        let run = run_window(2, case_settings, &records, bounds, bounds.last());
+
+        assert_matches_host(&run, &records, bounds, case_settings, 2);
+    }
+}
+
+#[test]
+fn a_starved_channel_keeps_its_windowed_value_from_neighbouring_frames() {
+    let mut records: Vec<HostRecord> = (0..5)
+        .map(|frame| hashed_record(frame + 80, 2, true, true))
+        .collect();
+    starve_channel(&mut records[2], 1);
+
+    let bounds = WindowBounds::around(2, 4);
+    let case_settings = settings(1.0);
+    let run = run_window(2, case_settings, &records, bounds, 4);
+
+    let channel_0 = floored_median(sampled_sigmas(&records, 0));
+    let channel_1 = floored_median(sampled_sigmas(&records, 1));
+    let temporal = run.snapshot.temporal_only.expect("the window has samples");
+    let derived = run.snapshot.derived;
+
+    assert_eq!(bounds.len(), 5);
+    assert_eq!(sampled_sigmas(&records, 1).len(), 4);
+    assert_eq!(temporal, [channel_0, channel_1]);
+    assert_eq!(derived.sigma, [channel_0, channel_1]);
+    assert_matches_host(&run, &records, bounds, case_settings, 2);
+}
+
+#[test]
+fn a_channel_starved_for_the_whole_window_falls_back_alone() {
+    let fed: Vec<HostRecord> = (0..9)
+        .map(|frame| hashed_record(frame + 90, 2, true, true))
+        .collect();
+    let mut starved = fed.clone();
+    for record in &mut starved {
+        starve_channel(record, 1);
+    }
+
+    let bounds = WindowBounds::around(4, 8);
+    let case_settings = settings(1.0);
+    let fed_run = run_window(2, case_settings, &fed, bounds, 8);
+    let starved_run = run_window(2, case_settings, &starved, bounds, 8);
+
+    let immerkaer_low: Vec<f32> = starved
+        .iter()
+        .map(|record| record.reading.immerkaer_low[1])
+        .collect();
+    let fallback = floored_median(immerkaer_low);
+    let snapshot = &starved_run.snapshot;
+    let fed_snapshot = &fed_run.snapshot;
+    let temporal = snapshot.temporal_only.expect("channel 0 has samples");
+    let fed_temporal = fed_snapshot.temporal_only.expect("channel 0 has samples");
+    let low_unboosted = snapshot.low_unboosted.expect("the low chain is written");
+    let derived = snapshot.derived;
+
+    assert!(fallback.is_finite() && fallback > 0.0);
+    assert_eq!(low_unboosted[1], fallback);
+    assert_eq!(temporal[1], fallback);
+    assert_eq!(derived.sigma[1], fallback);
+    assert_eq!(temporal[0], fed_temporal[0]);
+    assert_eq!(derived.sigma[0], fed_snapshot.derived.sigma[0]);
+    assert_eq!(snapshot.rho, fed_snapshot.rho);
+    assert_eq!(snapshot.curve, fed_snapshot.curve);
+    assert_matches_host(&starved_run, &starved, bounds, case_settings, 2);
+}
+
+/// The windowed chains, rho and curve of `snapshot`, in the order the stream state holds them.
+fn snapshot_words(snapshot: &NoiseSnapshot) -> Vec<f32> {
+    let mut words = Vec::new();
+    let chains = [
+        snapshot.median,
+        snapshot.low,
+        snapshot.low_unboosted,
+        snapshot.temporal_only,
+    ];
+    for chain in chains {
+        let flag = if chain.is_some() { 1.0 } else { 0.0 };
+        words.push(flag);
+        words.extend(chain.unwrap_or_default());
+    }
+
+    let rho_flag = if snapshot.rho.is_some() { 1.0 } else { 0.0 };
+    words.push(rho_flag);
+    words.push(snapshot.rho.unwrap_or_default());
+
+    let curve_flag = if snapshot.curve.is_some() { 1.0 } else { 0.0 };
+    let (ratios, quarter_median) = snapshot.curve.unwrap_or(([0.0; NOISE_CURVE_BINS], 0.0));
+    words.push(curve_flag);
+    words.push(quarter_median);
+    words.extend(ratios);
+
+    words
+}
+
+/// The state and output words of two single-channel windows, recorded before each channel had its
+/// own sample.
+///
+/// The first window mixes frames with and without samples and curves. The second has no sample.
+const RECORDED_WINDOW_BITS: [u32; 218] = [
+    0x3f800000, 0x3c522755, 0x00000000, 0x3f800000, 0x3c29fecc, 0x00000000, 0x3f800000, 0x3c1fdb37,
+    0x00000000, 0x3f800000, 0x3c307c08, 0x00000000, 0x3f800000, 0x3ea24aa2, 0x3f800000, 0x3c24aefd,
+    0x3f7d91e6, 0x3f7ffb06, 0x3f86f1d6, 0x3f840418, 0x3f7a07a2, 0x3f80df75, 0x3f820aee, 0x3f7bbef2,
+    0x3f8d0cc8, 0x3f7f041a, 0x3f71248f, 0x3f8628b4, 0x3f8c7216, 0x3f811e65, 0x3f6b46ba, 0x3f718c2b,
+    0x3c307c08, 0x00000000, 0x394d9e0d, 0x3f800000, 0x3fc504e0, 0x4013c3a8, 0x3e59d696, 0x3e0b6a9d,
+    0x3bb061c1, 0x3bb061c1, 0x3ea24aa2, 0x3f7d91e6, 0x3f7ffb06, 0x3f86f1d6, 0x3f840418, 0x3f7a07a2,
+    0x3f80df75, 0x3f820aee, 0x3f7bbef2, 0x3f8d0cc8, 0x3f7f041a, 0x3f71248f, 0x3f8628b4, 0x3f8c7216,
+    0x3f811e65, 0x3f6b46ba, 0x3f718c2b, 0x3ba98a5e, 0x3ba2deba, 0x3b9ea8ff, 0x3ba2deba, 0x3ba98a5e,
+    0x3ba2deba, 0x3b8da4f7, 0x3b70f23a, 0x3b8da4f7, 0x3ba2deba, 0x3b9ea8ff, 0x3b70f23a, 0x00000000,
+    0x3b70f23a, 0x3b9ea8ff, 0x3ba2deba, 0x3b8da4f7, 0x3b70f23a, 0x3b8da4f7, 0x3ba2deba, 0x3ba98a5e,
+    0x3ba2deba, 0x3b9ea8ff, 0x3ba2deba, 0x3ba98a5e, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1,
+    0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1,
+    0x00000000, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1,
+    0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3bb061c1, 0x3f800000, 0x3c262ed6, 0x00000000,
+    0x3f800000, 0x3bfc15e4, 0x00000000, 0x3f800000, 0x3bfc15e4, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3bfc15e4, 0x00000000, 0x38d1c14d,
+    0x00000000, 0x3f9bcbe9, 0x3fe9b1dd, 0x3eae2ec3, 0x3e5ef42c, 0x3b41ee2d, 0x3b41ee2d, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d,
+    0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x00000000, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d,
+    0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d,
+    0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d,
+    0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x00000000, 0x3b41ee2d, 0x3b41ee2d,
+    0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d, 0x3b41ee2d,
+    0x3b41ee2d, 0x3b41ee2d,
+];
+
+#[test]
+fn a_single_channel_window_fold_matches_today() {
+    let newest = RECORD_COUNT - 1;
+    let mixed = hashed_records(RECORD_COUNT, 1, 31);
+    let unsampled: Vec<HostRecord> = (0..RECORD_COUNT)
+        .map(|frame| hashed_record(frame + 41, 1, false, false))
+        .collect();
+    let case_settings = settings(1.1);
+    let bounds = WindowBounds::around(RECORD_COUNT / 2, newest);
+    let mut bits = Vec::new();
+
+    for records in [&mixed, &unsampled] {
+        let run = run_window(1, case_settings, records, bounds, bounds.last());
+        let state = snapshot_words(&run.snapshot);
+        let state_bits = state.iter().map(|word| word.to_bits());
+
+        bits.extend(state_bits);
+        bits.extend(run.bits());
+    }
+
+    assert_eq!(bits, RECORDED_WINDOW_BITS);
 }

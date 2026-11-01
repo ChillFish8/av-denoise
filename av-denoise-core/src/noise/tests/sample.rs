@@ -19,7 +19,7 @@ use crate::noise::reading::{
     IMMERKAER_QUERY_EXCLUDED_BASE,
     IMMERKAER_QUERY_REFERENCE_BASE,
     READING_CURVE_VALID,
-    READING_SAMPLE_VALID,
+    READING_SAMPLE_VALID_BASE,
     READING_WORDS,
     ReadingRecord,
     SAMPLE_CHANNEL_QUERIES,
@@ -220,6 +220,8 @@ fn assert_sample_matches(gpu: Option<TemporalNoiseSample>, host: Option<Temporal
         (gpu, host) => panic!("the gpu sample {gpu:?} and the host sample {host:?} disagree"),
     };
 
+    assert_eq!(gpu.valid, host.valid, "the channels with a sample");
+
     for channel in 0..NOISE_CHANNELS as usize {
         let sigma_what = format!("sigma[{channel}]");
         let low_what = format!("sigma_low[{channel}]");
@@ -351,6 +353,7 @@ fn the_query_indices_name_their_queries() {
 #[test]
 fn a_reading_survives_its_words() {
     let sample = TemporalNoiseSample {
+        valid: [true; NOISE_CHANNELS as usize],
         sigma: [0.01, 0.02],
         sigma_low: [0.005, 0.015],
         rho: 0.3,
@@ -380,12 +383,32 @@ fn a_reading_survives_its_words() {
         ..record
     };
     let empty_words = empty.to_words();
-    let sample_valid = empty_words[READING_SAMPLE_VALID as usize];
+    let valid_start = READING_SAMPLE_VALID_BASE as usize;
+    let valid_end = valid_start + NOISE_CHANNELS as usize;
+    let sample_valid = &empty_words[valid_start..valid_end];
     let curve_valid = empty_words[READING_CURVE_VALID as usize];
     let empty_back = ReadingRecord::from_words(&empty_words);
-    assert_eq!(sample_valid, 0.0);
+    assert_eq!(sample_valid, [0.0; NOISE_CHANNELS as usize]);
     assert_eq!(curve_valid, 0.0);
     assert_eq!(empty_back, empty);
+
+    let channel_1_only = TemporalNoiseSample {
+        valid: [false, true],
+        sigma: [0.0, 0.02],
+        sigma_low: [0.0, 0.015],
+        rho: 0.0,
+        static_fraction: 0.0,
+    };
+    let partial = ReadingRecord {
+        sample: Some(channel_1_only),
+        curve: None,
+        ..record
+    };
+    let partial_words = partial.to_words();
+    let partial_valid = &partial_words[valid_start..valid_end];
+    let partial_back = ReadingRecord::from_words(&partial_words);
+    assert_eq!(partial_valid, [0.0, 1.0]);
+    assert_eq!(partial_back, partial);
 }
 
 #[test]
@@ -836,11 +859,13 @@ fn recorded_luma_blocks() -> Vec<BlockSpec> {
 }
 
 /// The reading words of [recorded_luma_blocks], recorded before each channel had its own checks.
+///
+/// The fourth word is channel 1's sample flag, which came after the recording and reads 0.
 const RECORDED_LUMA_WORDS: [u32; READING_WORDS as usize] = [
-    0x3adaa02c, 0x00000000, 0x3f800000, 0x3c3c3903, 0x00000000, 0x3c1cd525, 0x00000000, 0x3e8cd626,
-    0x3f73ffff, 0x43370000, 0x3f800000, 0x3c47f521, 0x40800000, 0x3f6b3254, 0x3f6b3254, 0x3f6b3254,
-    0x3f6b3254, 0x3f72067f, 0x3f78daab, 0x3f7faed7, 0x3f7b0aa1, 0x3f76666a, 0x3f71c234, 0x3f808b01,
-    0x3f8834e8, 0x3f8fdecf, 0x3f8fdecf, 0x3f8fdecf, 0x3f8fdecf,
+    0x3adaa02c, 0x00000000, 0x3f800000, 0x00000000, 0x3c3c3903, 0x00000000, 0x3c1cd525, 0x00000000,
+    0x3e8cd626, 0x3f73ffff, 0x43370000, 0x3f800000, 0x3c47f521, 0x40800000, 0x3f6b3254, 0x3f6b3254,
+    0x3f6b3254, 0x3f6b3254, 0x3f72067f, 0x3f78daab, 0x3f7faed7, 0x3f7b0aa1, 0x3f76666a, 0x3f71c234,
+    0x3f808b01, 0x3f8834e8, 0x3f8fdecf, 0x3f8fdecf, 0x3f8fdecf, 0x3f8fdecf,
 ];
 
 #[test]
@@ -1018,4 +1043,95 @@ fn each_channel_rejects_its_own_outliers() {
     let block_count = plane.blocks();
     let counts = assert_channel_accepted(plane, &partials, &records);
     assert_eq!(counts, [block_count - 4, block_count - 4]);
+}
+
+/// Static grain whose channel `channel` reads one sigma with no spread, beside a few quiet blocks
+/// that leave its ceiling untrusted.
+fn untrusted_channel_blocks(plane: Plane, seed: u32, channel: usize) -> Vec<BlockSpec> {
+    let mut blocks = static_blocks(plane, seed);
+
+    for (index, block) in blocks.iter_mut().enumerate() {
+        let quiet = index % 9 == 0;
+        block.mean[channel] = 0.0;
+        block.sigma[channel] = if quiet { 0.5 * RHO_SIGMA_GATE } else { 5.0 / 255.0 };
+    }
+
+    blocks
+}
+
+/// Asserts the GPU flags no block as accepted by channel `channel`.
+fn assert_channel_accepts_nothing(plane: Plane, partials: &[f32], records: &[f32], channel: u32) {
+    let client = test_client();
+    let settings = ReadingSettings::default();
+    let state = state_for(&client, plane, true, settings, partials, records);
+    state.queue_reading(0).expect("the reading queues");
+
+    let flags = state.read_block_flags();
+    let flag = channel_flag(BLOCK_ACCEPTED, channel);
+    let flagged = flags.iter().filter(|&&flags| flags & flag != 0).count();
+
+    assert_eq!(flagged, 0, "channel {channel} accepted flags");
+}
+
+#[test]
+fn a_starved_channel_1_leaves_channel_0_valid() {
+    let client = test_client();
+    let plane = Plane::chroma(256, 192);
+    let luma = Plane::luma(plane.width, plane.height);
+    let partials = hashed_partials(plane.width, plane.height, 109);
+    let mut blocks = static_blocks(plane, 109);
+    for block in &mut blocks {
+        block.mean[1] = 0.0;
+        block.sigma[1] = 0.0;
+    }
+
+    let records = plane.records(&blocks);
+    let (gpu, host) = check_plane(plane, &partials, &records);
+    let sample = gpu.sample.expect("channel 0 keeps its sample");
+    let host_sample = host.sample.expect("the host keeps channel 0's sample");
+
+    let luma_records = luma.records(&blocks);
+    let (luma_gpu, _) = gpu_reading(&client, luma, true, &partials, &luma_records);
+    let luma_sample = luma_gpu.sample.expect("the channel 0 frame has a sample");
+
+    assert_eq!(sample.valid, [true, false]);
+    assert_eq!(host_sample.valid, [true, false]);
+    assert_eq!(sample.sigma[0].to_bits(), luma_sample.sigma[0].to_bits());
+    assert_eq!(sample.sigma_low[0].to_bits(), luma_sample.sigma_low[0].to_bits());
+    assert_eq!(sample.rho.to_bits(), luma_sample.rho.to_bits());
+    assert_eq!((sample.sigma[1], sample.sigma_low[1]), (0.0, 0.0));
+}
+
+#[test]
+fn an_untrusted_channel_1_reference_matches_the_host() {
+    let plane = Plane::chroma(256, 192);
+    let partials = hashed_partials(plane.width, plane.height, 113);
+    let blocks = untrusted_channel_blocks(plane, 113, 1);
+    let records = plane.records(&blocks);
+    let host_indices = accepted_channel_indices(&records, plane.channels, plane.width, plane.height, 1);
+    assert_eq!(host_indices, None, "channel 1's ceiling is not trusted");
+
+    let (gpu, _) = check_plane(plane, &partials, &records);
+    let sample = gpu.sample.expect("channel 0 keeps its sample");
+
+    assert_eq!(sample.valid, [true, false]);
+    assert_channel_accepts_nothing(plane, &partials, &records, 1);
+}
+
+#[test]
+fn an_untrusted_channel_0_leaves_channel_1_valid() {
+    let plane = Plane::chroma(256, 192);
+    let partials = hashed_partials(plane.width, plane.height, 127);
+    let blocks = untrusted_channel_blocks(plane, 127, 0);
+    let records = plane.records(&blocks);
+
+    let (gpu, _) = check_plane(plane, &partials, &records);
+    let sample = gpu.sample.expect("channel 1 keeps its sample");
+
+    assert_eq!(sample.valid, [false, true]);
+    assert_eq!((sample.sigma[0], sample.sigma_low[0]), (0.0, 0.0));
+    assert_eq!((sample.rho, sample.static_fraction), (0.0, 0.0));
+    assert_eq!(gpu.accepted, 0);
+    assert_channel_excludes(sample, &blocks, 1, &[]);
+    assert_channel_accepts_nothing(plane, &partials, &records, 0);
 }
