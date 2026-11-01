@@ -1,8 +1,8 @@
 use cubecl::prelude::*;
 
-use super::helpers::make_client;
+use super::make_client;
 use crate::motion::THSAD_PIXEL;
-use crate::nl4d::kernels::nl4d_mv_regularise;
+use crate::motion::truemotion::kernels::nl4d_mv_regularise;
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 

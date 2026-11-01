@@ -16,7 +16,6 @@ pub(crate) mod harness;
 pub(crate) mod kernels;
 mod options;
 pub(crate) mod params;
-mod regularise;
 pub(crate) mod snapshot;
 
 // The tests run against a real GPU runtime, so they need a wgpu-backed feature.

@@ -8,6 +8,7 @@ mod global;
 pub(crate) mod kernels;
 mod pyramid;
 mod search;
+pub(crate) mod truemotion;
 
 #[cfg(test)]
 pub(crate) mod tests;

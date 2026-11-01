@@ -6,12 +6,12 @@ use cubecl::server::Handle;
 
 use super::denoiser::{AccumClear, Nl4dDenoiser, accumulator_lens};
 use super::nl4d_pool_ratio;
-use super::regularise::run_regularise;
 use super::snapshot::LastFields;
 use crate::collab::geometry::{ref_count, refs_along};
 use crate::collab::grid_frames;
 use crate::collab::kernels::aggregate::collab_zero_accum;
 use crate::engine::timing::timed;
+use crate::motion::truemotion::run_regularise;
 use crate::nlmeans::{MAX_GRID_1D, RingView};
 use crate::tune::sites::{
     CollabFilterSite,

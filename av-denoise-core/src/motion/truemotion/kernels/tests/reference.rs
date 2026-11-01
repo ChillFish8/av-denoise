@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use crate::nl4d::kernels::REGULARISE_CANDIDATES;
+use crate::motion::truemotion::kernels::REGULARISE_CANDIDATES;
 use crate::noise::DERIVED_SAD_FLOOR;
 
 /// The most neighbours a block has in its 3x3 neighbourhood.

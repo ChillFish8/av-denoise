@@ -2,7 +2,11 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NL4D_MV_REGULARISE;
-use crate::nl4d::kernels::{REGULARISE_CANDIDATES, nl4d_mv_regularise, nl4d_mv_regularise_coop};
+use crate::motion::truemotion::kernels::{
+    REGULARISE_CANDIDATES,
+    nl4d_mv_regularise,
+    nl4d_mv_regularise_coop,
+};
 use crate::noise::DERIVED_WORDS;
 use crate::tune::family::{Families, FamilyId, FlatFamily};
 use crate::tune::fidelity::{CompareResult, Fidelity, PlaneDiff, diff_integers, diff_plane};

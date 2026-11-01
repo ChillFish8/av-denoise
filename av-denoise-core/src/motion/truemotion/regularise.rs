@@ -14,7 +14,7 @@ use crate::tune::sites::{RegulariseOutputs, RegulariseSite};
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
 )]
-pub(super) fn run_regularise(
+pub(crate) fn run_regularise(
     kernels: &KernelSelector,
     motion_ctx: &MotionCtx,
     view: &RingView,

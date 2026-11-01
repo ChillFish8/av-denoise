@@ -18,13 +18,14 @@ fn clamp_index(value: i32, limit: i32) -> i32 {
 
 /// Re-scores each block's motion vector with every thread of the cube sharing every candidate's SAD.
 ///
-/// It picks the same winner as [nl4d_mv_regularise](crate::nl4d::kernels::nl4d_mv_regularise) up
-/// to rounding. Launch one cube of `threads` threads along x per block per neighbour, where
-/// `threads` is a power of two of at least 8. Each thread sums the absolute differences of every
-/// `threads`-th pixel of the block for all seven candidates, so neighbouring threads read
-/// neighbouring pixels. The partial sums meet in shared memory through a tree with one barrier per
-/// level. Thread 0 then costs the candidates and writes the winner and its confidence, scored
-/// against the SAD floor of the derived noise values `noise`.
+/// It picks the same winner as
+/// [nl4d_mv_regularise](crate::motion::truemotion::kernels::nl4d_mv_regularise) up to rounding.
+/// Launch one cube of `threads` threads along x per block per neighbour, where `threads` is a
+/// power of two of at least 8. Each thread sums the absolute differences of every `threads`-th
+/// pixel of the block for all seven candidates, so neighbouring threads read neighbouring pixels.
+/// The partial sums meet in shared memory through a tree with one barrier per level. Thread 0 then
+/// costs the candidates and writes the winner and its confidence, scored against the SAD floor of
+/// the derived noise values `noise`.
 ///
 /// Every frame is a full-resolution luma slot of `pyramid`, `slot_pixels` values apart. The
 /// neighbour runs on z. Neighbour `n` re-scores the field `n * mv_stride` values into `mv_in`

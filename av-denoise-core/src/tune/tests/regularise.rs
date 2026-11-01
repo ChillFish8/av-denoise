@@ -5,7 +5,7 @@ use super::equivalence::assert_candidates_match_baseline;
 use super::fixtures::{RegulariseContent, RegulariseSpec, regularise_neighbour_slot, regularise_site};
 use super::runtime::test_client;
 use crate::Nl4dOptions;
-use crate::nl4d::kernels::tests::reference::nl4d_mv_regularise_reference;
+use crate::motion::truemotion::kernels::tests::reference::nl4d_mv_regularise_reference;
 use crate::nlmeans::ChannelMode;
 use crate::noise::DERIVED_WORDS;
 use crate::tune::gpu::{bind, read_f32, read_i32};
