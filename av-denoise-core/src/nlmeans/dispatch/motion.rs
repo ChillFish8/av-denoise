@@ -136,7 +136,8 @@ impl NlmDenoiser {
     /// Matches every neighbour against the centre frame and writes each one's `mv_field` slice.
     ///
     /// It reads the neighbours from the neighbour-slot table, and writes confidence too when the
-    /// denoiser has a confidence buffer.
+    /// denoiser has a confidence buffer. A `Direct` match also searches around each neighbour's
+    /// camera model prediction, from the gap table the window last uploaded.
     fn match_neighbours(&self, center_t: u32) -> Result<(), anyhow::Error> {
         let motion_ctx = self
             .mc_ctx
@@ -176,6 +177,13 @@ impl NlmDenoiser {
             1
         };
 
+        // The chained seeds already carry the camera's motion from their seeded pair searches.
+        let predictions = if self.is_chained() {
+            None
+        } else {
+            self.compose_window_seeds()
+        };
+
         let targets = MatchTargets {
             pyramid: analyse_pyramid,
             frame_count,
@@ -187,7 +195,7 @@ impl NlmDenoiser {
             confidence: confidence_arg,
             conf_len,
             write_confidence,
-            predictions: None,
+            predictions,
             sad: None,
         };
 

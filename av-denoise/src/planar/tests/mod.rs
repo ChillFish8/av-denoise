@@ -12,6 +12,9 @@ mod passthrough_retry;
 mod measured_reseed;
 // Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
 #[cfg(feature = "vulkan")]
+mod pan_reseed;
+// Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
 mod profile_keys;
 mod push_retry;
 // Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.

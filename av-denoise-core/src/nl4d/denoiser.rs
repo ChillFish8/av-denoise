@@ -11,6 +11,7 @@ use crate::collab::kernels::transforms::{RECIPROCAL_FLOOR, dct_noise_profile};
 use crate::collab::{MAX_K, PATCH_SIZE, needs_warp_uniform_search, supports_f16_search};
 use crate::engine::timing::{DeviceTimed, DeviceTimer, timed};
 use crate::engine::{DevicePlane, EngineTiming, SampleFormat};
+use crate::motion::SharedMotion;
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, PrefilterMode, RingView};
 use crate::noise::NoiseConsumer;
@@ -424,6 +425,11 @@ impl Nl4dDenoiser {
         if self.passes_run == 0 {
             self.stream_start = StreamStart::Continuation;
         }
+    }
+
+    /// Starts every motion search from the camera models in `motion`, before the first push.
+    pub(crate) fn set_shared_motion(&mut self, motion: SharedMotion) {
+        self.front.set_shared_motion(motion);
     }
 
     /// Runs the front end's motion and noise machinery for a pass centred on logical position `centre`.

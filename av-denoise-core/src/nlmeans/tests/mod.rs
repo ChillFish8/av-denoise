@@ -12,6 +12,7 @@ mod hq;
 mod lookahead;
 mod machinery;
 mod mirror;
+pub(crate) mod models;
 mod motion_compensation;
 mod noise;
 mod noise_curve;

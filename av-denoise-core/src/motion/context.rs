@@ -7,6 +7,10 @@ pub(crate) struct MotionCtx {
     pub blksize: u32,
     pub step: u32,
     pub search_radius: u32,
+    /// The search radius of the coarse pass, on the smallest pyramid level.
+    pub coarse_search_radius: u32,
+    /// How many times wider a coarse block is than the content one fine block covers.
+    pub coarse_block_factor: u32,
     pub pyramid_levels: u32,
     pub blocks_x: u32,
     pub blocks_y: u32,
@@ -36,11 +40,22 @@ impl MotionCtx {
             blksize,
             step,
             search_radius,
+            coarse_search_radius: search_radius,
+            coarse_block_factor: 1,
             pyramid_levels,
             blocks_x,
             blocks_y,
             align,
         })
+    }
+
+    /// This geometry with the coarse pass searching `radius` with blocks `block_factor` times wider.
+    pub fn with_coarse_search(self, radius: u32, block_factor: u32) -> Self {
+        Self {
+            coarse_search_radius: radius,
+            coarse_block_factor: block_factor,
+            ..self
+        }
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]

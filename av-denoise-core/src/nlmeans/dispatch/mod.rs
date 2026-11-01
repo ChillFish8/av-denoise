@@ -625,12 +625,14 @@ impl NlmDenoiser {
         let center_t = self.params.temporal_radius;
         let client = self.client.clone();
 
-        // Only the motion and confidence launches read the table, and the upload comes before
+        // Only the motion and confidence launches read the tables, and the uploads come before
         // their first dispatch because an upload ends a device span's timed pass.
         if self.mc_ctx.is_some() || self.confidence_ctx.is_some() {
             let neighbour_slots = self.window_neighbour_slots(center_t);
             self.update_neighbour_slots(&neighbour_slots);
         }
+
+        self.update_window_seeds(center_t);
 
         // The look-ahead has read every frame the window reaches, so the fold runs first and both
         // confidence scores read this centre's own derived values.

@@ -2,6 +2,7 @@ mod lookahead;
 mod machinery;
 mod noise;
 mod ring;
+mod seeds;
 mod sizes;
 mod stages;
 
@@ -12,6 +13,7 @@ use self::lookahead::LookAhead;
 pub(crate) use self::lookahead::{LOOKAHEAD_FRAMES, lookahead_depth_for};
 pub(crate) use self::machinery::RingView;
 use self::noise::{measures_noise, noise_shape};
+use self::seeds::ModelSeeds;
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
 use super::mirror::MirroredBuffer;
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
@@ -100,6 +102,8 @@ pub struct NlmDenoiser {
     pub(super) noise: NoiseState,
 
     pub(super) mc_ctx: Option<MotionCtx>,
+    /// The camera model predictions the motion searches start from, when the models are fitted.
+    pub(super) seeds: Option<ModelSeeds>,
     /// The motion-shifted input ring the temporal kernels read neighbours from.
     pub(super) compensated_input_buf: Option<Handle>,
     /// The motion-shifted reference ring.
@@ -361,6 +365,7 @@ impl NlmDenoiser {
             ring_slot_tables,
             noise: fixed_noise,
             mc_ctx,
+            seeds: None,
             compensated_input_buf,
             compensated_reference_buf,
             mv_field_buf,

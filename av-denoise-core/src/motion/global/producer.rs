@@ -16,24 +16,25 @@ use crate::engine::align::StorageAlign;
 use crate::engine::{BufferSize, DevicePlane, IngestTarget, SampleFormat, ingest};
 use crate::motion::kernels::mc_model_identity;
 use crate::motion::pyramid::{pyramid_pixels_per_frame, pyramid_slot_byte_offset, run_pyramid_downscale};
-use crate::motion::{
-    MAX_PYRAMID_LEVELS,
-    MAX_SEARCH_RADIUS,
-    MatchTargets,
-    MotionCompensationMode,
-    MotionCtx,
-    run_analyse,
-};
+use crate::motion::{MAX_PYRAMID_LEVELS, MatchTargets, MotionCompensationMode, MotionCtx, run_analyse};
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 use crate::tune::gpu::{bind, zeroed_words};
 
 /// Frames the producer's pyramid holds, the newest and the one before it.
 const PYRAMID_SLOTS: u32 = 2;
 
-/// The deep search a pair's first match runs, on the block grid of `mode`.
+/// The coarse search radius of a pair's first match, on its quarter-resolution level.
+const ACQUISITION_COARSE_RADIUS: u32 = 12;
+
+/// How many times wider a coarse block of a pair's first match is than its content-matched size.
 ///
-/// It searches the most pyramid levels at the widest radius, so a pan of about 40 luma pixels is
-/// found without a model to start from.
+/// A quarter-resolution block of 4 pixels holds too little detail to tell matches apart.
+const ACQUISITION_COARSE_BLOCK_FACTOR: u32 = 2;
+
+/// The deep search a pair's first match runs, on the block grid and fine radius of `mode`.
+///
+/// It searches the most pyramid levels with a wide coarse radius, so a pan of about 50 luma pixels
+/// is found without a model to start from.
 fn acquisition_ctx(
     mode: &MotionCompensationMode,
     luma_width: u32,
@@ -43,6 +44,7 @@ fn acquisition_ctx(
     let MotionCompensationMode::Mvtools {
         blksize,
         overlap,
+        search_radius,
         estimation,
         ..
     } = *mode
@@ -53,16 +55,18 @@ fn acquisition_ctx(
     let deep = MotionCompensationMode::Mvtools {
         blksize,
         overlap,
-        search_radius: MAX_SEARCH_RADIUS,
+        search_radius,
         pyramid_levels: MAX_PYRAMID_LEVELS,
         estimation,
     };
-    MotionCtx::new(deep, luma_width, luma_height, align)
+    let ctx = MotionCtx::new(deep, luma_width, luma_height, align)?;
+    let wide = ctx.with_coarse_search(ACQUISITION_COARSE_RADIUS, ACQUISITION_COARSE_BLOCK_FACTOR);
+
+    Some(wide)
 }
 
 /// The camera models every pass reads, with the scale from a pass's pixels to luma pixels.
 #[derive(Debug, Clone)]
-#[expect(dead_code, reason = "task 5 seeds the pass searches from these models")]
 pub(crate) struct SharedMotion {
     pub ring: ModelRing,
     pub scale_x: f32,
@@ -92,8 +96,8 @@ impl Run {
 ///
 /// Each push matches the new frame against the one before it, fits a model to the block vectors,
 /// matches again around that model and fits once more. The first match runs a deep search, so a
-/// fast pan is found from a run's start, and also searches around the previous pair's model when
-/// there is one. The first frame of a run writes identity.
+/// fast pan is found without a model to start from. Each model depends on its own pair alone, and
+/// the first frame of a run writes identity.
 pub struct PairModelProducer {
     client: Client,
     /// The search of `mode`, which the refit match runs.
@@ -217,15 +221,9 @@ impl PairModelProducer {
 
         let older_slot = (frame - 1) % PYRAMID_SLOTS;
         let slot = self.ring.slot(frame);
-        let has_prior = run.first + 1 < frame;
-        let prior = has_prior.then(|| self.ring.slot(frame - 1));
 
-        if let Some(prior_slot) = prior {
-            self.predict(prior_slot);
-        }
-
-        self.match_pair(&self.deep_ctx, older_slot, newer_slot, has_prior)?;
-        self.fit(prior, slot);
+        self.match_pair(&self.deep_ctx, older_slot, newer_slot, false)?;
+        self.fit(None, slot);
 
         self.predict(slot);
         self.match_pair(&self.ctx, older_slot, newer_slot, true)?;
@@ -266,7 +264,17 @@ impl PairModelProducer {
     fn predict(&self, slot: u32) {
         let gaps = &self.gap_tables[slot as usize];
 
-        run_compose_models(&self.client, &self.ring, gaps, &self.predictions, 1, 1, 1.0, 1.0);
+        run_compose_models(
+            &self.client,
+            &self.ring,
+            gaps,
+            &self.predictions,
+            1,
+            0,
+            1,
+            1.0,
+            1.0,
+        );
     }
 
     /// Matches the older frame's blocks into the newer frame with the search of `ctx`, also around

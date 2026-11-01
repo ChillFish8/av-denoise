@@ -59,10 +59,11 @@ impl NlmDenoiser {
             return Ok(None);
         }
 
-        // The table upload comes before the first motion dispatch, because an upload ends a device
+        // The table uploads come before the first motion dispatch, because an upload ends a device
         // span's timed pass.
         let neighbour_slots = self.window_neighbour_slots(center_t);
         self.update_neighbour_slots(&neighbour_slots);
+        self.update_window_seeds(center_t);
 
         // The look-ahead has read every frame the window reaches, so the fold runs first and the
         // match scores confidence against this centre's own derived values.

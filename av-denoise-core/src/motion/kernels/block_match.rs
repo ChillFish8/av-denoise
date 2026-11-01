@@ -9,6 +9,7 @@ use super::candidates::{
     beats_incumbent,
     candidate_count,
     model_displacement,
+    predicts_motion,
 };
 use super::helpers::clamp_i32;
 use crate::noise::DERIVED_SAD_FLOOR;
@@ -71,8 +72,9 @@ struct BlockSite {
 /// When `model_candidate` is set, a second window centres on the camera model's prediction in
 /// `predictions`, and its best replaces the zero window's only when it is lower by more than
 /// [MODEL_CANDIDATE_BIAS] times the derived SAD floor of `noise`. `floor_scale` converts that floor
-/// from a full-resolution block to this level's block. Otherwise `noise` and `predictions` are
-/// never read and can be placeholders.
+/// from a full-resolution block to this level's block. An identity prediction adds no window.
+/// When `model_candidate` is unset, `noise` and `predictions` are never read and can be
+/// placeholders.
 ///
 /// `blksize` must be at most [MAX_BLKSIZE](crate::motion::MAX_BLKSIZE), so the shared centre tile
 /// stays within 1024 values. The neighbour pixels the search reaches are staged into shared memory
@@ -140,7 +142,10 @@ pub fn mc_block_match_coarse(
             level_width,
             level_height,
         );
-        centres.set(1u32, model.dx, model.dy);
+        let moves = predicts_motion(predictions, neighbour_index);
+        let model_dx = if moves { model.dx } else { 0i32 };
+        let model_dy = if moves { model.dy } else { 0i32 };
+        centres.set(1u32, model_dx, model_dy);
         bias = MODEL_CANDIDATE_BIAS * noise[DERIVED_SAD_FLOOR as usize] * floor_scale;
     }
 
@@ -206,8 +211,8 @@ pub fn mc_block_match_coarse(
 ///
 /// When `model_candidate` is set, a second window centres on the camera model's prediction in
 /// `predictions`, and its best replaces the seed window's only when it is lower by more than
-/// [MODEL_CANDIDATE_BIAS] times the derived SAD floor of `noise`. Otherwise `predictions` is never
-/// read and can be a placeholder.
+/// [MODEL_CANDIDATE_BIAS] times the derived SAD floor of `noise`. An identity prediction adds no
+/// window. When `model_candidate` is unset, `predictions` is never read and can be a placeholder.
 ///
 /// Every frame is a slot of `pyramid`, `slot_pixels` values apart. The launch runs one cube per
 /// block per neighbour, with the neighbour on z. Neighbour `n` matches slot `neighbour_slots[n]`
@@ -292,7 +297,10 @@ pub fn mc_block_match_fine(
             width,
             height,
         );
-        centres.set(1u32, model.dx, model.dy);
+        let moves = predicts_motion(predictions, neighbour_index);
+        let model_dx = if moves { model.dx } else { seed_dx };
+        let model_dy = if moves { model.dy } else { seed_dy };
+        centres.set(1u32, model_dx, model_dy);
         bias = MODEL_CANDIDATE_BIAS * noise[DERIVED_SAD_FLOOR as usize];
     }
 

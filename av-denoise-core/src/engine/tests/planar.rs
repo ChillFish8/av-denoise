@@ -15,13 +15,14 @@ use crate::engine::{
     DevicePlane,
     Engine,
     EngineSpec,
+    FramePass,
     Geometry,
-    PassEngine,
     PassSpec,
     PlaneSource,
     SampleFormat,
 };
 use crate::error::Error;
+use crate::motion::{PairModelProducer, SharedMotion};
 use crate::nl4d::Nl4dOptions;
 use crate::nl4d::tests::helpers::noisy_frames;
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansHqOptions, NlmeansOptions};
@@ -94,11 +95,55 @@ fn build(client: &Client, spec: &EngineSpec) -> Result<Box<dyn Engine>, Error> {
     spec.build(client, default_kernels)
 }
 
-fn build_pass(client: &Client, pass: Option<PassSpec>) -> Box<dyn PassEngine> {
-    let pass = pass.expect("the spec has this pass");
-    let kernels = EngineKernels::default();
+/// A pass engine that reads the camera models a producer fits from the clip's luma, as the passes
+/// of a merged engine do.
+struct SeededPass {
+    pass: Box<dyn FramePass>,
+    producer: Option<PairModelProducer>,
+    /// The clip's luma planes, by stream frame.
+    luma: Vec<Handle>,
+}
 
-    pass.build(client, kernels).expect("build pass")
+impl SeededPass {
+    /// Fits the model of the frame the pass takes next.
+    fn fit(&mut self) -> Result<(), Error> {
+        let Some(producer) = self.producer.as_mut() else {
+            return Ok(());
+        };
+
+        let frame = self.pass.next_frame();
+        let luma = &self.luma[frame as usize];
+        let plane = DevicePlane::new(luma, WIDTH, HEIGHT);
+
+        producer.push(&plane, frame).map_err(Error::Gpu)
+    }
+}
+
+/// The pass of `spec` cleaning luma when `luma`, otherwise chroma, fed the models of `clip`.
+fn seeded_pass(client: &Client, spec: &EngineSpec, luma: bool, clip: &[Planes]) -> SeededPass {
+    let (luma_pass, chroma_pass) = spec.passes();
+    let pass = if luma { luma_pass } else { chroma_pass };
+    let pass = pass.expect("the spec has this pass");
+    let (scale_x, scale_y) = if luma {
+        (1.0, 1.0)
+    } else {
+        spec.geometry().chroma.chroma_scale()
+    };
+
+    let producer = spec.pair_model_producer(client).expect("the producer builds");
+    let motion = producer.as_ref().map(|producer| SharedMotion {
+        ring: producer.ring().clone(),
+        scale_x,
+        scale_y,
+    });
+    let kernels = EngineKernels::default();
+    let pass = pass.build_pass(client, kernels, motion).expect("build pass");
+    let luma = clip
+        .iter()
+        .map(|frame| client.create_from_slice(&frame[0]))
+        .collect();
+
+    SeededPass { pass, producer, luma }
 }
 
 fn to_codes(samples: &[f32]) -> Vec<u8> {
@@ -164,21 +209,23 @@ impl Stream for Box<dyn Engine> {
     }
 }
 
-impl Stream for Box<dyn PassEngine> {
+impl Stream for SeededPass {
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error> {
-        PassEngine::push(self.as_mut(), planes)
+        self.fit()?;
+        self.pass.push(planes)
     }
 
     fn push_context(&mut self, planes: &[DevicePlane<'_>]) -> Result<(), Error> {
-        PassEngine::push_context(self.as_mut(), planes)
+        self.fit()?;
+        self.pass.push_context(planes)
     }
 
     fn emit_into(&mut self, planes: &[DevicePlane<'_>]) -> Result<(), Error> {
-        PassEngine::emit_into(self.as_mut(), planes)
+        self.pass.emit_into(planes)
     }
 
     fn finish(&mut self) -> Result<usize, Error> {
-        PassEngine::finish(self.as_mut())
+        self.pass.finish()
     }
 }
 
@@ -275,9 +322,8 @@ fn luma_and_chroma_match_the_two_pass_engines() {
     let geometry = geometry(ChromaLayout::Yuv420);
 
     for spec in specs(geometry, true, true) {
-        let (luma_pass, chroma_pass) = spec.passes();
-        let mut luma_engine = build_pass(&client, luma_pass);
-        let mut chroma_engine = build_pass(&client, chroma_pass);
+        let mut luma_engine = seeded_pass(&client, &spec, true, &clip);
+        let mut chroma_engine = seeded_pass(&client, &spec, false, &clip);
         let luma_frames = luma_of(&clip);
         let chroma_frames = chroma_of(&clip);
         let luma_expected = drive(&mut luma_engine, &client, &luma_frames, 0, true);
@@ -305,13 +351,12 @@ fn luma_and_chroma_match_the_two_pass_engines() {
 /// It runs a context-led stream and then a scene-start stream on the same engines.
 fn assert_passes_through(client: &Client, spec: &EngineSpec, clean_luma: bool) {
     let clip = clip();
-    let (luma_pass, chroma_pass) = spec.passes();
-    let (pass, cleaned_frames, luma_first) = if clean_luma {
-        (luma_pass, luma_of(&clip), true)
+    let (cleaned_frames, luma_first) = if clean_luma {
+        (luma_of(&clip), true)
     } else {
-        (chroma_pass, chroma_of(&clip), false)
+        (chroma_of(&clip), false)
     };
-    let mut pass_engine = build_pass(client, pass);
+    let mut pass_engine = seeded_pass(client, spec, clean_luma, &clip);
     let mut engine = build(client, spec).expect("build");
 
     for context in [CONTEXT_FRAMES, 0] {
@@ -384,10 +429,10 @@ fn a_gray_engine_runs_the_luma_pass_alone() {
     let geometry = geometry(ChromaLayout::Gray);
 
     for spec in specs(geometry, true, false) {
-        let (luma_pass, chroma_pass) = spec.passes();
+        let (_, chroma_pass) = spec.passes();
         assert!(chroma_pass.is_none(), "{spec:?}");
 
-        let mut luma_engine = build_pass(&client, luma_pass);
+        let mut luma_engine = seeded_pass(&client, &spec, true, &clip);
         let expected = drive(&mut luma_engine, &client, &luma_frames, 0, true);
 
         let mut engine = build(&client, &spec).expect("build");

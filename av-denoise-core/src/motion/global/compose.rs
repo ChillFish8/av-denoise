@@ -13,21 +13,19 @@ pub const NO_PAIR: u32 = u32::MAX;
 
 /// Builds the gap table [mc_compose_models](crate::motion::kernels::mc_compose_models()) reads.
 ///
-/// `slot_frames` holds the stream frame of each ring slot and `centre` is the slot of the centre
-/// frame. Neighbour slots wrap around the end, so physical and logical orders both work.
-/// Neighbours come in motion-field order, past first, each with `radius` entries listed from the
-/// centre outward. A gap is the ring slot of its newer frame's pair. A gap that does not step
-/// exactly one stream frame, such as an edge duplicate, and every entry past the neighbour's
-/// distance, is [NO_PAIR].
-pub fn compose_gaps(slot_frames: &[u32], centre: usize, radius: usize, ring: &ModelRing) -> Vec<u32> {
-    let slot_count = slot_frames.len() as isize;
-    let frame_at = |offset: isize| {
-        let index = (centre as isize + offset).rem_euclid(slot_count);
-        slot_frames[index as usize]
-    };
-    let gap_between = |older: isize| {
-        let older_frame = frame_at(older);
-        let newer_frame = frame_at(older + 1);
+/// `window_frames` holds the stream frame at each window position, oldest first, and `centre` is
+/// the position of the centre frame. Every other position is a neighbour, in window order, with
+/// `max_steps` entries listed from the centre outward. A gap is the ring slot of its newer frame's
+/// pair. A gap that does not step exactly one stream frame, such as an edge duplicate, and every
+/// entry past the neighbour's distance, is [NO_PAIR].
+///
+/// # Panics
+///
+/// Panics if a neighbour lies more than `max_steps` positions from the centre.
+pub fn compose_gaps(window_frames: &[u32], centre: usize, max_steps: usize, ring: &ModelRing) -> Vec<u32> {
+    let gap_between = |older: usize| {
+        let older_frame = window_frames[older];
+        let newer_frame = window_frames[older + 1];
         let next_frame = older_frame.wrapping_add(1);
         if newer_frame == next_frame {
             ring.slot(newer_frame)
@@ -36,16 +34,25 @@ pub fn compose_gaps(slot_frames: &[u32], centre: usize, radius: usize, ring: &Mo
         }
     };
 
-    let mut gaps = vec![NO_PAIR; 2 * radius * radius];
+    let neighbours = window_frames.len() - 1;
+    let mut gaps = vec![NO_PAIR; neighbours * max_steps];
 
-    for distance in 1..=radius {
-        let past_row = (radius - distance) * radius;
-        let future_row = (radius + distance - 1) * radius;
+    let positions = (0..window_frames.len()).filter(|&position| position != centre);
+    for (row, position) in positions.enumerate() {
+        let distance = position.abs_diff(centre);
+        assert!(
+            distance <= max_steps,
+            "a neighbour {distance} frames out needs more than {max_steps} steps"
+        );
 
+        let row_start = row * max_steps;
         for step in 0..distance {
-            let step_offset = step as isize;
-            gaps[past_row + step] = gap_between(-step_offset - 1);
-            gaps[future_row + step] = gap_between(step_offset);
+            let older = if position < centre {
+                centre - step - 1
+            } else {
+                centre + step
+            };
+            gaps[row_start + step] = gap_between(older);
         }
     }
 
@@ -55,7 +62,8 @@ pub fn compose_gaps(slot_frames: &[u32], centre: usize, radius: usize, ring: &Mo
 /// Composes one prediction per neighbour from `ring` into `out`.
 ///
 /// `gaps` holds the table [compose_gaps] builds for `neighbours` neighbours with `max_steps`
-/// entries each, and `out` takes [AFFINE_WORDS] words per neighbour.
+/// entries each, the first `past_neighbours` of them behind the centre. `out` takes
+/// [AFFINE_WORDS] words per neighbour.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -66,6 +74,7 @@ pub fn run_compose_models(
     gaps: &Handle,
     out: &Handle,
     neighbours: u32,
+    past_neighbours: u32,
     max_steps: u32,
     scale_x: f32,
     scale_y: f32,
@@ -84,7 +93,16 @@ pub fn run_compose_models(
     // thread per neighbour.
     unsafe {
         mc_compose_models::launch_unchecked(
-            client, cube_count, cube_dim, models_arg, gaps_arg, out_arg, neighbours, max_steps, scale_x,
+            client,
+            cube_count,
+            cube_dim,
+            models_arg,
+            gaps_arg,
+            out_arg,
+            neighbours,
+            max_steps,
+            past_neighbours,
+            scale_x,
             scale_y,
         );
     }

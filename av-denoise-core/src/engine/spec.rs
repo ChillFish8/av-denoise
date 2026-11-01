@@ -303,7 +303,7 @@ impl EngineSpec {
     ///
     /// It fits on the luma plane with the luma pass's search, or the chroma pass's when only that
     /// one searches. Its ring covers the frames the passes hold and their temporal window.
-    fn pair_model_producer(&self, client: &Client) -> Result<Option<PairModelProducer>, Error> {
+    pub(crate) fn pair_model_producer(&self, client: &Client) -> Result<Option<PairModelProducer>, Error> {
         let (luma, chroma) = self.passes();
         let luma_motion = luma.and_then(|pass| pass.motion());
         let chroma_motion = chroma.and_then(|pass| pass.motion());

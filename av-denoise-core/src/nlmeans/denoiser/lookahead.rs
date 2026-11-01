@@ -4,6 +4,7 @@ use cubecl::server::Handle;
 
 use super::NlmDenoiser;
 use super::noise::measures_noise;
+use super::seeds::PairSeeds;
 use crate::engine::timing::timed;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
 use crate::motion::{self, MatchTargets, MotionCtx, run_analyse, run_pyramid_build};
@@ -261,7 +262,8 @@ impl NlmDenoiser {
 
         let previous_slot = lookahead_slot(previous);
         let both_ways = frame == 1;
-        self.search_lookahead_pair(motion_ctx, previous_slot, slot, both_ways)
+        let seeds = self.compose_pair_seeds(previous, frame);
+        self.search_lookahead_pair(motion_ctx, previous_slot, slot, both_ways, seeds)
     }
 
     /// Reads and records the noise of stream frame `frame`, just written to the look-ahead.
@@ -319,17 +321,23 @@ impl NlmDenoiser {
     ///
     /// `Chained` estimation runs the pair analyse, which searches both ways. `Direct` estimation
     /// searches from the newer frame to the older one, and also the other way when `both_ways`.
+    /// With `seeds`, each direction also searches around its camera model prediction.
     fn search_lookahead_pair(
         &self,
         motion_ctx: &MotionCtx,
         older_slot: u32,
         newer_slot: u32,
         both_ways: bool,
+        seeds: Option<PairSeeds<'_>>,
     ) -> Result<(), anyhow::Error> {
         let lookahead = self.lookahead();
         let pyramid = lookahead.pyramid();
         let pair_field = lookahead.pair_field();
-        let noise = self.derived_handle();
+        let predictions = seeds.as_ref().map(|seeds| seeds.predictions);
+        let noise = match seeds.as_ref() {
+            Some(seeds) => seeds.noise.clone(),
+            None => self.derived_handle(),
+        };
 
         if self.is_chained() || both_ways {
             return motion::run_pair_analyse(
@@ -346,10 +354,12 @@ impl NlmDenoiser {
                 pair_field,
                 &self.confidence_dummy,
                 &noise,
-                None,
+                predictions,
             )
             .context("look-ahead pair analyse dispatch failed");
         }
+
+        let newer_to_older_prediction = predictions.map(|[_, newer_to_older]| newer_to_older);
 
         let direction_offset = motion::pair_byte_offset(motion_ctx, 0, NEWER_TO_OLDER);
         let newer_to_older = pair_field.clone().offset_start(direction_offset);
@@ -364,7 +374,7 @@ impl NlmDenoiser {
             confidence: &self.confidence_dummy,
             conf_len: 1,
             write_confidence: false,
-            predictions: None,
+            predictions: newer_to_older_prediction,
             sad: None,
         };
 

@@ -123,6 +123,7 @@ fn compose(
         &out,
         NEIGHBOURS as u32,
         RADIUS as u32,
+        RADIUS as u32,
         scale_x,
         scale_y,
     );
@@ -281,11 +282,60 @@ fn compose_gaps_lists_past_gaps_from_the_centre_outward() {
 }
 
 #[test]
-fn compose_gaps_wraps_physical_slots() {
+fn compose_gaps_walks_an_off_centre_window() {
     let client = test_client();
     let ring = ring_with(&client, &[]);
-    let logical = compose_gaps(&[8, 9, 10, 11, 12], RADIUS, RADIUS, &ring);
-    let physical = compose_gaps(&[11, 12, 8, 9, 10], 4, RADIUS, &ring);
+    let gaps = compose_gaps(&[8, 9, 10, 11, 12], 0, 4, &ring);
 
-    assert_eq!(physical, logical);
+    let ends_at_9 = 9 % RING_DEPTH;
+    let ends_at_10 = 10 % RING_DEPTH;
+    let ends_at_11 = 11 % RING_DEPTH;
+    let ends_at_12 = 12 % RING_DEPTH;
+    let expected = vec![
+        ends_at_9, NO_PAIR, NO_PAIR, NO_PAIR, // +1
+        ends_at_9, ends_at_10, NO_PAIR, NO_PAIR, // +2
+        ends_at_9, ends_at_10, ends_at_11, NO_PAIR, // +3
+        ends_at_9, ends_at_10, ends_at_11, ends_at_12, // +4
+    ];
+    assert_eq!(gaps, expected);
+}
+
+#[test]
+fn an_off_centre_window_composes_its_past_neighbours() {
+    let client = test_client();
+    let pairs = window_pairs();
+    let ring = ring_with(&client, &pairs);
+    let gaps = compose_gaps(&[8, 9, 10, 11, 12], 3, 3, &ring);
+    let gap_bytes = u32::as_bytes(&gaps);
+    let gaps_handle = client.create_from_slice(gap_bytes);
+    let out_len = NEIGHBOURS * AFFINE_WORDS as usize;
+    let out = client.empty(out_len * size_of::<f32>());
+
+    run_compose_models(
+        &client,
+        &ring,
+        &gaps_handle,
+        &out,
+        NEIGHBOURS as u32,
+        3,
+        3,
+        1.0,
+        1.0,
+    );
+
+    let words = read_f32(&client, &out, out_len).expect("composed predictions read back");
+    let (predictions, _) = words.as_chunks::<{ AFFINE_WORDS as usize }>();
+    let three_back = predictions[0].map(f64::from);
+    let one_ahead = predictions[3].map(f64::from);
+
+    let first_pair = as_affine(pairs[0].1);
+    let second_pair = as_affine(pairs[1].1);
+    let third_pair = as_affine(pairs[2].1);
+    let first_two = then(first_pair, second_pair);
+    let older_to_centre = then(first_two, third_pair);
+    let three_back_expected = inverse(older_to_centre);
+    let one_ahead_expected = as_affine(pairs[3].1);
+
+    assert_affine_close(three_back, three_back_expected, "-3");
+    assert_affine_close(one_ahead, one_ahead_expected, "+1");
 }

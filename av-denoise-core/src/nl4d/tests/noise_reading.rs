@@ -3,6 +3,7 @@ use crate::bench_api::HostIo;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::{interleave_planes, panning_frames, raw_reading_sigma};
+use crate::nlmeans::tests::models::ModelFitter;
 use crate::nlmeans::{ChannelMode, MotionCompensationMode, MotionEstimation, NlmParams};
 use crate::noise::{BLOCK_MOVED_LANE, NOISE_CHANNELS, temporal_stats_record_len};
 
@@ -15,6 +16,8 @@ const PAN_FRAMES: usize = 12 + LOOKAHEAD;
 const LOOKAHEAD: usize = LOOKAHEAD_FRAMES as usize;
 const PAN_SIGMA: f32 = 2.0 / 255.0;
 const PAN_SEED: u32 = 7;
+/// Past the 12 px an unseeded search reaches at the default block search.
+const FAST_PAN_SHIFT: u32 = 30;
 
 fn reading_params(channels: ChannelMode, motion_compensation: MotionCompensationMode) -> Nl4dParams {
     let defaults = Nl4dParams::default();
@@ -152,6 +155,54 @@ fn assert_tracks_pan_sigma(params: Nl4dParams, label: &str) {
     assert!(
         rel_err <= 0.10,
         "{label}: folded sigma {sigma} vs true {PAN_SIGMA} (rel err {rel_err:.3})"
+    );
+}
+
+/// The folded sigma after a stream fed with its camera models fitted alongside, when `seeded`.
+fn seeded_pan_sigma(params: Nl4dParams, frames: &[Vec<f32>], seeded: bool) -> f32 {
+    let client = make_client();
+    let mode = params.nlm.motion_compensation;
+    let mut fitter = ModelFitter::new(&client, PAN_WIDTH, PAN_HEIGHT, mode);
+    let mut denoiser =
+        Nl4dDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT).expect("construction failed");
+    if seeded {
+        let motion = fitter.motion(1.0, 1.0);
+        denoiser.set_shared_motion(motion);
+    }
+
+    for frame in frames {
+        fitter.fit(frame);
+        denoiser.push_frame(frame);
+        denoiser.denoise().expect("denoise failed");
+    }
+
+    folded_temporal_sigma(&denoiser)
+}
+
+#[test]
+fn the_pan_noise_reading_stays_near_truth() {
+    let frames = panning_frames(
+        PAN_WIDTH,
+        PAN_HEIGHT,
+        FAST_PAN_SHIFT,
+        PAN_FRAMES,
+        PAN_SIGMA,
+        PAN_SEED,
+    );
+    let params = reading_params(ChannelMode::Luma, mvtools(16, 8));
+
+    let unseeded = seeded_pan_sigma(params.clone(), &frames, false);
+    let unseeded_err = (unseeded - PAN_SIGMA).abs() / PAN_SIGMA;
+    assert!(
+        unseeded_err > 0.10,
+        "test premise: an unseeded search over-reads the pan, got {unseeded} vs {PAN_SIGMA}"
+    );
+
+    let sigma = seeded_pan_sigma(params, &frames, true);
+    let rel_err = (sigma - PAN_SIGMA).abs() / PAN_SIGMA;
+    assert!(
+        rel_err <= 0.10,
+        "folded sigma {sigma} vs true {PAN_SIGMA} (rel err {rel_err:.3})"
     );
 }
 

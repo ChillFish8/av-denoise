@@ -4,6 +4,7 @@ mod buffers;
 mod clear;
 mod edges;
 mod engine;
+mod global_motion;
 mod grouping;
 mod noise_map;
 mod noise_reading;

@@ -140,8 +140,9 @@ impl NlmDenoiser {
 
     /// Measures motion both ways between the slot just written and the one before it.
     ///
-    /// The result goes into the pair ring. A stream's first frame has no older partner and is
-    /// skipped, so composition reads the priming duplicate's zeroed pair instead.
+    /// Each direction also searches around the pair's camera model prediction. The result goes
+    /// into the pair ring. A stream's first frame has no older partner and is skipped, so
+    /// composition reads the priming duplicate's zeroed pair instead.
     fn run_pair_analyse_for_slot(&self, newer_slot: u32) -> Result<(), anyhow::Error> {
         if self.ring_head == 0 {
             return Ok(());
@@ -170,7 +171,14 @@ impl NlmDenoiser {
         let total_frames = self.params.total_frames();
         let older_slot = (newer_slot + total_frames - 1) % total_frames;
         let pair_slot = self.pair_slot(0);
-        let noise = self.derived_handle();
+        let older_frame = self.slot_frame(older_slot);
+        let newer_frame = self.slot_frame(newer_slot);
+        let seeds = self.compose_pair_seeds(older_frame, newer_frame);
+        let predictions = seeds.as_ref().map(|seeds| seeds.predictions);
+        let noise = match seeds.as_ref() {
+            Some(seeds) => seeds.noise.clone(),
+            None => self.derived_handle(),
+        };
 
         motion::run_pair_analyse(
             &self.client,
@@ -186,7 +194,7 @@ impl NlmDenoiser {
             pair_ring,
             &self.confidence_dummy,
             &noise,
-            None,
+            predictions,
         )
         .context("pair analyse dispatch failed")
     }

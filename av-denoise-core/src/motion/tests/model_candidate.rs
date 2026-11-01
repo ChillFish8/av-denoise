@@ -97,6 +97,17 @@ impl FineSearch {
     /// Runs the unseeded fine kernel against each neighbour, with the model candidate on when
     /// `predictions` holds six words per neighbour.
     fn run(&self, centre: &[f32], neighbours: &[Vec<f32>], predictions: Option<&[f32]>) -> FineOutput {
+        self.run_seeded(centre, neighbours, predictions, None)
+    }
+
+    /// [Self::run] with every block seeded at `seed` when given.
+    fn run_seeded(
+        &self,
+        centre: &[f32],
+        neighbours: &[Vec<f32>],
+        predictions: Option<&[f32]>,
+        seed: Option<(i32, i32)>,
+    ) -> FineOutput {
         let client = test_client();
         let neighbour_count = neighbours.len() as u32;
         let (pyramid, neighbour_slots, pyramid_len) = slot_frames(&client, centre, neighbours);
@@ -106,9 +117,13 @@ impl FineSearch {
         let mv_stride = 2 * self.blocks();
         let mv_len = (mv_stride * neighbour_count) as usize;
         let conf_len = (self.conf_stride() * neighbour_count) as usize;
-        let zeros = vec![0i32; mv_len];
-        let zero_bytes = i32::as_bytes(&zeros);
-        let mv_field = client.create_from_slice(zero_bytes);
+        let (seed_dx, seed_dy) = seed.unwrap_or((0, 0));
+        let seeds: Vec<i32> = (0..mv_len)
+            .map(|index| if index % 2 == 0 { seed_dx } else { seed_dy })
+            .collect();
+        let seed_bytes = i32::as_bytes(&seeds);
+        let mv_field = client.create_from_slice(seed_bytes);
+        let use_seed = u32::from(seed.is_some());
         let unwritten = vec![f32::NAN; conf_len];
         let confidence = upload(&client, &unwritten);
         let sad = upload(&client, &unwritten);
@@ -151,7 +166,7 @@ impl FineSearch {
                 self.blksize,
                 self.step,
                 self.search_radius,
-                0u32,
+                use_seed,
                 self.blocks_x(),
                 mv_stride,
                 self.conf_stride(),
@@ -268,6 +283,31 @@ fn offset_pair(seed_offset: f32, model_offset: f32) -> (i32, i32) {
     let output = search.run(&centre, &neighbours, Some(&predictions));
 
     search.vector(&output, 0, 0, 0)
+}
+
+#[test]
+fn an_identity_prediction_keeps_a_non_zero_seed() {
+    let search = FineSearch {
+        width: 64,
+        height: 16,
+        blksize: 16,
+        step: 16,
+        search_radius: 0,
+        sad_floor: 0.0,
+        write_sad: true,
+    };
+    let centre = texture(search.width, search.height, 5);
+    let neighbours = [centre.clone()];
+    let identity = translation(0.0, 0.0);
+    let seed = Some((20, 0));
+
+    let without_model = search.run_seeded(&centre, &neighbours, None, seed);
+    let with_model = search.run_seeded(&centre, &neighbours, Some(&identity), seed);
+
+    let seeded_vector = search.vector(&with_model, 0, 0, 0);
+    assert_eq!(seeded_vector, (20, 0), "the seed is kept, not the zero window");
+    assert_eq!(with_model.vectors, without_model.vectors);
+    assert_eq!(bits(&with_model.sad), bits(&without_model.sad));
 }
 
 #[test]

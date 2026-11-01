@@ -8,7 +8,7 @@ use crate::nl4d::Nl4dOptions;
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::EngineKernels;
 use crate::tune::gpu::read_f32;
-use crate::tune::tests::fixtures::{hashed_unit, upload};
+use crate::tune::tests::fixtures::{hashed_unit, noisy_field_over, upload};
 use crate::tune::tests::runtime::test_client;
 
 const WIDTH: u32 = 960;
@@ -280,6 +280,62 @@ fn a_synthetic_pan_is_recovered_frame_by_frame() {
 
     let mut producer = producer(&client, mode);
     assert_pan_recovered(&client, &mut producer, 0, 8, 30.0, PAN_TOLERANCE);
+}
+
+#[test]
+fn a_46_px_pan_is_recovered_from_frame_0() {
+    let client = test_client();
+    let mut producer = producer(&client, default_mode());
+
+    assert_pan_recovered(&client, &mut producer, 0, 6, 46.0, PAN_TOLERANCE);
+}
+
+/// How far the camera of frame `frame` has panned, speeding up by 10 px a frame to 70 px a frame.
+///
+/// Only a search seeded by the pairs before it could follow the top speed, which lies past the
+/// unseeded reach.
+fn ramp_offset(frame: u32) -> f64 {
+    (1..=frame).map(|step| f64::from((10 * step).min(70))).sum()
+}
+
+/// Pushes frame `frame` of a grainy ramping pan, numbered `run_frame` in its run.
+fn push_ramp_frame(client: &Client, producer: &mut PairModelProducer, frame: u32, run_frame: u32) {
+    let offset = ramp_offset(frame);
+    let camera = Similarity::shift(offset, 0.0);
+    let clean = render(camera, WIDTH, HEIGHT);
+    let samples = noisy_field_over(&clean, WIDTH, HEIGHT, 0.04, frame);
+    let handle = upload(client, &samples);
+    let plane = DevicePlane::new(&handle, WIDTH, HEIGHT);
+
+    producer.push(&plane, run_frame).unwrap();
+}
+
+#[test]
+fn a_pair_fits_the_same_model_in_any_run() {
+    let client = test_client();
+    let restart = 8u32;
+    let last = 11u32;
+
+    let mut streamed = producer(&client, default_mode());
+
+    for frame in 0..=last {
+        push_ramp_frame(&client, &mut streamed, frame, frame);
+    }
+
+    let mut restarted = producer(&client, default_mode());
+
+    for frame in restart..=last {
+        push_ramp_frame(&client, &mut restarted, frame, frame - restart);
+    }
+
+    for frame in restart + 1..=last {
+        let streamed_model = read_slot(&client, streamed.ring(), frame);
+        let restarted_model = read_slot(&client, restarted.ring(), frame - restart);
+        assert_eq!(
+            streamed_model, restarted_model,
+            "frame {frame}: a pair's model must not depend on the pairs before it"
+        );
+    }
 }
 
 #[test]

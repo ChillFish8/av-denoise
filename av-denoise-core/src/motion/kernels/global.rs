@@ -17,10 +17,11 @@ use crate::motion::global::{
 
 /// Composes the camera model from the centre frame to each neighbour, in the pass's own pixels.
 ///
-/// One thread handles one neighbour, in motion-field order with past neighbours first. Its
-/// `max_steps` gap entries name the model-ring slots between the centre and that neighbour,
-/// listed from the centre outward. A future neighbour applies them in order. A past neighbour
-/// multiplies them into the motion from the neighbour to the centre and writes its inverse.
+/// One thread handles one neighbour, in motion-field order with the first `past_neighbours`
+/// behind the centre. Its `max_steps` gap entries name the model-ring slots between the centre
+/// and that neighbour, listed from the centre outward. A future neighbour applies them in order.
+/// A past neighbour multiplies them into the motion from the neighbour to the centre and writes
+/// its inverse.
 /// A `NO_PAIR` entry, or a model whose `valid` word is zero, counts as no motion.
 ///
 /// Models are in luma pixels and each output is `m00, m01, m10, m11, tx, ty` with
@@ -32,6 +33,7 @@ pub fn mc_compose_models(
     out: &mut [f32],
     #[comptime] neighbours: u32,
     #[comptime] max_steps: u32,
+    past_neighbours: u32,
     scale_x: f32,
     scale_y: f32,
 ) {
@@ -40,7 +42,7 @@ pub fn mc_compose_models(
         terminate!();
     }
 
-    let past = neighbour < neighbours / 2;
+    let past = neighbour < past_neighbours;
     let mut acc_a = 1.0f32;
     let mut acc_b = 0.0f32;
     let mut acc_tx = 0.0f32;

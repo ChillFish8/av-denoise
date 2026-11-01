@@ -14,7 +14,8 @@ struct ReferenceBest {
 /// The per-candidate block match the production kernel must reproduce.
 ///
 /// With `model_candidate`, a second window centres on the rounded model displacement at the block
-/// centre, and wins only when its SAD plus `model_bias` is below the zero window's.
+/// centre, and wins only when its SAD plus `model_bias` is below the zero window's. An identity
+/// prediction never wins.
 #[cube(launch_unchecked)]
 pub(super) fn reference_block_match_coarse(
     centre: &[f32],
@@ -96,7 +97,8 @@ pub(super) fn reference_block_match_coarse(
             search_radius,
         );
 
-        if model_window.sad + model_bias < zero_window.sad {
+        let moves = reference_predicts_motion(predictions);
+        if moves && model_window.sad + model_bias < zero_window.sad {
             best_dx = model_window.dx;
             best_dy = model_window.dy;
         }
@@ -143,7 +145,8 @@ pub(super) fn reference_block_match_coarse(
 /// The per-candidate block match the production kernel must reproduce.
 ///
 /// With `model_candidate`, a second window centres on the rounded model displacement at the block
-/// centre, and wins only when its SAD plus `model_bias` is below the seed window's.
+/// centre, and wins only when its SAD plus `model_bias` is below the seed window's. An identity
+/// prediction never wins.
 #[cube(launch_unchecked)]
 pub(super) fn reference_block_match_fine(
     centre: &[f32],
@@ -223,7 +226,8 @@ pub(super) fn reference_block_match_fine(
             search_radius,
         );
 
-        if model_window.sad + model_bias < seed_window.sad {
+        let moves = reference_predicts_motion(predictions);
+        if moves && model_window.sad + model_bias < seed_window.sad {
             best_sad = model_window.sad;
             best_dx = model_window.dx;
             best_dy = model_window.dy;
@@ -362,6 +366,21 @@ fn reference_window(
         dx: best_dx,
         dy: best_dy,
     }
+}
+
+/// Whether the neighbour's prediction differs from identity.
+#[cube]
+fn reference_predicts_motion(predictions: &[f32]) -> bool {
+    let base = (CUBE_POS_Z * AFFINE_WORDS) as usize;
+    let mut moves = false;
+    for word in 0..AFFINE_WORDS {
+        let identity_word = if word == 0 || word == 3 { 1.0f32 } else { 0.0f32 };
+        if predictions[base + word as usize] != identity_word {
+            moves = true;
+        }
+    }
+
+    moves
 }
 
 /// The model's x displacement at the block centre on a level `level_scale` times smaller.

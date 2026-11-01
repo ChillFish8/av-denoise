@@ -101,7 +101,8 @@ pub(crate) fn run_analyse(
         let slot_pixels = pyramid_slot_pixels(width, height, coarse_level, motion_ctx.align);
         let coarse_scale = 1u32 << coarse_level;
         // A coarse block covers the same content as a fine block scaled down by `coarse_scale`.
-        let coarse_blksize = (motion_ctx.blksize / coarse_scale).max(2);
+        let content_blksize = (motion_ctx.blksize / coarse_scale).max(2);
+        let coarse_blksize = content_blksize * motion_ctx.coarse_block_factor;
         let coarse_step = (motion_ctx.step / coarse_scale).max(1);
         let coarse_blocks_x = coarse_width.div_ceil(coarse_step).max(1);
         let coarse_blocks_y = coarse_height.div_ceil(coarse_step).max(1);
@@ -141,7 +142,7 @@ pub(crate) fn run_analyse(
                 slot_pixels,
                 coarse_blksize,
                 coarse_step,
-                motion_ctx.search_radius,
+                motion_ctx.coarse_search_radius,
                 coarse_scale,
                 motion_ctx.blocks_x,
                 motion_ctx.blocks_y,

@@ -37,9 +37,6 @@ pub(crate) struct Nlmeans {
     pushed: bool,
     /// The stream frame of the last emit.
     emitted: Option<u32>,
-    /// The camera models of the frames this pass sees.
-    #[expect(dead_code, reason = "task 5 seeds the pass searches from these models")]
-    motion: Option<SharedMotion>,
     poisoned: bool,
 }
 
@@ -53,7 +50,8 @@ impl Nlmeans {
 
     /// Builds the engine with each launch site's candidate picked from `kernels`.
     ///
-    /// Returns [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
+    /// Its motion searches start from the camera models in `motion` when given. Returns
+    /// [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
     pub fn with_kernels(
         client: &Client,
         algorithm: NlmeansAlgorithm,
@@ -84,7 +82,10 @@ impl Nlmeans {
         indexable.map_err(Error::InvalidGeometry)?;
 
         let selector = KernelSelector::new(client, kernels);
-        let front = NlmDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
+        let mut front = NlmDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
+        if let Some(motion) = motion {
+            front.set_shared_motion(motion);
+        }
 
         Ok(Self {
             front,
@@ -93,7 +94,6 @@ impl Nlmeans {
             tail_remaining: 0,
             pushed: false,
             emitted: None,
-            motion,
             poisoned: false,
         })
     }

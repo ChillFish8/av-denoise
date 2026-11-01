@@ -112,6 +112,19 @@ pub(super) fn model_displacement(
     }
 }
 
+/// Whether neighbour `neighbour_index`'s camera model moves anything.
+///
+/// A neighbour without a model composes to an exact identity, which adds no search centre.
+#[cube]
+pub(super) fn predicts_motion(predictions: &[f32], neighbour_index: u32) -> bool {
+    let base = (neighbour_index * AFFINE_WORDS) as usize;
+    let scales = predictions[base] != 1.0f32 || predictions[base + 3] != 1.0f32;
+    let shears = predictions[base + 1] != 0.0f32 || predictions[base + 2] != 0.0f32;
+    let shifts = predictions[base + 4] != 0.0f32 || predictions[base + 5] != 0.0f32;
+
+    scales || shears || shifts
+}
+
 /// Whether a later candidate's SAD beats the incumbent's.
 ///
 /// It must be lower by more than `bias`, so ties and near-ties keep the earlier candidate.

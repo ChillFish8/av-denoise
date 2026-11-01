@@ -101,10 +101,19 @@ fn run(config: &ParityConfig, entries: &mut Entries) {
         entries.insert(key, value);
     }
 
-    run_reseed(config, &mut denoiser, &clip, entries);
+    run_reseed(config, &mut denoiser, &clip, &outputs, entries);
 }
 
-fn run_reseed(config: &ParityConfig, denoiser: &mut PlanarDenoiser, clip: &[Planes], entries: &mut Entries) {
+/// Runs the config's reseed and records it.
+///
+/// A mid-clip reseed must reproduce the streamed output of its target frame byte for byte.
+fn run_reseed(
+    config: &ParityConfig,
+    denoiser: &mut PlanarDenoiser,
+    clip: &[Planes],
+    streamed: &[Planes],
+    entries: &mut Entries,
+) {
     let span = denoiser.window_span();
 
     match config.reseed {
@@ -114,6 +123,13 @@ fn run_reseed(config: &ParityConfig, denoiser: &mut PlanarDenoiser, clip: &[Plan
             let end = start + span.frame_count();
             let window = &clip[start..end];
             let reseeded = denoiser.reseed(window).expect("reseed");
+            let target = &streamed[start + span.behind];
+            let matches = reseeded.y == target.y && reseeded.u == target.u && reseeded.v == target.v;
+            assert!(
+                matches,
+                "{}: the reseed differs from its streamed frame",
+                config.name
+            );
             record_planes(entries, config.name, "reseed", &reseeded);
         },
         Reseed::ClipStart => {
