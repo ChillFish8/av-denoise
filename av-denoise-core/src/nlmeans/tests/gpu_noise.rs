@@ -14,8 +14,6 @@ use crate::noise::{
     NOISE_CHANNELS,
     NoiseConsumer,
     NoiseSnapshot,
-    STRENGTH_MAP_OFF,
-    StrengthMapKind,
     build_spatial_offset_lut,
     spatial_offset_factor,
     spatial_offset_index,
@@ -197,11 +195,10 @@ fn the_coefficients_reproduce_the_host_formulas() {
                 temporal_only: None,
                 rho: None,
                 curve: None,
-                classes_present: false,
                 derived: DerivedValues::default(),
             };
             let consumer = NoiseConsumer::default();
-            let gpu = coefficients.derive_host(&snapshot, count, consumer, StrengthMapKind::Off);
+            let gpu = coefficients.derive_host(&snapshot, count, consumer);
             let host = host_formulas(&front, median, low);
             let pairs = [
                 ("h2_inv_norm", gpu.h2_inv_norm, host.h2_inv_norm),
@@ -418,7 +415,6 @@ fn pinned_formulas(front: &NlmDenoiser, sigma: f32) -> DerivedValues {
         sigma: sigmas,
         weight_scale: weight,
         curve_valid: false,
-        map_mode: STRENGTH_MAP_OFF,
         sad_noise_floor: sad_floor,
         confidence_sad_noise_floor: confidence_sad_floor,
         h2_inv_norm,

@@ -176,7 +176,7 @@ fn the_history_keeps_each_frame_reading_until_it_folds() {
 
     let sigmas: Vec<f32> = (0..recorded)
         .map(|frame| {
-            let (_, sums, _) = noise.read_history_frame(frame);
+            let (_, sums) = noise.read_history_frame(frame);
             sigma_from_abs_sum(sums[0], width, height)
         })
         .collect();

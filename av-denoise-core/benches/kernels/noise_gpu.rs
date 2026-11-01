@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use av_denoise_core::bench_api::noise_kernels::{noise_select_histogram, noise_select_resolve};
-use av_denoise_core::bench_api::noise_reading::{NoiseReading, ReadingMap, ReadingOptions, ReadingStage};
+use av_denoise_core::bench_api::noise_reading::{NoiseReading, ReadingOptions, ReadingStage};
 use av_denoise_core::bench_api::noise_select::{
     RankRule,
     SELECT_CUBE_THREADS,
@@ -49,14 +49,6 @@ const PERCENTILE_RULES: [RankRule; 4] = [
 ];
 
 const MEDIAN_RULES: [RankRule; 2] = [RankRule::MedianLow, RankRule::MedianHigh];
-
-/// The luma strength map the class and map rows build, with the line ring and the texture veto on.
-const READING_MAP: ReadingMap = ReadingMap {
-    flat_boost: 1.5,
-    shadow_soften: 0.65,
-    texture_cut: 0.21,
-    line_ring: 2,
-};
 
 /// Copies `length` words of `source` over `target`.
 #[cube(launch_unchecked)]
@@ -445,8 +437,8 @@ impl Benchmark for SelectBench {
 /// The stats come from the real stats kernels over a frame and a copy with hashed noise added, so
 /// most blocks are static noise. The launches before the timed one run in `prepare`. The luma rows
 /// measure the quarter fields, as nl4d does, except the plain finish row, which leaves the curve
-/// out. The class and map rows also build a luma strength map. The curve batch's passes add to its
-/// histogram, so it is refilled from a copy outside the timed span.
+/// out. The curve batch's passes add to its histogram, so it is refilled from a copy outside the
+/// timed span.
 pub struct ReadingBench {
     pub client: Client,
     pub stage: ReadingStage,
@@ -472,12 +464,6 @@ impl ReadingBench {
         } else {
             (WIDTH, HEIGHT, 1)
         }
-    }
-
-    /// The strength map the reading builds, for the class and map rows only.
-    fn map(&self) -> Option<ReadingMap> {
-        let builds_map = matches!(self.stage, ReadingStage::Classify | ReadingStage::StrengthMap);
-        builds_map.then_some(READING_MAP)
     }
 
     /// Whether the stats carry the luma quarter fields.
@@ -565,7 +551,6 @@ impl Benchmark for ReadingBench {
         let ring = self.ring();
         let options = ReadingOptions {
             luma_fields: self.luma_fields(),
-            map: self.map(),
             offset_tables: None,
         };
         let reading = NoiseReading::new(&self.client, width, height, channels, &ring, options)
@@ -618,8 +603,6 @@ impl Benchmark for ReadingBench {
             (ReadingStage::CurveBatch, _) => "curve_batch",
             (ReadingStage::SampleFinish, false) => "sample_finish",
             (ReadingStage::SampleFinish, true) => "sample_finish_curve",
-            (ReadingStage::Classify, _) => "classify",
-            (ReadingStage::StrengthMap, _) => "strength_map",
         };
         let plane = if self.chroma { "chroma" } else { "luma" };
 
@@ -640,13 +623,11 @@ impl Benchmark for ReadingBench {
 /// Which launch of the stream state a fold row times.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FoldStage {
-    /// A window fold over a full window of one reading with a sample and a curve, with no map.
-    WindowWithoutMap,
-    /// A window fold that also folds a 1080p luma map.
+    /// A window fold over a full window of one reading with a sample and a curve.
     Window,
-    /// A window fold that also writes the offset tables of a radius 2 search window, with no map.
+    /// A window fold that also writes the offset tables of a radius 2 search window.
     WindowWithTables,
-    /// The copy of one reading and its 1080p luma map into the history.
+    /// The copy of one reading into the history.
     Record,
 }
 
@@ -666,7 +647,7 @@ impl FoldBench {
     fn queue_stage(&self, reading: &NoiseReading) {
         match self.stage {
             FoldStage::Record => reading.queue_record(),
-            FoldStage::WindowWithoutMap | FoldStage::Window | FoldStage::WindowWithTables => {
+            FoldStage::Window | FoldStage::WindowWithTables => {
                 reading.queue_window_fold().expect("the window fold queues")
             },
         }
@@ -680,17 +661,14 @@ impl Benchmark for FoldBench {
     fn prepare(&self) -> Self::Input {
         let gradient = ReadingBench {
             client: self.client.clone(),
-            stage: ReadingStage::StrengthMap,
+            stage: ReadingStage::SampleFinish,
             chroma: false,
             curve: true,
         };
         let ring = gradient.ring();
-        let has_map = matches!(self.stage, FoldStage::Window | FoldStage::Record);
-        let map = has_map.then_some(READING_MAP);
         let offset_tables = (self.stage == FoldStage::WindowWithTables).then_some(FOLD_TABLE_RADIUS);
         let options = ReadingOptions {
             luma_fields: true,
-            map,
             offset_tables,
         };
         let reading =
@@ -720,7 +698,6 @@ impl Benchmark for FoldBench {
 
     fn name(&self) -> String {
         let stage = match self.stage {
-            FoldStage::WindowWithoutMap => "window_without_map",
             FoldStage::Window => "window",
             FoldStage::WindowWithTables => "window_with_tables",
             FoldStage::Record => "record",

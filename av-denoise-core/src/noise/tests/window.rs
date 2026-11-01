@@ -12,7 +12,6 @@ use super::fold_reference::{
     state_pairs,
 };
 use super::records::hashed_unit;
-use crate::collab::geometry::strength_map_dims;
 use crate::engine::align::StorageAlign;
 use crate::noise::NOISE_CHANNELS;
 use crate::noise::correlation::build_spatial_offset_lut;
@@ -24,8 +23,7 @@ use crate::noise::history::{NOISE_WINDOW_RADIUS, ReadingHistory, WindowBounds, h
 use crate::noise::reading::{READING_WORDS, ReadingRecord};
 use crate::noise::snapshot::NoiseSnapshot;
 use crate::noise::spatial::{RESULTS_PER_SLOT, immerkaer_sigma_scale};
-use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
-use crate::noise::strength_map::StrengthMapParams;
+use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings};
 use crate::noise::temporal::TemporalNoiseSample;
 use crate::tune::tests::runtime::test_client;
 
@@ -36,10 +34,6 @@ const TEMPORAL_RADIUS: u32 = 1;
 const TABLE_RADIUS: u32 = 2;
 const MAX_RELATIVE: f32 = 1.0e-5;
 const RECORD_COUNT: u32 = 40;
-const LUMA_PARAMS: StrengthMapParams = StrengthMapParams {
-    flat_boost: 1.5,
-    shadow_soften: 0.65,
-};
 
 fn shape(client: &Client, channels: u32) -> NoiseShape {
     NoiseShape {
@@ -53,17 +47,8 @@ fn shape(client: &Client, channels: u32) -> NoiseShape {
     }
 }
 
-fn quarters() -> usize {
-    let (cols, rows) = strength_map_dims(WIDTH, HEIGHT);
-    (cols * rows) as usize
-}
-
-fn settings(map: StrengthMapKind, sigma_scale: f32) -> NoiseSettings {
-    let reading = ReadingSettings {
-        luma_fields: true,
-        map,
-        ..ReadingSettings::default()
-    };
+fn settings(sigma_scale: f32) -> NoiseSettings {
+    let reading = ReadingSettings { luma_fields: true };
     let fold = FoldSettings {
         sigma_scale,
         consumer: CONSUMER,
@@ -72,10 +57,6 @@ fn settings(map: StrengthMapKind, sigma_scale: f32) -> NoiseSettings {
     };
 
     NoiseSettings { reading, fold }
-}
-
-fn luma_map() -> StrengthMapKind {
-    StrengthMapKind::Luma(LUMA_PARAMS)
 }
 
 /// The abs sum whose Immerkær sigma is about `sigma`.
@@ -114,9 +95,6 @@ fn hashed_record(seed: u32, channels: u32, sampled: bool, curved: bool) -> HostR
         ratios,
         sigma_quarter_median: (2.0 + hashed_unit(seed, 70)) / 255.0,
     });
-    let map = (0..quarters())
-        .map(|quarter| 0.5 + hashed_unit(seed, 100 + quarter as u32))
-        .collect();
 
     let reading = ReadingRecord {
         immerkaer_low,
@@ -126,11 +104,7 @@ fn hashed_record(seed: u32, channels: u32, sampled: bool, curved: bool) -> HostR
         populated_bins: if curve.is_some() { 6 } else { 0 },
     };
 
-    HostRecord {
-        reading,
-        immerkaer,
-        map,
-    }
+    HostRecord { reading, immerkaer }
 }
 
 /// Records whose every third frame has no sample and every fourth sampled frame no curve.
@@ -140,8 +114,8 @@ fn hashed_records(count: u32, channels: u32, seed: u32) -> Vec<HostRecord> {
         .collect()
 }
 
-/// A record with every value, the curve ratios and the map scaled by `level`, and a sample of
-/// correlation 0.2.
+/// A record with every value and the curve ratios scaled by `level`, and a sample of correlation
+/// 0.2.
 fn level_record(level: f32) -> HostRecord {
     let sample = TemporalNoiseSample {
         sigma: [level, 0.0],
@@ -165,18 +139,15 @@ fn level_record(level: f32) -> HostRecord {
     HostRecord {
         reading,
         immerkaer: [level * 0.75, 0.0],
-        map: vec![0.625 * codes; quarters()],
     }
 }
 
 /// A history holding frames `0..=newest` of `records`, each in the slot its frame number names.
-fn upload_history(client: &Client, records: &[HostRecord], newest: u32, map_len: u32) -> ReadingHistory {
+fn upload_history(client: &Client, records: &[HostRecord], newest: u32) -> ReadingHistory {
     let capacity = history_capacity(TEMPORAL_RADIUS) as usize;
     let reading_words = READING_WORDS as usize;
-    let map_words = map_len as usize;
     let mut words = vec![0.0f32; capacity * reading_words];
     let mut results = vec![0.0f32; capacity * RESULTS_PER_SLOT];
-    let mut maps = vec![1.0f32; capacity * map_words];
 
     let recorded = &records[..=newest as usize];
     for (frame, record) in recorded.iter().enumerate() {
@@ -189,12 +160,9 @@ fn upload_history(client: &Client, records: &[HostRecord], newest: u32, map_len:
         for channel in 0..RESULTS_PER_SLOT {
             results[results_start + channel] = abs_sum_for(record.immerkaer[channel]);
         }
-
-        let maps_start = slot * map_words;
-        maps[maps_start..maps_start + map_words].copy_from_slice(&record.map[..map_words]);
     }
 
-    ReadingHistory::from_words(client, TEMPORAL_RADIUS, map_len, &words, &results, &maps)
+    ReadingHistory::from_words(client, TEMPORAL_RADIUS, &words, &results)
 }
 
 /// Everything one window fold writes.
@@ -202,7 +170,6 @@ fn upload_history(client: &Client, records: &[HostRecord], newest: u32, map_len:
 struct WindowRun {
     snapshot: NoiseSnapshot,
     curve: Vec<f32>,
-    map: Vec<f32>,
     spatial: Vec<f32>,
     pilot: Vec<f32>,
 }
@@ -213,7 +180,6 @@ impl WindowRun {
         let words = derived
             .iter()
             .chain(&self.curve)
-            .chain(&self.map)
             .chain(&self.spatial)
             .chain(&self.pilot);
 
@@ -237,11 +203,7 @@ fn run_window(
     let client = test_client();
     let shape = shape(&client, channels);
     let state = NoiseState::new(&client, shape, settings, DerivedValues::default());
-    let map_len = match settings.reading.map {
-        StrengthMapKind::Off => 0,
-        _ => quarters() as u32,
-    };
-    let history = upload_history(&client, records, newest, map_len);
+    let history = upload_history(&client, records, newest);
 
     state
         .fold_history(&history, bounds)
@@ -254,7 +216,6 @@ fn run_window(
     WindowRun {
         snapshot,
         curve: state.read_curve(),
-        map: state.read_current_map(),
         spatial: read_words(&client, spatial_handle),
         pilot: read_words(&client, pilot_handle),
     }
@@ -283,12 +244,6 @@ fn assert_matches_host(
     };
     assert_eq!(run.curve, expected_curve, "the curve buffer");
 
-    if settings.reading.map != StrengthMapKind::Off {
-        let ones = vec![1.0f32; quarters()];
-        let expected_map = host.map.unwrap_or(ones);
-        assert_eq!(run.map, expected_map, "the current map");
-    }
-
     let derived_values = run.snapshot.derived;
     let spatial = build_spatial_offset_lut(TABLE_RADIUS, derived_values.rho, derived_values.noise_offset);
     let pilot = build_spatial_offset_lut(TABLE_RADIUS, 0.0, derived_values.input_noise_offset);
@@ -305,11 +260,7 @@ fn assert_matches_host(
 
 #[test]
 fn window_fold_matches_the_host_model() {
-    let cases = [
-        (1, settings(luma_map(), 1.1)),
-        (2, settings(StrengthMapKind::Chroma { flat_boost: 1.5 }, 1.0)),
-        (1, settings(StrengthMapKind::Off, 0.9)),
-    ];
+    let cases = [(1, settings(1.1)), (2, settings(1.0)), (1, settings(0.9))];
     let newest = RECORD_COUNT - 1;
     let centres = [0, RECORD_COUNT / 2, newest];
 
@@ -334,7 +285,7 @@ fn one_spiked_record_does_not_move_the_window() {
     spiked[5] = level_record(6.0 / 255.0);
 
     let bounds = WindowBounds::around(NOISE_WINDOW_RADIUS, newest);
-    let case_settings = settings(luma_map(), 1.0);
+    let case_settings = settings(1.0);
     let calm_run = run_window(1, case_settings, &calm, bounds, newest);
     let spiked_run = run_window(1, case_settings, &spiked, bounds, newest);
 
@@ -348,7 +299,7 @@ fn a_window_without_samples_falls_back_to_immerkaer() {
         .map(|frame| hashed_record(frame + 3, 1, false, false))
         .collect();
     let bounds = WindowBounds::around(4, 8);
-    let case_settings = settings(luma_map(), 1.0);
+    let case_settings = settings(1.0);
     let run = run_window(1, case_settings, &records, bounds, 8);
 
     let mut unboosted: Vec<f32> = records
@@ -359,7 +310,6 @@ fn a_window_without_samples_falls_back_to_immerkaer() {
     let expected = unboosted[4].max(SIGMA_FLOOR);
     let derived = run.snapshot.derived;
     let words = derived.to_words();
-    let ones = vec![1.0f32; quarters()];
     let zeros = vec![0.0f32; NOISE_CURVE_BINS];
 
     assert_eq!(derived.sigma[0], expected);
@@ -368,7 +318,6 @@ fn a_window_without_samples_falls_back_to_immerkaer() {
     assert_eq!(run.snapshot.curve, None);
     assert_eq!(derived.rho, 0.0);
     assert!(words.iter().all(|word| word.is_finite()));
-    assert_eq!(run.map, ones);
     assert_eq!(run.curve, zeros);
 }
 
@@ -382,7 +331,7 @@ fn a_clipped_window_uses_only_frames_inside_the_stream() {
     }
 
     let bounds = WindowBounds::around(4, 8);
-    let case_settings = settings(luma_map(), 1.0);
+    let case_settings = settings(1.0);
     let inside_run = run_window(1, case_settings, &inside, bounds, newest);
     let outside_run = run_window(1, case_settings, &outside, bounds, newest);
 
@@ -393,7 +342,7 @@ fn a_clipped_window_uses_only_frames_inside_the_stream() {
 }
 
 #[test]
-fn curve_ratios_and_map_take_the_elementwise_median() {
+fn curve_ratios_take_the_elementwise_median() {
     let mut records: Vec<HostRecord> = (0..3)
         .map(|seed| hashed_record(seed + 60, 1, true, true))
         .collect();
@@ -403,15 +352,10 @@ fn curve_ratios_and_map_take_the_elementwise_median() {
             let rank = (bin + index) % 3;
             *ratio = 0.9 + 0.1 * rank as f32 + 0.001 * index as f32;
         }
-
-        for (quarter, multiplier) in record.map.iter_mut().enumerate() {
-            let rank = (quarter + 2 * index) % 3;
-            *multiplier = 0.8 + 0.2 * rank as f32 + 0.001 * index as f32;
-        }
     }
 
     let bounds = WindowBounds::around(1, 2);
-    let case_settings = settings(luma_map(), 1.0);
+    let case_settings = settings(1.0);
     let run = run_window(1, case_settings, &records, bounds, 2);
 
     let middle = |value_of: &dyn Fn(&HostRecord) -> f32| {
@@ -422,9 +366,6 @@ fn curve_ratios_and_map_take_the_elementwise_median() {
     let expected_curve: Vec<f32> = (0..NOISE_CURVE_BINS)
         .map(|bin| middle(&|record| record.reading.curve.unwrap().ratios[bin]))
         .collect();
-    let expected_map: Vec<f32> = (0..quarters())
-        .map(|quarter| middle(&|record| record.map[quarter]))
-        .collect();
 
     for record in &records {
         let ratios = record.reading.curve.unwrap().ratios.to_vec();
@@ -432,14 +373,9 @@ fn curve_ratios_and_map_take_the_elementwise_median() {
             ratios, expected_curve,
             "one record already holds the median curve"
         );
-        assert_ne!(
-            record.map, expected_map,
-            "one record already holds the median map"
-        );
     }
 
     assert_eq!(run.curve, expected_curve);
-    assert_eq!(run.map, expected_map);
     assert_matches_host(&run, &records, bounds, case_settings, 1);
 }
 
@@ -448,7 +384,7 @@ fn the_window_fold_is_byte_identical_across_runs() {
     let records = hashed_records(RECORD_COUNT, 1, 23);
     let newest = RECORD_COUNT - 1;
     let bounds = WindowBounds::around(RECORD_COUNT / 2, newest);
-    let case_settings = settings(luma_map(), 1.0);
+    let case_settings = settings(1.0);
 
     let first = run_window(1, case_settings, &records, bounds, bounds.last());
     let second = run_window(1, case_settings, &records, bounds, bounds.last());

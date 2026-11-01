@@ -39,7 +39,6 @@ use crate::noise::select::{RankRule, SelectQuery};
 use crate::noise::spatial::{RESULTS_PER_SLOT, sigma_block_p25_from_partials};
 use crate::noise::state::{BLOCK_ACCEPTED, NoiseShape, NoiseState, ReadingSettings, SlotStats};
 use crate::noise::stats::lower_quartile;
-use crate::noise::strength_map::QuarterSettings;
 use crate::noise::temporal::{
     RHO_SIGMA_GATE,
     STATIC_GATE,
@@ -111,14 +110,7 @@ struct HostReading {
 
 fn host_reading(plane: Plane, partials: &[f32], records: &[f32]) -> HostReading {
     let immerkaer_low = sigma_block_p25_from_partials(partials, plane.channels, plane.width, plane.height);
-    let reading = temporal_noise_reading(
-        records,
-        plane.channels,
-        plane.width,
-        plane.height,
-        false,
-        QuarterSettings::default(),
-    );
+    let reading = temporal_noise_reading(records, plane.channels, plane.width, plane.height, false);
     let accepted_blocks = accepted_static_blocks(records, plane.channels, plane.width, plane.height);
     let accepted = accepted_blocks
         .unwrap_or_default()
@@ -656,10 +648,7 @@ fn quarter_lanes_never_join_the_channel_or_correlation_sets() {
     }
 
     let records = plane.records(&blocks);
-    let settings = ReadingSettings {
-        luma_fields: true,
-        ..ReadingSettings::default()
-    };
+    let settings = ReadingSettings { luma_fields: true };
     let state = state_for(&client, plane, true, settings, &partials, &records);
     state.queue_reading(0).expect("the reading queues");
 

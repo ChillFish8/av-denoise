@@ -112,7 +112,7 @@ fn sigma_scale_still_scales_strength_with_the_noise_map_on() {
 }
 
 #[test]
-fn a_chroma_denoiser_without_a_flat_boost_never_builds_a_curve() {
+fn a_chroma_denoiser_never_builds_a_curve() {
     let frames = ramp_clip(2);
 
     let map_on_params = ramp_params(ChannelMode::Chroma, true, 1.0);

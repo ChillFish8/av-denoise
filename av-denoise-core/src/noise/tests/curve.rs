@@ -16,7 +16,6 @@ use crate::noise::reading::ReadingRecord;
 use crate::noise::select::UNTAGGED;
 use crate::noise::spatial::RESULTS_PER_SLOT;
 use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, SlotStats};
-use crate::noise::strength_map::QuarterSettings;
 use crate::noise::temporal::{
     STATIC_GATE,
     TEMPORAL_NOISE_BLOCK,
@@ -112,10 +111,7 @@ fn binned_quarter(bin: u32, unit: f32) -> QuarterSpec {
 }
 
 fn curve_settings(luma_fields: bool) -> ReadingSettings {
-    ReadingSettings {
-        luma_fields,
-        ..ReadingSettings::default()
-    }
+    ReadingSettings { luma_fields }
 }
 
 fn luma_shape(client: &Client, width: u32, height: u32) -> NoiseShape {
@@ -141,14 +137,7 @@ fn curve_state(client: &Client, frame: &CurveFrame, records: &[f32], luma_fields
 
 /// The host's sample and curve for `records`.
 fn host_curve(frame: &CurveFrame, records: &[f32]) -> (Option<TemporalNoiseSample>, Option<NoiseCurve>) {
-    let reading = temporal_noise_reading(
-        records,
-        1,
-        frame.width,
-        frame.height,
-        true,
-        QuarterSettings::default(),
-    );
+    let reading = temporal_noise_reading(records, 1, frame.width, frame.height, true);
 
     (reading.sample, reading.curve)
 }

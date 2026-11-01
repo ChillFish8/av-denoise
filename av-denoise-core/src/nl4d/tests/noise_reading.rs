@@ -96,7 +96,7 @@ fn frame_sigma(denoiser: &Nl4dDenoiser, frame: usize) -> Option<[f32; NOISE_CHAN
         .front_for_test()
         .measured_noise()
         .expect("the noise is measured");
-    let (reading, _, _) = noise.read_history_frame(frame as u32);
+    let (reading, _) = noise.read_history_frame(frame as u32);
 
     reading.sample.map(|sample| sample.sigma)
 }

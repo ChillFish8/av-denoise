@@ -6,7 +6,6 @@ use crate::noise::derived::{
     DERIVED_CURVE_VALID,
     DERIVED_H2_INV_NORM,
     DERIVED_INPUT_NOISE_OFFSET,
-    DERIVED_MAP_MODE,
     DERIVED_NOISE_OFFSET,
     DERIVED_PILOT_H2_INV_NORM,
     DERIVED_RHO,
@@ -19,7 +18,6 @@ use crate::noise::fold::{
     FOLD_H2_FIXED,
     FOLD_H2_PER_INVERSE_VARIANCE,
     FOLD_MAIN_OFFSET,
-    FOLD_MAP_KIND,
     FOLD_OFFSET_PER_VARIANCE,
     FOLD_PILOT_H2_FACTOR,
     FOLD_SAD_PER_SIGMA,
@@ -27,7 +25,6 @@ use crate::noise::fold::{
     FOLD_WEIGHT_FLOOR,
     FOLD_WEIGHT_G_MAX,
 };
-use crate::noise::{STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 
 const _: () = assert!(
     CORRELATION_FACTOR_TABLE.len() == 4,
@@ -142,7 +139,6 @@ pub(super) struct FoldedNoise {
     pub(super) low_sum: f32,
     /// Whether the curve exists and the consumer applies it.
     pub(super) curve_valid: bool,
-    pub(super) classes_present: bool,
     /// The grain correlation, 0 while unset.
     pub(super) rho: f32,
 }
@@ -166,12 +162,6 @@ pub(super) fn write_derived(
     let norm = sigma0 * sigma0 * g_max * g_max;
     let usable = !norm.is_nan() && !norm.is_inf() && norm > weight_floor;
 
-    let map_kind = u32::cast_from(fold_settings[FOLD_MAP_KIND as usize]);
-    let luma_map = map_kind == STRENGTH_MAP_LUMA && folded.curve_valid;
-    let chroma_map = map_kind == STRENGTH_MAP_ALL && folded.classes_present;
-    let other_mode = select(chroma_map, STRENGTH_MAP_ALL, STRENGTH_MAP_OFF);
-    let map_mode = select(luma_map, STRENGTH_MAP_LUMA, other_mode);
-
     let median0 = folded.median0;
     let h2_auto = fold_settings[FOLD_H2_AUTO as usize] != 0.0f32;
     let per_inverse_variance = fold_settings[FOLD_H2_PER_INVERSE_VARIANCE as usize];
@@ -185,7 +175,6 @@ pub(super) fn write_derived(
 
     derived[DERIVED_WEIGHT_SCALE as usize] = select(usable, norm, weight_floor);
     derived[DERIVED_CURVE_VALID as usize] = select(folded.curve_valid, 1.0f32, 0.0f32);
-    derived[DERIVED_MAP_MODE as usize] = f32::cast_from(map_mode);
     derived[DERIVED_SAD_FLOOR as usize] = fold_settings[FOLD_SAD_PER_SIGMA as usize] * median0;
     derived[DERIVED_CONFIDENCE_SAD_FLOOR as usize] =
         fold_settings[FOLD_CONFIDENCE_SAD_PER_SIGMA as usize] * median0;

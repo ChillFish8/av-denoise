@@ -10,16 +10,8 @@ use super::history::{NOISE_WINDOW_LEN, ReadingHistory, WindowBounds};
 use super::kernels::noise_window_fold;
 use super::reading::READING_WORDS;
 use super::spatial::{RESULTS_PER_SLOT, immerkaer_sigma_scale};
-use super::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind, quarter_count};
-use super::{
-    NOISE_BLOCK_1D,
-    NOISE_CHANNELS,
-    NOISE_CURVE_BINS,
-    STRENGTH_MAP_ALL,
-    STRENGTH_MAP_LUMA,
-    STRENGTH_MAP_OFF,
-};
-use crate::engine::MAX_GRID_1D;
+use super::state::{NoiseShape, NoiseState, ReadingSettings};
+use super::{NOISE_BLOCK_1D, NOISE_CHANNELS, NOISE_CURVE_BINS};
 use crate::tune::gpu::bind;
 
 /// The factor each frame's combined reading is scaled by before the median.
@@ -40,12 +32,10 @@ pub(crate) const FOLD_SAD_PER_SIGMA: u32 = 10;
 pub(crate) const FOLD_CONFIDENCE_SAD_PER_SIGMA: u32 = 11;
 /// The factor that turns one channel's Immerkær abs sum into its sigma.
 pub(crate) const FOLD_IMMERKAER_FACTOR: u32 = 12;
-/// The strength map the reading builds, as the `STRENGTH_MAP_*` mode it can reach.
-pub(crate) const FOLD_MAP_KIND: u32 = 13;
 /// The reciprocal width of each correlation-table segment, 3 words.
-pub(crate) const FOLD_SEGMENT_RECIPROCALS: u32 = 14;
+pub(crate) const FOLD_SEGMENT_RECIPROCALS: u32 = 13;
 /// The `f32` words of the fold settings buffer.
-pub(crate) const FOLD_WORDS: u32 = 17;
+pub(crate) const FOLD_WORDS: u32 = 16;
 
 /// The words of one chain, its valid flag then one sigma per channel.
 pub(crate) const STATE_CHAIN_WORDS: u32 = 1 + NOISE_CHANNELS;
@@ -63,10 +53,8 @@ pub(crate) const STATE_RHO: u32 = STATE_RHO_VALID + 1;
 /// 1.0 while the state holds a curve.
 pub(crate) const STATE_CURVE_VALID: u32 = STATE_RHO + 1;
 pub(crate) const STATE_QUARTER_MEDIAN: u32 = STATE_CURVE_VALID + 1;
-/// 1.0 while the state holds quarter classes, which it does exactly when it holds a curve.
-pub(crate) const STATE_CLASSES_PRESENT: u32 = STATE_QUARTER_MEDIAN + 1;
 /// The current curve's ratio per luma bin, 16 words.
-pub(crate) const STATE_RATIOS: u32 = STATE_CLASSES_PRESENT + 1;
+pub(crate) const STATE_RATIOS: u32 = STATE_QUARTER_MEDIAN + 1;
 /// The `f32` words of the stream state.
 pub(crate) const STATE_WORDS: u32 = STATE_RATIOS + NOISE_CURVE_BINS as u32;
 
@@ -133,11 +121,6 @@ pub(super) fn fold_words(shape: NoiseShape, settings: NoiseSettings) -> [f32; FO
 
     let interior = ((shape.width - 2) as f32) * ((shape.height - 2) as f32);
     let immerkaer_divisor = 6.0 * interior;
-    let map_kind = match settings.reading.map {
-        StrengthMapKind::Off => STRENGTH_MAP_OFF,
-        StrengthMapKind::Luma(_) => STRENGTH_MAP_LUMA,
-        StrengthMapKind::Chroma { .. } => STRENGTH_MAP_ALL,
-    };
 
     words[FOLD_SIGMA_SCALE as usize] = fold.sigma_scale;
     words[FOLD_CURVE_APPLIES as usize] = flag(fold.consumer.curve_applies);
@@ -152,7 +135,6 @@ pub(super) fn fold_words(shape: NoiseShape, settings: NoiseSettings) -> [f32; FO
     words[FOLD_SAD_PER_SIGMA as usize] = coefficients.sad_per_sigma;
     words[FOLD_CONFIDENCE_SAD_PER_SIGMA as usize] = coefficients.confidence_sad_per_sigma;
     words[FOLD_IMMERKAER_FACTOR as usize] = immerkaer_sigma_scale() / immerkaer_divisor;
-    words[FOLD_MAP_KIND as usize] = map_kind as f32;
 
     for (index, segment) in CORRELATION_FACTOR_TABLE.windows(2).enumerate() {
         let width = segment[1].0 - segment[0].0;
@@ -168,7 +150,7 @@ fn flag(on: bool) -> f32 {
 
 impl NoiseState {
     /// Queues one fold of the recorded frames `bounds` names into the stream state, the derived
-    /// values, the current curve, the current map and the offset tables, in one launch.
+    /// values, the current curve and the offset tables, in one launch.
     ///
     /// A state that holds fixed values queues nothing.
     ///
@@ -185,10 +167,9 @@ impl NoiseState {
     }
 
     /// Queues one fold of the history frames `bounds` names into the stream state, the derived
-    /// values, the current curve, the current map and the offset tables, in one launch.
+    /// values, the current curve and the offset tables, in one launch.
     ///
-    /// With a map the launch spans one cube per 256 map quarters. A state that holds fixed values
-    /// queues nothing.
+    /// A state that holds fixed values queues nothing.
     pub(super) fn fold_history(
         &self,
         history: &ReadingHistory,
@@ -210,42 +191,29 @@ impl NoiseState {
             "a window of {frames} frames is past the {capacity} history slots"
         );
 
-        let map_len = self.current_map_len();
-        let history_map_len = history.map_len();
-        ensure!(
-            history_map_len == map_len,
-            "the history keeps {history_map_len} map quarters per frame, the state {map_len}"
-        );
-
         let records_len = (capacity * READING_WORDS) as usize;
         let results_len = capacity as usize * RESULTS_PER_SLOT;
         let records = history.records();
         let results = history.results();
-        let map_args = self.window_map_args(history);
-        let map_cubes = map_len.div_ceil(NOISE_BLOCK_1D);
-        let grid = map_cubes.clamp(1, MAX_GRID_1D);
         let table_args = self.table_args();
 
         unsafe {
             noise_window_fold::launch_unchecked(
                 &self.client,
-                CubeCount::new_1d(grid),
+                CubeCount::new_1d(1),
                 CubeDim::new_1d(NOISE_BLOCK_1D),
                 bind(records, records_len),
                 bind(results, results_len),
-                map_args.maps,
                 bind(&measurement.fold_settings, FOLD_WORDS as usize),
                 bind(&measurement.fold_state, STATE_WORDS as usize),
                 bind(&self.derived, DERIVED_WORDS as usize),
                 bind(&self.curve_ratios, NOISE_CURVE_BINS),
-                map_args.current_map,
                 table_args.spatial,
                 table_args.pilot,
                 bounds.first(),
                 bounds.last(),
                 capacity,
                 self.shape.channels,
-                map_len,
                 table_args.radius,
             );
         }
@@ -260,34 +228,6 @@ impl NoiseState {
         };
 
         measurement.recorded.store(0, Ordering::Relaxed);
-    }
-
-    /// The map quarters the fold copies, 0 without a strength map.
-    fn current_map_len(&self) -> u32 {
-        match self.measurement().classes.as_ref() {
-            Some(_) => quarter_count(self.shape),
-            None => 0,
-        }
-    }
-
-    /// The history's maps and the current map, bound over every history slot and one map.
-    ///
-    /// Without a map the kernel never touches them, so the derived buffer stands in.
-    fn window_map_args(&self, history: &ReadingHistory) -> MapArgs {
-        let Some(maps) = history.maps() else {
-            return MapArgs {
-                maps: bind(&self.derived, DERIVED_WORDS as usize),
-                current_map: bind(&self.derived, DERIVED_WORDS as usize),
-            };
-        };
-
-        let map_len = history.map_len() as usize;
-        let maps_len = map_len * history.capacity() as usize;
-
-        MapArgs {
-            maps: bind(maps, maps_len),
-            current_map: bind(&self.current_map, map_len),
-        }
     }
 
     /// The offset tables and their search radius.
@@ -310,12 +250,6 @@ impl NoiseState {
             radius: tables.radius,
         }
     }
-}
-
-/// The fold's map bindings.
-struct MapArgs {
-    maps: BufferArg,
-    current_map: BufferArg,
 }
 
 /// The fold's offset table bindings and their search radius, 0 without tables.

@@ -57,25 +57,6 @@ pub(crate) struct NoiseCurve {
     pub(crate) sigma_quarter_median: f32,
 }
 
-#[cfg(test)]
-impl NoiseCurve {
-    /// The ratio at `luma`, interpolated between bin centres the same way the fused kernel reads it.
-    pub(crate) fn ratio_at(&self, luma: f32) -> f32 {
-        let bins = NOISE_CURVE_BINS as f32;
-        let position = (luma * bins - 0.5).clamp(0.0, bins - 1.0);
-        let lower = (position as usize).min(NOISE_CURVE_BINS - 2);
-        let fraction = position - lower as f32;
-        let lower_ratio = self.ratios[lower];
-        let upper_ratio = self.ratios[lower + 1];
-        lower_ratio + (upper_ratio - lower_ratio) * fraction
-    }
-
-    /// The noise sigma the curve predicts at `luma`.
-    pub(crate) fn sigma_at(&self, luma: f32) -> f32 {
-        self.ratio_at(luma) * self.sigma_quarter_median
-    }
-}
-
 /// One 8x8 quarter that passed its own static gates.
 #[cfg(test)]
 struct CurveQuarter {

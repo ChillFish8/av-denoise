@@ -15,9 +15,6 @@ use crate::noise::{
     QUARTER_LUMA_SUM,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
-    QUARTER_TENSOR_XX,
-    QUARTER_TENSOR_XY,
-    QUARTER_TENSOR_YY,
     TEMPORAL_NOISE_BLOCK,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
@@ -236,7 +233,7 @@ fn quarter_offset(channels: u32, quarter: u32) -> usize {
     (2 * channels + TEMPORAL_QUARTER_BASE + quarter * TEMPORAL_QUARTER_FIELDS) as usize
 }
 
-/// The nine fields of one quarter's record, computed on the host from single-channel frames.
+/// The fields of one quarter's record, computed on the host from single-channel frames.
 ///
 /// An empty quarter keeps the kernel's min and max seeds.
 fn quarter_fields_host(
@@ -247,7 +244,7 @@ fn quarter_fields_host(
     block_x: u32,
     block_y: u32,
     quarter: u32,
-) -> [f32; 9] {
+) -> [f32; TEMPORAL_QUARTER_FIELDS as usize] {
     let size = TEMPORAL_QUARTER_SIZE;
     let origin_x = block_x * TEMPORAL_NOISE_BLOCK + (quarter % 2) * size;
     let origin_y = block_y * TEMPORAL_NOISE_BLOCK + (quarter / 2) * size;
@@ -311,38 +308,13 @@ fn quarter_fields_host(
         UNMEASURED_FLATNESS
     };
 
-    let mean_at = |x: u32, y: u32| {
-        let idx = ((origin_y + y) * width + origin_x + x) as usize;
-        0.5 * (new[idx] + previous[idx])
-    };
-
-    let mut tensor_xx = 0.0f32;
-    let mut tensor_yy = 0.0f32;
-    let mut tensor_xy = 0.0f32;
-    for y in 0..quarter_height.saturating_sub(1) {
-        for x in 0..quarter_width.saturating_sub(1) {
-            let top_left = mean_at(x, y);
-            let top_right = mean_at(x + 1, y);
-            let bottom_left = mean_at(x, y + 1);
-            let bottom_right = mean_at(x + 1, y + 1);
-            let grad_x = 0.5 * ((top_right + bottom_right) - (top_left + bottom_left));
-            let grad_y = 0.5 * ((bottom_left + bottom_right) - (top_left + top_right));
-            tensor_xx += grad_x * grad_x;
-            tensor_yy += grad_y * grad_y;
-            tensor_xy += grad_x * grad_y;
-        }
-    }
-
-    let mut fields = [0.0f32; 9];
+    let mut fields = [0.0f32; TEMPORAL_QUARTER_FIELDS as usize];
     fields[QUARTER_SUM_D as usize] = sum_d;
     fields[QUARTER_SUM_D2 as usize] = sum_d2;
     fields[QUARTER_LUMA_SUM as usize] = luma_sum;
     fields[QUARTER_FLATNESS as usize] = flatness;
     fields[QUARTER_LUMA_MIN as usize] = luma_min;
     fields[QUARTER_LUMA_MAX as usize] = luma_max;
-    fields[QUARTER_TENSOR_XX as usize] = tensor_xx;
-    fields[QUARTER_TENSOR_YY as usize] = tensor_yy;
-    fields[QUARTER_TENSOR_XY as usize] = tensor_xy;
     fields
 }
 
@@ -506,14 +478,7 @@ fn assert_quarters_match_mirror(width: u32, height: u32, previous: &[f32], new: 
                 let fields = &record[offset..offset + TEMPORAL_QUARTER_FIELDS as usize];
                 let label = format!("{width}x{height} block ({block_x},{block_y}) quarter {quarter}");
 
-                let exact_fields = [
-                    QUARTER_SUM_D,
-                    QUARTER_SUM_D2,
-                    QUARTER_LUMA_SUM,
-                    QUARTER_TENSOR_XX,
-                    QUARTER_TENSOR_YY,
-                    QUARTER_TENSOR_XY,
-                ];
+                let exact_fields = [QUARTER_SUM_D, QUARTER_SUM_D2, QUARTER_LUMA_SUM];
                 for field in exact_fields {
                     let index = field as usize;
                     let field_label = format!("{label} field {field}");
@@ -646,7 +611,7 @@ fn luma_fields_off_leaves_the_quarter_lanes_zero_and_the_rest_unchanged() {
         );
 
         let quarter_lanes = &without_luma[base + scalar_len..base + record_len];
-        assert_eq!(quarter_lanes.len(), 36);
+        assert_eq!(quarter_lanes.len(), 24);
         assert!(
             quarter_lanes.iter().all(|&value| value == 0.0),
             "block {block}: quarter lanes must read 0 with luma_fields off, got {quarter_lanes:?}"
@@ -952,7 +917,7 @@ fn copies_at_either_end_record_nothing() {
 
     // A copy recorded over the last real frame would drop the sample the look-ahead read.
     let last = recorded - 1;
-    let (reading, _, _) = noise.read_history_frame(last);
+    let (reading, _) = noise.read_history_frame(last);
     assert!(
         reading.sample.is_some(),
         "the last real frame keeps its compensated sample"

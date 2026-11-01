@@ -12,9 +12,6 @@ use crate::noise::{
     QUARTER_LUMA_SUM,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
-    QUARTER_TENSOR_XX,
-    QUARTER_TENSOR_XY,
-    QUARTER_TENSOR_YY,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     TEMPORAL_QUARTERS,
@@ -155,7 +152,7 @@ pub fn nlm_noise_reduce(
 /// than two such cells writes 0. Then `moved`, 1.0 when the block followed a non-zero motion
 /// vector, else 0.0.
 ///
-/// Each record also carries nine channel-0 fields per 8x8 quarter, in top-left, top-right,
+/// Each record also carries six channel-0 fields per 8x8 quarter, in top-left, top-right,
 /// bottom-left, bottom-right order.
 ///
 /// - `sum_d` and `sum_d2` of the residual.
@@ -163,9 +160,6 @@ pub fn nlm_noise_reduce(
 /// - `flatness`, the mean squared neighbour difference of a 4x4 grid of 2x2 cells over the mean of
 ///   both frames. A quarter smaller than 8x8 writes
 ///   [UNMEASURED_FLATNESS](crate::noise::UNMEASURED_FLATNESS).
-/// - `tensor_xx`, `tensor_yy` and `tensor_xy`, the structure tensor sums of the temporal mean's
-///   2x2 gradients, from the 2x2 windows inside both the quarter and the frame, 49 on a full
-///   quarter.
 ///
 /// With `luma_fields` off, every quarter lane is written as 0 and the quarter work is skipped.
 /// `block` must be 16, because the quarter reductions assume 8x8 quarters and 64-slot segments.
@@ -185,8 +179,8 @@ pub fn nlm_noise_reduce(
 ///
 /// # Layout
 ///
-/// Records sit at `stats[block_index * (2 * channels + 39)..]` as every `sum_d`, every `sum_d2`,
-/// then `sum_lag`, `texture` and `moved`. Quarter `q` follows at `2 * channels + 3 + 9 * q`, with
+/// Records sit at `stats[block_index * (2 * channels + 27)..]` as every `sum_d`, every `sum_d2`,
+/// then `sum_lag`, `texture` and `moved`. Quarter `q` follows at `2 * channels + 3 + 6 * q`, with
 /// its fields at the `QUARTER_*` offsets in `noise`. The stride never depends on `luma_fields`.
 /// `stats` must be bound to the new slot's own region of the ring. Thread `l` sums record lane `l`
 /// over every thread in order.
@@ -210,8 +204,7 @@ pub fn nlm_temporal_noise_stats<N: Size>(
 ) {
     // The scratch holds `scratch_len` interleaved lanes per thread, then a `threads`-long tile at
     // `tile_base`. It is sized by `scratch_len`, not `record_len`, or its unwritten tail would
-    // enter the reduction as uninitialised memory. The luma branch reuses the lanes for three
-    // `threads`-long tensor runs, which fit because `scratch_len` is at least 3.
+    // enter the reduction as uninitialised memory.
     //
     // The tile holds the new frame's channel 0 for the texture cells, and later the temporal mean.
     // A separate tile lowers occupancy enough to cost about 40% of the luma variant's throughput.
@@ -515,30 +508,6 @@ pub fn nlm_temporal_noise_stats<N: Size>(
 
         sync_cube();
 
-        // Each 2x2 window inside its quarter and the frame adds one gradient of the temporal mean to
-        // the structure tensor. `scratch` holds the three sums, one `threads`-long run each.
-        let quarter_col = local_x % 8u32;
-        let quarter_row = local_y % 8u32;
-        let window_in_quarter = quarter_col < 7u32 && quarter_row < 7u32;
-        let window_in_frame = global_x + 1u32 < width && global_y + 1u32 < height;
-        let mut grad_x = 0.0f32;
-        let mut grad_y = 0.0f32;
-        if window_in_quarter && window_in_frame {
-            let tile_pos = tile_base + thread_id;
-            let top_left = scratch[tile_pos as usize];
-            let top_right = scratch[(tile_pos + 1u32) as usize];
-            let bottom_left = scratch[(tile_pos + block) as usize];
-            let bottom_right = scratch[(tile_pos + block + 1u32) as usize];
-            grad_x = 0.5f32 * ((top_right + bottom_right) - (top_left + bottom_left));
-            grad_y = 0.5f32 * ((bottom_left + bottom_right) - (top_left + top_right));
-        }
-
-        scratch[slot as usize] = grad_x * grad_x;
-        scratch[(threads + slot) as usize] = grad_y * grad_y;
-        scratch[(2u32 * threads + slot) as usize] = grad_x * grad_y;
-
-        sync_cube();
-
         // Six halving rounds reduce each 64-slot segment to its first slot. `stride` is a per-round
         // comptime constant because cubecl panics at JIT time on a `mut` seeded from a comptime
         // value. Every thread reaches every `sync_cube()`, the halving only guards the updates.
@@ -553,14 +522,6 @@ pub fn nlm_temporal_noise_stats<N: Size>(
                 residual_sq_tile[here] += residual_sq_tile[partner];
                 min_tile[here] = f32::min(min_tile[here], min_tile[partner]);
                 max_tile[here] = f32::max(max_tile[here], max_tile[partner]);
-
-                let yy_here = (threads + slot) as usize;
-                let yy_partner = (threads + slot + stride) as usize;
-                let xy_here = (2u32 * threads + slot) as usize;
-                let xy_partner = (2u32 * threads + slot + stride) as usize;
-                scratch[here] += scratch[partner];
-                scratch[yy_here] += scratch[yy_partner];
-                scratch[xy_here] += scratch[xy_partner];
             }
 
             sync_cube();
@@ -644,10 +605,6 @@ pub fn nlm_temporal_noise_stats<N: Size>(
                 stats[(quarter_base + QUARTER_FLATNESS) as usize] = flatness;
                 stats[(quarter_base + QUARTER_LUMA_MIN) as usize] = min_tile[slot as usize];
                 stats[(quarter_base + QUARTER_LUMA_MAX) as usize] = max_tile[slot as usize];
-                stats[(quarter_base + QUARTER_TENSOR_XX) as usize] = scratch[slot as usize];
-                stats[(quarter_base + QUARTER_TENSOR_YY) as usize] = scratch[(threads + slot) as usize];
-                stats[(quarter_base + QUARTER_TENSOR_XY) as usize] =
-                    scratch[(2u32 * threads + slot) as usize];
             } else {
                 #[unroll]
                 for field in 0..TEMPORAL_QUARTER_FIELDS {

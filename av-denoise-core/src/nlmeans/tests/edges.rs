@@ -90,7 +90,7 @@ fn centre_zero_reads_its_own_sample_against_the_next_frame() {
     at_one.submit_machinery(1).unwrap().unwrap();
 
     let noise = at_zero.measured_noise().expect("the noise is measured");
-    let (reading, _, _) = noise.read_history_frame(0);
+    let (reading, _) = noise.read_history_frame(0);
     assert!(reading.sample.is_some(), "centre 0 has its own sample");
 
     let from_next = at_zero.current_sigmas_temporal_only();

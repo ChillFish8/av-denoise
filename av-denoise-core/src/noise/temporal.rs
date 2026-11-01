@@ -11,8 +11,6 @@ use super::kernels::{nlm_temporal_noise_stats, nlm_temporal_stats_zero};
 use super::select::RankRule;
 #[cfg(test)]
 use super::stats::{lower_quartile, median, sort_ascending};
-#[cfg(test)]
-use super::strength_map::{QuarterClasses, QuarterSettings, classify_quarters};
 use crate::engine::MAX_GRID_1D;
 use crate::engine::align::StorageAlign;
 
@@ -32,11 +30,11 @@ pub(crate) const BLOCK_TEXTURE_LANE: u32 = 1;
 pub(crate) const BLOCK_MOVED_LANE: u32 = 2;
 /// The offset of the first quarter record past `2 * channels`.
 ///
-/// Quarter `q` starts at `2 * channels + 3 + 9 * q`, in top-left, top-right, bottom-left,
+/// Quarter `q` starts at `2 * channels + 3 + 6 * q`, in top-left, top-right, bottom-left,
 /// bottom-right order.
 pub(crate) const TEMPORAL_QUARTER_BASE: u32 = 3;
 /// How many `f32`s one quarter record holds.
-pub(crate) const TEMPORAL_QUARTER_FIELDS: u32 = 9;
+pub(crate) const TEMPORAL_QUARTER_FIELDS: u32 = 6;
 /// The largest share of the zero-vector residual variance a block's compensated residual may keep
 /// for the block to follow its motion vector.
 ///
@@ -57,12 +55,6 @@ pub(crate) const QUARTER_FLATNESS: u32 = 3;
 pub(crate) const QUARTER_LUMA_MIN: u32 = 4;
 /// The quarter-record offset of the new frame's maximum luma.
 pub(crate) const QUARTER_LUMA_MAX: u32 = 5;
-/// The quarter-record offset of the temporal mean's summed squared horizontal gradient.
-pub(crate) const QUARTER_TENSOR_XX: u32 = 6;
-/// The quarter-record offset of the temporal mean's summed squared vertical gradient.
-pub(crate) const QUARTER_TENSOR_YY: u32 = 7;
-/// The quarter-record offset of the temporal mean's summed horizontal times vertical gradient.
-pub(crate) const QUARTER_TENSOR_XY: u32 = 8;
 /// The flatness a quarter smaller than 8x8 holds.
 ///
 /// It sits far above any measured flatness, so a flat gate always rejects the quarter.
@@ -560,15 +552,7 @@ pub(crate) fn aggregate_temporal_noise_stats(
     width: u32,
     height: u32,
 ) -> Option<TemporalNoiseSample> {
-    temporal_noise_reading(
-        records,
-        channels,
-        width,
-        height,
-        false,
-        QuarterSettings::default(),
-    )
-    .sample
+    temporal_noise_reading(records, channels, width, height, false).sample
 }
 
 /// One centre slot's temporal-noise reading.
@@ -578,18 +562,15 @@ pub(crate) struct TemporalNoiseReading {
     pub(crate) sample: Option<TemporalNoiseSample>,
     /// The per-frame luma noise curve, present only when requested and a sample exists.
     pub(crate) curve: Option<NoiseCurve>,
-    /// The frame's quarter classes, present exactly when `curve` is.
-    pub(crate) classes: Option<QuarterClasses>,
 }
 
 #[cfg(test)]
 impl TemporalNoiseReading {
-    /// A reading with no sample, curve or classes.
+    /// A reading with no sample or curve.
     pub(crate) fn empty() -> Self {
         Self {
             sample: None,
             curve: None,
-            classes: None,
         }
     }
 }
@@ -605,8 +586,7 @@ impl TemporalNoiseReading {
 /// but still counts everywhere else. The sample is also `None` when that leaves no sigma.
 ///
 /// The curve needs `with_curve` and a sample, since a frame too unreliable for a scalar sample is
-/// too unreliable for a curve. `settings` control what [classify_quarters] does after classing the
-/// quarters.
+/// too unreliable for a curve.
 #[cfg(test)]
 pub(crate) fn temporal_noise_reading(
     records: &[f32],
@@ -614,7 +594,6 @@ pub(crate) fn temporal_noise_reading(
     width: u32,
     height: u32,
     with_curve: bool,
-    settings: QuarterSettings,
 ) -> TemporalNoiseReading {
     let none = TemporalNoiseReading::empty();
 
@@ -679,13 +658,8 @@ pub(crate) fn temporal_noise_reading(
         None
     };
 
-    let classes = curve
-        .as_ref()
-        .map(|curve| classify_quarters(records, channels, width, height, curve, settings));
-
     TemporalNoiseReading {
         sample: Some(sample),
         curve,
-        classes,
     }
 }

@@ -6,8 +6,7 @@ use crate::noise::derived::DerivedValues;
 use crate::noise::fold::{FoldSettings, NoiseSettings};
 use crate::noise::history::WindowBounds;
 use crate::noise::spatial::{NoiseCtx, noise_partials_slot_stride_bytes, run_noise_estimate};
-use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
-use crate::noise::strength_map::{QuarterSettings, StrengthMapParams};
+use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings};
 use crate::noise::temporal::{TemporalStatsCtx, run_temporal_noise_stats};
 use crate::tune::gpu::sync;
 use crate::tune::tests::fixtures::{hashed_ring, upload};
@@ -30,10 +29,7 @@ fn luma_shape(client: &Client, temporal: bool) -> NoiseShape {
 }
 
 fn luma_settings(luma_fields: bool) -> ReadingSettings {
-    ReadingSettings {
-        luma_fields,
-        ..ReadingSettings::default()
-    }
+    ReadingSettings { luma_fields }
 }
 
 fn luma_state(client: &Client, luma_fields: bool) -> NoiseState {
@@ -180,41 +176,26 @@ fn a_state_without_temporal_stats_hands_out_no_records() {
 fn set_settings_replaces_every_setting() {
     let client = test_client();
     let mut state = luma_state(&client, true);
-    let map = StrengthMapParams {
-        flat_boost: 1.5,
-        shadow_soften: 0.65,
-    };
-    let quarter = QuarterSettings {
-        texture_cut: Some(0.21),
-        line_ring: Some(2),
-    };
 
-    let luma_reading = ReadingSettings {
-        luma_fields: false,
-        quarter,
-        map: StrengthMapKind::Luma(map),
-    };
+    let scaled_reading = ReadingSettings { luma_fields: false };
     let fold = FoldSettings {
         sigma_scale: 1.25,
         ..FoldSettings::default()
     };
+    let scaled = NoiseSettings {
+        reading: scaled_reading,
+        fold,
+    };
+    state.set_settings(scaled);
+    assert_eq!(state.settings(), scaled);
+
+    let luma_reading = ReadingSettings { luma_fields: true };
     let luma = NoiseSettings {
         reading: luma_reading,
-        fold,
+        ..NoiseSettings::default()
     };
     state.set_settings(luma);
     assert_eq!(state.settings(), luma);
-
-    let chroma_reading = ReadingSettings {
-        map: StrengthMapKind::Chroma { flat_boost: 1.2 },
-        ..ReadingSettings::default()
-    };
-    let chroma = NoiseSettings {
-        reading: chroma_reading,
-        ..NoiseSettings::default()
-    };
-    state.set_settings(chroma);
-    assert_eq!(state.settings(), chroma);
 
     sync(&client).expect("the device syncs");
 }
@@ -249,9 +230,7 @@ fn a_fixed_state_queues_nothing_and_snapshots_its_values() {
     assert_eq!(snapshot.curve, None);
 
     let curve = state.read_curve();
-    let map = state.read_current_map();
     assert!(curve.iter().all(|&ratio| ratio == 0.0));
-    assert!(map.iter().all(|&multiplier| multiplier == 1.0));
 
     sync(&client).expect("the device syncs");
 }

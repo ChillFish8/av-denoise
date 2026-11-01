@@ -4,7 +4,6 @@ use cubecl::prelude::*;
 
 use super::records::{hashed_unit, ulp_gap};
 use super::y4m::read_y4m;
-use crate::collab::geometry::strength_map_dims;
 use crate::engine::align::StorageAlign;
 use crate::noise::NOISE_CHANNELS;
 use crate::noise::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS, curve_bin_counts};
@@ -12,10 +11,8 @@ use crate::noise::derived::DerivedValues;
 use crate::noise::fold::NoiseSettings;
 use crate::noise::reading::{CURVE_TAGS, ReadingRecord};
 use crate::noise::spatial::{RESULTS_PER_SLOT, sigma_block_p25_from_partials};
-use crate::noise::state::{BLOCK_ACCEPTED, NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
-use crate::noise::strength_map::{QuarterSettings, StrengthMapParams};
+use crate::noise::state::{BLOCK_ACCEPTED, NoiseShape, NoiseState, ReadingSettings};
 use crate::noise::temporal::{
-    TEMPORAL_QUARTER_SIZE,
     TemporalNoiseReading,
     accepted_static_blocks,
     temporal_noise_reading,
@@ -25,7 +22,7 @@ use crate::tune::gpu::sync;
 use crate::tune::tests::fixtures::upload;
 use crate::tune::tests::runtime::test_client;
 
-/// The lowest share of blocks, bins or quarters whose decisions must match on any frame.
+/// The lowest share of blocks or bins whose decisions must match on any frame.
 const MIN_AGREEMENT: f64 = 0.999;
 /// The largest relative gap any value may show on a frame whose decisions all match.
 pub(crate) const MAX_RELATIVE: f32 = 1.0e-5;
@@ -75,56 +72,14 @@ impl Plane {
     }
 }
 
-/// The luma plane's settings with the curve and no map.
-fn luma_off() -> ReadingSettings {
-    ReadingSettings {
-        luma_fields: true,
-        ..ReadingSettings::default()
-    }
+/// The luma plane's settings, with the curve.
+pub(super) fn luma_settings() -> ReadingSettings {
+    ReadingSettings { luma_fields: true }
 }
 
-/// The luma plane's settings with the map, the texture cut and the line ring.
-pub(super) fn luma_map() -> ReadingSettings {
-    let params = StrengthMapParams {
-        flat_boost: 1.75,
-        shadow_soften: 0.65,
-    };
-    let ring = 16u32.div_ceil(TEMPORAL_QUARTER_SIZE) as usize;
-    let quarter = QuarterSettings {
-        texture_cut: Some(0.21),
-        line_ring: Some(ring),
-    };
-
-    ReadingSettings {
-        luma_fields: true,
-        quarter,
-        map: StrengthMapKind::Luma(params),
-    }
-}
-
-/// The chroma plane's settings without a map.
-fn chroma_off() -> ReadingSettings {
-    ReadingSettings::default()
-}
-
-/// The chroma plane's settings with the chroma map.
-pub(super) fn chroma_map() -> ReadingSettings {
-    let map = StrengthMapKind::Chroma { flat_boost: 1.5 };
-
-    ReadingSettings {
-        luma_fields: true,
-        map,
-        ..ReadingSettings::default()
-    }
-}
-
-/// The multiplier a flat quarter gets under `map`, `None` without a map.
-pub(super) fn flat_boost(map: StrengthMapKind) -> Option<f32> {
-    match map {
-        StrengthMapKind::Off => None,
-        StrengthMapKind::Luma(params) => Some(params.flat_boost),
-        StrengthMapKind::Chroma { flat_boost } => Some(flat_boost),
-    }
+/// The chroma plane's settings, without the curve.
+pub(super) fn chroma_settings() -> ReadingSettings {
+    ReadingSettings { luma_fields: false }
 }
 
 /// What the GPU wrote for one slot.
@@ -132,8 +87,6 @@ pub(super) struct GpuSlot {
     pub(super) reading: ReadingRecord,
     block_flags: Vec<u32>,
     bin_counts: [usize; NOISE_CURVE_BINS],
-    /// Empty without a map.
-    map: Vec<f32>,
 }
 
 /// What the host reference reads from the same slot's stats.
@@ -145,8 +98,6 @@ pub(super) struct HostSlot {
     accepted: Vec<bool>,
     /// The bin counts, present when the curve is built and the slot has a sample.
     bin_counts: Option<[usize; NOISE_CURVE_BINS]>,
-    /// Empty without a map.
-    pub(super) map: Vec<f32>,
 }
 
 /// A noise state over a ring of `2 * radius + 1` slots that reads every pushed frame.
@@ -235,7 +186,6 @@ impl ReadingHarness {
         let reading = self.state.read_reading(slot);
         let block_flags = self.state.read_block_flags();
         let tags = self.state.read_curve_tags();
-        let map = self.state.read_slot_map(slot);
 
         let mut bin_counts = [0usize; NOISE_CURVE_BINS];
         for tag in tags {
@@ -248,7 +198,6 @@ impl ReadingHarness {
             reading,
             block_flags,
             bin_counts,
-            map,
         }
     }
 
@@ -264,7 +213,6 @@ impl ReadingHarness {
             plane.width,
             plane.height,
             settings.luma_fields,
-            settings.quarter,
         );
         let accepted_blocks = accepted_static_blocks(&records, plane.channels, plane.width, plane.height);
 
@@ -281,30 +229,13 @@ impl ReadingHarness {
             _ => None,
         };
 
-        let map = host_map(&reading, settings.map, plane);
-
         HostSlot {
             sums,
             immerkaer_low,
             reading,
             accepted,
             bin_counts,
-            map,
         }
-    }
-}
-
-/// The host's multipliers for the reading's classes, ones without classes, empty without a map.
-fn host_map(reading: &TemporalNoiseReading, map: StrengthMapKind, plane: Plane) -> Vec<f32> {
-    let (cols, rows) = strength_map_dims(plane.width, plane.height);
-    let quarters = (cols * rows) as usize;
-    let classes = reading.classes.as_ref();
-
-    match (map, classes) {
-        (StrengthMapKind::Off, _) => Vec::new(),
-        (_, None) => vec![1.0; quarters],
-        (StrengthMapKind::Luma(params), Some(classes)) => classes.luma_multipliers(params),
-        (StrengthMapKind::Chroma { flat_boost }, Some(classes)) => classes.chroma_multipliers(flat_boost),
     }
 }
 
@@ -315,13 +246,11 @@ pub(super) struct Agreement {
     block_flips: usize,
     bins: usize,
     bin_flips: usize,
-    quarters: usize,
-    quarter_flips: usize,
     none_paths_agree: bool,
 }
 
 impl Agreement {
-    pub(super) fn measure(gpu: &GpuSlot, host: &HostSlot, boost: Option<f32>) -> Self {
+    pub(super) fn measure(gpu: &GpuSlot, host: &HostSlot) -> Self {
         let blocks = host.accepted.len();
         let gpu_blocks = gpu.block_flags.len();
         assert_eq!(gpu_blocks, blocks, "block flag count");
@@ -350,33 +279,25 @@ impl Agreement {
             None => (0, 0),
         };
 
-        let (quarters, quarter_flips) = match boost {
-            Some(boost) => quarter_flips(&gpu.map, &host.map, boost),
-            None => (0, 0),
-        };
-
         Self {
             blocks,
             block_flips,
             bins,
             bin_flips,
-            quarters,
-            quarter_flips,
             none_paths_agree,
         }
     }
 
     pub(super) fn decisions_match(&self) -> bool {
-        let no_flips = self.block_flips == 0 && self.bin_flips == 0 && self.quarter_flips == 0;
+        let no_flips = self.block_flips == 0 && self.bin_flips == 0;
         no_flips && self.none_paths_agree
     }
 
     fn lowest(&self) -> f64 {
         let block_share = share(self.block_flips, self.blocks);
         let bin_share = share(self.bin_flips, self.bins);
-        let quarter_share = share(self.quarter_flips, self.quarters);
 
-        block_share.min(bin_share).min(quarter_share)
+        block_share.min(bin_share)
     }
 }
 
@@ -400,21 +321,6 @@ fn bin_flips(gpu: &[usize; NOISE_CURVE_BINS], host: &[usize; NOISE_CURVE_BINS]) 
             populated && gpu_count != host_count
         })
         .count()
-}
-
-/// The quarter count and the quarters that only one side boosts as flat.
-fn quarter_flips(gpu: &[f32], host: &[f32], boost: f32) -> (usize, usize) {
-    let quarters = host.len();
-    let gpu_quarters = gpu.len();
-    assert_eq!(gpu_quarters, quarters, "map length");
-
-    let flips = gpu
-        .iter()
-        .zip(host)
-        .filter(|(gpu_value, host_value)| (**gpu_value == boost) != (**host_value == boost))
-        .count();
-
-    (quarters, flips)
 }
 
 /// The largest gaps one quantity showed.
@@ -478,10 +384,6 @@ impl Gaps {
                 self.record("ratio", gpu_curve.ratios[bin], host_curve.ratios[bin]);
             }
         }
-
-        for (&gpu_value, &host_value) in gpu.map.iter().zip(&host.map) {
-            self.record("multiplier", gpu_value, host_value);
-        }
     }
 }
 
@@ -500,7 +402,6 @@ struct StreamSummary {
     frames: usize,
     sampled: usize,
     curved: usize,
-    flat_quarters: usize,
     /// Each frame with a flip, with its agreement.
     flipped: Vec<(usize, Agreement)>,
     /// The immerkaer quartile's gaps over every frame.
@@ -515,11 +416,7 @@ impl StreamSummary {
         let sampled = self.sampled;
         let curved = self.curved;
         let flipped = self.flipped.len();
-        let flat = self.flat_quarters;
-        println!(
-            "{what}: {frames} frames, {sampled} sampled, {curved} curved, {flat} flat quarters, \
-             {flipped} with a flip"
-        );
+        println!("{what}: {frames} frames, {sampled} sampled, {curved} curved, {flipped} with a flip");
 
         for (frame, agreement) in &self.flipped {
             let Agreement {
@@ -527,13 +424,11 @@ impl StreamSummary {
                 block_flips,
                 bins,
                 bin_flips,
-                quarters,
-                quarter_flips,
                 none_paths_agree,
             } = agreement;
             println!(
-                "{what}: frame {frame}: {block_flips}/{blocks} blocks, {bin_flips}/{bins} bins, \
-                 {quarter_flips}/{quarters} quarters, none paths agree {none_paths_agree}"
+                "{what}: frame {frame}: {block_flips}/{blocks} blocks, {bin_flips}/{bins} bins, none \
+                 paths agree {none_paths_agree}"
             );
         }
 
@@ -582,13 +477,12 @@ fn check_stream<'a>(
     frames: impl IntoIterator<Item = &'a [f32]>,
 ) -> StreamSummary {
     let mut harness = ReadingHarness::new(plane, settings);
-    let boost = flat_boost(settings.map);
     let channels = plane.channels as usize;
     let mut summary = StreamSummary::default();
 
     for (index, frame) in frames.into_iter().enumerate() {
         let (gpu, host) = harness.push(frame);
-        let agreement = Agreement::measure(&gpu, &host, boost);
+        let agreement = Agreement::measure(&gpu, &host);
 
         for channel in 0..channels {
             let gpu_low = gpu.reading.immerkaer_low[channel];
@@ -602,15 +496,9 @@ fn check_stream<'a>(
             summary.flipped.push((index, agreement));
         }
 
-        let flat_quarters = match boost {
-            Some(boost) => host.map.iter().filter(|&&value| value == boost).count(),
-            None => 0,
-        };
-
         summary.frames += 1;
         summary.sampled += usize::from(host.reading.sample.is_some());
         summary.curved += usize::from(host.reading.curve.is_some());
-        summary.flat_quarters += flat_quarters;
     }
 
     sync(&harness.client).expect("the device syncs");
@@ -681,8 +569,8 @@ fn synthetic_streams_agree_with_the_host_reading() {
     let luma = Plane::luma(256, 256);
     let chroma = Plane::chroma(128, 128);
     let cases = [
-        (luma, luma_map(), 3, "synthetic luma"),
-        (chroma, chroma_map(), 5, "synthetic chroma"),
+        (luma, luma_settings(), 3, "synthetic luma"),
+        (chroma, chroma_settings(), 5, "synthetic chroma"),
     ];
 
     for (plane, settings, seed, what) in cases {
@@ -695,15 +583,16 @@ fn synthetic_streams_agree_with_the_host_reading() {
         // Frame 0 has no previous frame, so only the frames after it carry a sample.
         let sampled = summary.sampled;
         let curved = summary.curved;
-        let flat_quarters = summary.flat_quarters;
         let expected = frames.len() - 1;
         assert_eq!(sampled, expected, "{what}: sampled frames");
-        assert!(curved > 0, "{what}: no frame has a curve");
-        assert!(flat_quarters > 0, "{what}: no quarter is flat");
+
+        if settings.luma_fields {
+            assert!(curved > 0, "{what}: no frame has a curve");
+        }
     }
 }
 
-/// Checks the luma and chroma planes of the clip at `path`, with and without a map.
+/// Checks the luma and chroma planes of the clip at `path`.
 fn check_clip(path: &str, name: &str) {
     let clip = read_y4m(path).expect("the clip reads");
     let luma = Plane::luma(clip.width, clip.height);
@@ -711,10 +600,8 @@ fn check_clip(path: &str, name: &str) {
     let chroma = Plane::chroma(chroma_width, chroma_height);
 
     let cases = [
-        (luma, luma_off(), "luma, map off"),
-        (luma, luma_map(), "luma, luma map"),
-        (chroma, chroma_off(), "chroma, map off"),
-        (chroma, chroma_map(), "chroma, chroma map"),
+        (luma, luma_settings(), "luma"),
+        (chroma, chroma_settings(), "chroma"),
     ];
 
     let mut summaries = Vec::with_capacity(cases.len());
@@ -749,16 +636,14 @@ fn edges_agrees_with_the_host_reading() {
 fn the_per_slot_path_is_byte_identical_across_runs() {
     let plane = Plane::luma(256, 256);
     let frames = synthetic_stream(plane, 9);
-    let mut first = ReadingHarness::new(plane, luma_map());
-    let mut second = ReadingHarness::new(plane, luma_map());
+    let mut first = ReadingHarness::new(plane, luma_settings());
+    let mut second = ReadingHarness::new(plane, luma_settings());
 
     for (index, frame) in frames.iter().enumerate() {
         let first_slot = first.push_gpu(frame);
         let second_slot = second.push_gpu(frame);
         let first_words = first_slot.reading.to_words().map(f32::to_bits);
         let second_words = second_slot.reading.to_words().map(f32::to_bits);
-        let first_map: Vec<u32> = first_slot.map.iter().map(|value| value.to_bits()).collect();
-        let second_map: Vec<u32> = second_slot.map.iter().map(|value| value.to_bits()).collect();
 
         assert_eq!(first_words, second_words, "frame {index} reading");
         assert_eq!(
@@ -769,7 +654,6 @@ fn the_per_slot_path_is_byte_identical_across_runs() {
             first_slot.bin_counts, second_slot.bin_counts,
             "frame {index} bins"
         );
-        assert_eq!(first_map, second_map, "frame {index} map");
     }
 
     sync(&first.client).expect("the device syncs");

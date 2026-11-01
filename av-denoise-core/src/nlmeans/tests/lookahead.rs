@@ -84,7 +84,7 @@ fn run_nl4d(params: Nl4dParams, frames: &[Vec<f32>]) -> Nl4dDenoiser {
 /// The temporal sample sigma the history holds for stream frame `frame`, `None` without a sample.
 fn history_sigma(front: &NlmDenoiser, frame: u32) -> Option<f32> {
     let noise = front.measured_noise().expect("the noise is measured");
-    let (reading, _, _) = noise.read_history_frame(frame);
+    let (reading, _) = noise.read_history_frame(frame);
 
     reading.sample.map(|sample| sample.sigma[0])
 }
@@ -204,7 +204,7 @@ fn motion_off_reads_uncompensated_at_push() {
     spatial.push_frame(&frames[1]);
 
     let noise = spatial.measured_noise().expect("the noise is measured");
-    let (reading, _, _) = noise.read_history_frame(1);
+    let (reading, _) = noise.read_history_frame(1);
     assert_eq!(reading.sample, None, "a spatial front reads no temporal sample");
     assert!(
         reading.immerkaer_low[0] > 0.0,

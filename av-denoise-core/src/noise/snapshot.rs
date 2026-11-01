@@ -3,7 +3,6 @@ use cubecl::prelude::*;
 
 use super::derived::DerivedValues;
 use super::fold::{
-    STATE_CLASSES_PRESENT,
     STATE_CURVE_VALID,
     STATE_LOW,
     STATE_LOW_UNBOOSTED,
@@ -27,14 +26,13 @@ pub(crate) struct NoiseSnapshot {
     pub rho: Option<f32>,
     /// The curve's ratios and the quarter median they are relative to.
     pub curve: Option<([f32; NOISE_CURVE_BINS], f32)>,
-    pub classes_present: bool,
     pub derived: DerivedValues,
 }
 
 impl NoiseState {
     /// Reads the stream state and the derived values back, waiting for every queued fold.
     ///
-    /// A state that holds fixed values has no chains, curve or classes.
+    /// A state that holds fixed values has no chains or curve.
     pub(crate) fn snapshot(&self) -> Result<NoiseSnapshot, anyhow::Error> {
         let derived_handle = self.derived().clone();
         let derived_bytes = self
@@ -52,7 +50,6 @@ impl NoiseState {
                 temporal_only: None,
                 rho: None,
                 curve: None,
-                classes_present: false,
                 derived,
             };
             return Ok(snapshot);
@@ -85,7 +82,6 @@ impl NoiseState {
             temporal_only: chain(state, STATE_TEMPORAL_ONLY),
             rho,
             curve,
-            classes_present: state[STATE_CLASSES_PRESENT as usize] != 0.0,
             derived,
         };
 

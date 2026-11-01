@@ -95,9 +95,6 @@ pub const DERIVED_WORDS: u32 = crate::noise::DERIVED_WORDS;
 pub const DERIVED_SAD_FLOOR: u32 = crate::noise::DERIVED_SAD_FLOOR;
 pub const DERIVED_CONFIDENCE_SAD_FLOOR: u32 = crate::noise::DERIVED_CONFIDENCE_SAD_FLOOR;
 pub const DERIVED_H2_INV_NORM: u32 = crate::noise::DERIVED_H2_INV_NORM;
-pub const STRENGTH_MAP_OFF: u32 = crate::noise::STRENGTH_MAP_OFF;
-pub const STRENGTH_MAP_LUMA: u32 = crate::noise::STRENGTH_MAP_LUMA;
-pub const STRENGTH_MAP_ALL: u32 = crate::noise::STRENGTH_MAP_ALL;
 
 /// A readback in flight, resolving to one buffer per handle read.
 pub type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<Bytes>, ServerError>> + Send>>;

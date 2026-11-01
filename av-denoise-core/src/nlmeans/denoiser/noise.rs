@@ -24,9 +24,6 @@ use crate::noise::{
     NoiseSettings,
     NoiseShape,
     ReadingSettings,
-    STRENGTH_MAP_OFF,
-    StrengthMapKind,
-    TEMPORAL_QUARTER_SIZE,
     WindowBounds,
 };
 
@@ -102,11 +99,6 @@ impl NlmDenoiser {
         self.change_noise_settings(|settings| change(&mut settings.reading));
     }
 
-    /// Sets the strength map each slot reading builds, before the first push.
-    pub(crate) fn set_strength_map(&mut self, kind: StrengthMapKind) {
-        self.change_reading_settings(|settings| settings.map = kind);
-    }
-
     /// Sets what the consuming denoiser makes of the noise, before the first push.
     pub(crate) fn set_noise_consumer(&mut self, consumer: NoiseConsumer) {
         self.change_noise_settings(|settings| settings.fold.consumer = consumer);
@@ -123,20 +115,6 @@ impl NlmDenoiser {
         self.change_reading_settings(|settings| settings.luma_fields = on);
     }
 
-    pub(crate) fn set_flat_texture_cut(&mut self, cut: Option<f32>) {
-        self.change_reading_settings(|settings| settings.quarter.texture_cut = cut);
-    }
-
-    /// Sets the line ring's radius in pixels.
-    ///
-    /// Within the ring around strong lines, the luma flat map skips shadow soften and the flat texture
-    /// cut. The radius rounds up to whole 8x8 quarters. `None` or `0` turns the ring off.
-    pub(crate) fn set_line_ring(&mut self, radius_px: Option<u32>) {
-        let active_radius = radius_px.filter(|&radius| radius > 0);
-        let quarters = active_radius.map(|radius| radius.div_ceil(TEMPORAL_QUARTER_SIZE) as usize);
-        self.change_reading_settings(|settings| settings.quarter.line_ring = quarters);
-    }
-
     /// The current noise curve, read back from the GPU state.
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn current_noise_curve(&self) -> Option<NoiseCurve> {
@@ -147,13 +125,6 @@ impl NlmDenoiser {
         })
     }
 
-    /// Whether the current estimate holds quarter classes.
-    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn current_classes_present(&self) -> bool {
-        let snapshot = self.gpu_snapshot_for_test();
-        snapshot.classes_present
-    }
-
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     fn gpu_snapshot_for_test(&self) -> NoiseSnapshot {
         self.noise.snapshot().expect("the GPU noise state reads back")
@@ -162,18 +133,6 @@ impl NlmDenoiser {
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn noise_settings_for_test(&self) -> NoiseSettings {
         self.noise.settings()
-    }
-
-    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn flat_texture_cut(&self) -> Option<f32> {
-        let settings = self.measured_noise().map(|noise| noise.settings().reading);
-        settings.and_then(|settings| settings.quarter.texture_cut)
-    }
-
-    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn line_ring(&self) -> Option<usize> {
-        let settings = self.measured_noise().map(|noise| noise.settings().reading);
-        settings.and_then(|settings| settings.quarter.line_ring)
     }
 
     /// The noise state, `None` unless it measures the noise.
@@ -350,8 +309,8 @@ impl NlmDenoiser {
 
     /// The derived values of a front with no estimate, at the pinned sigma or at zero.
     ///
-    /// A pinned or fast front keeps these values. There is no curve and no map, and the grain reads
-    /// as white noise.
+    /// A pinned or fast front keeps these values. There is no curve, and the grain reads as white
+    /// noise.
     pub(super) fn fixed_derived_values(&self) -> DerivedValues {
         let params = &self.params;
         let consumer = self.noise.settings().fold.consumer;
@@ -383,7 +342,6 @@ impl NlmDenoiser {
             sigma: [sigma_y; NOISE_CHANNELS as usize],
             weight_scale: weight,
             curve_valid: false,
-            map_mode: STRENGTH_MAP_OFF,
             sad_noise_floor: sad_floor,
             confidence_sad_noise_floor: confidence_sad_floor,
             h2_inv_norm,

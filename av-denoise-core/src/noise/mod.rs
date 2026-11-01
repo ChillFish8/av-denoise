@@ -5,7 +5,6 @@ mod estimator;
 mod fold;
 mod history;
 pub(crate) mod kernels;
-mod line_ring;
 mod reading;
 pub(crate) mod select;
 mod slot;
@@ -15,7 +14,6 @@ mod spatial;
 mod state;
 #[cfg(test)]
 mod stats;
-mod strength_map;
 mod temporal;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -58,16 +56,8 @@ pub(crate) use self::state::{
     ReadingSettings,
     SAMPLE_RUN_QUARTERS,
     SAMPLE_RUN_RHO,
-    StrengthMapKind,
     reading_buffer_sizes,
 };
-#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-pub(crate) use self::strength_map::QuarterClasses;
-#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-pub(crate) use self::strength_map::classify_quarters;
-#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-pub(crate) use self::strength_map::{QuarterClass, QuarterTensor};
-pub(crate) use self::strength_map::{QuarterSettings, StrengthMapParams};
 pub(crate) use self::temporal::{
     BLOCK_MOVED_LANE,
     BLOCK_TEXTURE_LANE,
@@ -78,13 +68,9 @@ pub(crate) use self::temporal::{
     QUARTER_LUMA_SUM,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
-    QUARTER_TENSOR_XX,
-    QUARTER_TENSOR_XY,
-    QUARTER_TENSOR_YY,
     StatsMotion,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
-    TEMPORAL_QUARTER_SIZE,
     TEMPORAL_QUARTERS,
     UNMEASURED_FLATNESS,
     temporal_stats_blocks,
@@ -93,6 +79,7 @@ pub(crate) use self::temporal::{
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::temporal::{
     TEMPORAL_NOISE_BLOCK,
+    TEMPORAL_QUARTER_SIZE,
     TemporalStatsCtx,
     accepted_static_blocks,
     aggregate_temporal_noise_stats,
@@ -111,10 +98,3 @@ pub(crate) const IMMERKAER_BLOCK_Y: u32 = 8;
 
 /// Block size for the 1D noise reduce and zero kernels.
 pub(crate) const NOISE_BLOCK_1D: u32 = 256;
-
-/// Every threshold is left as it is.
-pub(crate) const STRENGTH_MAP_OFF: u32 = 0;
-/// The map scales channel 0's noise-curve ratio.
-pub(crate) const STRENGTH_MAP_LUMA: u32 = 1;
-/// The map scales every channel's threshold, for a denoiser with no curve.
-pub(crate) const STRENGTH_MAP_ALL: u32 = 2;

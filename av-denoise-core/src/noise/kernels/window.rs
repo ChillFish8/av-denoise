@@ -8,7 +8,6 @@ use crate::noise::fold::{
     FOLD_CURVE_APPLIES,
     FOLD_IMMERKAER_FACTOR,
     FOLD_SIGMA_SCALE,
-    STATE_CLASSES_PRESENT,
     STATE_CURVE_VALID,
     STATE_LOW,
     STATE_LOW_UNBOOSTED,
@@ -281,7 +280,7 @@ fn window_median_task(
     }
 }
 
-/// Writes the windowed chains, rho, curve and classes flag into `state`, and every derived value.
+/// Writes the windowed chains, rho and curve into `state`, and every derived value.
 ///
 /// Run by thread 0 of cube 0 once every median is in `medians`.
 #[cube]
@@ -341,7 +340,6 @@ fn write_window_state(
     state[STATE_RHO as usize] = rho;
     state[STATE_CURVE_VALID as usize] = curve_flag;
     state[STATE_QUARTER_MEDIAN as usize] = quarter_median;
-    state[STATE_CLASSES_PRESENT as usize] = curve_flag;
 
     let curve_applies = fold_settings[FOLD_CURVE_APPLIES as usize] != 0.0f32;
     let curve_valid = curve_present && curve_applies;
@@ -360,7 +358,6 @@ fn write_window_state(
         median_sum,
         low_sum,
         curve_valid,
-        classes_present: curve_present,
         rho,
     };
 
@@ -375,19 +372,18 @@ fn write_window_state(
 }
 
 /// Folds the history frames `first..=last` into the stream state, the derived values, the current
-/// curve, the current map and the offset tables, in one launch.
+/// curve and the offset tables, in one launch.
 ///
 /// Stream frame `frame` sits in history slot `frame % capacity`. Each chain is the median over the
 /// window of each frame's reading, combined and scaled as one fold of that frame alone would, and
 /// floored at the sigma floor. Every frame feeds the median and low chains. Only frames with a
 /// sample feed the temporal-only chain and the rho. The window holds a curve when at least half
-/// its sampled frames have one, and the ratios, the quarter median and the map are then the
-/// elementwise median over those frames. Without a curve the map is all ones.
+/// its sampled frames have one, and the ratios and the quarter median are then the elementwise
+/// median over those frames.
 ///
 /// Cube 0's threads each take one median between them, then thread 0 writes the state and the
-/// derived values. With a `table_radius` above 0, cube 0 then writes both offset tables. With a
-/// map, every thread of the grid takes its grid-stride share of the map quarters. `map_len` 0
-/// leaves both map bindings untouched, and a `table_radius` of 0 both table bindings.
+/// derived values. With a `table_radius` above 0, cube 0 then writes both offset tables. A
+/// `table_radius` of 0 leaves both table bindings untouched.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -396,19 +392,16 @@ fn write_window_state(
 pub fn noise_window_fold(
     records: &[f32],
     results: &[f32],
-    maps: &[f32],
     fold_settings: &[f32],
     state: &mut [f32],
     derived: &mut [f32],
     curve: &mut [f32],
-    current_map: &mut [f32],
     spatial_table: &mut [f32],
     pilot_table: &mut [f32],
     first: u32,
     last: u32,
     #[comptime] capacity: u32,
     #[comptime] channels: u32,
-    #[comptime] map_len: u32,
     #[comptime] table_radius: u32,
 ) {
     comptime! {
@@ -454,17 +447,5 @@ pub fn noise_window_fold(
 
     if comptime!(table_radius > 0) {
         write_offset_tables(&table_inputs, spatial_table, pilot_table, table_radius);
-    }
-
-    if comptime!(map_len > 0) {
-        let stride = CUBE_COUNT_X * CUBE_DIM_X;
-        let mut index = CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X;
-
-        while index < map_len {
-            let median = gated_median(maps, records, &window, map_len, index, GATE_CURVE, capacity);
-
-            current_map[index as usize] = select(curve_present, median, 1.0f32);
-            index += stride;
-        }
     }
 }

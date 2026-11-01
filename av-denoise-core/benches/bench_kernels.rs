@@ -255,14 +255,11 @@ fn run_all(backend: &str, client: Client) {
         }
     }
 
-    // The luma curve's launches on a smooth gradient whose quarters fill every bin, then the
-    // classes and the strength map with the line ring and the texture veto on.
+    // The luma curve's launches on a smooth gradient whose quarters fill every bin.
     let curve_stages = [
         ReadingStage::CurveBins,
         ReadingStage::CurveBatch,
         ReadingStage::SampleFinish,
-        ReadingStage::Classify,
-        ReadingStage::StrengthMap,
     ];
     for stage in curve_stages {
         run(ReadingBench {
@@ -273,14 +270,9 @@ fn run_all(backend: &str, client: Client) {
         });
     }
 
-    // The stream state's launches, a window fold alone, with the map and with the offset tables,
-    // and the history record.
-    let fold_stages = [
-        FoldStage::WindowWithoutMap,
-        FoldStage::Window,
-        FoldStage::WindowWithTables,
-        FoldStage::Record,
-    ];
+    // The stream state's launches, a window fold alone and with the offset tables, and the history
+    // record.
+    let fold_stages = [FoldStage::Window, FoldStage::WindowWithTables, FoldStage::Record];
     for stage in fold_stages {
         run(FoldBench {
             client: client.clone(),

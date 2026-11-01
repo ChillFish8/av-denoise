@@ -11,9 +11,6 @@ use crate::noise::{
     QUARTER_LUMA_SUM,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
-    QUARTER_TENSOR_XX,
-    QUARTER_TENSOR_XY,
-    QUARTER_TENSOR_YY,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     TEMPORAL_QUARTERS,
@@ -139,8 +136,7 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
     #[comptime] luma_fields: bool,
 ) {
     // The scratch is sized by `scratch_len`, not `record_len`, or its unwritten tail would enter
-    // the reduction as uninitialised memory. The luma branch reuses it for three `threads`-long
-    // tensor runs, which fit because `scratch_len` is at least 3.
+    // the reduction as uninitialised memory.
     let quarter_lanes = comptime!(TEMPORAL_QUARTERS * TEMPORAL_QUARTER_FIELDS);
     let record_len = comptime!(2 * channels + TEMPORAL_QUARTER_BASE + quarter_lanes);
     let scratch_len = comptime!(2 * channels + 1);
@@ -327,29 +323,6 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
 
         sync_cube();
 
-        // Each 2x2 window inside its quarter and the frame adds one gradient of the temporal mean to
-        // the structure tensor. `scratch` holds the three sums, one `threads`-long run each.
-        let quarter_col = local_x % 8u32;
-        let quarter_row = local_y % 8u32;
-        let window_in_quarter = quarter_col < 7u32 && quarter_row < 7u32;
-        let window_in_frame = global_x + 1u32 < width && global_y + 1u32 < height;
-        let mut grad_x = 0.0f32;
-        let mut grad_y = 0.0f32;
-        if window_in_quarter && window_in_frame {
-            let top_left = d0_tile[thread_id as usize];
-            let top_right = d0_tile[(thread_id + 1u32) as usize];
-            let bottom_left = d0_tile[(thread_id + block) as usize];
-            let bottom_right = d0_tile[(thread_id + block + 1u32) as usize];
-            grad_x = 0.5f32 * ((top_right + bottom_right) - (top_left + bottom_left));
-            grad_y = 0.5f32 * ((bottom_left + bottom_right) - (top_left + top_right));
-        }
-
-        scratch[slot as usize] = grad_x * grad_x;
-        scratch[(threads + slot) as usize] = grad_y * grad_y;
-        scratch[(2u32 * threads + slot) as usize] = grad_x * grad_y;
-
-        sync_cube();
-
         // Six halving rounds reduce each 64-slot segment to its first slot. `stride` is a per-round
         // comptime constant because cubecl panics at JIT time on a `mut` seeded from a comptime
         // value. Every thread reaches every `sync_cube()`, the halving only guards the updates.
@@ -364,14 +337,6 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
                 residual_sq_tile[here] += residual_sq_tile[partner];
                 min_tile[here] = f32::min(min_tile[here], min_tile[partner]);
                 max_tile[here] = f32::max(max_tile[here], max_tile[partner]);
-
-                let yy_here = (threads + slot) as usize;
-                let yy_partner = (threads + slot + stride) as usize;
-                let xy_here = (2u32 * threads + slot) as usize;
-                let xy_partner = (2u32 * threads + slot + stride) as usize;
-                scratch[here] += scratch[partner];
-                scratch[yy_here] += scratch[yy_partner];
-                scratch[xy_here] += scratch[xy_partner];
             }
 
             sync_cube();
@@ -452,9 +417,6 @@ pub(super) fn reference_temporal_noise_stats<N: Size>(
             stats[(out_base + QUARTER_FLATNESS) as usize] = flatness;
             stats[(out_base + QUARTER_LUMA_MIN) as usize] = min_tile[slot as usize];
             stats[(out_base + QUARTER_LUMA_MAX) as usize] = max_tile[slot as usize];
-            stats[(out_base + QUARTER_TENSOR_XX) as usize] = scratch[slot as usize];
-            stats[(out_base + QUARTER_TENSOR_YY) as usize] = scratch[(threads + slot) as usize];
-            stats[(out_base + QUARTER_TENSOR_XY) as usize] = scratch[(2u32 * threads + slot) as usize];
         }
     }
 }

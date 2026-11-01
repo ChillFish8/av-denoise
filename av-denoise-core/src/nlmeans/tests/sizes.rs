@@ -3,7 +3,6 @@ use cubecl::server::Handle;
 use super::helpers::make_client;
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::*;
-use crate::noise::{StrengthMapKind, StrengthMapParams};
 
 // Odd dimensions leave ragged block grids and unaligned slots, so every padding rule is exercised.
 const WIDTH: u32 = 101;
@@ -27,13 +26,8 @@ fn assert_sizes_match_allocations(params: NlmParams) {
     let sizes = front_buffer_sizes(&client, &params, WIDTH, HEIGHT);
     let mut denoiser = NlmDenoiser::new(&client, params, WIDTH, HEIGHT);
 
-    // The sizes count the curve batch and the class scratch, which only these settings allocate.
-    let map = StrengthMapParams {
-        flat_boost: 1.5,
-        shadow_soften: 0.65,
-    };
+    // The sizes count the curve batch, which only these settings allocate.
     denoiser.set_luma_noise_fields(true);
-    denoiser.set_strength_map(StrengthMapKind::Luma(map));
 
     let noise = denoiser.measured_noise();
     let partials = noise.map(|noise| noise.partials());

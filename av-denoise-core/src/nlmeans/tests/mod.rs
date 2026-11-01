@@ -27,7 +27,6 @@ mod sizes;
 mod spatial;
 mod spatial_offset;
 mod split_sigma;
-mod strength_map;
 mod temporal;
 mod temporal_noise;
 mod timing;
