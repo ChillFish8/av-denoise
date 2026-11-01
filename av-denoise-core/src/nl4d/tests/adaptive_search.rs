@@ -1,6 +1,6 @@
 use super::helpers::make_client;
 use crate::bench_api::HostIo;
-use crate::motion::MotionCompensationMode;
+use crate::motion::{MAX_SEARCH_RADIUS, MotionCompensationMode};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::models::{PanShape, pan_clip};
@@ -42,23 +42,24 @@ fn bits(frames: &[Vec<f32>]) -> Vec<Vec<u32>> {
 }
 
 #[test]
-fn escalating_defaults_are_bit_identical_run_to_run() {
-    let defaults = Nl4dParams::default();
+fn an_escalating_search_is_bit_identical_run_to_run() {
+    let mut params = Nl4dParams::default();
     let MotionCompensationMode::Mvtools {
         search_radius,
         max_search_escalation,
         ..
-    } = defaults.nlm.motion_compensation
+    } = &mut params.nlm.motion_compensation
     else {
         panic!("nl4d always searches");
     };
+    *max_search_escalation = MAX_SEARCH_RADIUS;
     assert!(
-        max_search_escalation > search_radius,
-        "test premise: the defaults escalate"
+        *max_search_escalation > *search_radius,
+        "test premise: the search escalates"
     );
 
-    let first = run_stream(defaults.clone());
-    let second = run_stream(defaults);
+    let first = run_stream(params.clone());
+    let second = run_stream(params);
 
     assert!(!first.is_empty(), "the stream puts frames out");
     assert!(

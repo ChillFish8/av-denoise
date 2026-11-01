@@ -168,9 +168,8 @@ pub const DEFAULT_SEARCH_RADIUS: u32 = 4;
 
 /// The default widest radius a failing block searches again with.
 ///
-/// It equals [MAX_SEARCH_RADIUS], so with a two-level pyramid a failing block reaches roughly 24
-/// pixels around its search centre.
-pub const DEFAULT_MAX_SEARCH_ESCALATION: u32 = MAX_SEARCH_RADIUS;
+/// It equals [DEFAULT_SEARCH_RADIUS], so by default a failing block does not search again.
+pub const DEFAULT_MAX_SEARCH_ESCALATION: u32 = DEFAULT_SEARCH_RADIUS;
 
 /// The default number of pyramid levels.
 ///
@@ -410,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_escalate_to_the_widest_radius() {
+    fn the_defaults_do_not_escalate() {
         let search = MotionSearch::default();
         let MotionCompensationMode::Mvtools {
             max_search_escalation,
@@ -420,8 +419,8 @@ mod tests {
             panic!("mvtools_default is Mvtools");
         };
 
-        assert_eq!(search.max_search_escalation, MAX_SEARCH_RADIUS);
-        assert_eq!(max_search_escalation, MAX_SEARCH_RADIUS);
+        assert_eq!(search.max_search_escalation, search.search_radius);
+        assert_eq!(max_search_escalation, DEFAULT_SEARCH_RADIUS);
     }
 
     #[test]

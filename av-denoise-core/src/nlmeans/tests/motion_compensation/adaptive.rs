@@ -1,5 +1,5 @@
 use crate::bench_api::HostIo;
-use crate::motion::{MotionCompensationMode, MotionCtx, MotionEstimation, MotionSearch};
+use crate::motion::{MAX_SEARCH_RADIUS, MotionCompensationMode, MotionCtx, MotionEstimation, MotionSearch};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::{correlated_noisy_frame, make_client, noisy_field_over};
 use crate::nlmeans::tests::models::{PanShape, matched_flags, mean_over_blocks, pan_clip, stays_inside};
@@ -202,15 +202,16 @@ fn a_small_first_window_with_escalation_matches_a_full_window_on_a_pan() {
 }
 
 #[test]
-fn defaults_keep_every_interior_vector_of_a_pan_in_reach() {
+fn escalation_keeps_every_interior_vector_of_a_pan_in_reach() {
     let frames = pan_frames();
     let direct = MotionEstimation::Direct;
-    let defaults = MotionSearch {
+    let search = MotionSearch {
+        max_search_escalation: MAX_SEARCH_RADIUS,
         estimation: direct,
         ..MotionSearch::default()
     };
-    let fixed_mode = mode(defaults.search_radius, defaults.search_radius, direct);
-    let escalating_mode = MotionCompensationMode::from(defaults);
+    let fixed_mode = mode(search.search_radius, search.search_radius, direct);
+    let escalating_mode = MotionCompensationMode::from(search);
     let escalating = run_front(escalating_mode, &frames);
     let fixed = run_front(fixed_mode, &frames);
     let escalating_vectors = inside_pan_vectors(&escalating);

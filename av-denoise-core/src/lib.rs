@@ -63,7 +63,7 @@ pub use self::nlmeans::{
     nlmeans_variant_for,
     parse_prefilter,
 };
-pub use self::options::Preset;
+pub use self::options::{Preset, search_escalation_for};
 pub use self::tune::{
     BudgetRequest,
     CacheHook,

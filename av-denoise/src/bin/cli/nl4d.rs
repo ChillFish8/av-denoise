@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Nl4dOptions, PlaneOptions};
+use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Nl4dOptions, PlaneOptions, search_escalation_for};
 
 use super::{Args, CommonArgs, MotionArgs, Preset, RunOptions, resolve_channel_intent};
 
@@ -193,10 +193,10 @@ impl Nl4dArgs {
 
     /// Builds the run options from these flags and the global flags.
     pub fn build_options(&self, globals: &Args) -> Result<RunOptions, anyhow::Error> {
-        if globals.preset != Preset::Base {
+        if !matches!(globals.preset, Preset::Base | Preset::Slow) {
             anyhow::bail!(
-                "nl4d only runs the base preset, use --temporal-radius and --spatial-radius to \
-                 trade speed for quality"
+                "nl4d only runs the base and slow presets, use --temporal-radius and \
+                 --spatial-radius to trade speed for quality"
             );
         }
 
@@ -232,10 +232,11 @@ impl Nl4dArgs {
         self.warn_on_dead_per_plane_flags(intent);
 
         let temporal_radius = self.temporal_radius(&defaults)?;
+        let preset_ceiling = search_escalation_for(globals.preset);
 
         let spatial_radius = self.spatial_radius.unwrap_or(defaults.spatial_radius);
         let nl4d_options = Nl4dOptions {
-            motion: self.motion.to_motion_search(),
+            motion: self.motion.to_motion_search(preset_ceiling),
             temporal_radius,
             sigma: self.sigma.map(|sigma| sigma / 255.0),
             sigma_scale: self.sigma_scale.unwrap_or(defaults.sigma_scale),
@@ -570,13 +571,33 @@ mod tests {
     }
 
     #[test]
-    fn the_escalation_ceiling_defaults_to_the_widest_radius() {
+    fn the_escalation_ceiling_defaults_to_the_search_radius() {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         let motion = expect_nl4d(&opts).motion;
 
         assert_eq!(motion.search_radius, 4);
-        assert_eq!(motion.max_search_escalation, 8);
+        assert_eq!(motion.max_search_escalation, 4);
+    }
+
+    #[test]
+    fn an_unset_escalation_ceiling_follows_a_narrower_search() {
+        let (args, nl4d) = parse(&["--mc-search", "2"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+
+        assert_eq!(motion.search_radius, 2);
+        assert_eq!(motion.max_search_escalation, 2);
+    }
+
+    #[test]
+    fn an_unset_escalation_ceiling_follows_a_wider_search() {
+        let (args, nl4d) = parse(&["--mc-search", "6"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+
+        assert_eq!(motion.search_radius, 6);
+        assert_eq!(motion.max_search_escalation, 6);
     }
 
     #[test]
@@ -590,15 +611,77 @@ mod tests {
     }
 
     #[test]
-    fn a_preset_other_than_base_is_rejected() {
-        for preset in ["veryfast", "fast", "slow", "veryslow"] {
+    fn a_preset_other_than_base_or_slow_is_rejected() {
+        for preset in ["veryfast", "fast", "veryslow"] {
             let (args, nl4d) = parse(&["--preset", preset]);
             let error = nl4d
                 .build_options(&args)
-                .expect_err("nl4d must reject presets other than base");
+                .expect_err("nl4d must reject presets other than base and slow");
 
-            assert!(error.to_string().contains("base preset"), "{preset}: got {error}");
+            assert!(
+                error.to_string().contains("base and slow presets"),
+                "{preset}: got {error}"
+            );
         }
+    }
+
+    #[test]
+    fn the_slow_preset_is_base_with_a_ceiling_of_eight() {
+        let (base_args, base_nl4d) = parse(&[]);
+        let (slow_args, slow_nl4d) = parse(&["--preset", "slow"]);
+        let base_opts = base_nl4d.build_options(&base_args).expect("base should resolve");
+        let slow_opts = slow_nl4d.build_options(&slow_args).expect("slow should resolve");
+        let base = expect_nl4d(&base_opts);
+        let slow = expect_nl4d(&slow_opts);
+
+        let base_with_ceiling = av_denoise::MotionSearch {
+            max_search_escalation: 8,
+            ..base.motion
+        };
+        assert_eq!(slow.motion, base_with_ceiling);
+
+        let slow_with_base_motion = Nl4dOptions {
+            motion: base.motion,
+            ..slow
+        };
+        assert_eq!(slow_with_base_motion, base);
+        assert_eq!(slow_opts.planes.mode, base_opts.planes.mode);
+    }
+
+    #[test]
+    fn explicit_motion_flags_outrank_the_slow_preset() {
+        let (args, nl4d) = parse(&["--preset", "slow", "--mc-search", "6"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+
+        assert_eq!(motion.search_radius, 6);
+        assert_eq!(motion.max_search_escalation, 8);
+
+        let (args, nl4d) = parse(&["--preset", "slow", "--mc-max-search-escalation", "5"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+
+        assert_eq!(motion.max_search_escalation, 5);
+    }
+
+    #[test]
+    fn an_explicit_ceiling_below_the_search_radius_is_rejected_under_slow() {
+        let (args, nl4d) = parse(&[
+            "--preset",
+            "slow",
+            "--mc-search",
+            "6",
+            "--mc-max-search-escalation",
+            "5",
+        ]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+        let mode = av_denoise::MotionCompensationMode::from(motion);
+
+        assert!(
+            mode.validate().is_err(),
+            "a ceiling of 5 below a radius of 6 must fail"
+        );
     }
 
     #[test]

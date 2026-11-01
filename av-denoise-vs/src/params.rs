@@ -23,6 +23,7 @@ use av_denoise::{
     nlmeans_temporal_radius_for,
     nlmeans_variant_for,
     parse_prefilter,
+    search_escalation_for,
 };
 use vapoursynth::format::{ColorFamily, SampleType};
 
@@ -246,6 +247,17 @@ fn reject_mismatched_params(
     Ok(())
 }
 
+/// The default motion search with the ceiling `preset` widens failing blocks to.
+fn preset_motion_search(preset: Preset) -> MotionSearch {
+    let defaults = MotionSearch::default();
+    let ceiling = search_escalation_for(preset).unwrap_or(defaults.search_radius);
+
+    MotionSearch {
+        max_search_escalation: ceiling.max(defaults.search_radius),
+        ..defaults
+    }
+}
+
 /// Validates `raw` and builds the denoiser's [PlaneOptions].
 ///
 /// Parameters the algorithm never reads are rejected first, so `search_radius` on nl4d fails as a
@@ -263,12 +275,15 @@ pub fn plane_options_from(
         Some(name) => parse_preset(name)?,
     };
 
-    if algorithm_kind == AlgorithmKind::Nl4d && preset != Preset::Base {
+    let runs_preset = matches!(preset, Preset::Base | Preset::Slow);
+    if algorithm_kind == AlgorithmKind::Nl4d && !runs_preset {
         anyhow::bail!(
-            "Nl4d only runs the base preset, use temporal_radius and spatial_radius to trade \
-             speed for quality"
+            "Nl4d only runs the base and slow presets, use temporal_radius and spatial_radius to \
+             trade speed for quality"
         );
     }
+
+    let motion_search = preset_motion_search(preset);
 
     // Only nlmeans reads `variant`, so nl4d never parses it and a set value fails as a mismatch below.
     let variant = match algorithm_kind {
@@ -348,7 +363,6 @@ pub fn plane_options_from(
                 ..NlmTuning::default()
             };
 
-            let motion_search = MotionSearch::default();
             let motion_compensation = match raw.motion_compensation {
                 Some(true) => MotionCompensationMode::from(motion_search),
                 Some(false) | None => MotionCompensationMode::None,
@@ -411,6 +425,7 @@ pub fn plane_options_from(
                     Some(enabled) => enabled,
                     None => Nl4dOptions::default().pooled_threshold,
                 },
+                motion: motion_search,
                 ..Nl4dOptions::default()
             };
 

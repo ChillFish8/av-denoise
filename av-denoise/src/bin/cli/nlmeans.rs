@@ -11,6 +11,7 @@ use av_denoise::{
     nlmeans_temporal_radius_for,
     nlmeans_variant_for,
     parse_prefilter,
+    search_escalation_for,
 };
 
 use super::{Args, CommonArgs, MotionArgs, Preset, RunOptions, resolve_channel_intent};
@@ -227,12 +228,15 @@ pub struct NlmeansArgs {
 }
 
 /// `--variant`, `--temporal-radius`, and `--search-radius` resolved
-/// from either an explicit flag or the active `--preset`.
+/// from either an explicit flag or the active `--preset`, plus the
+/// preset's motion search ceiling.
 #[derive(Debug, Copy, Clone)]
 pub struct ResolvedPreset {
     pub variant: Variant,
     pub temporal_radius: u32,
     pub search_radius: u32,
+    /// The widest radius a failing motion block searches again with, when the preset widens.
+    pub search_escalation: Option<u32>,
 }
 
 impl NlmeansArgs {
@@ -246,6 +250,7 @@ impl NlmeansArgs {
             search_radius: self
                 .search_radius
                 .unwrap_or_else(|| nlmeans_search_radius_for(preset)),
+            search_escalation: search_escalation_for(preset),
         }
     }
 
@@ -333,7 +338,7 @@ impl NlmeansArgs {
                 );
             }
 
-            self.motion.to_motion_search().into()
+            self.motion.to_motion_search(resolved.search_escalation).into()
         } else {
             if self.motion.any_set() {
                 tracing::warn!("--mc-* options are ignored unless --motion-compensation is set");
@@ -423,6 +428,79 @@ mod tests {
     fn resolve(extra: &[&str]) -> ResolvedPreset {
         let (args, nlm) = parse(extra);
         nlm.resolve_preset(args.preset)
+    }
+
+    #[test]
+    fn only_slow_and_veryslow_widen_failing_motion_searches() {
+        for (preset, expected) in [
+            ("veryfast", None),
+            ("fast", None),
+            ("base", None),
+            ("slow", Some(8)),
+            ("veryslow", Some(8)),
+        ] {
+            let resolved = resolve(&["--preset", preset]);
+
+            assert_eq!(resolved.search_escalation, expected, "{preset}");
+        }
+    }
+
+    fn motion_of(extra: &[&str]) -> MotionCompensationMode {
+        let (args, nlm) = parse(extra);
+        let opts = nlm.build_options(&args).expect("build_options should succeed");
+
+        match opts.planes.algorithm {
+            av_denoise::Algorithm::NlmeansHq(hq) => hq.nlm.motion_compensation,
+            av_denoise::Algorithm::Nlmeans(nlm) => nlm.motion_compensation,
+            ref other => panic!("expected an nlmeans algorithm, got {other:?}"),
+        }
+    }
+
+    fn ceiling_of(mode: MotionCompensationMode) -> u32 {
+        match mode {
+            MotionCompensationMode::Mvtools {
+                max_search_escalation,
+                ..
+            } => max_search_escalation,
+            other => panic!("expected motion compensation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_slow_preset_widens_motion_searches_up_to_eight() {
+        let slow = motion_of(&["--preset", "slow", "--motion-compensation"]);
+        let base = motion_of(&["--motion-compensation"]);
+
+        assert_eq!(ceiling_of(slow), 8);
+        assert_eq!(ceiling_of(base), 4);
+    }
+
+    #[test]
+    fn the_slow_preset_leaves_motion_compensation_off_without_the_flag() {
+        let mode = motion_of(&["--preset", "slow"]);
+
+        assert_eq!(mode, MotionCompensationMode::None);
+    }
+
+    #[test]
+    fn explicit_motion_flags_outrank_the_slow_preset() {
+        let wide_first = motion_of(&[
+            "--preset",
+            "veryslow",
+            "--motion-compensation",
+            "--mc-search",
+            "6",
+        ]);
+        let pinned = motion_of(&[
+            "--preset",
+            "slow",
+            "--motion-compensation",
+            "--mc-max-search-escalation",
+            "4",
+        ]);
+
+        assert_eq!(ceiling_of(wide_first), 8);
+        assert_eq!(ceiling_of(pinned), 4);
     }
 
     #[test]

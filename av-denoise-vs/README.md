@@ -180,7 +180,9 @@ clean.set_output()
 `preset` is the main quality-versus-speed dial for `Nlm` and `NlmHQ`. It takes one of five values,
 from fastest to slowest and best-quality: `veryfast`, `fast`, `base`, `slow`, `veryslow`.
 Each preset resolves every unset numeric and string parameter to a value tuned for that speed tier.
-`Nl4d` only runs `base`, and any other preset raises `vs.Error`.
+`Nl4d` runs `base` and `slow`, and any other preset raises `vs.Error`. `slow` searches badly
+matched motion blocks again with a wider window, for about 17-18% of speed at 1080p. `Nlm` and
+`NlmHQ` do the same at `slow` and `veryslow` when `motion_compensation=True`.
 
 Any parameter you set explicitly overrides what the preset would have chosen for it,
 other fields still fall back to the preset's values. This lets you take a preset as a

@@ -213,7 +213,8 @@ def Nl4d(
 
     Args:
         clip: The input video node to denoise.
-        preset: Preset name. NL4D only runs `"base"`.
+        preset: Preset name. NL4D runs `"base"` and `"slow"`, which searches badly matched motion blocks
+            again with a wider window.
         channel_mode: Which planes to filter, one of `"luma"`, `"chroma"`, or `"lumachroma"`.
         device: Compute device to run on. `"cpu"` selects a software device where the platform offers one,
             useful for testing, not for real encodes. Example: `"discrete:0"` for discrete GPU 0.

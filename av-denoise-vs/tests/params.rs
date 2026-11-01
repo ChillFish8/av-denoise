@@ -609,8 +609,8 @@ fn nl4d_resolves_the_library_defaults() {
 }
 
 #[test]
-fn nl4d_rejects_presets_other_than_base() {
-    for name in ["veryfast", "fast", "slow", "veryslow"] {
+fn nl4d_rejects_presets_other_than_base_and_slow() {
+    for name in ["veryfast", "fast", "veryslow"] {
         let raw = RawParams {
             preset: Some(name.to_string()),
             ..RawParams::default()
@@ -619,7 +619,63 @@ fn nl4d_rejects_presets_other_than_base() {
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("base preset"), "{name}: got {err}");
+        assert!(err.contains("base and slow presets"), "{name}: got {err}");
+    }
+}
+
+fn nl4d_ceiling_for(preset: &str) -> u32 {
+    let raw = RawParams {
+        preset: Some(preset.to_string()),
+        ..RawParams::default()
+    };
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap();
+
+    match opts.algorithm {
+        av_denoise::Algorithm::Nl4d(nl4d) => nl4d.motion.max_search_escalation,
+        other => panic!("expected Nl4d algorithm, got {other:?}"),
+    }
+}
+
+#[test]
+fn nl4d_slow_widens_failing_motion_searches_up_to_eight() {
+    let defaults = Nl4dOptions::default();
+
+    assert_eq!(nl4d_ceiling_for("slow"), 8);
+    assert_eq!(nl4d_ceiling_for("base"), defaults.motion.search_radius);
+}
+
+fn nlmeans_ceiling_for(preset: &str) -> u32 {
+    let raw = RawParams {
+        preset: Some(preset.to_string()),
+        motion_compensation: Some(true),
+        ..RawParams::default()
+    };
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
+    let motion = match opts.algorithm {
+        av_denoise::Algorithm::NlmeansHq(hq) => hq.nlm.motion_compensation,
+        av_denoise::Algorithm::Nlmeans(nlm) => nlm.motion_compensation,
+        other => panic!("expected an nlmeans algorithm, got {other:?}"),
+    };
+
+    match motion {
+        MotionCompensationMode::Mvtools {
+            max_search_escalation,
+            ..
+        } => max_search_escalation,
+        other => panic!("expected motion compensation, got {other:?}"),
+    }
+}
+
+#[test]
+fn nlmeans_slow_and_veryslow_widen_failing_motion_searches_up_to_eight() {
+    for (preset, expected) in [
+        ("veryfast", 4),
+        ("fast", 4),
+        ("base", 4),
+        ("slow", 8),
+        ("veryslow", 8),
+    ] {
+        assert_eq!(nlmeans_ceiling_for(preset), expected, "{preset}");
     }
 }
 

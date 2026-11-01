@@ -87,7 +87,9 @@ pub struct Args {
     /// above also run the `hq` variant, and `slow` and `veryslow` widen
     /// its search radius.
     ///
-    /// `nl4d` only runs `base`, the default.
+    /// `nl4d` runs `base`, the default, and `slow`. `slow` raises the
+    /// motion search escalation ceiling to 8, so badly matched motion
+    /// blocks search again with a wider window.
     #[arg(long, env = "AVD_PRESET", default_value = "base", global = true)]
     pub preset: Preset,
 

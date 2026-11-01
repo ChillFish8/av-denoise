@@ -39,7 +39,9 @@ pub struct MotionArgs {
     /// must be at least `--mc-search` and at most 8. Setting it equal
     /// to `--mc-search` turns the wider search off.
     ///
-    /// Defaults to 8 when unset.
+    /// Defaults to 8 under `--preset slow` and `veryslow`. Under the
+    /// other presets it defaults to `--mc-search`, which leaves the
+    /// wider search off.
     #[arg(long)]
     pub mc_max_search_escalation: Option<u32>,
 
@@ -68,16 +70,21 @@ impl MotionArgs {
     }
 
     /// Converts these flags to a [MotionSearch], with the library default for each unset flag.
-    pub fn to_motion_search(&self) -> MotionSearch {
+    ///
+    /// An unset ceiling takes `preset_ceiling` when the preset widens failing searches, and never
+    /// sits below the first search's radius. Without one it equals that radius, so no block
+    /// searches again.
+    pub fn to_motion_search(&self, preset_ceiling: Option<u32>) -> MotionSearch {
         let defaults = MotionSearch::default();
+        let search_radius = self.mc_search.unwrap_or(defaults.search_radius);
+        let unset_ceiling = preset_ceiling.map_or(search_radius, |ceiling| ceiling.max(search_radius));
+        let max_search_escalation = self.mc_max_search_escalation.unwrap_or(unset_ceiling);
 
         MotionSearch {
             blksize: self.mc_blksize.unwrap_or(defaults.blksize),
             overlap: self.mc_overlap.unwrap_or(defaults.overlap),
-            search_radius: self.mc_search.unwrap_or(defaults.search_radius),
-            max_search_escalation: self
-                .mc_max_search_escalation
-                .unwrap_or(defaults.max_search_escalation),
+            search_radius,
+            max_search_escalation,
             pyramid_levels: self.mc_pyramid_levels.unwrap_or(defaults.pyramid_levels),
             estimation: defaults.estimation,
         }

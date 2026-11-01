@@ -41,6 +41,7 @@ pub use av_denoise_core::{
     nlmeans_temporal_radius_for,
     nlmeans_variant_for,
     parse_prefilter,
+    search_escalation_for,
 };
 
 pub use self::backend::{Device, accelerate, device, enumerate, sniff};

@@ -99,7 +99,7 @@ These are global, so they work on either side of the subcommand.
 
 | Flag                               | What it does                                                                                                     | Default       |
 |------------------------------------|------------------------------------------------------------------------------------------------------------------|---------------|
-| `--preset <veryfast..veryslow>`    | Speed vs quality for `nlmeans`, see the ladder below. `nl4d` only runs `base`.                                   | `base`        |
+| `--preset <veryfast..veryslow>`    | Speed vs quality for `nlmeans`, see the ladder below. `nl4d` runs `base` and `slow`.                             | `base`        |
 | `--channel-mode <luma,chroma>`     | Which planes to clean.                                                                                           | `luma,chroma` |
 | `-A, --accelerators <list>`        | Backends to try, in order. Comma-separated, for example `cuda,vulkan`.                                           | `vulkan`      |
 | `-d, --device <spec>`              | `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]`, or `cpu`.                                            | `default`     |
@@ -151,8 +151,10 @@ Motion tracking is always on, and the temporal window always reaches at
 least one frame, which this algorithm needs. There is no NLMeans weighting pass, so none of
 the NLMeans knobs below exist here.
 
-NL4D only runs the `base` preset. Trade speed for quality with `--temporal-radius` and
-`--spatial-radius` instead.
+NL4D runs the `base` and `slow` presets. `slow` is `base` with `--mc-max-search-escalation 8`, so
+badly matched motion blocks search again with a wider window. It runs about 17-18% slower than
+`base` at 1080p, and its quality measured within noise of `base`. Otherwise, trade speed for quality
+with `--temporal-radius` and `--spatial-radius`.
 
 | Flag                               | What it does                                                                                                                                                                                                                    | Default                  |
 |------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
@@ -175,7 +177,7 @@ NL4D only runs the `base` preset. Trade speed for quality with `--temporal-radiu
 | `--no-noise-map`                                                     | Turns off the luma noise map, which scales the luma threshold by how noisy each brightness level is.                                                                                                                                                              | map on              |
 | `--no-pooled-threshold`                                              | Turns off the pooled threshold, which judges each frequency together with its neighbours so faint texture survives.                                                                                                                                               | pooling on          |
 | `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. NL4D always tracks motion, so these are always live.                                                                                                                                                                                      | `16`, `8`, `4`, `2` |
-| `--mc-max-search-escalation <N>`                                     | Widest radius a motion block that matched badly searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns the wider search off.                                                                                                              | `8`                 |
+| `--mc-max-search-escalation <N>`                                     | Widest radius a motion block that matched badly searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns the wider search off.                                                                                                              | from `--preset`     |
 
 </details>
 
@@ -186,13 +188,17 @@ either inside a single frame or across a temporal window.
 
 What `--preset` fills in:
 
-| Preset     | Variant | Temporal radius | Search radius |
-|------------|---------|-----------------|---------------|
-| `veryfast` | `fast`  | 0               | 2             |
-| `fast`     | `hq`    | 1               | 2             |
-| `base`     | `hq`    | 2               | 2             |
-| `slow`     | `hq`    | 4               | 4             |
-| `veryslow` | `hq`    | 8               | 4             |
+| Preset     | Variant | Temporal radius | Search radius | Motion search ceiling |
+|------------|---------|-----------------|---------------|-----------------------|
+| `veryfast` | `fast`  | 0               | 2             | `--mc-search`         |
+| `fast`     | `hq`    | 1               | 2             | `--mc-search`         |
+| `base`     | `hq`    | 2               | 2             | `--mc-search`         |
+| `slow`     | `hq`    | 4               | 4             | 8                     |
+| `veryslow` | `hq`    | 8               | 4             | 8                     |
+
+The motion search ceiling is `--mc-max-search-escalation`, and it only applies with
+`--motion-compensation`. At 8, badly matched motion blocks search again with a wider window, which
+costs about 17-18% of speed at 1080p for quality within noise.
 
 | Flag                    | What it does                                                                                                                                                                                   | Default         |
 |-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------|
@@ -217,7 +223,7 @@ What `--preset` fills in:
 | `--hq-no-noise-floor`                                                | Keeps the expected noise floor inside patch distances instead of subtracting it.                                                                                                   | off                 |
 | `--hq-no-temporal-confidence`                                        | Weights every neighbour equally, however badly it matches.                                                                                                                         | off                 |
 | `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. Only used with `--motion-compensation`.                                                                                                                    | `16`, `8`, `4`, `2` |
-| `--mc-max-search-escalation <N>`                                     | Widest radius a badly matched motion block searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns it off. Only used with `--motion-compensation`.          | `8`                 |
+| `--mc-max-search-escalation <N>`                                     | Widest radius a badly matched motion block searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns it off. Only used with `--motion-compensation`.          | from `--preset`     |
 
 </details>
 ---
