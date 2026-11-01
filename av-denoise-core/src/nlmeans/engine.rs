@@ -17,6 +17,7 @@ use crate::engine::{
     egress,
 };
 use crate::error::Error;
+use crate::motion::SharedMotion;
 use crate::tune::{EngineKernels, KernelSelector};
 
 /// The frames an engine at `temporal_radius` holds with a noise look-ahead `lookahead` deep.
@@ -36,6 +37,9 @@ pub(crate) struct Nlmeans {
     pushed: bool,
     /// The stream frame of the last emit.
     emitted: Option<u32>,
+    /// The camera models of the frames this pass sees.
+    #[expect(dead_code, reason = "task 5 seeds the pass searches from these models")]
+    motion: Option<SharedMotion>,
     poisoned: bool,
 }
 
@@ -44,7 +48,7 @@ impl Nlmeans {
     #[cfg(test)]
     pub fn new(client: &Client, algorithm: NlmeansAlgorithm, geometry: PassGeometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
-        Self::with_kernels(client, algorithm, geometry, kernels)
+        Self::with_kernels(client, algorithm, geometry, kernels, None)
     }
 
     /// Builds the engine with each launch site's candidate picked from `kernels`.
@@ -55,6 +59,7 @@ impl Nlmeans {
         algorithm: NlmeansAlgorithm,
         geometry: PassGeometry,
         kernels: EngineKernels,
+        motion: Option<SharedMotion>,
     ) -> Result<Self, Error> {
         geometry.validate()?;
 
@@ -88,6 +93,7 @@ impl Nlmeans {
             tail_remaining: 0,
             pushed: false,
             emitted: None,
+            motion,
             poisoned: false,
         })
     }

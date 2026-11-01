@@ -26,7 +26,6 @@ pub(crate) use self::denoiser::{NlmDenoiser, RingView};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::dispatch::mc_sad_noise_floor_sigma;
 pub(crate) use self::engine::Nlmeans;
-#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::options::resolve_params;
 pub use self::options::{
     DenoisingMode,

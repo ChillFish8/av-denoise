@@ -121,6 +121,21 @@ pub fn mc_compose_models(
     out[base + 5] = acc_ty / scale_y;
 }
 
+/// Writes identity with `valid` at 0 to ring slot `slot`.
+#[cube(launch_unchecked)]
+pub fn mc_model_identity(models: &mut [f32], slot: u32) {
+    if ABSOLUTE_POS_X != 0 {
+        terminate!();
+    }
+
+    let base = (slot * MODEL_WORDS) as usize;
+    models[base] = 1.0f32;
+    models[base + 1] = 0.0f32;
+    models[base + 2] = 0.0f32;
+    models[base + 3] = 0.0f32;
+    models[base + 4] = 0.0f32;
+}
+
 /// Halving rounds that reduce [FIT_THREADS] partial sums to one.
 const FIT_ROUNDS: u32 = 8;
 

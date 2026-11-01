@@ -13,5 +13,5 @@ pub use self::block_match::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block
 pub use self::candidates::MODEL_CANDIDATE_BIAS;
 pub use self::chain::{mc_chain_compose, mc_pair_zero};
 pub use self::compensate::mc_warp;
-pub use self::global::{mc_compose_models, mc_fit_bands, mc_fit_finish, mc_fit_sums};
+pub use self::global::{mc_compose_models, mc_fit_bands, mc_fit_finish, mc_fit_sums, mc_model_identity};
 pub use self::pyramid::{mc_downscale, mc_extract_luma};

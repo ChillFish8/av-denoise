@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), expect(dead_code, reason = "only the tests run a fit so far"))]
-
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 

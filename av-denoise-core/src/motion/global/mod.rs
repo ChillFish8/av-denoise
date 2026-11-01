@@ -1,6 +1,7 @@
 mod compose;
 mod fit;
 mod model;
+mod producer;
 
 #[cfg(test)]
 mod tests;
@@ -21,6 +22,7 @@ pub use self::fit::{
     FitScratch,
     MAX_ROLL_TAN,
 };
-#[cfg_attr(not(test), expect(unused_imports, reason = "only the tests run a fit so far"))]
 pub(crate) use self::fit::{FitField, run_model_fit};
 pub use self::model::{MODEL_WORDS, ModelRing};
+pub use self::producer::PairModelProducer;
+pub(crate) use self::producer::{SharedMotion, producer_buffer_sizes};

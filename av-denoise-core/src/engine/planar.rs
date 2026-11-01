@@ -7,6 +7,9 @@ use cubecl::server::Handle;
 use super::passthrough::PassthroughRing;
 use super::{ChromaLayout, DevicePlane, Engine, FramePass, Geometry, PassTimings, PlaneSource, WindowSpan};
 use crate::error::Error;
+#[cfg(test)]
+use crate::motion::ModelRing;
+use crate::motion::PairModelProducer;
 use crate::nl4d::grain::GrainChunk;
 
 /// The warning a stream of gray frames logs once, as it starts.
@@ -83,11 +86,14 @@ impl<'s> StagedFrame<'s> {
 /// One engine over every plane of a frame, running a luma pass, a chroma pass, or both.
 ///
 /// A plane group without a pass is held in a [PassthroughRing] under the stream frame it came in
-/// with, and written out when the cleaned pass emits that same frame.
+/// with, and written out when the cleaned pass emits that same frame. With a
+/// [PairModelProducer], every frame's luma plane is fitted into a camera model before the passes
+/// see the frame.
 pub(crate) struct PlanarEngine {
     geometry: Geometry,
     luma: Option<Box<dyn FramePass>>,
     chroma: Option<Box<dyn FramePass>>,
+    producer: Option<PairModelProducer>,
     passthrough: Option<PassthroughRing>,
     /// Logged once at the start of each stream.
     warning: Option<&'static str>,
@@ -105,6 +111,7 @@ impl PlanarEngine {
         geometry: Geometry,
         luma: Option<Box<dyn FramePass>>,
         chroma: Option<Box<dyn FramePass>>,
+        producer: Option<PairModelProducer>,
         warns: bool,
     ) -> Self {
         let gray = geometry.chroma == ChromaLayout::Gray;
@@ -114,6 +121,7 @@ impl PlanarEngine {
             geometry,
             luma,
             chroma,
+            producer,
             passthrough: None,
             warning,
             stream_started: false,
@@ -138,6 +146,29 @@ impl PlanarEngine {
         let bytes = self.geometry.input.plane_bytes(pixels);
 
         PassthroughRing::new(client, slots, planes, bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn models(&self) -> Option<&ModelRing> {
+        let producer = self.producer.as_ref();
+        producer.map(|producer| producer.ring())
+    }
+
+    /// Fits stream frame `frame`'s camera model from its luma plane, when the engine fits models.
+    ///
+    /// A failure poisons the engine, since the ring may hold a partly written model.
+    fn fit_pair_model(&mut self, luma: &DevicePlane<'_>, frame: u32) -> Result<(), Error> {
+        let Some(producer) = self.producer.as_mut() else {
+            return Ok(());
+        };
+
+        let pushed = producer.push(luma, frame);
+        if let Err(error) = pushed {
+            self.poisoned = true;
+            return Err(Error::Gpu(error));
+        }
+
+        Ok(())
     }
 
     /// The first present pass, luma before chroma.
@@ -284,6 +315,8 @@ impl Engine for PlanarEngine {
         self.start_stream();
 
         let frame = self.lead().next_frame();
+        self.fit_pair_model(&planes[0], frame)?;
+
         let ready = self.forward_planes(planes, |pass, pass_planes| pass.push(pass_planes))?;
         self.store_uncleaned(frame, planes);
 
@@ -297,6 +330,12 @@ impl Engine for PlanarEngine {
         let frame = self.lead().next_frame();
         let geometry = self.geometry;
         let mut staged = StagedFrame::new(source, geometry);
+        if self.producer.is_some() {
+            let handles = staged.handles(PlaneGroup::Luma)?;
+            let planes = geometry.device_planes(0, handles);
+            self.fit_pair_model(&planes[0], frame)?;
+        }
+
         let ready = self.forward(|pass, group| {
             let first = group.indices(geometry.chroma).start;
             let handles = staged.handles(group)?;
@@ -318,6 +357,8 @@ impl Engine for PlanarEngine {
         self.start_stream();
 
         let frame = self.lead().next_frame();
+        self.fit_pair_model(&planes[0], frame)?;
+
         self.forward_planes(planes, |pass, pass_planes| pass.push_context(pass_planes))?;
         self.store_uncleaned(frame, planes);
 
@@ -361,6 +402,10 @@ impl Engine for PlanarEngine {
         let passes = [self.luma.as_deref_mut(), self.chroma.as_deref_mut()];
         for pass in passes.into_iter().flatten() {
             pass.reset();
+        }
+
+        if let Some(producer) = self.producer.as_mut() {
+            producer.reset();
         }
 
         self.stream_started = false;

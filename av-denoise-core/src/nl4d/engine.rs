@@ -19,6 +19,7 @@ use crate::engine::{
     egress,
 };
 use crate::error::Error;
+use crate::motion::SharedMotion;
 use crate::nlmeans::ChannelMode;
 use crate::nlmeans::denoiser::{check_u32_indexable, lookahead_depth_for};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
@@ -46,6 +47,9 @@ pub(crate) struct Nl4d {
     pushed: bool,
     /// The stream frame of the last emit.
     emitted: Option<u32>,
+    /// The camera models of the frames this pass sees.
+    #[expect(dead_code, reason = "task 5 seeds the pass searches from these models")]
+    motion: Option<SharedMotion>,
     poisoned: bool,
 }
 
@@ -54,7 +58,7 @@ impl Nl4d {
     #[cfg(test)]
     pub fn new(client: &Client, options: Nl4dOptions, geometry: PassGeometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
-        Self::with_kernels(client, options, geometry, kernels)
+        Self::with_kernels(client, options, geometry, kernels, None)
     }
 
     /// Builds the engine with each launch site's candidate picked from `kernels`.
@@ -65,6 +69,7 @@ impl Nl4d {
         options: Nl4dOptions,
         geometry: PassGeometry,
         kernels: EngineKernels,
+        motion: Option<SharedMotion>,
     ) -> Result<Self, Error> {
         if geometry.width < PATCH_SIZE || geometry.height < PATCH_SIZE {
             let message = format!(
@@ -108,6 +113,7 @@ impl Nl4d {
             pushes: 0,
             pushed: false,
             emitted: None,
+            motion,
             poisoned: false,
         })
     }

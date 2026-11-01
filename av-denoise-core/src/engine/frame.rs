@@ -37,6 +37,15 @@ impl ChromaLayout {
             ChromaLayout::Yuv444 => Some((width, height)),
         }
     }
+
+    /// The luma pixels one chroma pixel spans along each axis.
+    pub(crate) fn chroma_scale(self) -> (f32, f32) {
+        match self {
+            ChromaLayout::Yuv420 => (2.0, 2.0),
+            ChromaLayout::Yuv422 => (2.0, 1.0),
+            ChromaLayout::Gray | ChromaLayout::Yuv444 => (1.0, 1.0),
+        }
+    }
 }
 
 /// The frame an engine is built for.

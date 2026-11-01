@@ -490,7 +490,7 @@ fn drive_from(
 }
 
 #[test]
-fn push_from_matches_push_and_uploads_the_cleaned_luma_first() {
+fn push_from_matches_push_and_uploads_luma_first_when_a_pass_needs_it() {
     let client = client();
     let clip = clip();
     let geometry = geometry(ChromaLayout::Yuv420);
@@ -506,7 +506,9 @@ fn push_from_matches_push_and_uploads_the_cleaned_luma_first() {
 
             assert_eq!(actual, expected, "{spec:?}");
 
-            let order = if luma { [0..1, 1..3] } else { [1..3, 0..1] };
+            // An nl4d pass always tracks motion, so its camera model fit asks for luma first.
+            let luma_first = luma || spec.is_nl4d();
+            let order = if luma_first { [0..1, 1..3] } else { [1..3, 0..1] };
             for frame_requests in requests {
                 assert_eq!(frame_requests, order, "{spec:?}");
             }

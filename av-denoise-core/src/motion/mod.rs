@@ -40,9 +40,11 @@ pub use self::global::{
     MODEL_WORDS,
     ModelRing,
     NO_PAIR,
+    PairModelProducer,
     compose_gaps,
     run_compose_models,
 };
+pub(crate) use self::global::{SharedMotion, producer_buffer_sizes};
 pub(crate) use self::pyramid::{
     level_dims,
     pyramid_pixels_per_frame,

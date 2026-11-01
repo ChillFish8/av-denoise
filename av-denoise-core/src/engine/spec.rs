@@ -5,9 +5,16 @@ use super::PassEngine;
 use super::planar::PlanarEngine;
 use super::{ChromaLayout, EdgePadding, Engine, FramePass, Geometry, PassGeometry, WindowSpan};
 use crate::error::Error;
+#[cfg(test)]
+use crate::motion::ModelRing;
+use crate::motion::{MotionCompensationMode, PairModelProducer, SharedMotion, producer_buffer_sizes};
 use crate::nl4d::{Nl4d, Nl4dOptions};
-use crate::nlmeans::{ChannelMode, Nlmeans, NlmeansAlgorithm};
+use crate::nlmeans::denoiser::check_u32_indexable;
+use crate::nlmeans::{ChannelMode, Nlmeans, NlmeansAlgorithm, resolve_params};
 use crate::tune::EngineKernels;
+
+/// Model ring slots beyond the frames a pass holds and its temporal window.
+const MODEL_RING_MARGIN: u32 = 2;
 
 /// Which engine to build, and for what planes.
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +61,20 @@ impl PassSpec {
         }
     }
 
+    /// The motion search the pass runs and its temporal radius, when it compensates motion.
+    pub(crate) fn motion(&self) -> Option<(MotionCompensationMode, u32)> {
+        let (mode, radius) = match self {
+            PassSpec::Nlmeans { algorithm, geometry } => {
+                let params = resolve_params(algorithm, geometry.channels);
+                (params.motion_compensation, params.temporal_radius)
+            },
+            PassSpec::Nl4d { options, .. } => (options.motion.into(), options.temporal_radius),
+        };
+
+        let active = mode.is_active() && radius > 0;
+        active.then_some((mode, radius))
+    }
+
     /// Builds the engine on `client`, picking each launch site's candidate from `kernels`.
     #[cfg(test)]
     pub(crate) fn build(
@@ -61,23 +82,26 @@ impl PassSpec {
         client: &Client,
         kernels: EngineKernels,
     ) -> Result<Box<dyn PassEngine>, Error> {
-        let engine: Box<dyn PassEngine> = self.build_pass(client, kernels)?;
+        let engine: Box<dyn PassEngine> = self.build_pass(client, kernels, None)?;
         Ok(engine)
     }
 
     /// Builds the engine as a [FramePass] that names the frame behind each emit.
+    ///
+    /// `motion` holds the camera models of the frames the pass sees, when they are fitted.
     pub(crate) fn build_pass(
         &self,
         client: &Client,
         kernels: EngineKernels,
+        motion: Option<SharedMotion>,
     ) -> Result<Box<dyn FramePass>, Error> {
         match *self {
             PassSpec::Nlmeans { algorithm, geometry } => {
-                let engine = Nlmeans::with_kernels(client, algorithm, geometry, kernels)?;
+                let engine = Nlmeans::with_kernels(client, algorithm, geometry, kernels, motion)?;
                 Ok(Box::new(engine))
             },
             PassSpec::Nl4d { options, geometry } => {
-                let engine = Nl4d::with_kernels(client, options, geometry, kernels)?;
+                let engine = Nl4d::with_kernels(client, options, geometry, kernels, motion)?;
                 Ok(Box::new(engine))
             },
         }
@@ -262,31 +286,106 @@ impl EngineSpec {
         self.build_planar(client, kernels, false)
     }
 
+    /// [Self::build] that also hands back the camera model ring, when the engine fits one.
+    #[cfg(test)]
+    pub(crate) fn build_with_models(
+        &self,
+        client: &Client,
+        kernels: impl FnMut(&PassSpec) -> EngineKernels,
+    ) -> Result<(Box<dyn Engine>, Option<ModelRing>), Error> {
+        let engine = self.build_planar_engine(client, kernels, false)?;
+        let models = engine.models().cloned();
+
+        Ok((Box::new(engine), models))
+    }
+
+    /// The producer of the frame pair camera models, when any pass compensates motion.
+    ///
+    /// It fits on the luma plane with the luma pass's search, or the chroma pass's when only that
+    /// one searches. Its ring covers the frames the passes hold and their temporal window.
+    fn pair_model_producer(&self, client: &Client) -> Result<Option<PairModelProducer>, Error> {
+        let (luma, chroma) = self.passes();
+        let luma_motion = luma.and_then(|pass| pass.motion());
+        let chroma_motion = chroma.and_then(|pass| pass.motion());
+        let Some((mode, radius)) = luma_motion.or(chroma_motion) else {
+            return Ok(None);
+        };
+
+        let validated = mode.validate();
+        validated.map_err(|error| {
+            let message = error.to_string();
+            Error::InvalidOptions(message)
+        })?;
+
+        let geometry = self.geometry();
+        let held = self.max_held_frames() as u32;
+        let window = 2 * radius + 1;
+        let depth = held + window + MODEL_RING_MARGIN;
+
+        let sizes = producer_buffer_sizes(client, geometry.width, geometry.height, &mode, depth);
+        let indexable = check_u32_indexable(&sizes);
+        indexable.map_err(Error::InvalidGeometry)?;
+
+        let producer = PairModelProducer::new(
+            client,
+            geometry.width,
+            geometry.height,
+            &mode,
+            geometry.input,
+            depth,
+        );
+        Ok(producer)
+    }
+
     fn build_planar(
+        &self,
+        client: &Client,
+        kernels: impl FnMut(&PassSpec) -> EngineKernels,
+        warns: bool,
+    ) -> Result<Box<dyn Engine>, Error> {
+        let engine = self.build_planar_engine(client, kernels, warns)?;
+        Ok(Box::new(engine))
+    }
+
+    fn build_planar_engine(
         &self,
         client: &Client,
         mut kernels: impl FnMut(&PassSpec) -> EngineKernels,
         warns: bool,
-    ) -> Result<Box<dyn Engine>, Error> {
+    ) -> Result<PlanarEngine, Error> {
         self.validate()?;
+
+        let geometry = self.geometry();
+        let producer = self.pair_model_producer(client)?;
+        let ring = producer.as_ref().map(|producer| producer.ring());
+        let (chroma_scale_x, chroma_scale_y) = geometry.chroma.chroma_scale();
+        let luma_motion = ring.map(|ring| SharedMotion {
+            ring: ring.clone(),
+            scale_x: 1.0,
+            scale_y: 1.0,
+        });
+        let chroma_motion = ring.map(|ring| SharedMotion {
+            ring: ring.clone(),
+            scale_x: chroma_scale_x,
+            scale_y: chroma_scale_y,
+        });
 
         let (luma, chroma) = self.passes();
         let luma_pass = luma
             .map(|pass| {
                 let pass_kernels = kernels(&pass);
-                pass.build_pass(client, pass_kernels)
+                pass.build_pass(client, pass_kernels, luma_motion)
             })
             .transpose()?;
         let chroma_pass = chroma
             .map(|pass| {
                 let pass_kernels = kernels(&pass);
-                pass.build_pass(client, pass_kernels)
+                pass.build_pass(client, pass_kernels, chroma_motion)
             })
             .transpose()?;
 
-        let geometry = self.geometry();
-        let engine = PlanarEngine::new(client, geometry, luma_pass, chroma_pass, warns);
+        let engine = PlanarEngine::new(client, geometry, luma_pass, chroma_pass, producer, warns);
 
-        Ok(Box::new(engine))
+        Ok(engine)
     }
 }
