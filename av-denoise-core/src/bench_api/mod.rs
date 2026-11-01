@@ -76,9 +76,8 @@ use crate::engine::{DevicePlane, EgressSource, SampleFormat, egress};
 pub use crate::nl4d::denoiser::Nl4dDenoiser;
 pub use crate::nl4d::params::Nl4dParams;
 pub use crate::nl4d::snapshot::MotionSnapshot;
-use crate::nlmeans::ChannelMode;
 pub use crate::nlmeans::denoiser::{GpuOutput, NlmDenoiser};
-pub use crate::nlmeans::params::NlmParams;
+pub use crate::nlmeans::params::{ChannelMode, NlmParams};
 pub use crate::noise::DerivedValues;
 
 pub const BLOCK_X: u32 = crate::nlmeans::BLOCK_X;

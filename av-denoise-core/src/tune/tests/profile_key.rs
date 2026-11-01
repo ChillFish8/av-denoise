@@ -1,7 +1,8 @@
+use crate::engine::{PassGeometry, PassSpec};
+use crate::nlmeans::ChannelMode;
 use crate::tune::unit::{TuneUnit, unit_profile_keys};
 use crate::tune::{TUNE_EXTRA_FRAMES, profile_key, tuning_frame_count};
 use crate::{
-    ChannelMode,
     ChromaLayout,
     DenoisingMode,
     EngineSpec,
@@ -10,8 +11,6 @@ use crate::{
     NlmeansAlgorithm,
     NlmeansHqOptions,
     NlmeansOptions,
-    PassGeometry,
-    PassSpec,
     SampleFormat,
 };
 

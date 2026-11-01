@@ -25,11 +25,13 @@ pub(crate) mod tests;
 
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::denoiser::Nl4dDenoiser;
-pub use self::engine::Nl4d;
+pub(crate) use self::engine::Nl4d;
+pub use self::options::Nl4dOptions;
+#[cfg(test)]
+pub(crate) use self::options::nl4d_default_lambda_ht;
 pub(crate) use self::options::nl4d_pool_ratio;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::options::resolve_params;
-pub use self::options::{Nl4dOptions, nl4d_default_lambda_ht};
 #[cfg(test)]
 pub(crate) use self::params::MAX_KAISER_BETA;
 pub(crate) use self::params::Nl4dParams;

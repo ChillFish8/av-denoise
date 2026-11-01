@@ -3,11 +3,12 @@ use cubecl::server::Handle;
 
 use super::fixtures::{hashed_unit, upload};
 use super::runtime::test_client;
+use crate::Nl4dOptions;
 use crate::engine::{DevicePlane, PassEngine, PassGeometry, SampleFormat};
-use crate::nlmeans::{ChannelMode, DenoisingMode, NlmTuning, NlmeansAlgorithm, NlmeansOptions};
+use crate::nl4d::Nl4d;
+use crate::nlmeans::{ChannelMode, DenoisingMode, NlmTuning, Nlmeans, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::gpu::read_f32;
 use crate::tune::{EngineKernels, KernelPlan};
-use crate::{Nl4d, Nl4dOptions, Nlmeans};
 
 /// `count` frames of a smooth ramp plus per-frame hashed noise, one `Vec` per plane.
 pub(crate) fn noisy_frames(width: u32, height: u32, planes: usize, count: usize) -> Vec<Vec<Vec<f32>>> {

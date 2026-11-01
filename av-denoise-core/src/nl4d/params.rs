@@ -38,7 +38,7 @@ pub struct Nl4dParams {
     /// Hard-threshold multiplier on the propagated coefficient sigma.
     ///
     /// Higher removes more noise and more fine detail. Defaults to 4.158, though luma and chroma
-    /// want separately tuned values. See [nl4d_default_lambda_ht](crate::nl4d_default_lambda_ht).
+    /// want separately tuned values.
     pub lambda_ht: f32,
     /// The confidence floor below which a whole neighbour block is skipped, in `0.0..1.0`.
     ///

@@ -1,5 +1,4 @@
 use av_denoise_core::{
-    ChannelMode,
     ChromaLayout,
     DenoisingMode,
     EngineSpec,
@@ -13,6 +12,13 @@ use av_denoise_core::{
 
 use super::Depth;
 use crate::tune::TuningMode;
+
+/// Which plane group an option is resolved for.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum PlaneGroup {
+    Luma,
+    Chroma,
+}
 
 /// Which planes a caller wants cleaned.
 ///
@@ -113,8 +119,8 @@ impl DenoiserOptions {
 
         match self.algorithm {
             Algorithm::Nlmeans(nlm) => {
-                let luma = cleans_luma.then(|| self.plane_fast(nlm, ChannelMode::Luma));
-                let chroma = cleans_chroma.then(|| self.plane_fast(nlm, ChannelMode::Chroma));
+                let luma = cleans_luma.then(|| self.plane_fast(nlm, PlaneGroup::Luma));
+                let chroma = cleans_chroma.then(|| self.plane_fast(nlm, PlaneGroup::Chroma));
 
                 EngineSpec::Nlmeans {
                     luma,
@@ -123,8 +129,8 @@ impl DenoiserOptions {
                 }
             },
             Algorithm::NlmeansHq(hq) => {
-                let luma = cleans_luma.then(|| self.plane_hq(hq, ChannelMode::Luma));
-                let chroma = cleans_chroma.then(|| self.plane_hq(hq, ChannelMode::Chroma));
+                let luma = cleans_luma.then(|| self.plane_hq(hq, PlaneGroup::Luma));
+                let chroma = cleans_chroma.then(|| self.plane_hq(hq, PlaneGroup::Chroma));
 
                 EngineSpec::Nlmeans {
                     luma,
@@ -133,8 +139,8 @@ impl DenoiserOptions {
                 }
             },
             Algorithm::Nl4d(nl4d) => {
-                let luma = cleans_luma.then(|| self.plane_nl4d(nl4d, ChannelMode::Luma));
-                let chroma = cleans_chroma.then(|| self.plane_nl4d(nl4d, ChannelMode::Chroma));
+                let luma = cleans_luma.then(|| self.plane_nl4d(nl4d, PlaneGroup::Luma));
+                let chroma = cleans_chroma.then(|| self.plane_nl4d(nl4d, PlaneGroup::Chroma));
 
                 EngineSpec::Nl4d {
                     luma,
@@ -146,15 +152,15 @@ impl DenoiserOptions {
     }
 
     /// Picks the luma or chroma value of a per-plane setting.
-    fn per_plane<T>(channels: ChannelMode, luma: T, chroma: T) -> T {
+    fn per_plane<T>(channels: PlaneGroup, luma: T, chroma: T) -> T {
         match channels {
-            ChannelMode::Luma => luma,
-            ChannelMode::Chroma => chroma,
+            PlaneGroup::Luma => luma,
+            PlaneGroup::Chroma => chroma,
         }
     }
 
     /// `nlm` with this run's mode and the strength override of `channels`.
-    fn plane_nlm(&self, nlm: NlmeansOptions, channels: ChannelMode) -> NlmeansOptions {
+    fn plane_nlm(&self, nlm: NlmeansOptions, channels: PlaneGroup) -> NlmeansOptions {
         let strength = Self::per_plane(channels, self.luma_strength, self.chroma_strength);
         let with_strength = with_plane_strength(nlm, strength);
 
@@ -164,12 +170,12 @@ impl DenoiserOptions {
         }
     }
 
-    fn plane_fast(&self, nlm: NlmeansOptions, channels: ChannelMode) -> NlmeansAlgorithm {
+    fn plane_fast(&self, nlm: NlmeansOptions, channels: PlaneGroup) -> NlmeansAlgorithm {
         let options = self.plane_nlm(nlm, channels);
         NlmeansAlgorithm::Fast(options)
     }
 
-    fn plane_hq(&self, hq: NlmeansHqOptions, channels: ChannelMode) -> NlmeansAlgorithm {
+    fn plane_hq(&self, hq: NlmeansHqOptions, channels: PlaneGroup) -> NlmeansAlgorithm {
         let nlm = self.plane_nlm(hq.nlm, channels);
         let options = NlmeansHqOptions { nlm, ..hq };
 
@@ -180,13 +186,13 @@ impl DenoiserOptions {
     ///
     /// An unset `lambda_ht` stays `None`, so the engine resolves it to the plane's own default.
     /// Grain is only exported from luma.
-    fn plane_nl4d(&self, nl4d: Nl4dOptions, channels: ChannelMode) -> Nl4dOptions {
+    fn plane_nl4d(&self, nl4d: Nl4dOptions, channels: PlaneGroup) -> Nl4dOptions {
         let plane_lambda_ht = Self::per_plane(channels, self.luma_lambda_ht, self.chroma_lambda_ht);
 
         Nl4dOptions {
             temporal_radius: self.temporal_radius(),
             lambda_ht: plane_lambda_ht.or(nl4d.lambda_ht),
-            grain_export: nl4d.grain_export && channels == ChannelMode::Luma,
+            grain_export: nl4d.grain_export && channels == PlaneGroup::Luma,
             ..nl4d
         }
     }

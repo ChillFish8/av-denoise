@@ -31,7 +31,7 @@ fn held_frames(temporal_radius: u32, lookahead: usize) -> usize {
 }
 
 /// Four-dimensional collaborative denoising over GPU planes.
-pub struct Nl4d {
+pub(crate) struct Nl4d {
     inner: Nl4dDenoiser,
     client: Client,
     geometry: PassGeometry,
@@ -51,12 +51,15 @@ pub struct Nl4d {
 
 impl Nl4d {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
+    #[cfg(test)]
     pub fn new(client: &Client, options: Nl4dOptions, geometry: PassGeometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
         Self::with_kernels(client, options, geometry, kernels)
     }
 
-    /// [Nl4d::new] with each launch site's candidate picked from `kernels`.
+    /// Builds the engine like the default, with each launch site's candidate picked from `kernels`.
+    ///
+    /// Returns [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
     pub fn with_kernels(
         client: &Client,
         options: Nl4dOptions,

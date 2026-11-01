@@ -10,9 +10,17 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use av_denoise_core::bench_api::tune_sites::RegulariseCandidate;
-use av_denoise_core::bench_api::{Device, HostIo, NlmDenoiser, NlmParams, start_read, wait_read};
+use av_denoise_core::bench_api::{
+    ChannelMode,
+    Device,
+    HostIo,
+    NlmDenoiser,
+    NlmParams,
+    start_read,
+    wait_read,
+};
 use av_denoise_core::tune::SiteCandidate;
-use av_denoise_core::{ChannelMode, MotionCompensationMode, MotionEstimation, PrefilterMode, testing};
+use av_denoise_core::{MotionCompensationMode, MotionEstimation, PrefilterMode, testing};
 use clap::Parser;
 use cubecl::prelude::*;
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;

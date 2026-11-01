@@ -8,7 +8,7 @@ use crate::nlmeans::DenoisingMode;
 ///
 /// It names the algorithm with its settings, the channels, the input and output formats and the
 /// plane size rounded up to powers of two.
-pub fn profile_key(spec: &PassSpec) -> String {
+pub(crate) fn profile_key(spec: &PassSpec) -> String {
     let geometry = spec.geometry();
     let width_bucket = bucket_dim(geometry.width);
     let height_bucket = bucket_dim(geometry.height);

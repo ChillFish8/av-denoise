@@ -25,7 +25,7 @@ pub(crate) mod tests;
 pub(crate) use self::denoiser::{NlmDenoiser, RingView};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::dispatch::mc_sad_noise_floor_sigma;
-pub use self::engine::Nlmeans;
+pub(crate) use self::engine::Nlmeans;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::options::resolve_params;
 pub use self::options::{
@@ -39,10 +39,10 @@ pub use self::options::{
     nlmeans_temporal_radius_for,
     nlmeans_variant_for,
 };
-pub use self::params::{ChannelMode, HqParams};
+pub use self::params::HqParams;
+pub(crate) use self::params::{ChannelMode, NlmParams, hq_default_strength};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::params::{MAX_PATCH_RADIUS, MAX_SEARCH_RADIUS, MAX_TEMPORAL_RADIUS};
-pub(crate) use self::params::{NlmParams, hq_default_strength};
 pub use self::prefilter::{DEFAULT_PILOT_STRENGTH_SCALE, PrefilterMode, parse_prefilter};
 pub(crate) use crate::engine::MAX_GRID_1D;
 pub use crate::motion::{MotionCompensationMode, MotionEstimation, MotionSearch};

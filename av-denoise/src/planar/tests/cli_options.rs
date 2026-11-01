@@ -1,4 +1,4 @@
-use av_denoise_core::{ChannelMode, Nl4dOptions, NlmeansAlgorithm, NlmeansHqOptions, NlmeansOptions};
+use av_denoise_core::{Nl4dOptions, NlmeansAlgorithm, NlmeansHqOptions, NlmeansOptions};
 
 use super::*;
 
@@ -223,7 +223,7 @@ fn both_planes_lambda_ht_set_independently_for_nl4d() {
 }
 
 #[test]
-fn unset_nl4d_overrides_resolve_to_different_lambda_ht_per_plane_end_to_end() {
+fn unset_nl4d_overrides_stay_unresolved_for_both_planes() {
     let plane_options = nl4d_options(None, None);
 
     let (luma, chroma) = nl4d_planes(&plane_options);
@@ -231,12 +231,4 @@ fn unset_nl4d_overrides_resolve_to_different_lambda_ht_per_plane_end_to_end() {
     // Neither plane has anything set, so both stay unresolved at this layer.
     assert_eq!(luma.lambda_ht, None);
     assert_eq!(chroma.lambda_ht, None);
-
-    // Construction resolves each through `nl4d_default_lambda_ht`, which gives luma and chroma
-    // different values.
-    let luma_default = crate::nl4d_default_lambda_ht(ChannelMode::Luma);
-    let chroma_default = crate::nl4d_default_lambda_ht(ChannelMode::Chroma);
-    assert!((luma_default - 4.158).abs() < f32::EPSILON);
-    assert!((chroma_default - 3.234).abs() < f32::EPSILON);
-    assert!((chroma_default - luma_default).abs() > f32::EPSILON);
 }

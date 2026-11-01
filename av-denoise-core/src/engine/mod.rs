@@ -13,8 +13,10 @@ mod tests;
 
 pub use self::frame::{ChromaLayout, Geometry};
 pub(crate) use self::io::{EgressSource, IngestTarget, copy_words_into, egress, ingest};
-pub use self::plane::{DevicePlane, PassGeometry, SampleFormat};
-pub use self::spec::{EngineSpec, PassSpec};
+pub(crate) use self::plane::PassGeometry;
+pub use self::plane::{DevicePlane, SampleFormat};
+pub use self::spec::EngineSpec;
+pub(crate) use self::spec::PassSpec;
 pub use self::timing::EngineTiming;
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
@@ -59,7 +61,7 @@ impl WindowSpan {
 /// [PassEngine::finish] and emit the frames it reports. The next push then starts a new stream.
 ///
 /// Any GPU error leaves the engine refusing calls with [Error::NeedsReset] until [PassEngine::reset].
-pub trait PassEngine: Send {
+pub(crate) trait PassEngine: Send {
     /// Ingests one frame and returns how many frames are ready to emit.
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error>;
 

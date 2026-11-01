@@ -1,7 +1,9 @@
 use cubecl::prelude::*;
 
+#[cfg(test)]
+use super::PassEngine;
 use super::planar::PlanarEngine;
-use super::{ChromaLayout, EdgePadding, Engine, FramePass, Geometry, PassEngine, PassGeometry, WindowSpan};
+use super::{ChromaLayout, EdgePadding, Engine, FramePass, Geometry, PassGeometry, WindowSpan};
 use crate::error::Error;
 use crate::nl4d::{Nl4d, Nl4dOptions};
 use crate::nlmeans::{ChannelMode, Nlmeans, NlmeansAlgorithm};
@@ -9,7 +11,7 @@ use crate::tune::EngineKernels;
 
 /// Which engine to build, and for what planes.
 #[derive(Debug, Clone, Copy)]
-pub enum PassSpec {
+pub(crate) enum PassSpec {
     Nlmeans {
         algorithm: NlmeansAlgorithm,
         geometry: PassGeometry,
@@ -53,7 +55,7 @@ impl PassSpec {
     }
 
     /// Builds the engine on `client`, picking each launch site's candidate from `kernels`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests build a lone pass"))]
+    #[cfg(test)]
     pub(crate) fn build(
         &self,
         client: &Client,
@@ -63,7 +65,7 @@ impl PassSpec {
         Ok(engine)
     }
 
-    /// Builds the engine like [PassSpec::build], as a [FramePass] that names the frame behind each emit.
+    /// Builds the engine as a [FramePass] that names the frame behind each emit.
     pub(crate) fn build_pass(
         &self,
         client: &Client,

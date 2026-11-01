@@ -90,7 +90,7 @@ impl<'a> DevicePlane<'a> {
 /// `width` and `height` are the dimensions of the planes the engine sees, so a chroma engine is built at
 /// chroma size. Luma takes one plane and Chroma takes U and V.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PassGeometry {
+pub(crate) struct PassGeometry {
     pub width: u32,
     pub height: u32,
     pub channels: ChannelMode,

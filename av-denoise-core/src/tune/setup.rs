@@ -74,7 +74,7 @@ pub(crate) fn device_priority(device: &DeviceProfile) -> &'static PriorityTable 
 /// Builds `spec` on `client` from the store's picks, with no tuning ledger.
 ///
 /// `device` is the device `client` runs on, and names the stored result to read. Each pass reads
-/// the profile stored under its own [profile_key]. With [TuningMode::Off] every launch site runs its
+/// the profile stored under its own profile key. With [TuningMode::Off] every launch site runs its
 /// baseline under the device's legality rules.
 pub fn build_engine(
     device: &cubecl::Device,

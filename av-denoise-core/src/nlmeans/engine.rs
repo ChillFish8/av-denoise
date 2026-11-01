@@ -25,7 +25,7 @@ fn held_frames(temporal_radius: u32, lookahead: usize) -> usize {
 }
 
 /// Non-local means over GPU planes.
-pub struct Nlmeans {
+pub(crate) struct Nlmeans {
     front: NlmDenoiser,
     geometry: PassGeometry,
     /// The finished frame waiting for `emit_into`, if any.
@@ -41,12 +41,15 @@ pub struct Nlmeans {
 
 impl Nlmeans {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
+    #[cfg(test)]
     pub fn new(client: &Client, algorithm: NlmeansAlgorithm, geometry: PassGeometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
         Self::with_kernels(client, algorithm, geometry, kernels)
     }
 
-    /// [Nlmeans::new] with each launch site's candidate picked from `kernels`.
+    /// Builds the engine like the default, with each launch site's candidate picked from `kernels`.
+    ///
+    /// Returns [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
     pub fn with_kernels(
         client: &Client,
         algorithm: NlmeansAlgorithm,

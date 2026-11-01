@@ -2,7 +2,7 @@ use super::Nl4dParams;
 use crate::error::Error;
 use crate::nlmeans::{ChannelMode, HqParams, MotionSearch, NlmParams};
 
-/// Settings for [Nl4d](crate::Nl4d).
+/// Settings for the nl4d denoiser.
 ///
 /// The HQ front end runs only for its frame ring, motion field and noise estimate, so no NLM
 /// weighting knobs appear here. Motion tracking is always on, because the grouping kernel reads
@@ -29,8 +29,8 @@ pub struct Nl4dOptions {
     pub spatial_radius: u32,
     /// Hard-threshold multiplier on the propagated coefficient sigma.
     ///
-    /// Higher removes more noise and more fine detail. `None` resolves per plane through
-    /// [nl4d_default_lambda_ht].
+    /// Higher removes more noise and more fine detail. `None` resolves per plane to
+    /// the plane's own default.
     pub lambda_ht: Option<f32>,
     /// A multiplier on the resolved `lambda_ht`, in `0.1..=10.0`. Defaults to 1.0.
     ///
@@ -95,7 +95,7 @@ impl Default for Nl4dOptions {
 ///
 /// The values were picked by eye on real film grain, accepting some lost detail for less remaining
 /// noise on heavy grain. Encoders lose more detail to leftover grain than the denoiser does.
-pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
+pub(crate) fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
         ChannelMode::Luma => 4.158,
         ChannelMode::Chroma => 3.234,
