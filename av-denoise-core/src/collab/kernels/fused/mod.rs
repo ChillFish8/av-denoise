@@ -127,9 +127,10 @@ const _: () = assert!(
 /// scatters into its own frame's region. `accum_scale` is the fixed-point scale of that scatter.
 /// `noise` is the derived noise buffer, which gives the sigma of each channel, the weight scale
 /// and the curve flag. `noise_curve` holds `NOISE_CURVE_BINS` ratios and is read only when the
-/// curve flag is set. `kaiser` holds [kaiser_window](crate::collab::kernels::aggregate::kaiser_window)'s
-/// taps. `dct_profile` holds [dct_noise_profile](crate::collab::kernels::transforms::dct_noise_profile)'s
-/// values, and coefficient `(u, v)`'s variance scales by `dct_profile[u] * dct_profile[v]`.
+/// curve flag is set. `kaiser` holds
+/// [kaiser_window](crate::collab::kernels::aggregate::kaiser_window)'s taps. `dct_profile` holds
+/// [dct_noise_profile](crate::collab::kernels::transforms::dct_noise_profile)'s values, and
+/// coefficient `(u, v)`'s variance scales by `dct_profile[u] * dct_profile[v]`.
 /// `grid_frames` is the frames per volume from [grid_frames](crate::collab::grid_frames), and 1
 /// compiles the grid out.
 ///

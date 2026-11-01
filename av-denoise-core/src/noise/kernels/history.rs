@@ -21,11 +21,9 @@ pub fn noise_record(
     let results_per_slot = comptime!(RESULTS_PER_SLOT as u32);
 
     while index < READING_WORDS {
-        if index < READING_WORDS {
-            let source = slot * READING_WORDS + index;
-            let target = history_slot * READING_WORDS + index;
-            records[target as usize] = readings[source as usize];
-        }
+        let source = slot * READING_WORDS + index;
+        let target = history_slot * READING_WORDS + index;
+        records[target as usize] = readings[source as usize];
 
         if index < results_per_slot {
             let source = slot * results_per_slot + index;
