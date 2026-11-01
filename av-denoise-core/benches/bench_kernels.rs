@@ -34,6 +34,7 @@ use kernels::ingest::{IngestBench, IngestFormat};
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
 use kernels::mc_block_match_fine::BlockMatchFineBench;
 use kernels::mc_chain_compose::ChainComposeBench;
+use kernels::mc_compose_models::ComposeModelsBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
@@ -303,6 +304,10 @@ fn run_all(backend: &str, client: Client) {
     }
 
     run(ChainComposeBench {
+        client: client.clone(),
+    });
+
+    run(ComposeModelsBench {
         client: client.clone(),
     });
 

@@ -3,6 +3,7 @@ mod chain;
 mod compensate;
 mod confidence;
 mod context;
+mod global;
 pub(crate) mod kernels;
 mod pyramid;
 mod search;
@@ -21,6 +22,7 @@ pub(crate) use self::chain::{neighbour_idx_for_k, pair_byte_offset, run_pair_ana
 pub(crate) use self::compensate::run_compensate;
 pub(crate) use self::confidence::{THSAD_PIXEL, run_confidence, sad_noise_floor, thsad};
 pub(crate) use self::context::{MotionCtx, pair_ring_slot_count};
+pub use self::global::{AFFINE_WORDS, MODEL_WORDS, ModelRing, NO_PAIR, compose_gaps, run_compose_models};
 pub(crate) use self::pyramid::{
     level_dims,
     pyramid_pixels_per_frame,
