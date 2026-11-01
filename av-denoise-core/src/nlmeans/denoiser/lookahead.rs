@@ -322,6 +322,9 @@ impl NlmDenoiser {
     ///
     /// It searches from the newer frame to the older one, and also the other way when `both_ways`.
     /// With `seeds`, each direction also searches around its camera model prediction.
+    ///
+    /// The fields only feed the noise reading, so the search runs no truemotion stage. The stage's
+    /// smoother vectors leave misalignment in the reading's residual, which reads the noise high.
     fn search_lookahead_pair(
         &self,
         motion_ctx: &MotionCtx,
@@ -344,8 +347,6 @@ impl NlmDenoiser {
             reads_floor: false,
         });
         let thsad = self.search_thsad(motion_ctx);
-        // The look-ahead's noise is not this window's, so its truemotion penalty stays unscaled.
-        let truemotion = self.truemotion_targets(false);
 
         if both_ways {
             let predictions = seeds.as_ref().and_then(PairSeeds::both_ways);
@@ -365,7 +366,7 @@ impl NlmDenoiser {
                 &noise,
                 predictions,
                 escalation_state,
-                truemotion,
+                None,
                 thsad,
             )
             .context("look-ahead pair analyse dispatch failed");
@@ -389,7 +390,7 @@ impl NlmDenoiser {
             predictions: newer_to_older_prediction,
             sad: None,
             escalation,
-            truemotion,
+            truemotion: None,
         };
 
         run_analyse(

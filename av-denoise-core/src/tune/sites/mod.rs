@@ -67,7 +67,7 @@ pub const NLM_WINDOW: &str = "nlm_window";
 pub const NLM_ACCUMULATE: &str = "nlm_accumulate";
 /// The nl4d grouping, filtering and scatter kernel.
 pub const COLLAB_FUSED: &str = "collab_fused";
-/// One pass of the truemotion stage every motion search ends with.
+/// One pass of the truemotion stage that ends a motion search.
 pub const MC_TRUEMOTION: &str = "mc_truemotion";
 
 /// Whether `name` is a candidate of the site `site` in this build.

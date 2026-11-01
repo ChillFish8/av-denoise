@@ -223,8 +223,9 @@ impl NlmDenoiser {
         self.run_match(motion_ctx, &targets, thsad)
     }
 
-    /// The truemotion stage a motion search ends with, scaling its penalty by the floor in the
-    /// search's noise when `reads_floor`.
+    /// The truemotion stage that ends a motion search, when the search runs one.
+    ///
+    /// With `reads_floor`, the penalty scales with the floor in the search's noise.
     pub(crate) fn truemotion_targets(&self, reads_floor: bool) -> Option<TruemotionTargets<'_>> {
         let [seeds, field, changes] = self.truemotion_bufs.as_ref()?;
         let targets = TruemotionTargets {

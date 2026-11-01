@@ -6,6 +6,7 @@ use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::*;
 use crate::noise::NOISE_WINDOW_RADIUS;
+use crate::tune::tests::fixtures::noisy_field_over;
 
 const PAN_WIDTH: u32 = 256;
 const PAN_HEIGHT: u32 = 192;
@@ -112,6 +113,35 @@ fn lookahead_readings_match_pass_time_readings() {
             let sigma = history_sigma(front, frame as u32).expect("a pan frame has a sample");
             let frame_label = format!("{label} frame {frame}");
             assert_within(sigma, reference, 0.02, &frame_label);
+        }
+    }
+}
+
+#[test]
+fn lookahead_readings_do_not_depend_on_the_field_lambda() {
+    // On flat grain each block's best match fits the grain, which the truemotion stage would smooth.
+    let flat = vec![0.5f32; (PAN_WIDTH * PAN_HEIGHT) as usize];
+    let frames: Vec<Vec<f32>> = (0..PAN_FRAMES as u32)
+        .map(|index| noisy_field_over(&flat, PAN_WIDTH, PAN_HEIGHT, PAN_SIGMA, PAN_SEED * 1000 + index))
+        .collect();
+
+    for radius in [2, 3] {
+        let smoothed_params = Nl4dParams {
+            field_lambda: 4.0,
+            ..nl4d_pan_params(radius)
+        };
+        let raw_params = Nl4dParams {
+            field_lambda: 0.0,
+            ..nl4d_pan_params(radius)
+        };
+        let smoothed = run_nl4d(smoothed_params, &frames);
+        let raw = run_nl4d(raw_params, &frames);
+
+        for frame in 0..PAN_FRAMES as u32 {
+            let smoothed_sigma =
+                history_sigma(smoothed.front_for_test(), frame).expect("a flat frame has a sample");
+            let raw_sigma = history_sigma(raw.front_for_test(), frame).expect("a flat frame has a sample");
+            assert_eq!(smoothed_sigma, raw_sigma, "radius {radius} frame {frame}");
         }
     }
 }

@@ -61,7 +61,7 @@ pub(crate) struct MotionCtx {
     pub pyramid_levels: u32,
     /// How the search widens, from `search_radius` up to the mode's `max_search_escalation`.
     pub schedule: SearchSchedule,
-    /// How the truemotion stage that ends every search picks its vectors.
+    /// How the truemotion stage that ends a search picks its vectors.
     pub truemotion: TruemotionParams,
     pub blocks_x: u32,
     pub blocks_y: u32,
