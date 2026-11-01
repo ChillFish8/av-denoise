@@ -154,7 +154,8 @@ pub(super) struct SampleScratch {
     pub(super) block_values: Handle,
     /// One flag word per block.
     pub(super) block_flags: Handle,
-    /// Each accepted block's sigmas, correlation, static quarter sigmas and accepted flag.
+    /// Each block's kept sigma and accepted flag per channel, plus its correlation and static
+    /// quarter sigmas.
     pub(super) batch: SelectBatch,
 }
 
