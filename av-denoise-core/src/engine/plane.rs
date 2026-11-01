@@ -53,9 +53,9 @@ impl SampleFormat {
 
 /// One plane of samples on the GPU, tightly packed with a stride equal to its width.
 ///
-/// The handle must hold whole 4-byte words, which is `SampleFormat::plane_bytes(width * height)` bytes,
-/// and [PassEngine::emit_into](crate::engine::PassEngine::emit_into) writes zeros into the padding past the last
-/// sample.
+/// The handle must hold whole 4-byte words, which is `SampleFormat::plane_bytes(width * height)` bytes.
+/// [PassEngine::emit_into](crate::engine::PassEngine::emit_into) writes zeros into the padding past the
+/// last sample.
 #[derive(Debug, Clone, Copy)]
 pub struct DevicePlane<'a> {
     handle: &'a Handle,

@@ -12,6 +12,7 @@ use crate::engine::{
     EdgePadding,
     EgressSource,
     EngineTiming,
+    FramePass,
     PassEngine,
     PassGeometry,
     WindowSpan,
@@ -43,6 +44,8 @@ pub struct Nl4d {
     pushes: usize,
     /// Whether the current stream has had a real push, after which context frames are refused.
     pushed: bool,
+    /// The stream frame of the last emit.
+    emitted: Option<u32>,
     poisoned: bool,
 }
 
@@ -101,6 +104,7 @@ impl Nl4d {
             tail_remaining: 0,
             pushes: 0,
             pushed: false,
+            emitted: None,
             poisoned: false,
         })
     }
@@ -254,6 +258,9 @@ impl PassEngine for Nl4d {
             return Err(Error::NothingToEmit);
         };
 
+        let emitted = self.inner.front.slot_frame(region.slot);
+        self.emitted = Some(emitted);
+
         let frame = self.inner.read_region(region);
         self.write_out(&frame, planes);
 
@@ -287,6 +294,7 @@ impl PassEngine for Nl4d {
 
     fn reset(&mut self) {
         self.pending.clear();
+        self.emitted = None;
         self.poisoned = false;
         self.restart_stream();
     }
@@ -320,5 +328,15 @@ impl PassEngine for Nl4d {
 
     fn sample_device_time(&mut self, every: u32) {
         self.inner.sample_device_time(every);
+    }
+}
+
+impl FramePass for Nl4d {
+    fn next_frame(&self) -> u32 {
+        self.inner.front.stream_frames()
+    }
+
+    fn emitted_frame(&self) -> Option<u32> {
+        self.emitted
     }
 }

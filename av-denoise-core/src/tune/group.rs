@@ -6,12 +6,20 @@ use cubecl::server::Handle;
 use super::config::{TuningConfig, TuningMode};
 use super::device::{DeviceLimits, DeviceProfile};
 use super::driver::{TuneOutcome, TuneReport, TuneRequest, is_tuned_on, tune_frames};
-use super::frame::{TuningFrame, check_engine_count, copy_words_into};
+use super::frame::{TuningFrame, check_engine_count};
 use super::identity::describe;
 use super::profile_key::{profile_key, tuning_frame_count};
 use super::search::SearchMode;
 use super::setup::{KernelSetup, engine_kernels};
-use crate::engine::{DevicePlane, EngineTiming, PassEngine, PassGeometry, PassSpec, WindowSpan};
+use crate::engine::{
+    DevicePlane,
+    EngineTiming,
+    PassEngine,
+    PassGeometry,
+    PassSpec,
+    WindowSpan,
+    copy_words_into,
+};
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
 

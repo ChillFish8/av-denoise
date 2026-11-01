@@ -23,12 +23,17 @@ mod tests;
 pub mod tune;
 
 pub use self::engine::{
+    ChromaLayout,
     DevicePlane,
     EdgePadding,
+    Engine,
+    EngineSpec,
     EngineTiming,
+    Geometry,
     PassEngine,
     PassGeometry,
     PassSpec,
+    PassTimings,
     SampleFormat,
     WindowSpan,
 };

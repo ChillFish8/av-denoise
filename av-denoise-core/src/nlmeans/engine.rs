@@ -10,6 +10,7 @@ use crate::engine::{
     EdgePadding,
     EgressSource,
     EngineTiming,
+    FramePass,
     PassEngine,
     PassGeometry,
     WindowSpan,
@@ -33,6 +34,8 @@ pub struct Nlmeans {
     tail_remaining: usize,
     /// Whether the current stream has had a real push, after which context frames are refused.
     pushed: bool,
+    /// The stream frame of the last emit.
+    emitted: Option<u32>,
     poisoned: bool,
 }
 
@@ -81,6 +84,7 @@ impl Nlmeans {
             ready: None,
             tail_remaining: 0,
             pushed: false,
+            emitted: None,
             poisoned: false,
         })
     }
@@ -200,7 +204,10 @@ impl PassEngine for Nlmeans {
         self.check_usable()?;
         self.geometry.check_planes(planes, self.geometry.output)?;
 
+        // The window has not moved since the frame was denoised, so its centre is still that frame.
         if let Some(frame) = self.ready.take() {
+            let emitted = self.front.centre_frame();
+            self.emitted = Some(emitted);
             self.write_out(&frame, planes);
             return Ok(());
         }
@@ -211,6 +218,8 @@ impl PassEngine for Nlmeans {
 
         let step = self.next_tail_frame();
         let output = self.guard(step)?;
+        let emitted = self.front.centre_frame();
+        self.emitted = Some(emitted);
         self.write_out(&output.handle, planes);
 
         self.tail_remaining -= 1;
@@ -235,6 +244,7 @@ impl PassEngine for Nlmeans {
 
     fn reset(&mut self) {
         self.ready = None;
+        self.emitted = None;
         self.tail_remaining = 0;
         self.poisoned = false;
         self.restart_stream();
@@ -262,5 +272,15 @@ impl PassEngine for Nlmeans {
 
     fn sample_device_time(&mut self, every: u32) {
         self.front.sample_device_time(every);
+    }
+}
+
+impl FramePass for Nlmeans {
+    fn next_frame(&self) -> u32 {
+        self.front.stream_frames()
+    }
+
+    fn emitted_frame(&self) -> Option<u32> {
+        self.emitted
     }
 }

@@ -1,8 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::engine::kernels::copy_words;
-use crate::engine::{BLOCK_1D, DevicePlane, MAX_GRID_1D, PassGeometry, PassSpec};
+use crate::engine::{DevicePlane, PassGeometry, PassSpec, copy_words_into};
 use crate::error::Error;
 
 /// One frame on the GPU, as each engine of a group reads it.
@@ -96,22 +95,4 @@ fn copy_plane(client: &Client, plane: &DevicePlane<'_>, bytes: usize) -> Handle 
     copy_words_into(client, plane.handle(), &destination, words);
 
     destination
-}
-
-/// Copies the first `words` 4-byte words of `source` into `destination` on the device.
-pub(crate) fn copy_words_into(client: &Client, source: &Handle, destination: &Handle, words: usize) {
-    let groups = (words as u32).div_ceil(BLOCK_1D).clamp(1, MAX_GRID_1D);
-    let total_threads = groups * BLOCK_1D;
-
-    unsafe {
-        copy_words::launch_unchecked(
-            client,
-            CubeCount::new_1d(groups),
-            CubeDim::new_1d(BLOCK_1D),
-            BufferArg::from_raw_parts(source.clone(), words),
-            BufferArg::from_raw_parts(destination.clone(), words),
-            words as u32,
-            total_threads,
-        );
-    }
 }
