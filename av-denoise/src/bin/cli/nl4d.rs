@@ -554,6 +554,8 @@ mod tests {
             "16",
             "--mc-search",
             "6",
+            "--mc-max-search-escalation",
+            "7",
             "--mc-pyramid-levels",
             "1",
         ]);
@@ -563,7 +565,18 @@ mod tests {
         assert_eq!(motion.blksize, 32);
         assert_eq!(motion.overlap, 16);
         assert_eq!(motion.search_radius, 6);
+        assert_eq!(motion.max_search_escalation, 7);
         assert_eq!(motion.pyramid_levels, 1);
+    }
+
+    #[test]
+    fn the_escalation_ceiling_defaults_to_the_widest_radius() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+
+        assert_eq!(motion.search_radius, 4);
+        assert_eq!(motion.max_search_escalation, 8);
     }
 
     #[test]

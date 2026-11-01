@@ -5,15 +5,19 @@ use super::prediction_buffer;
 use crate::engine::align::StorageAlign;
 use crate::motion::analyse::{escalation_state_len, launch_fine};
 use crate::motion::context::SearchSchedule;
-use crate::motion::escalate::{launch_flags, run_escalation};
-use crate::motion::kernels::{NEIGHBOUR_DISAGREEMENT, STATE_SECTIONS};
+use crate::motion::escalate::{Scoring as FloorScoring, launch_flags, launch_floor, run_escalation};
+use crate::motion::kernels::{FLAT_SHARE, FLOOR_RANK_DIVISOR, NEIGHBOUR_DISAGREEMENT, STATE_SECTIONS};
 use crate::motion::{
+    Escalation,
     MatchTargets,
     MotionCompensationMode,
     MotionCtx,
     MotionEstimation,
+    pyramid_pixels_per_frame,
     pyramid_slot_pixels,
     run_analyse,
+    run_pyramid_build,
+    run_seeded_refine,
     sad_noise_floor,
 };
 use crate::noise::DERIVED_SAD_FLOOR;
@@ -32,6 +36,10 @@ const THSAD: f32 = 5.12;
 const LENIENT_THSAD: f32 = 1.0e4;
 /// A kept SAD far past `THSAD`, which scores a confidence of 0.
 const POOR_SAD: f32 = 1.0e3;
+/// A kept SAD the planted blocks share, which the measured floor lands on.
+const FLOOR_SAD: f32 = 1.0;
+/// An edge bar no kept SAD reaches, so every block counts as on its window's edge.
+const UNBEATEN_BAR: f32 = 1.0e30;
 /// Pixels of world around each frame, so shifted crops never clamp.
 const MARGIN: i32 = 16;
 /// The `thsad` and derived SAD floor one search scores with.
@@ -135,6 +143,7 @@ fn ctx_with(client: &Client, schedule: SearchSchedule) -> MotionCtx {
         blksize: BLKSIZE,
         overlap: BLKSIZE - STEP,
         search_radius: schedule.ceiling,
+        max_search_escalation: schedule.ceiling,
         pyramid_levels: 1,
         estimation: MotionEstimation::Direct,
     };
@@ -266,8 +275,28 @@ impl Buffers {
             write_confidence: true,
             predictions: None,
             sad: Some(&self.sad),
-            escalation: tracked.then_some(&self.state),
+            escalation: tracked.then_some(self.escalation()),
         }
+    }
+
+    /// The escalation over this search's state, reading the floor of `noise` when it is positive.
+    fn escalation(&self) -> Escalation<'_> {
+        Escalation {
+            state: &self.state,
+            reads_floor: true,
+        }
+    }
+
+    /// Writes the floor the escalation scores against, as a whole analyse would.
+    fn launch_floor(&self, client: &Client, ctx: &MotionCtx, targets: &MatchTargets<'_>, thsad: f32) {
+        let escalation = self.escalation();
+        let scoring = FloorScoring {
+            noise: &self.noise,
+            sad_field: DERIVED_SAD_FLOOR,
+            thsad,
+        };
+
+        launch_floor(client, ctx, targets, &escalation, &scoring);
     }
 
     fn read(&self, client: &Client) -> Outputs {
@@ -324,32 +353,28 @@ fn first_pass_flags(client: &Client, ctx: &MotionCtx, frames: &Frames, search: S
         DERIVED_SAD_FLOOR,
         thsad,
     );
-    launch_flags(
-        client,
-        ctx,
-        &targets,
-        &buffers.state,
-        &buffers.noise,
-        DERIVED_SAD_FLOOR,
-        thsad,
-    );
+    buffers.launch_floor(client, ctx, &targets, thsad);
+    launch_flags(client, ctx, &targets, &buffers.state, thsad);
 
     buffers.read(client)
 }
 
-/// Runs the escalation over a first pass that left `vectors` with `kept_sads` and no edge winners.
+/// Runs the escalation over a first pass that left `vectors` with `kept_sads`, and every block's
+/// edge bar at `edge_bar`.
 fn escalate_planted(
     client: &Client,
     ctx: &MotionCtx,
     frames: &Frames,
     vectors: &[i32],
     kept_sads: &[f32],
+    edge_bar: f32,
 ) -> Outputs {
     let buffers = Buffers::new(client, ctx, &[1], Some(vectors), 0.0);
     let section_len = ctx.conf_stride() as usize;
     let mut state = vec![0.0f32; buffers.state_len];
     for (block, kept_sad) in kept_sads.iter().enumerate() {
         state[SAD_SECTION * section_len + block] = *kept_sad;
+        state[FLAG_SECTION * section_len + block] = edge_bar;
         state[CENTRE_X_SECTION * section_len + block] = vectors[2 * block] as f32;
         state[CENTRE_Y_SECTION * section_len + block] = vectors[2 * block + 1] as f32;
     }
@@ -370,6 +395,7 @@ fn escalate_planted(
         &planted.noise,
         DERIVED_SAD_FLOOR,
         THSAD,
+        false,
     )
     .expect("the escalation runs");
 
@@ -465,10 +491,11 @@ fn low_confidence_blocks_escalate() {
     let poor = middle_block(&ctx);
     let mut vectors = uniform_vectors(&ctx, (0, 0));
     vectors[2 * poor] = 1;
-    let mut kept_sads = vec![0.0f32; block_count(&ctx)];
+    // The other blocks set the measured floor, which the poor block sits far past.
+    let mut kept_sads = vec![FLOOR_SAD; block_count(&ctx)];
     kept_sads[poor] = POOR_SAD;
 
-    let escalated = escalate_planted(&client, &ctx, &frames, &vectors, &kept_sads);
+    let escalated = escalate_planted(&client, &ctx, &frames, &vectors, &kept_sads, 0.0);
 
     assert_eq!(escalated.vector(poor), (0, 0));
     assert_eq!(escalated.sad[poor], 0.0);
@@ -498,8 +525,8 @@ fn neighbour_disagreement_escalates() {
     let mut near = uniform_vectors(&ctx, (0, 0));
     near[2 * outlier] = NEIGHBOUR_DISAGREEMENT;
 
-    let far_result = escalate_planted(&client, &ctx, &frames, &far, &kept_sads);
-    let near_result = escalate_planted(&client, &ctx, &frames, &near, &kept_sads);
+    let far_result = escalate_planted(&client, &ctx, &frames, &far, &kept_sads, 0.0);
+    let near_result = escalate_planted(&client, &ctx, &frames, &near, &kept_sads, 0.0);
 
     assert_eq!(far_result.vector(outlier), (0, 0));
     assert_eq!(near_result.vector(outlier), (NEIGHBOUR_DISAGREEMENT, 0));
@@ -617,9 +644,10 @@ fn no_failing_blocks_and_all_failing_blocks_both_work() {
     assert_bits_eq(&none_fail.confidence, &first_only.confidence, "confidence");
     assert_bits_eq(&none_fail.sad, &first_only.sad, "SADs");
 
+    // Every block poor makes the measured floor poor too, so the edge bars fail them instead.
     let vectors = uniform_vectors(&ctx, (1, 0));
     let kept_sads = vec![POOR_SAD; blocks];
-    let all_fail = escalate_planted(&client, &ctx, &frames, &vectors, &kept_sads);
+    let all_fail = escalate_planted(&client, &ctx, &frames, &vectors, &kept_sads, UNBEATEN_BAR);
 
     for block in 0..blocks {
         assert_eq!(all_fail.vector(block), (0, 0), "block {block}");
@@ -712,7 +740,7 @@ fn tracked_first_pass_matches_the_plain_fine_pass() {
 }
 
 #[test]
-fn flat_grain_rarely_escalates_and_keeps_near_vectors() {
+fn flat_grain_rarely_escalates_or_moves() {
     let client = test_client();
     let ctx = ctx_with(&client, schedule(2, 6, 2));
     let sigma = 4.0 / 255.0;
@@ -735,16 +763,10 @@ fn flat_grain_rarely_escalates_and_keeps_near_vectors() {
         "{flagged} of {blocks} blocks flagged on grain"
     );
 
-    let first_radius = ctx.schedule.first_radius as i32;
-    for block in 0..blocks {
-        let (dx, dy) = escalated.vector(block);
-
-        assert!(
-            dx.abs() <= first_radius && dy.abs() <= first_radius,
-            "block {block} moved to ({dx}, {dy})"
-        );
-        assert_eq!(escalated.vector(block), flags.vector(block), "block {block}");
-    }
+    let moved = (0..blocks)
+        .filter(|block| escalated.vector(*block) != flags.vector(*block))
+        .count();
+    assert!(moved * 50 <= blocks, "{moved} of {blocks} blocks moved on grain");
 }
 
 #[test]
@@ -760,7 +782,7 @@ fn a_flagged_block_that_finds_nothing_better_keeps_its_first_pass() {
     // No offset scores below 0, so the wider search cannot win.
     let kept_sads = vec![0.0f32; block_count(&ctx)];
 
-    let escalated = escalate_planted(&client, &ctx, &frames, &vectors, &kept_sads);
+    let escalated = escalate_planted(&client, &ctx, &frames, &vectors, &kept_sads, 0.0);
 
     assert_eq!(escalated.vector(outlier), (NEIGHBOUR_DISAGREEMENT + 2, 0));
     assert_eq!(escalated.sad[outlier], UNWRITTEN);
@@ -788,7 +810,262 @@ fn an_escalating_schedule_rejects_a_zero_thsad() {
         &buffers.noise,
         DERIVED_SAD_FLOOR,
         0.0,
+        false,
     );
 
     assert!(result.is_err());
+}
+
+/// `buffers` with `kept_sads` planted per neighbour in the escalation state.
+fn plant_kept_sads(client: &Client, ctx: &MotionCtx, buffers: Buffers, kept_sads: &[Vec<f32>]) -> Buffers {
+    let conf_stride = ctx.conf_stride() as usize;
+    let mut state = vec![0.0f32; buffers.state_len];
+    for (neighbour, sads) in kept_sads.iter().enumerate() {
+        let start = neighbour * conf_stride;
+        state[start..start + sads.len()].copy_from_slice(sads);
+    }
+
+    let state_bytes = f32::as_bytes(&state);
+
+    Buffers {
+        state: client.create_from_slice(state_bytes),
+        ..buffers
+    }
+}
+
+/// Writes the floor over the kept SADs planted in `planted` for `neighbours` neighbours, and
+/// returns it.
+fn measure_planted_floor(client: &Client, ctx: &MotionCtx, planted: &Buffers, neighbours: u32) -> f32 {
+    let world = hashed_world(19);
+    let still = world.frame(0, 0);
+    let frames = upload_frames(client, ctx, &[still]);
+    let targets = planted.targets(&frames, true);
+    planted.launch_floor(client, ctx, &targets, THSAD);
+
+    let outputs = planted.read(client);
+    let floor_slot = STATE_SECTIONS as usize * neighbours as usize * ctx.conf_stride() as usize;
+    outputs.state[floor_slot]
+}
+
+/// Measures the floor over kept SADs planted per neighbour, with no reading, and returns it.
+fn planted_floor(client: &Client, ctx: &MotionCtx, kept_sads: &[Vec<f32>]) -> f32 {
+    let neighbours = kept_sads.len() as u32;
+    let table: Vec<u32> = (1..=neighbours).collect();
+    let buffers = Buffers::new(client, ctx, &table, None, 0.0);
+    let planted = plant_kept_sads(client, ctx, buffers, kept_sads);
+
+    measure_planted_floor(client, ctx, &planted, neighbours)
+}
+
+#[test]
+fn the_floor_is_the_quarter_rank_of_the_grainy_kept_sads() {
+    let client = test_client();
+    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let blocks = block_count(&ctx);
+    // Block 0 matches exactly and is left out, which leaves 1 up to 127 with a median of 64.
+    let ramp: Vec<f32> = (0..blocks).map(|block| block as f32).collect();
+    let median = (blocks - 1).div_ceil(2) as f32;
+    let flat_limit = median * FLAT_SHARE;
+    let grainy: Vec<f32> = ramp
+        .iter()
+        .copied()
+        .filter(|kept_sad| *kept_sad >= flat_limit)
+        .collect();
+    let rank = grainy.len().div_ceil(FLOOR_RANK_DIVISOR as usize);
+    let quarter = grainy[rank - 1];
+
+    let floor = planted_floor(&client, &ctx, &[ramp]);
+
+    assert_eq!(floor, quarter);
+}
+
+#[test]
+fn a_positive_reading_is_the_floor() {
+    let client = test_client();
+    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let blocks = block_count(&ctx);
+    let ramp: Vec<f32> = (0..blocks).map(|block| block as f32).collect();
+    let buffers = Buffers::new(&client, &ctx, &[1], None, FLOOR_SAD);
+    let planted = plant_kept_sads(&client, &ctx, buffers, &[ramp]);
+
+    let floor = measure_planted_floor(&client, &ctx, &planted, 1);
+
+    assert_eq!(floor, FLOOR_SAD);
+}
+
+#[test]
+fn exact_matches_leave_a_zero_floor() {
+    let client = test_client();
+    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let blocks = block_count(&ctx);
+    let exact = vec![0.0f32; blocks];
+
+    let floor = planted_floor(&client, &ctx, &[exact]);
+
+    assert_eq!(floor, 0.0);
+}
+
+#[test]
+fn the_floor_pools_every_neighbour() {
+    let client = test_client();
+    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let blocks = block_count(&ctx);
+    let missed = vec![POOR_SAD; blocks];
+    let matched = vec![FLOOR_SAD; blocks];
+
+    let floor = planted_floor(&client, &ctx, &[missed, matched]);
+
+    assert_eq!(floor, FLOOR_SAD);
+}
+
+/// A two-level geometry over the test frame with `schedule`, its frames built into a pyramid.
+fn pyramid_frames(client: &Client, schedule: SearchSchedule, frames: &[Vec<f32>]) -> (MotionCtx, Frames) {
+    let mode = MotionCompensationMode::Mvtools {
+        blksize: BLKSIZE,
+        overlap: BLKSIZE - STEP,
+        search_radius: schedule.first_radius,
+        max_search_escalation: schedule.ceiling,
+        pyramid_levels: 2,
+        estimation: MotionEstimation::Direct,
+    };
+    let align = StorageAlign::from_client(client);
+    let base = MotionCtx::new(mode, WIDTH, HEIGHT, align).expect("the geometry is valid");
+    let ctx = MotionCtx { schedule, ..base };
+
+    let count = frames.len() as u32;
+    let full_res: Vec<f32> = frames.concat();
+    let full_res = upload(client, &full_res);
+    let pyramid_pixels = pyramid_pixels_per_frame(WIDTH, HEIGHT, ctx.pyramid_levels, align);
+    let pyramid = client.empty(pyramid_pixels * count as usize * size_of::<f32>());
+    for slot in 0..count {
+        run_pyramid_build(client, &ctx, WIDTH, HEIGHT, count, slot, &full_res, &pyramid, 1)
+            .expect("the pyramid builds");
+    }
+
+    (ctx, Frames { pyramid, count })
+}
+
+#[test]
+fn escalation_widens_the_coarse_level() {
+    let client = test_client();
+    let world = smooth_world();
+    let centre = world.frame(0, 0);
+    let neighbour = world.frame(12, 0);
+    let frames = [centre, neighbour];
+    let (fixed_ctx, pyramid) = pyramid_frames(&client, SearchSchedule::fixed(2), &frames);
+    let (ctx, _) = pyramid_frames(&client, schedule(2, 4, 1), &frames);
+
+    let fixed = analyse(&client, &fixed_ctx, &pyramid, &[1], LENIENT, false);
+    let escalated = analyse(&client, &ctx, &pyramid, &[1], LENIENT, true);
+
+    for block in interior_blocks(&ctx, 16) {
+        let first_centre = escalated.state_word(&ctx, CENTRE_X_SECTION, block);
+
+        assert_ne!(
+            fixed.vector(block),
+            (12, 0),
+            "premise: block {block} is out of reach"
+        );
+        // A fine level widened alone reaches 4 past its first centre, short of 12.
+        assert!(
+            first_centre <= 4.0,
+            "premise: block {block} first centre {first_centre}"
+        );
+        assert_eq!(escalated.vector(block), (12, 0), "block {block}");
+    }
+}
+
+#[test]
+fn a_seeded_refine_escalates_up_to_the_ceiling() {
+    let client = test_client();
+    let ctx = ctx_with(&client, schedule(4, 6, 1));
+    let world = smooth_world();
+    let centre = world.frame(0, 0);
+    let within = world.frame(5, 0);
+    let beyond = world.frame(8, 0);
+    let frames = upload_frames(&client, &ctx, &[centre, within, beyond]);
+    let buffers = Buffers::new(&client, &ctx, &[1, 2], None, 0.0);
+    let targets = buffers.targets(&frames, true);
+
+    run_seeded_refine(
+        &client,
+        &ctx,
+        WIDTH,
+        HEIGHT,
+        &targets,
+        2,
+        &buffers.noise,
+        DERIVED_SAD_FLOOR,
+        LENIENT_THSAD,
+    )
+    .expect("the refine runs");
+    let refined = buffers.read(&client);
+    let mv_stride = ctx.mv_stride() as usize;
+
+    for block in interior_blocks(&ctx, 8) {
+        let beyond_slot = mv_stride + 2 * block;
+        let beyond_vector = (refined.vectors[beyond_slot], refined.vectors[beyond_slot + 1]);
+
+        assert_eq!(refined.vector(block), (5, 0), "block {block} within the ceiling");
+        assert_eq!(beyond_vector, (6, 0), "block {block} stops at the ceiling");
+    }
+}
+
+/// Pixels of each side bar in [letterboxed_grain_frame], which leaves a quarter of the blocks wholly
+/// inside a bar.
+const BAR_WIDTH: u32 = 24;
+
+/// A still textured frame under `sigma` grain, with dark side bars that carry only faint
+/// compression noise.
+fn letterboxed_grain_frame(world: &World, sigma: f32, seed: u32) -> Vec<f32> {
+    let picture = world.frame(0, 0);
+    let grainy = noisy_field_over(&picture, WIDTH, HEIGHT, sigma, seed);
+    let bars = vec![16.0 / 255.0; (WIDTH * HEIGHT) as usize];
+    let bar_noise = noisy_field_over(&bars, WIDTH, HEIGHT, 0.4 / 255.0, seed + 100);
+
+    (0..WIDTH * HEIGHT)
+        .map(|index| {
+            let column = index % WIDTH;
+            let picture_columns = BAR_WIDTH..WIDTH - BAR_WIDTH;
+            let in_bar = !picture_columns.contains(&column);
+            let source = if in_bar { &bar_noise } else { &grainy };
+            source[index as usize]
+        })
+        .collect()
+}
+
+#[test]
+fn faint_bars_neither_collapse_the_floor_nor_flag_the_picture() {
+    let client = test_client();
+    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let sigma = 4.0 / 255.0;
+    let world = hashed_world(23);
+    let centre = letterboxed_grain_frame(&world, sigma, 31);
+    let neighbour = letterboxed_grain_frame(&world, sigma, 32);
+    let frames = upload_frames(&client, &ctx, &[centre, neighbour]);
+    let grain_floor = sad_noise_floor(BLKSIZE, sigma);
+
+    // A floor of 0 makes the escalation measure its own.
+    let flags = first_pass_flags(&client, &ctx, &frames, EXACT);
+    let floor_slot = STATE_SECTIONS as usize * ctx.conf_stride() as usize;
+    let floor = flags.state[floor_slot];
+    let picture = (0..block_count(&ctx)).filter(|block| {
+        let left = (*block as u32 % ctx.blocks_x) * STEP;
+        left >= BAR_WIDTH && left + BLKSIZE <= WIDTH - BAR_WIDTH
+    });
+    let picture: Vec<usize> = picture.collect();
+    let flagged = picture
+        .iter()
+        .filter(|block| flags.flagged(&ctx, **block))
+        .count();
+
+    assert!(
+        floor > 0.5 * grain_floor,
+        "the floor {floor} collapsed below the picture's grain floor {grain_floor}"
+    );
+    assert!(
+        flagged * 10 <= picture.len(),
+        "{flagged} of {} picture blocks flagged",
+        picture.len()
+    );
 }

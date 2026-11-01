@@ -196,6 +196,8 @@ impl NlmDenoiser {
             &self.confidence_dummy,
             &noise,
             predictions,
+            self.escalation_buf.as_ref(),
+            self.search_thsad(motion_ctx),
         )
         .context("pair analyse dispatch failed")
     }

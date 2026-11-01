@@ -2,6 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
+use super::context::SearchSchedule;
 use super::escalate::run_escalation;
 use super::global::AFFINE_WORDS;
 use super::kernels::{
@@ -44,7 +45,7 @@ pub(crate) fn confidence_byte_offset(motion_ctx: &MotionCtx, neighbour_idx: u32)
 /// in the confidence layout, then each block's window mean SAD in the same layout after it.
 ///
 /// With `escalation` and a [MotionCtx] schedule that escalates, the fine pass also records what
-/// [run_escalation] needs, [escalation_state_len] `f32` values.
+/// [run_escalation] needs.
 pub(crate) struct MatchTargets<'a> {
     pub pyramid: &'a Handle,
     /// Frame slots the pyramid holds.
@@ -63,13 +64,80 @@ pub(crate) struct MatchTargets<'a> {
     pub predictions: Option<&'a Handle>,
     /// Holds twice `neighbours` confidence strides of `f32` when set.
     pub sad: Option<&'a Handle>,
-    pub escalation: Option<&'a Handle>,
+    pub escalation: Option<Escalation<'a>>,
+}
+
+/// Where a search keeps what its escalation needs, and where its SAD floor comes from.
+#[derive(Clone, Copy)]
+pub(crate) struct Escalation<'a> {
+    /// Holds [escalation_state_len] `f32` values.
+    pub state: &'a Handle,
+    /// Whether a positive derived word of the search's noise at its `sad_field` is the floor.
+    ///
+    /// A search whose noise is zeroed or does not belong to the window measures its floor instead.
+    pub reads_floor: bool,
 }
 
 /// The `f32` values the escalation state of `neighbours` neighbours holds.
+///
+/// It holds [STATE_SECTIONS] values per block, then the SAD floor.
 pub(crate) fn escalation_state_len(motion_ctx: &MotionCtx, neighbours: u32) -> usize {
-    let values = STATE_SECTIONS * neighbours * motion_ctx.conf_stride();
+    let sections = STATE_SECTIONS * neighbours * motion_ctx.conf_stride();
+    let values = sections + 1;
     values as usize
+}
+
+/// The smallest pyramid level the coarse pass searches, and how its blocks map onto the fine grid.
+pub(super) struct CoarseLevel {
+    pub width: u32,
+    pub height: u32,
+    /// Where the level starts in the pyramid, in values.
+    pub level_offset: u32,
+    pub slot_pixels: u32,
+    /// 2 raised to the level.
+    pub scale: u32,
+    pub blksize: u32,
+    pub step: u32,
+    pub blocks_x: u32,
+    pub blocks_y: u32,
+    /// Converts the SAD floor from a full-resolution block to a coarse one.
+    pub floor_scale: f32,
+}
+
+/// The coarse level of a search over `frame_count` pyramid slots, or `None` with a single level.
+pub(super) fn coarse_level(
+    motion_ctx: &MotionCtx,
+    width: u32,
+    height: u32,
+    frame_count: u32,
+) -> Option<CoarseLevel> {
+    if motion_ctx.pyramid_levels <= 1 {
+        return None;
+    }
+
+    let level = motion_ctx.pyramid_levels - 1;
+    let (level_width, level_height) = level_dims(width, height, level);
+    let level_offset = pyramid_level_offset(width, height, frame_count, level, motion_ctx.align);
+    let slot_pixels = pyramid_slot_pixels(width, height, level, motion_ctx.align);
+    let scale = 1u32 << level;
+    // A coarse block covers the same content as a fine block scaled down by `scale`.
+    let content_blksize = (motion_ctx.blksize / scale).max(2);
+    let blksize = content_blksize * motion_ctx.coarse_block_factor;
+    let step = (motion_ctx.step / scale).max(1);
+    let floor_scale = coarse_floor_scale(blksize, motion_ctx.blksize, scale);
+
+    Some(CoarseLevel {
+        width: level_width,
+        height: level_height,
+        level_offset,
+        slot_pixels,
+        scale,
+        blksize,
+        step,
+        blocks_x: level_width.div_ceil(step).max(1),
+        blocks_y: level_height.div_ceil(step).max(1),
+        floor_scale,
+    })
 }
 
 /// The SAD floor's scale on a coarse block, relative to a full-resolution block.
@@ -88,12 +156,13 @@ fn coarse_floor_scale(coarse_blksize: u32, blksize: u32, coarse_scale: u32) -> f
 ///
 /// A coarse pass on the smallest pyramid level seeds a fine pass at full resolution, which writes
 /// each neighbour's `mv_field` slice. The fine pass searches the schedule's first radius, then
-/// [run_escalation] searches the blocks that fail again with wider windows. Both passes search
-/// around the camera model's prediction too when `targets` carries one. With `write_confidence`
-/// set, a per-block score also lands in its `confidence` slice, scored against the derived word of
-/// `noise` at index `sad_field`. Otherwise `confidence` is never indexed, so a placeholder buffer
-/// works. `thsad` may stay at 0.0 only when confidence is unwritten and the schedule does not
-/// escalate, because escalation scores every block's confidence to decide which ones fail.
+/// [run_escalation] searches the blocks that fail again with wider windows at both levels. Both
+/// passes search around the camera model's prediction too when `targets` carries one. With
+/// `write_confidence` set, a per-block score also lands in its `confidence` slice, scored against
+/// the derived word of `noise` at index `sad_field`. Otherwise `confidence` is never indexed, so a
+/// placeholder buffer works. `thsad` may stay at 0.0 only when confidence is unwritten and the
+/// schedule does not escalate, because escalation scores every block's confidence to decide which
+/// ones fail.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -112,21 +181,10 @@ pub(crate) fn run_analyse(
     let pyramid_len = pyramid_pixels * targets.frame_count as usize;
     let slots_len = targets.neighbours as usize;
     let mv_stride = motion_ctx.mv_stride();
+    let coarse = coarse_level(motion_ctx, width, height, targets.frame_count);
 
-    if motion_ctx.pyramid_levels > 1 {
-        let coarse_level = motion_ctx.pyramid_levels - 1;
-        let (coarse_width, coarse_height) = level_dims(width, height, coarse_level);
-        let level_offset =
-            pyramid_level_offset(width, height, targets.frame_count, coarse_level, motion_ctx.align);
-        let slot_pixels = pyramid_slot_pixels(width, height, coarse_level, motion_ctx.align);
-        let coarse_scale = 1u32 << coarse_level;
-        // A coarse block covers the same content as a fine block scaled down by `coarse_scale`.
-        let content_blksize = (motion_ctx.blksize / coarse_scale).max(2);
-        let coarse_blksize = content_blksize * motion_ctx.coarse_block_factor;
-        let coarse_step = (motion_ctx.step / coarse_scale).max(1);
-        let coarse_blocks_x = coarse_width.div_ceil(coarse_step).max(1);
-        let coarse_blocks_y = coarse_height.div_ceil(coarse_step).max(1);
-        let grid = CubeCount::new_3d(coarse_blocks_x, coarse_blocks_y, targets.neighbours);
+    if let Some(coarse) = coarse {
+        let grid = CubeCount::new_3d(coarse.blocks_x, coarse.blocks_y, targets.neighbours);
         // One cube per image block, with its threads sharing the scoring work.
         let threads = coarse_match_threads(motion_ctx.coarse_search_radius);
         let dim = CubeDim::new_1d(threads);
@@ -135,7 +193,6 @@ pub(crate) fn run_analyse(
         let mv_field = targets.mv_field.clone();
         let noise_handle = noise.clone();
         let (predictions, predictions_len) = prediction_binding(targets, noise);
-        let floor_scale = coarse_floor_scale(coarse_blksize, motion_ctx.blksize, coarse_scale);
         let model_candidate = targets.predictions.is_some();
 
         unsafe {
@@ -155,16 +212,16 @@ pub(crate) fn run_analyse(
                 noise_arg,
                 predictions_arg,
                 targets.centre_slot,
-                floor_scale,
+                coarse.floor_scale,
                 model_candidate,
-                coarse_width,
-                coarse_height,
-                level_offset,
-                slot_pixels,
-                coarse_blksize,
-                coarse_step,
+                coarse.width,
+                coarse.height,
+                coarse.level_offset,
+                coarse.slot_pixels,
+                coarse.blksize,
+                coarse.step,
                 motion_ctx.coarse_search_radius,
-                coarse_scale,
+                coarse.scale,
                 motion_ctx.blocks_x,
                 motion_ctx.blocks_y,
                 motion_ctx.step,
@@ -190,15 +247,16 @@ pub(crate) fn run_analyse(
     );
 
     run_escalation(
-        client, motion_ctx, width, height, targets, noise, sad_field, thsad,
+        client, motion_ctx, width, height, targets, noise, sad_field, thsad, true,
     )
 }
 
 /// Refines the chained seed already sitting in each neighbour's `mv_field` slice.
 ///
 /// It searches `refine_radius` around the seed and writes the corrected vector back. There is no
-/// coarse pass, because the joined seed already carries the large movement. Confidence is written
-/// the same way as in [run_analyse].
+/// coarse pass, because the joined seed already carries the large movement. When the schedule
+/// escalates, [run_escalation] then searches the blocks that fail again with wider windows, up to
+/// the schedule's ceiling. Confidence is written the same way as in [run_analyse].
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -214,9 +272,15 @@ pub(crate) fn run_seeded_refine(
     sad_field: u32,
     thsad: f32,
 ) -> Result<(), anyhow::Error> {
+    let schedule = refine_schedule(motion_ctx.schedule, refine_radius);
+    let refine_ctx = MotionCtx {
+        schedule,
+        ..motion_ctx.clone()
+    };
+
     launch_fine(
         client,
-        motion_ctx,
+        &refine_ctx,
         width,
         height,
         targets,
@@ -227,7 +291,31 @@ pub(crate) fn run_seeded_refine(
         thsad,
     );
 
-    Ok(())
+    run_escalation(
+        client,
+        &refine_ctx,
+        width,
+        height,
+        targets,
+        noise,
+        sad_field,
+        thsad,
+        false,
+    )
+}
+
+/// The schedule of a seeded refine at `refine_radius` under a search's own schedule.
+///
+/// It escalates to the search's ceiling only when the search escalates at all.
+fn refine_schedule(search: SearchSchedule, refine_radius: u32) -> SearchSchedule {
+    if !search.escalates() || refine_radius >= search.ceiling {
+        return SearchSchedule::fixed(refine_radius);
+    }
+
+    SearchSchedule {
+        first_radius: refine_radius,
+        ..search
+    }
 }
 
 /// Launches the fine block match at pyramid level 0 over every neighbour in `targets`.
@@ -271,7 +359,8 @@ pub(super) fn launch_fine(
         None => (targets.confidence.clone(), targets.conf_len),
     };
     let noise = noise.clone();
-    let tracked = targets.escalation.filter(|_| motion_ctx.schedule.escalates());
+    let escalation = targets.escalation.filter(|_| motion_ctx.schedule.escalates());
+    let tracked = escalation.map(|escalation| escalation.state);
 
     if let Some(state) = tracked {
         let state_len = escalation_state_len(motion_ctx, targets.neighbours);
@@ -362,7 +451,7 @@ pub(super) fn launch_fine(
 }
 
 /// The predictions buffer and its length, or the noise buffer as a placeholder without one.
-fn prediction_binding(targets: &MatchTargets<'_>, noise: &Handle) -> (Handle, usize) {
+pub(super) fn prediction_binding(targets: &MatchTargets<'_>, noise: &Handle) -> (Handle, usize) {
     match targets.predictions {
         Some(handle) => {
             let words = targets.neighbours * AFFINE_WORDS;
@@ -387,6 +476,7 @@ mod tests {
             blksize,
             overlap,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };
@@ -401,12 +491,31 @@ mod tests {
             blksize: 4,
             overlap: 0,
             search_radius: 1,
+            max_search_escalation: 1,
             pyramid_levels: 1,
             estimation: MotionEstimation::Direct,
         };
         let align = align();
 
         MotionCtx::new(mode, 4, 4, align).unwrap()
+    }
+
+    #[test]
+    fn a_refine_escalates_only_under_an_escalating_search() {
+        let escalating = SearchSchedule {
+            first_radius: 4,
+            ceiling: 8,
+            steps: 1,
+        };
+        let fixed = SearchSchedule::fixed(4);
+        let expected = SearchSchedule {
+            first_radius: 2,
+            ..escalating
+        };
+
+        assert_eq!(refine_schedule(escalating, 2), expected);
+        assert_eq!(refine_schedule(fixed, 2), SearchSchedule::fixed(2));
+        assert_eq!(refine_schedule(escalating, 8), SearchSchedule::fixed(8));
     }
 
     #[test]

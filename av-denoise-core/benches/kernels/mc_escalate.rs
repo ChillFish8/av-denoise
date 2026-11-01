@@ -1,12 +1,14 @@
 use av_denoise_core::bench_api::kernels::motion::{
     BLOCK_MATCH_THREADS,
     FLAG_THREADS,
+    FLOOR_THREADS,
     NEIGHBOUR_DISAGREEMENT,
     STATE_SECTIONS,
     mc_block_match_fine,
     mc_block_match_fine_tracked,
     mc_escalate_search,
     mc_flag_failures,
+    mc_measure_floor,
 };
 use av_denoise_core::bench_api::{DERIVED_SAD_FLOOR, DERIVED_WORDS, DerivedValues};
 use cubecl::benchmark::Benchmark;
@@ -66,6 +68,12 @@ fn blocks_y() -> u32 {
     HEIGHT.div_ceil(FINE_STEP)
 }
 
+/// The `f32` values the escalation state of `neighbours` neighbours holds, its floor included.
+fn state_len(neighbours: u32) -> usize {
+    let sections = STATE_SECTIONS * block_count() * neighbours;
+    sections as usize + 1
+}
+
 fn block_count() -> u32 {
     blocks_x() * blocks_y()
 }
@@ -115,7 +123,9 @@ fn escalate_input(client: &Client, neighbours: u32, share: FailingShare) -> Esca
     }
 
     let all_vectors = vectors.repeat(neighbours as usize);
-    let all_state = neighbour_major_state(&state, blocks, neighbours);
+    let mut all_state = neighbour_major_state(&state, blocks, neighbours);
+    // A floor of 0 leaves the margins at 0, so a kept SAD of 0 is never beaten.
+    all_state.push(0.0);
     let vector_bytes = i32::as_bytes(&all_vectors);
     let state_bytes = f32::as_bytes(&all_state);
     let neighbours = neighbours as usize;
@@ -151,7 +161,7 @@ fn neighbour_major_state(state: &[f32], blocks: usize, neighbours: u32) -> Vec<f
 fn launch_flags(client: &Client, input: &EscalateInput, neighbours: u32) {
     let blocks = block_count();
     let mv_len = (2 * blocks * neighbours) as usize;
-    let state_len = (STATE_SECTIONS * blocks * neighbours) as usize;
+    let state_len = state_len(neighbours);
     let cubes_x = blocks_x().div_ceil(FLAG_THREADS);
     let grid = CubeCount::new_3d(cubes_x, blocks_y(), neighbours);
     let dim = CubeDim::new_1d(FLAG_THREADS);
@@ -159,7 +169,6 @@ fn launch_flags(client: &Client, input: &EscalateInput, neighbours: u32) {
     unsafe {
         let mv_field_arg = BufferArg::from_raw_parts(input.mv_field.clone(), mv_len);
         let state_arg = BufferArg::from_raw_parts(input.state.clone(), state_len);
-        let noise_arg = BufferArg::from_raw_parts(input.noise.clone(), DERIVED_WORDS as usize);
 
         mc_flag_failures::launch_unchecked(
             client,
@@ -167,8 +176,6 @@ fn launch_flags(client: &Client, input: &EscalateInput, neighbours: u32) {
             dim,
             mv_field_arg,
             state_arg,
-            noise_arg,
-            DERIVED_SAD_FLOOR,
             THSAD,
             blocks_x(),
             blocks_y(),
@@ -184,7 +191,7 @@ fn launch_escalate(client: &Client, input: &EscalateInput, neighbours: u32, radi
     let pyramid_len = ((neighbours + 1) * level_len) as usize;
     let mv_len = (2 * blocks * neighbours) as usize;
     let conf_len = (blocks * neighbours) as usize;
-    let state_len = (STATE_SECTIONS * blocks * neighbours) as usize;
+    let state_len = state_len(neighbours);
     let grid = CubeCount::new_3d(blocks_x(), blocks_y(), neighbours);
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
@@ -195,8 +202,10 @@ fn launch_escalate(client: &Client, input: &EscalateInput, neighbours: u32, radi
         let confidence_arg = BufferArg::from_raw_parts(input.confidence.clone(), conf_len);
         let sad_arg = BufferArg::from_raw_parts(input.sad.clone(), 2 * conf_len);
         let state_arg = BufferArg::from_raw_parts(input.state.clone(), state_len);
+        let predictions_arg = BufferArg::from_raw_parts(input.placeholder.clone(), 1);
         let noise_arg = BufferArg::from_raw_parts(input.noise.clone(), DERIVED_WORDS as usize);
 
+        // These rows search the fine level alone, so the coarse arguments take its shape.
         mc_escalate_search::launch_unchecked(
             client,
             grid,
@@ -207,12 +216,22 @@ fn launch_escalate(client: &Client, input: &EscalateInput, neighbours: u32, radi
             confidence_arg,
             sad_arg,
             state_arg,
+            predictions_arg,
             0u32,
             true,
             true,
+            false,
             noise_arg,
             DERIVED_SAD_FLOOR,
             THSAD,
+            0u32,
+            level_len,
+            1.0f32,
+            false,
+            WIDTH,
+            HEIGHT,
+            FINE_BLKSIZE,
+            1u32,
             WIDTH,
             HEIGHT,
             level_len,
@@ -232,7 +251,7 @@ fn launch_tracked(client: &Client, input: &EscalateInput, neighbours: u32, radiu
     let pyramid_len = ((neighbours + 1) * level_len) as usize;
     let mv_len = (2 * blocks * neighbours) as usize;
     let conf_len = (blocks * neighbours) as usize;
-    let state_len = (STATE_SECTIONS * blocks * neighbours) as usize;
+    let state_len = state_len(neighbours);
     let grid = CubeCount::new_3d(blocks_x(), blocks_y(), neighbours);
     let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
@@ -275,6 +294,67 @@ fn launch_tracked(client: &Client, input: &EscalateInput, neighbours: u32, radiu
             2 * blocks,
             blocks,
         );
+    }
+}
+
+fn launch_floor(client: &Client, input: &EscalateInput, neighbours: u32) {
+    let grid = CubeCount::new_1d(1);
+    let dim = CubeDim::new_1d(FLOOR_THREADS);
+    let blocks = block_count();
+    let floor_state_len = state_len(neighbours);
+
+    // The row times the measure, so it never takes the derived floor.
+    unsafe {
+        let state_arg = BufferArg::from_raw_parts(input.state.clone(), floor_state_len);
+        let noise_arg = BufferArg::from_raw_parts(input.noise.clone(), DERIVED_WORDS as usize);
+
+        mc_measure_floor::launch_unchecked(
+            client,
+            grid,
+            dim,
+            state_arg,
+            noise_arg,
+            DERIVED_SAD_FLOOR,
+            neighbours,
+            false,
+            blocks,
+            blocks,
+        );
+    }
+}
+
+/// The SAD floor measure over a 1080p luma field's kept SADs.
+pub struct MeasureFloorBench {
+    pub client: Client,
+    pub neighbours: u32,
+}
+
+impl Benchmark for MeasureFloorBench {
+    type Input = EscalateInput;
+    type Output = ();
+
+    fn prepare(&self) -> Self::Input {
+        let input = grain_input(&self.client, self.neighbours);
+        // The floor reads the first pass's kept SADs and never changes them.
+        launch_tracked(&self.client, &input, self.neighbours, GRAIN_FIRST_RADIUS);
+        input
+    }
+
+    fn execute(&self, args: Self::Input) -> Result<(), String> {
+        launch_floor(&self.client, &args, self.neighbours);
+        Ok(())
+    }
+
+    fn name(&self) -> String {
+        neighbour_bench_name("mc_measure_floor_1080p_luma", self.neighbours)
+    }
+
+    fn sync(&self) {
+        block_sync(&self.client);
+    }
+
+    fn shapes(&self) -> Vec<Vec<usize>> {
+        shapes_with_channels(1)
     }
 }
 
@@ -422,6 +502,8 @@ fn grainy_frame(base: &[f32], shift_x: i32, seed: u32) -> Vec<f32> {
 }
 
 /// Grainy frames panned one pixel per neighbour, with the derived SAD floor that grain implies.
+///
+/// The escalation measures its own floor, so the derived one only scores the written confidence.
 fn grain_input(client: &Client, neighbours: u32) -> EscalateInput {
     let base = make_synthetic_frame(WIDTH, HEIGHT, 1);
     let mut frames = grainy_frame(&base, 0, 0);
@@ -436,6 +518,7 @@ fn grain_input(client: &Client, neighbours: u32) -> EscalateInput {
     let blocks = block_count() as usize;
     let neighbours = neighbours as usize;
 
+    let state_bytes = state_len(neighbours as u32) * size_of::<f32>();
     let block_area = (FINE_BLKSIZE * FINE_BLKSIZE) as f32;
     let sad_floor = block_area * 2.0 * GRAIN_SIGMA / std::f32::consts::PI.sqrt();
     let mut noise_words = DerivedValues::default().to_words();
@@ -448,7 +531,7 @@ fn grain_input(client: &Client, neighbours: u32) -> EscalateInput {
         mv_field: client.empty(2 * neighbours * blocks * size_of::<i32>()),
         confidence: client.empty(neighbours * blocks * size_of::<f32>()),
         sad: client.empty(2 * neighbours * blocks * size_of::<f32>()),
-        state: client.empty(STATE_SECTIONS as usize * neighbours * blocks * size_of::<f32>()),
+        state: client.empty(state_bytes),
         noise: client.create_from_slice(noise_bytes),
         placeholder: client.empty(size_of::<f32>()),
     }
@@ -529,6 +612,7 @@ impl Benchmark for GrainSearchBench {
         }
 
         launch_tracked(&self.client, &args, self.neighbours, GRAIN_FIRST_RADIUS);
+        launch_floor(&self.client, &args, self.neighbours);
         for stage_radius in GRAIN_STAGE_RADII {
             launch_flags(&self.client, &args, self.neighbours);
             launch_escalate(&self.client, &args, self.neighbours, stage_radius);

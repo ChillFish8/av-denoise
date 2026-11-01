@@ -121,6 +121,7 @@ fn fit_ctx(client: &Client, search_radius: u32, pyramid_levels: u32) -> MotionCt
         blksize: 16,
         overlap: 8,
         search_radius,
+        max_search_escalation: search_radius,
         pyramid_levels,
         estimation: MotionEstimation::Direct,
     };

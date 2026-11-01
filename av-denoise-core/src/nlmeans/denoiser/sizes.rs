@@ -4,6 +4,7 @@ use super::LOOKAHEAD_FRAMES;
 use super::noise::measured_noise_shape;
 pub(crate) use crate::engine::BufferSize;
 use crate::engine::align::StorageAlign;
+use crate::motion::kernels::STATE_SECTIONS;
 use crate::motion::{self, MotionCtx, MotionEstimation};
 use crate::nlmeans::params::NlmParams;
 use crate::noise::{
@@ -120,6 +121,15 @@ pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32
 
         let pyramid = pyramid_ring(width, height, motion_ctx.pyramid_levels, align, total_frames);
         buffers.push(("motion pyramid ring", pyramid));
+
+        if motion_ctx.schedule.escalates() {
+            let conf_bytes = padded_slot_bytes(motion_blocks, align);
+            let conf_stride = conf_bytes.map(|bytes| bytes / ELEMENT_BYTES);
+            let sections = u64::from(STATE_SECTIONS);
+            let section_values = times(conf_stride, sections * neighbours);
+            let state = section_values.and_then(|values| values.checked_add(1));
+            buffers.push(("motion escalation state", state));
+        }
 
         if noise_shape.is_some() {
             let levels = motion_ctx.pyramid_levels;

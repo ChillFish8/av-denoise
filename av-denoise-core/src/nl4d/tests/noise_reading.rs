@@ -35,6 +35,7 @@ fn mvtools(blksize: u32, overlap: u32) -> MotionCompensationMode {
         blksize,
         overlap,
         search_radius: 4,
+        max_search_escalation: 4,
         pyramid_levels: 2,
         estimation: MotionEstimation::Auto,
     }

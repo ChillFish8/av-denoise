@@ -23,11 +23,16 @@ pub use self::escalate::{
     ESCALATE_BELOW_CONFIDENCE,
     ESCALATE_SAD_MARGIN,
     FLAG_THREADS,
+    FLAT_SHARE,
+    FLOOR_RANK_DIVISOR,
+    FLOOR_SAMPLES,
+    FLOOR_THREADS,
     NEIGHBOUR_DISAGREEMENT,
     STATE_SECTIONS,
     mc_block_match_fine_tracked,
     mc_escalate_search,
     mc_flag_failures,
+    mc_measure_floor,
 };
 pub use self::global::{
     mc_block_means,

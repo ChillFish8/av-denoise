@@ -1,4 +1,5 @@
 use crate::collab::MAX_TEMPORAL_RADIUS;
+use crate::motion::DEFAULT_MAX_SEARCH_ESCALATION;
 use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
 
 /// The largest [Nl4dParams::kaiser_beta] worth accepting.
@@ -86,6 +87,7 @@ impl Default for Nl4dParams {
                     blksize: 16,
                     overlap: 8,
                     search_radius: 4,
+                    max_search_escalation: DEFAULT_MAX_SEARCH_ESCALATION,
                     pyramid_levels: 2,
                     estimation: MotionEstimation::Auto,
                 },
@@ -218,6 +220,7 @@ mod tests {
                 blksize,
                 overlap,
                 search_radius: 4,
+                max_search_escalation: 4,
                 pyramid_levels: 2,
                 estimation: MotionEstimation::Auto,
             };
@@ -243,6 +246,7 @@ mod tests {
                 blksize,
                 overlap,
                 search_radius: 4,
+                max_search_escalation: 4,
                 pyramid_levels: 2,
                 estimation: MotionEstimation::Auto,
             };
@@ -272,6 +276,7 @@ mod tests {
             blksize: 16,
             overlap: 16,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Auto,
         };

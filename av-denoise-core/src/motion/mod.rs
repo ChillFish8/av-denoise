@@ -13,8 +13,10 @@ mod search;
 pub(crate) mod tests;
 
 pub(crate) use self::analyse::{
+    Escalation,
     MatchTargets,
     confidence_byte_offset,
+    escalation_state_len,
     mv_field_byte_offset,
     run_analyse,
     run_seeded_refine,
@@ -55,6 +57,7 @@ pub(crate) use self::pyramid::{
 pub use self::search::{
     CHAINED_RADIUS_THRESHOLD,
     DEFAULT_BLKSIZE,
+    DEFAULT_MAX_SEARCH_ESCALATION,
     DEFAULT_OVERLAP,
     DEFAULT_PYRAMID_LEVELS,
     DEFAULT_REFINE_RADIUS,

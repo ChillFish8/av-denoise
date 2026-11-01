@@ -948,6 +948,7 @@ fn run_analyse_follows_a_pan_beyond_reach_with_predictions() {
         blksize: 16,
         overlap: 8,
         search_radius: 4,
+        max_search_escalation: 4,
         pyramid_levels: 2,
         estimation: MotionEstimation::Direct,
     };

@@ -37,6 +37,7 @@ fn nl4d_pan_params(temporal_radius: u32) -> Nl4dParams {
         blksize: 16,
         overlap: 8,
         search_radius: 4,
+        max_search_escalation: 4,
         pyramid_levels: 2,
         estimation: MotionEstimation::Auto,
     };

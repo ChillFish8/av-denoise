@@ -77,8 +77,9 @@ sources, or an encode of the original file when av-denoise dropped frames that c
 - **`--c-min`** skips a neighbour block below its confidence floor entirely. A skip that leaves a
   volume short of frames makes its group filter from the centre frame alone, so this can change
   the output.
-- **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
-  the motion machinery's internals, changing any of these will likely invalidate all other defaults.
+- **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-max-search-escalation`,
+  `--mc-pyramid-levels`** tune the motion machinery's internals, changing any of these will likely
+  invalidate all other defaults.
 - **`--sigma-scale`**, and it does something different. The lambda dials decide how
   aggressive to be at a given noise level. `--sigma-scale` corrects the noise level itself. That
   estimate also feeds the motion confidence scoring, so when the whole result reads uniformly
@@ -161,8 +162,8 @@ makes things worse.
   (`--hq-sigma-scale`) instead.
 - **`--hq-no-noise-floor`, `--hq-no-auto-strength`, `--hq-no-temporal-confidence`** switch off
   measured machinery. They are comparison and debugging switches, not quality options.
-- **`--hq-thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`**
-  tune the motion machinery's internals. The defaults are calibrated together.
+- **`--hq-thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-max-search-escalation`,
+  `--mc-pyramid-levels`** tune the motion machinery's internals. The defaults are calibrated together.
 - **`--prefilter`** (the NLMeans pilot and bilateral modes) changes what patch matching sees, and
   under NLMeans-HQ's calibrated automatic handling both modes measured neutral at best on
   default settings. They exist for experimentation and for library users supplying their own

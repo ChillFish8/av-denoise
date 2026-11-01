@@ -217,6 +217,68 @@ fn nlmeans_reseed_matches_streaming_on_a_fast_pan() {
     }
 }
 
+/// A search that starts at radius 2 and escalates failing blocks up to radius 8.
+fn small_first_window() -> MotionSearch {
+    MotionSearch {
+        search_radius: 2,
+        max_search_escalation: 8,
+        ..MotionSearch::default()
+    }
+}
+
+#[test]
+fn reseed_equals_streaming_with_a_small_first_window() {
+    let nl4d = Nl4dOptions {
+        motion: small_first_window(),
+        ..Nl4dOptions::default()
+    };
+    let nl4d_options = PlaneOptions {
+        algorithm: Algorithm::Nl4d(nl4d),
+        ..test_plane_options(2)
+    };
+    let nlmeans_search = small_first_window();
+    let nlmeans_motion = MotionCompensationMode::from(nlmeans_search);
+    let hq = NlmeansHqOptions {
+        nlm: NlmeansOptions {
+            motion_compensation: nlmeans_motion,
+            ..NlmeansOptions::default()
+        },
+        ..NlmeansHqOptions::default()
+    };
+    let nlmeans_options = PlaneOptions {
+        algorithm: Algorithm::NlmeansHq(hq),
+        ..test_plane_options(2)
+    };
+
+    for (name, frames) in clips() {
+        let mut nl4d_denoiser = PlanarDenoiser::create(&nl4d_options, pan_layout()).unwrap();
+        let nl4d_streamed = stream(&mut nl4d_denoiser, &frames);
+        assert_eq!(nl4d_streamed.len(), FRAMES, "{name}");
+
+        for target in [FRAMES / 2, 0, FRAMES - 1] {
+            let got = reseed_shifted(&mut nl4d_denoiser, &frames, target);
+            for (offset, planes) in got.iter().enumerate() {
+                let index = target + offset;
+                let label = format!("nl4d {name} k={target} frame {index}");
+                assert_same_frame(planes, &nl4d_streamed[index], &label);
+            }
+        }
+
+        let mut nlmeans_denoiser = PlanarDenoiser::create(&nlmeans_options, pan_layout()).unwrap();
+        let nlmeans_streamed = stream(&mut nlmeans_denoiser, &frames);
+        assert_eq!(nlmeans_streamed.len(), FRAMES, "{name}");
+
+        for target in [FRAMES / 3, FRAMES / 2, 2 * FRAMES / 3] {
+            let span = nlmeans_denoiser.window_span();
+            let window = window_of_span(&frames, target, span);
+            let got = nlmeans_denoiser.reseed(&window).unwrap();
+
+            let label = format!("nlmeans {name} k={target}");
+            assert_same_frame(&got, &nlmeans_streamed[target], &label);
+        }
+    }
+}
+
 /// One plane of the parity harness's moving clip, a 1.5 px/frame sine pan plus hashed noise.
 fn parity_plane(width: u32, height: u32, frame: usize, channel: u32) -> Vec<u8> {
     let shift = frame as f32 * 1.5;

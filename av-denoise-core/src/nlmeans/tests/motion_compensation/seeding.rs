@@ -101,6 +101,7 @@ fn coarse_seeding_handles_equal_grids() {
         blksize: 8,
         overlap: 4,
         search_radius: 3,
+        max_search_escalation: 3,
         pyramid_levels: 2,
         estimation: MotionEstimation::Direct,
     };
@@ -166,6 +167,7 @@ fn coarse_seeding_still_correct_at_half_grid() {
         blksize: 4,
         overlap: 3,
         search_radius: 2,
+        max_search_escalation: 2,
         pyramid_levels: 2,
         estimation: MotionEstimation::Direct,
     };
@@ -255,6 +257,7 @@ fn pyramid_level0_extracted_at_one_level() {
         blksize: DEFAULT_BLKSIZE,
         overlap: DEFAULT_OVERLAP,
         search_radius: DEFAULT_SEARCH_RADIUS,
+        max_search_escalation: DEFAULT_SEARCH_RADIUS,
         pyramid_levels: 1,
         estimation: MotionEstimation::Direct,
     };
@@ -295,6 +298,7 @@ fn coarse_seeding_covers_ragged_last_block() {
         blksize: DEFAULT_BLKSIZE,
         overlap: DEFAULT_OVERLAP,
         search_radius: 4,
+        max_search_escalation: 4,
         pyramid_levels: 2,
         estimation: MotionEstimation::Direct,
     };

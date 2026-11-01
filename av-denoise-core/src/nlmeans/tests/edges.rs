@@ -22,6 +22,7 @@ fn edge_params() -> NlmParams {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },

@@ -40,6 +40,7 @@ fn assert_sizes_match_allocations(params: NlmParams) {
         ("motion field", denoiser.mv_field_buf.as_ref()),
         ("motion pyramid ring", denoiser.pyramid_input.as_ref()),
         ("motion pair ring", denoiser.pair_ring_buf.as_ref()),
+        ("motion escalation state", denoiser.escalation_buf.as_ref()),
         ("confidence", denoiser.confidence_buf.as_ref()),
         ("confidence pyramid ring", denoiser.confidence_pyramid.as_ref()),
         (
@@ -83,6 +84,7 @@ fn chained_motion_sizes_match_the_allocations() {
         blksize: 16,
         overlap: 8,
         search_radius: 4,
+        max_search_escalation: 8,
         pyramid_levels: 3,
         estimation: MotionEstimation::chained_default(),
     };

@@ -116,6 +116,11 @@ pub struct NlmDenoiser {
     ///
     /// Direction 0 runs from the older frame to the newer one.
     pub(super) pair_ring_buf: Option<Handle>,
+    /// What the motion searches record for blocks that fail their first window, present when
+    /// the search escalates.
+    ///
+    /// The look-ahead, pair and window searches run one after another, so they share it.
+    pub(super) escalation_buf: Option<Handle>,
     /// The luma pyramid, indexed by level, then frame, then pixel.
     pub(super) pyramid_input: Option<Handle>,
     /// The luma pyramid built from the reference ring.
@@ -265,6 +270,15 @@ impl NlmDenoiser {
             (None, None, None, None, None)
         };
 
+        let escalating_ctx = mc_ctx
+            .as_ref()
+            .filter(|motion_ctx| motion_ctx.schedule.escalates());
+        let escalation_buf = escalating_ctx.map(|motion_ctx| {
+            let neighbours = 2 * params.temporal_radius;
+            let state_len = motion::escalation_state_len(motion_ctx, neighbours);
+            client.empty(state_len * size_of::<f32>())
+        });
+
         let estimation = params
             .motion_compensation
             .resolved_estimation(params.temporal_radius);
@@ -370,6 +384,7 @@ impl NlmDenoiser {
             compensated_reference_buf,
             mv_field_buf,
             pair_ring_buf,
+            escalation_buf,
             pyramid_input,
             pyramid_reference,
             confidence_ctx,

@@ -175,6 +175,7 @@ NL4D only runs the `base` preset. Trade speed for quality with `--temporal-radiu
 | `--no-noise-map`                                                     | Turns off the luma noise map, which scales the luma threshold by how noisy each brightness level is.                                                                                                                                                              | map on              |
 | `--no-pooled-threshold`                                              | Turns off the pooled threshold, which judges each frequency together with its neighbours so faint texture survives.                                                                                                                                               | pooling on          |
 | `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. NL4D always tracks motion, so these are always live.                                                                                                                                                                                      | `16`, `8`, `4`, `2` |
+| `--mc-max-search-escalation <N>`                                     | Widest radius a motion block that matched badly searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns the wider search off.                                                                                                              | `8`                 |
 
 </details>
 
@@ -216,6 +217,7 @@ What `--preset` fills in:
 | `--hq-no-noise-floor`                                                | Keeps the expected noise floor inside patch distances instead of subtracting it.                                                                                                   | off                 |
 | `--hq-no-temporal-confidence`                                        | Weights every neighbour equally, however badly it matches.                                                                                                                         | off                 |
 | `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. Only used with `--motion-compensation`.                                                                                                                    | `16`, `8`, `4`, `2` |
+| `--mc-max-search-escalation <N>`                                     | Widest radius a badly matched motion block searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns it off. Only used with `--motion-compensation`.          | `8`                 |
 
 </details>
 ---

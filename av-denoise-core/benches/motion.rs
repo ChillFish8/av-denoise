@@ -9,7 +9,7 @@ mod kernels;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use av_denoise_core::bench_api::motion::PairModelProducer;
+use av_denoise_core::bench_api::motion::{DEFAULT_MAX_SEARCH_ESCALATION, PairModelProducer};
 use av_denoise_core::bench_api::tune_sites::RegulariseCandidate;
 use av_denoise_core::bench_api::{
     ChannelMode,
@@ -137,6 +137,7 @@ fn mc_default() -> MotionCompensationMode {
         blksize: 16,
         overlap: 8,
         search_radius: 4,
+        max_search_escalation: DEFAULT_MAX_SEARCH_ESCALATION,
         pyramid_levels: 2,
         estimation: MotionEstimation::Direct,
     }
@@ -148,6 +149,7 @@ fn mc_chained_default() -> MotionCompensationMode {
         blksize: 16,
         overlap: 8,
         search_radius: 4,
+        max_search_escalation: DEFAULT_MAX_SEARCH_ESCALATION,
         pyramid_levels: 2,
         estimation: MotionEstimation::chained_default(),
     }

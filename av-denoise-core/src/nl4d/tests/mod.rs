@@ -1,5 +1,6 @@
 pub(crate) mod helpers;
 
+mod adaptive_search;
 mod buffers;
 mod clear;
 mod edges;

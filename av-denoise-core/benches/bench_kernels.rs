@@ -42,6 +42,7 @@ use kernels::mc_escalate::{
     FailingShare,
     FlagFailuresBench,
     GrainSearchBench,
+    MeasureFloorBench,
     TrackedFineBench,
 };
 use kernels::mc_fit_model::{FitKernel, FitModelBench};
@@ -324,6 +325,10 @@ fn run_all(backend: &str, client: Client) {
                 search_radius,
             });
         }
+        run(MeasureFloorBench {
+            client: client.clone(),
+            neighbours,
+        });
         run(FlagFailuresBench {
             client: client.clone(),
             neighbours,

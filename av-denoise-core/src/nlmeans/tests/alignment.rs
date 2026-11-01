@@ -68,6 +68,7 @@ fn denoises_with_motion_compensation_when_the_pyramid_slot_stride_is_unaligned()
         blksize: 8,
         overlap: 4,
         search_radius: 2,
+        max_search_escalation: 2,
         pyramid_levels: 2,
         estimation: MotionEstimation::Direct,
     };

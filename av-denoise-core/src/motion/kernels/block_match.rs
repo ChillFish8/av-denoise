@@ -153,42 +153,23 @@ pub fn mc_block_match_coarse(
         threads,
     };
 
-    let mut centres = CandidateList::new();
-    centres.set(0u32, 0i32, 0i32);
-
     let mut bias = 0.0f32;
     if model_candidate {
-        let model = model_displacement(
-            predictions,
-            neighbour_index,
-            site.origin_x,
-            site.origin_y,
-            blksize,
-            level_scale,
-            level_width,
-            level_height,
-        );
-        let moves = predicts_motion(predictions, neighbour_index);
-        let zero = centres.get(0u32);
-        let centre = model_centre(model, zero, moves, search_radius);
-        centres.set(1u32, centre.dx, centre.dy);
         bias = MODEL_CANDIDATE_BIAS * noise[DERIVED_SAD_FLOOR as usize] * floor_scale;
     }
 
-    let count = comptime!(candidate_count(model_candidate));
-    let best = search_candidates(
+    let best = coarse_window_best(
         pyramid,
-        &centres,
-        bias,
-        0.0f32,
+        predictions,
         &site,
+        neighbour_index,
+        bias,
+        model_candidate,
         level_width,
         level_height,
         blksize,
+        level_scale,
         search_radius,
-        count,
-        false,
-        false,
     );
 
     if site.thread_id != 0 {
@@ -227,6 +208,67 @@ pub fn mc_block_match_coarse(
 
         fine_row += 1;
     }
+}
+
+/// Searches a coarse block around no motion and, with `model_candidate`, the camera model's
+/// prediction in `predictions`.
+///
+/// The model window replaces the zero window only when [beats_incumbent] prefers it under `bias`.
+/// An identity prediction, or one within `search_radius` of zero, adds no window. Only thread 0's
+/// result is meaningful, and every thread must call it.
+#[cube]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a buffer, position or comptime shape the search reads"
+)]
+pub(super) fn coarse_window_best(
+    pyramid: &[f32],
+    predictions: &[f32],
+    site: &BlockSite,
+    neighbour_index: u32,
+    bias: f32,
+    #[comptime] model_candidate: bool,
+    #[comptime] level_width: u32,
+    #[comptime] level_height: u32,
+    #[comptime] blksize: u32,
+    #[comptime] level_scale: u32,
+    #[comptime] search_radius: u32,
+) -> WindowBest {
+    let mut centres = CandidateList::new();
+    centres.set(0u32, 0i32, 0i32);
+
+    if model_candidate {
+        let model = model_displacement(
+            predictions,
+            neighbour_index,
+            site.origin_x,
+            site.origin_y,
+            blksize,
+            level_scale,
+            level_width,
+            level_height,
+        );
+        let moves = predicts_motion(predictions, neighbour_index);
+        let zero = centres.get(0u32);
+        let centre = model_centre(model, zero, moves, search_radius);
+        centres.set(1u32, centre.dx, centre.dy);
+    }
+
+    let count = comptime!(candidate_count(model_candidate));
+
+    search_candidates(
+        pyramid,
+        &centres,
+        bias,
+        site,
+        level_width,
+        level_height,
+        blksize,
+        search_radius,
+        count,
+        false,
+        false,
+    )
 }
 
 /// Refines each block's motion at full resolution and optionally scores its confidence.
@@ -293,7 +335,6 @@ pub fn mc_block_match_fine(
         predictions,
         noise,
         centre_slot,
-        0.0f32,
         model_candidate,
         write_sad,
         false,
@@ -338,8 +379,8 @@ pub(super) struct FineMatch {
 
 /// Runs the fine search of [mc_block_match_fine] for this cube's block.
 ///
-/// `edge_margin` and `measure_edge` set the edge test as [search_candidates] describes. Only thread
-/// 0's result is meaningful, and every thread must call it.
+/// `measure_edge` sets the edge test as [search_candidates] describes. Only thread 0's result is
+/// meaningful, and every thread must call it.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -352,7 +393,6 @@ pub(super) fn fine_match(
     predictions: &[f32],
     noise: &[f32],
     centre_slot: u32,
-    edge_margin: f32,
     #[comptime] model_candidate: bool,
     #[comptime] measure_mean: bool,
     #[comptime] measure_edge: bool,
@@ -421,7 +461,6 @@ pub(super) fn fine_match(
         pyramid,
         &centres,
         bias,
-        edge_margin,
         &site,
         width,
         height,
@@ -501,9 +540,8 @@ pub(super) fn match_confidence(best_sad: f32, sad_noise_floor: f32, thsad: f32) 
 ///
 /// The first centre is the incumbent. A later one replaces it only when [beats_incumbent] prefers it
 /// under `bias`, and a later centre equal to the first is skipped. With `measure_mean` set, the
-/// result also carries the winning window's mean SAD. With `measure_edge` set, it also says whether
-/// the winner sits on its window's edge, as [search_window] tests it under `edge_margin`. Only
-/// thread 0's result is meaningful.
+/// result also carries the winning window's mean SAD. With `measure_edge` set, it also carries the
+/// winning window's edge bar, as [search_window] measures it. Only thread 0's result is meaningful.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -513,7 +551,6 @@ pub(super) fn search_candidates(
     pyramid: &[f32],
     centres: &CandidateList,
     bias: f32,
-    edge_margin: f32,
     site: &BlockSite,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -546,7 +583,6 @@ pub(super) fn search_candidates(
         &mut scratch,
         site,
         &first,
-        edge_margin,
         width,
         height,
         blksize,
@@ -558,7 +594,7 @@ pub(super) fn search_candidates(
     let mut best_mean = incumbent.mean;
     let mut best_dx = incumbent.dx;
     let mut best_dy = incumbent.dy;
-    let mut best_edge = incumbent.edge;
+    let mut best_edge_bar = incumbent.edge_bar;
     let mut best_centre_dx = incumbent.centre_dx;
     let mut best_centre_dy = incumbent.centre_dy;
 
@@ -574,7 +610,6 @@ pub(super) fn search_candidates(
                 &mut scratch,
                 site,
                 &centre,
-                edge_margin,
                 width,
                 height,
                 blksize,
@@ -587,7 +622,7 @@ pub(super) fn search_candidates(
             best_mean = select(takes_challenger, challenger.mean, best_mean);
             best_dx = select(takes_challenger, challenger.dx, best_dx);
             best_dy = select(takes_challenger, challenger.dy, best_dy);
-            best_edge = select(takes_challenger, challenger.edge, best_edge);
+            best_edge_bar = select(takes_challenger, challenger.edge_bar, best_edge_bar);
             best_centre_dx = select(takes_challenger, challenger.centre_dx, best_centre_dx);
             best_centre_dy = select(takes_challenger, challenger.centre_dy, best_centre_dy);
         }
@@ -598,7 +633,7 @@ pub(super) fn search_candidates(
         mean: best_mean,
         dx: best_dx,
         dy: best_dy,
-        edge: best_edge,
+        edge_bar: best_edge_bar,
         centre_dx: best_centre_dx,
         centre_dy: best_centre_dy,
     }
@@ -636,9 +671,8 @@ fn stage_centre(
 /// pick. With `measure_mean` set, thread 0 also sums every offset's SAD in row-major order for the
 /// window's mean. Only thread 0's result is meaningful, and every thread must call it.
 ///
-/// With `measure_edge` set, the result is on the edge only when the winner sits on the window's
-/// outer ring and its SAD beats every inner offset's by more than `edge_margin`. On a flat noisy
-/// block the ring often wins by chance, and the margin keeps that from counting.
+/// With `measure_edge` set and the winner on the window's outer ring, the result's edge bar is the
+/// lowest SAD off that ring.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -649,7 +683,6 @@ fn search_window(
     scratch: &mut SearchScratch,
     site: &BlockSite,
     centre: &BlockVector,
-    edge_margin: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] blksize: u32,
@@ -707,7 +740,7 @@ fn search_window(
     let mut mean_sad = 0.0f32;
     let mut best_dx = centre.dx;
     let mut best_dy = centre.dy;
-    let mut edge = false;
+    let mut edge_bar = 0.0f32;
 
     if site.thread_id == 0 {
         if fills_planes {
@@ -758,8 +791,7 @@ fn search_window(
             let on_ring = gap_x == reach || gap_y == reach;
 
             if on_ring {
-                let inner_best = inner_minimum(&scratch.sad_scratch, search_radius);
-                edge = beats_incumbent(best_sad, inner_best, edge_margin);
+                edge_bar = inner_minimum(&scratch.sad_scratch, search_radius);
             }
         }
     }
@@ -769,7 +801,7 @@ fn search_window(
         mean: mean_sad,
         dx: best_dx,
         dy: best_dy,
-        edge,
+        edge_bar,
         centre_dx: centre.dx,
         centre_dy: centre.dy,
     }

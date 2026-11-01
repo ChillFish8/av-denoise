@@ -1,7 +1,10 @@
 use super::search::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP, MotionCompensationMode, MotionEstimation};
 use crate::engine::align::StorageAlign;
 
-/// How a fine block search widens for blocks that fail a small first window.
+/// The widening stages a search runs for blocks that fail their first window.
+pub(crate) const DEFAULT_ESCALATION_STEPS: u32 = 1;
+
+/// How a block search widens for blocks that fail a small first window.
 ///
 /// The first pass searches `first_radius`. Blocks that fail search again in `steps` widening stages,
 /// the last at `ceiling`. A `first_radius` equal to `ceiling` searches once.
@@ -55,7 +58,7 @@ pub(crate) struct MotionCtx {
     /// How many times wider a coarse block is than the content one fine block covers.
     pub coarse_block_factor: u32,
     pub pyramid_levels: u32,
-    /// How the fine search widens, which searches `search_radius` once by default.
+    /// How the search widens, from `search_radius` up to the mode's `max_search_escalation`.
     pub schedule: SearchSchedule,
     pub blocks_x: u32,
     pub blocks_y: u32,
@@ -70,6 +73,7 @@ impl MotionCtx {
             blksize,
             overlap,
             search_radius,
+            max_search_escalation,
             pyramid_levels,
             estimation: _,
         } = mode
@@ -80,6 +84,11 @@ impl MotionCtx {
         let step = blksize - overlap;
         let blocks_x = width.div_ceil(step).max(1);
         let blocks_y = height.div_ceil(step).max(1);
+        let schedule = SearchSchedule {
+            first_radius: search_radius,
+            ceiling: max_search_escalation.max(search_radius),
+            steps: DEFAULT_ESCALATION_STEPS,
+        };
 
         Some(Self {
             blksize,
@@ -88,7 +97,7 @@ impl MotionCtx {
             coarse_search_radius: search_radius,
             coarse_block_factor: 1,
             pyramid_levels,
-            schedule: SearchSchedule::fixed(search_radius),
+            schedule,
             blocks_x,
             blocks_y,
             align,
@@ -178,6 +187,7 @@ impl MotionCtx {
                 blksize: DEFAULT_BLKSIZE,
                 overlap: DEFAULT_OVERLAP,
                 search_radius: 0,
+                max_search_escalation: 0,
                 pyramid_levels: 1,
                 estimation: MotionEstimation::Direct,
             },
@@ -249,11 +259,12 @@ mod tests {
     }
 
     #[test]
-    fn new_contexts_search_their_radius_once() {
+    fn a_ceiling_equal_to_the_radius_searches_once() {
         let mode = MotionCompensationMode::Mvtools {
             blksize: 16,
             overlap: 8,
             search_radius: 6,
+            max_search_escalation: 6,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };
@@ -264,11 +275,33 @@ mod tests {
     }
 
     #[test]
+    fn new_contexts_widen_to_their_escalation_ceiling() {
+        let mode = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            max_search_escalation: 8,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
+        };
+        let align = StorageAlign::new(32);
+        let ctx = MotionCtx::new(mode, 64, 64, align).unwrap();
+        let expected = SearchSchedule {
+            first_radius: 4,
+            ceiling: 8,
+            steps: DEFAULT_ESCALATION_STEPS,
+        };
+
+        assert_eq!(ctx.schedule, expected);
+    }
+
+    #[test]
     fn motion_ctx_blocks_match_step() {
         let mode = MotionCompensationMode::Mvtools {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };

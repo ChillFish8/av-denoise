@@ -6,6 +6,7 @@ use crate::engine::{BLOCK_1D, MAX_GRID_1D};
 use crate::motion::kernels::mc_chain_compose;
 use crate::motion::{
     self,
+    Escalation,
     MatchTargets,
     MotionCtx,
     MotionEstimation,
@@ -56,6 +57,12 @@ pub(crate) fn mc_sad_noise_floor_sigma(prefilter: PrefilterMode, sigma_y: f32) -
 }
 
 impl NlmDenoiser {
+    /// The `thsad` every motion search of this front scores its matches with.
+    pub(in crate::nlmeans) fn search_thsad(&self, motion_ctx: &MotionCtx) -> f32 {
+        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
+        motion::thsad(motion_ctx.blksize, thsad_scale)
+    }
+
     /// Each neighbour's physical slot for a pass centred on `center_t`, in logical order skipping
     /// the centre.
     pub(in crate::nlmeans) fn window_neighbour_slots(&self, center_t: u32) -> Vec<u32> {
@@ -163,8 +170,7 @@ impl NlmDenoiser {
             Some(buf) => (buf, true),
             None => (&self.confidence_dummy, false),
         };
-        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
-        let thsad = motion::thsad(motion_ctx.blksize, thsad_scale);
+        let thsad = self.search_thsad(motion_ctx);
 
         // Match against the reference pyramid when one exists, because it is cleaner.
         let analyse_pyramid = self.pyramid_reference.as_ref().unwrap_or(pyramid_input);
@@ -184,6 +190,12 @@ impl NlmDenoiser {
             self.compose_window_seeds()
         };
 
+        // The window's derived noise is the floor confidence scores against, so escalation reads it.
+        let escalation = self.escalation_buf.as_ref().map(|state| Escalation {
+            state,
+            reads_floor: true,
+        });
+
         let targets = MatchTargets {
             pyramid: analyse_pyramid,
             frame_count,
@@ -197,7 +209,7 @@ impl NlmDenoiser {
             write_confidence,
             predictions,
             sad: None,
-            escalation: None,
+            escalation,
         };
 
         self.run_match(motion_ctx, &targets, thsad)
@@ -403,8 +415,7 @@ impl NlmDenoiser {
             .as_ref()
             .expect("confidence_buf allocated when confidence_ctx is Some");
 
-        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
-        let thsad = motion::thsad(ctx.blksize, thsad_scale);
+        let thsad = self.search_thsad(ctx);
         let noise = self.derived_handle();
 
         let mv_len = neighbours as usize * ctx.mv_stride() as usize;

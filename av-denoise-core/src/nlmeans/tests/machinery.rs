@@ -45,6 +45,7 @@ fn machinery_params() -> NlmParams {
             blksize: DEFAULT_BLKSIZE_FOR_TEST,
             overlap: DEFAULT_OVERLAP_FOR_TEST,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },

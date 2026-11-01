@@ -7,7 +7,7 @@ use super::noise::measures_noise;
 use super::seeds::PairSeeds;
 use crate::engine::timing::timed;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
-use crate::motion::{self, MatchTargets, MotionCtx, run_analyse, run_pyramid_build};
+use crate::motion::{self, Escalation, MatchTargets, MotionCtx, run_analyse, run_pyramid_build};
 use crate::nlmeans::params::NlmParams;
 use crate::noise::{DERIVED_SAD_FLOOR, NOISE_WINDOW_RADIUS, StatsMotion};
 
@@ -337,6 +337,13 @@ impl NlmDenoiser {
             Some(seeds) => seeds.noise.clone(),
             None => self.derived_handle(),
         };
+        let escalation_state = self.escalation_buf.as_ref();
+        // The look-ahead's noise is zeroed or belongs to an earlier window, so it measures its floor.
+        let escalation = escalation_state.map(|state| Escalation {
+            state,
+            reads_floor: false,
+        });
+        let thsad = self.search_thsad(motion_ctx);
 
         if both_ways {
             let predictions = seeds.as_ref().and_then(PairSeeds::both_ways);
@@ -355,6 +362,8 @@ impl NlmDenoiser {
                 &self.confidence_dummy,
                 &noise,
                 predictions,
+                escalation_state,
+                thsad,
             )
             .context("look-ahead pair analyse dispatch failed");
         }
@@ -376,7 +385,7 @@ impl NlmDenoiser {
             write_confidence: false,
             predictions: newer_to_older_prediction,
             sad: None,
-            escalation: None,
+            escalation,
         };
 
         run_analyse(
@@ -387,7 +396,7 @@ impl NlmDenoiser {
             &targets,
             &noise,
             DERIVED_SAD_FLOOR,
-            1.0,
+            thsad,
         )
         .context("look-ahead analyse dispatch failed")
     }

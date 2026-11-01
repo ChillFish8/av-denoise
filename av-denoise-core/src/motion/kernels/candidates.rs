@@ -55,9 +55,9 @@ pub(super) struct WindowBest {
     pub(super) mean: f32,
     pub(super) dx: i32,
     pub(super) dy: i32,
-    /// Whether the best offset lies on the outer ring of its window by a clear margin, or false
-    /// when it was not measured.
-    pub(super) edge: bool,
+    /// The lowest SAD off the window's outer ring when the best offset lies on that ring, and 0
+    /// otherwise or when it was not measured.
+    pub(super) edge_bar: f32,
     /// The centre of the window the best offset came from.
     pub(super) centre_dx: i32,
     pub(super) centre_dy: i32,

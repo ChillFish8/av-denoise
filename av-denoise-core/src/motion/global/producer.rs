@@ -14,9 +14,24 @@ use super::{
 };
 use crate::engine::align::StorageAlign;
 use crate::engine::{BufferSize, DevicePlane, IngestTarget, SampleFormat, ingest};
-use crate::motion::kernels::{mc_block_means, mc_box_rows, mc_high_pass_cols, mc_model_identity};
+use crate::motion::kernels::{
+    STATE_SECTIONS,
+    mc_block_means,
+    mc_box_rows,
+    mc_high_pass_cols,
+    mc_model_identity,
+};
 use crate::motion::pyramid::{pyramid_pixels_per_frame, pyramid_slot_byte_offset, run_pyramid_downscale};
-use crate::motion::{MAX_PYRAMID_LEVELS, MatchTargets, MotionCompensationMode, MotionCtx, run_analyse};
+use crate::motion::{
+    Escalation,
+    MAX_PYRAMID_LEVELS,
+    MatchTargets,
+    MotionCompensationMode,
+    MotionCtx,
+    escalation_state_len,
+    run_analyse,
+    thsad,
+};
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 use crate::tune::gpu::{bind, zeroed_words};
 
@@ -54,6 +69,7 @@ fn acquisition_ctx(
         blksize,
         overlap,
         search_radius,
+        max_search_escalation,
         estimation,
         ..
     } = *mode
@@ -65,6 +81,7 @@ fn acquisition_ctx(
         blksize,
         overlap,
         search_radius,
+        max_search_escalation,
         pyramid_levels: MAX_PYRAMID_LEVELS,
         estimation,
     };
@@ -135,6 +152,9 @@ pub struct PairModelProducer {
     /// The newest frame's luma averaged along each row.
     luma_rows: Handle,
     confidence_placeholder: Handle,
+    /// What both matches record for blocks that fail their first window, present when the search
+    /// escalates.
+    escalation: Option<Handle>,
     /// Zeroed noise values, so the search prefers its existing seed only on exact ties.
     noise: Handle,
     plane_placeholder: Handle,
@@ -180,6 +200,10 @@ impl PairModelProducer {
         let luma_rows = client.empty(plane_bytes);
         let predictions = client.empty(predictions_bytes);
         let confidence_placeholder = zeroed_words(client, 1);
+        let escalation = ctx.schedule.escalates().then(|| {
+            let state_len = escalation_state_len(&ctx, 1);
+            client.empty(state_len * size_of::<f32>())
+        });
         let noise = zeroed_words(client, DERIVED_WORDS as usize);
         let plane_placeholder = client.empty(size_of::<u32>());
         let ring = ModelRing::new(client, depth);
@@ -203,6 +227,7 @@ impl PairModelProducer {
             luma,
             luma_rows,
             confidence_placeholder,
+            escalation,
             noise,
             plane_placeholder,
             run: None,
@@ -381,6 +406,11 @@ impl PairModelProducer {
 
     /// Matches the older frame's blocks into the newer frame with the search of `ctx`, also around
     /// the prediction when `seeded`.
+    ///
+    /// Blocks that fail search again with wider windows when the search escalates. Their window
+    /// means stay those of the first window, so every block's fit contrast measures the same
+    /// window size. The failure test scores with the library's unscaled `thsad`, since the producer
+    /// serves every pass whatever its own `thsad` scale.
     fn match_pair(
         &self,
         ctx: &MotionCtx,
@@ -389,6 +419,11 @@ impl PairModelProducer {
         seeded: bool,
     ) -> Result<(), anyhow::Error> {
         let predictions = seeded.then_some(&self.predictions);
+        // The producer has no noise reading, so it measures its floor.
+        let escalation = self.escalation.as_ref().map(|state| Escalation {
+            state,
+            reads_floor: false,
+        });
         let targets = MatchTargets {
             pyramid: &self.pyramid,
             frame_count: PYRAMID_SLOTS,
@@ -402,8 +437,9 @@ impl PairModelProducer {
             write_confidence: false,
             predictions,
             sad: Some(&self.sad),
-            escalation: None,
+            escalation,
         };
+        let match_thsad = thsad(ctx.blksize, 1.0);
 
         run_analyse(
             &self.client,
@@ -413,7 +449,7 @@ impl PairModelProducer {
             &targets,
             &self.noise,
             DERIVED_SAD_FLOOR,
-            1.0,
+            match_thsad,
         )
     }
 
@@ -491,12 +527,14 @@ pub(crate) fn producer_buffer_sizes(
     let sad_stride = sad_bytes.map(|bytes| bytes / size_of::<f32>() as u64);
     let sad = checked_times(sad_stride, 3);
     let plane = u64::from(luma_width) * u64::from(luma_height);
+    let escalation_sections = checked_times(sad_stride, u64::from(STATE_SECTIONS));
+    let escalation = escalation_sections.and_then(|values| values.checked_add(1));
 
     let partial_count = blocks.map(|blocks| blocks.div_ceil(u64::from(FIT_THREADS)));
     let partials = checked_times(partial_count, u64::from(FIT_LANES));
     let ring = u64::from(depth) * u64::from(MODEL_WORDS);
 
-    vec![
+    let mut sizes = vec![
         ("pair model pyramid", pyramid),
         ("pair model field", field),
         ("pair model SAD", sad),
@@ -505,5 +543,11 @@ pub(crate) fn producer_buffer_sizes(
         ("pair model fit weights", blocks),
         ("pair model fit partials", partials),
         ("pair model ring", Some(ring)),
-    ]
+    ];
+
+    if ctx.schedule.escalates() {
+        sizes.push(("pair model escalation state", escalation));
+    }
+
+    sizes
 }
