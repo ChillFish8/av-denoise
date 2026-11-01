@@ -68,6 +68,7 @@ pub(crate) fn run_pair_analyse(
         write_confidence: false,
         predictions: older_to_newer_predictions,
         sad: None,
+        escalation: None,
     };
     run_analyse(
         client,
@@ -95,6 +96,7 @@ pub(crate) fn run_pair_analyse(
         write_confidence: false,
         predictions: newer_to_older_predictions,
         sad: None,
+        escalation: None,
     };
     run_analyse(
         client,

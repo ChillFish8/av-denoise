@@ -2,8 +2,16 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
+use super::escalate::run_escalation;
 use super::global::AFFINE_WORDS;
-use super::kernels::{BLOCK_MATCH_THREADS, coarse_match_threads, mc_block_match_coarse, mc_block_match_fine};
+use super::kernels::{
+    BLOCK_MATCH_THREADS,
+    STATE_SECTIONS,
+    coarse_match_threads,
+    mc_block_match_coarse,
+    mc_block_match_fine,
+    mc_block_match_fine_tracked,
+};
 use super::pyramid::{level_dims, pyramid_level_offset, pyramid_pixels_per_frame, pyramid_slot_pixels};
 #[cfg(test)]
 use crate::engine::align::StorageAlign;
@@ -34,6 +42,9 @@ pub(crate) fn confidence_byte_offset(motion_ctx: &MotionCtx, neighbour_idx: u32)
 /// With `predictions`, every block also searches around its neighbour's camera model prediction,
 /// [AFFINE_WORDS] words per neighbour. With `sad`, the fine pass writes each block's winning SAD
 /// in the confidence layout, then each block's window mean SAD in the same layout after it.
+///
+/// With `escalation` and a [MotionCtx] schedule that escalates, the fine pass also records what
+/// [run_escalation] needs, [escalation_state_len] `f32` values.
 pub(crate) struct MatchTargets<'a> {
     pub pyramid: &'a Handle,
     /// Frame slots the pyramid holds.
@@ -52,6 +63,13 @@ pub(crate) struct MatchTargets<'a> {
     pub predictions: Option<&'a Handle>,
     /// Holds twice `neighbours` confidence strides of `f32` when set.
     pub sad: Option<&'a Handle>,
+    pub escalation: Option<&'a Handle>,
+}
+
+/// The `f32` values the escalation state of `neighbours` neighbours holds.
+pub(crate) fn escalation_state_len(motion_ctx: &MotionCtx, neighbours: u32) -> usize {
+    let values = STATE_SECTIONS * neighbours * motion_ctx.conf_stride();
+    values as usize
 }
 
 /// The SAD floor's scale on a coarse block, relative to a full-resolution block.
@@ -69,11 +87,13 @@ fn coarse_floor_scale(coarse_blksize: u32, blksize: u32, coarse_scale: u32) -> f
 /// Estimates how each neighbour frame moved relative to the centre frame.
 ///
 /// A coarse pass on the smallest pyramid level seeds a fine pass at full resolution, which writes
-/// each neighbour's `mv_field` slice. Both passes search around the camera model's prediction too
-/// when `targets` carries one. With `write_confidence` set, a per-block score also lands in
-/// its `confidence` slice, scored against the derived word of `noise` at index `sad_field`.
-/// Otherwise `confidence` is never indexed, so a placeholder buffer works and `thsad` may stay at
-/// 0.0.
+/// each neighbour's `mv_field` slice. The fine pass searches the schedule's first radius, then
+/// [run_escalation] searches the blocks that fail again with wider windows. Both passes search
+/// around the camera model's prediction too when `targets` carries one. With `write_confidence`
+/// set, a per-block score also lands in its `confidence` slice, scored against the derived word of
+/// `noise` at index `sad_field`. Otherwise `confidence` is never indexed, so a placeholder buffer
+/// works. `thsad` may stay at 0.0 only when confidence is unwritten and the schedule does not
+/// escalate, because escalation scores every block's confidence to decide which ones fail.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -162,14 +182,16 @@ pub(crate) fn run_analyse(
         width,
         height,
         targets,
-        motion_ctx.search_radius,
+        motion_ctx.schedule.first_radius,
         seeded,
         noise,
         sad_field,
         thsad,
     );
 
-    Ok(())
+    run_escalation(
+        client, motion_ctx, width, height, targets, noise, sad_field, thsad,
+    )
 }
 
 /// Refines the chained seed already sitting in each neighbour's `mv_field` slice.
@@ -209,6 +231,8 @@ pub(crate) fn run_seeded_refine(
 }
 
 /// Launches the fine block match at pyramid level 0 over every neighbour in `targets`.
+///
+/// It also records the escalation state when `targets` carries one and the schedule escalates.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -247,6 +271,55 @@ pub(super) fn launch_fine(
         None => (targets.confidence.clone(), targets.conf_len),
     };
     let noise = noise.clone();
+    let tracked = targets.escalation.filter(|_| motion_ctx.schedule.escalates());
+
+    if let Some(state) = tracked {
+        let state_len = escalation_state_len(motion_ctx, targets.neighbours);
+        let state = state.clone();
+
+        unsafe {
+            let pyramid_arg = BufferArg::from_raw_parts(pyramid, pyramid_len);
+            let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, slots_len);
+            let mv_field_arg = BufferArg::from_raw_parts(mv_field, targets.mv_len);
+            let confidence_arg = BufferArg::from_raw_parts(confidence, targets.conf_len);
+            let sad_arg = BufferArg::from_raw_parts(sad, sad_len);
+            let state_arg = BufferArg::from_raw_parts(state, state_len);
+            let predictions_arg = BufferArg::from_raw_parts(predictions, predictions_len);
+            let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+
+            mc_block_match_fine_tracked::launch_unchecked(
+                client,
+                grid,
+                dim,
+                pyramid_arg,
+                neighbour_slots_arg,
+                mv_field_arg,
+                confidence_arg,
+                sad_arg,
+                state_arg,
+                predictions_arg,
+                targets.centre_slot,
+                targets.write_confidence,
+                write_sad,
+                model_candidate,
+                noise_arg,
+                sad_field,
+                thsad,
+                fine_width,
+                fine_height,
+                slot_pixels,
+                motion_ctx.blksize,
+                motion_ctx.step,
+                search_radius,
+                use_seed,
+                motion_ctx.blocks_x,
+                mv_stride,
+                conf_stride,
+            );
+        }
+
+        return;
+    }
 
     unsafe {
         let pyramid_arg = BufferArg::from_raw_parts(pyramid, pyramid_len);

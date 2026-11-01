@@ -55,6 +55,12 @@ pub(super) struct WindowBest {
     pub(super) mean: f32,
     pub(super) dx: i32,
     pub(super) dy: i32,
+    /// Whether the best offset lies on the outer ring of its window by a clear margin, or false
+    /// when it was not measured.
+    pub(super) edge: bool,
+    /// The centre of the window the best offset came from.
+    pub(super) centre_dx: i32,
+    pub(super) centre_dy: i32,
 }
 
 /// How many search centres a block evaluates, its existing seed first.

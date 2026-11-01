@@ -749,6 +749,7 @@ fn a_block_matched_roll_and_shift_follows_the_field_sign() {
         write_confidence: false,
         predictions: None,
         sad: None,
+        escalation: None,
     };
     run_analyse(
         &client,

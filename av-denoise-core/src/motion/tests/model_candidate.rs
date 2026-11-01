@@ -934,6 +934,7 @@ fn analyse_pan(client: &Client, ctx: &MotionCtx, pyramid: &Handle, predictions: 
         write_confidence: false,
         predictions,
         sad: None,
+        escalation: None,
     };
     run_analyse(client, ctx, 192, 64, &targets, &noise, DERIVED_SAD_FLOOR, 1.0).expect("the analyse runs");
 

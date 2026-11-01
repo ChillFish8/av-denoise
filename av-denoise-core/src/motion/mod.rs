@@ -3,6 +3,7 @@ mod chain;
 mod compensate;
 mod confidence;
 mod context;
+mod escalate;
 mod global;
 pub(crate) mod kernels;
 mod pyramid;

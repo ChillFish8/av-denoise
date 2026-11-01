@@ -376,6 +376,7 @@ impl NlmDenoiser {
             write_confidence: false,
             predictions: newer_to_older_prediction,
             sad: None,
+            escalation: None,
         };
 
         run_analyse(

@@ -1,5 +1,6 @@
 mod block_match;
 mod blocked_equivalence;
+mod escalate;
 mod merged;
 mod model_candidate;
 mod paths;

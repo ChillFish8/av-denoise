@@ -1,6 +1,49 @@
 use super::search::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP, MotionCompensationMode, MotionEstimation};
 use crate::engine::align::StorageAlign;
 
+/// How a fine block search widens for blocks that fail a small first window.
+///
+/// The first pass searches `first_radius`. Blocks that fail search again in `steps` widening stages,
+/// the last at `ceiling`. A `first_radius` equal to `ceiling` searches once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SearchSchedule {
+    pub first_radius: u32,
+    pub ceiling: u32,
+    pub steps: u32,
+}
+
+impl SearchSchedule {
+    /// A schedule that searches `radius` once.
+    pub fn fixed(radius: u32) -> Self {
+        Self {
+            first_radius: radius,
+            ceiling: radius,
+            steps: 1,
+        }
+    }
+
+    pub fn escalates(&self) -> bool {
+        self.first_radius < self.ceiling
+    }
+
+    /// The radius of each widening stage, ending at `ceiling`.
+    ///
+    /// The stages split the gap above `first_radius` evenly, rounding up. `steps` is clamped
+    /// between 1 and the gap, so every stage is wider than the one before.
+    pub fn stage_radii(&self) -> Vec<u32> {
+        if !self.escalates() {
+            return Vec::new();
+        }
+
+        let span = self.ceiling - self.first_radius;
+        let steps = self.steps.clamp(1, span);
+
+        (1..=steps)
+            .map(|stage| self.first_radius + (span * stage).div_ceil(steps))
+            .collect()
+    }
+}
+
 /// The block geometry a [MotionCompensationMode] resolves to for one frame size.
 #[derive(Debug, Clone)]
 pub(crate) struct MotionCtx {
@@ -12,6 +55,8 @@ pub(crate) struct MotionCtx {
     /// How many times wider a coarse block is than the content one fine block covers.
     pub coarse_block_factor: u32,
     pub pyramid_levels: u32,
+    /// How the fine search widens, which searches `search_radius` once by default.
+    pub schedule: SearchSchedule,
     pub blocks_x: u32,
     pub blocks_y: u32,
     /// The alignment each per-slot slice of the motion field, confidence, pair ring and pyramid
@@ -43,6 +88,7 @@ impl MotionCtx {
             coarse_search_radius: search_radius,
             coarse_block_factor: 1,
             pyramid_levels,
+            schedule: SearchSchedule::fixed(search_radius),
             blocks_x,
             blocks_y,
             align,
@@ -163,6 +209,58 @@ mod tests {
 
         assert_eq!(radius_three, 6);
         assert_eq!(radius_one, 2);
+    }
+
+    #[test]
+    fn fixed_schedule_has_no_stages() {
+        let schedule = SearchSchedule::fixed(4);
+
+        assert!(!schedule.escalates());
+        assert!(schedule.stage_radii().is_empty());
+    }
+
+    #[test]
+    fn stage_radii_split_the_gap_and_end_at_the_ceiling() {
+        let schedule = SearchSchedule {
+            first_radius: 2,
+            ceiling: 8,
+            steps: 4,
+        };
+        let radii = schedule.stage_radii();
+
+        assert_eq!(radii, vec![4, 5, 7, 8]);
+    }
+
+    #[test]
+    fn stage_radii_clamp_steps_to_the_gap() {
+        let many_steps = SearchSchedule {
+            first_radius: 2,
+            ceiling: 4,
+            steps: 9,
+        };
+        let no_steps = SearchSchedule {
+            first_radius: 2,
+            ceiling: 4,
+            steps: 0,
+        };
+
+        assert_eq!(many_steps.stage_radii(), vec![3, 4]);
+        assert_eq!(no_steps.stage_radii(), vec![4]);
+    }
+
+    #[test]
+    fn new_contexts_search_their_radius_once() {
+        let mode = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 6,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
+        };
+        let align = StorageAlign::new(32);
+        let ctx = MotionCtx::new(mode, 64, 64, align).unwrap();
+
+        assert_eq!(ctx.schedule, SearchSchedule::fixed(6));
     }
 
     #[test]

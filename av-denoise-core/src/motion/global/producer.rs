@@ -402,6 +402,7 @@ impl PairModelProducer {
             write_confidence: false,
             predictions,
             sad: Some(&self.sad),
+            escalation: None,
         };
 
         run_analyse(

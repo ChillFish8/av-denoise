@@ -37,6 +37,13 @@ use kernels::mc_chain_compose::ChainComposeBench;
 use kernels::mc_compose_models::ComposeModelsBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
+use kernels::mc_escalate::{
+    EscalateStageBench,
+    FailingShare,
+    FlagFailuresBench,
+    GrainSearchBench,
+    TrackedFineBench,
+};
 use kernels::mc_fit_model::{FitKernel, FitModelBench};
 use kernels::mc_warp::WarpBench;
 use kernels::mv_regularise::MvRegulariseBench;
@@ -306,6 +313,36 @@ fn run_all(backend: &str, client: Client) {
             client: client.clone(),
             neighbours,
         });
+    }
+
+    // Escalation runs at one neighbour and at four, with none, a tenth or all of the blocks failing.
+    for &neighbours in BENCH_NEIGHBOURS {
+        for search_radius in [2, 4] {
+            run(TrackedFineBench {
+                client: client.clone(),
+                neighbours,
+                search_radius,
+            });
+        }
+        run(FlagFailuresBench {
+            client: client.clone(),
+            neighbours,
+        });
+        for &share in FailingShare::ALL {
+            run(EscalateStageBench {
+                client: client.clone(),
+                neighbours,
+                stage_radius: 4,
+                share,
+            });
+        }
+        for adaptive in [false, true] {
+            run(GrainSearchBench {
+                client: client.clone(),
+                neighbours,
+                adaptive,
+            });
+        }
     }
 
     run(ChainComposeBench {

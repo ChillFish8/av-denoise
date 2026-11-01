@@ -339,6 +339,7 @@ fn run_analyse_fills_confidence_buffer() {
         write_confidence: true,
         predictions: None,
         sad: None,
+        escalation: None,
     };
     run_analyse(
         &client,
@@ -415,6 +416,7 @@ fn run_confidence_fills_confidence_buffer() {
         write_confidence: true,
         predictions: None,
         sad: None,
+        escalation: None,
     };
     run_confidence(
         &client,
