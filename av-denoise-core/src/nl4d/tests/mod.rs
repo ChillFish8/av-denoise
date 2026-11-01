@@ -7,6 +7,7 @@ mod edges;
 mod engine;
 mod global_motion;
 mod grouping;
+mod luma_motion;
 mod noise_map;
 mod noise_reading;
 mod options;

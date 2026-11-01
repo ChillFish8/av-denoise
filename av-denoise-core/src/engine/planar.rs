@@ -9,7 +9,7 @@ use super::{ChromaLayout, DevicePlane, Engine, FramePass, Geometry, PassTimings,
 use crate::error::Error;
 #[cfg(test)]
 use crate::motion::ModelRing;
-use crate::motion::PairModelProducer;
+use crate::motion::{LumaMotionRing, PairModelProducer};
 use crate::nl4d::grain::GrainChunk;
 
 /// The warning a stream of gray frames logs once, as it starts.
@@ -88,12 +88,16 @@ impl<'s> StagedFrame<'s> {
 /// A plane group without a pass is held in a [PassthroughRing] under the stream frame it came in
 /// with, and written out when the cleaned pass emits that same frame. With a
 /// [PairModelProducer], every frame's luma plane is fitted into a camera model before the passes
-/// see the frame.
+/// see the frame. With a [LumaMotionRing], the chroma pass refines the luma pass's window motion
+/// instead of searching its own.
 pub(crate) struct PlanarEngine {
     geometry: Geometry,
     luma: Option<Box<dyn FramePass>>,
     chroma: Option<Box<dyn FramePass>>,
     producer: Option<PairModelProducer>,
+    /// Emptied only by [Engine::reset], since the luma pass restarts its stream before the chroma
+    /// pass runs its last pass of the old one.
+    luma_motion: Option<LumaMotionRing>,
     passthrough: Option<PassthroughRing>,
     /// Logged once at the start of each stream.
     warning: Option<&'static str>,
@@ -112,6 +116,7 @@ impl PlanarEngine {
         luma: Option<Box<dyn FramePass>>,
         chroma: Option<Box<dyn FramePass>>,
         producer: Option<PairModelProducer>,
+        luma_motion: Option<LumaMotionRing>,
         warns: bool,
     ) -> Self {
         let gray = geometry.chroma == ChromaLayout::Gray;
@@ -122,6 +127,7 @@ impl PlanarEngine {
             luma,
             chroma,
             producer,
+            luma_motion,
             passthrough: None,
             warning,
             stream_started: false,
@@ -406,6 +412,10 @@ impl Engine for PlanarEngine {
 
         if let Some(producer) = self.producer.as_mut() {
             producer.reset();
+        }
+
+        if let Some(ring) = self.luma_motion.as_ref() {
+            ring.clear();
         }
 
         self.stream_started = false;

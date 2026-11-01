@@ -37,6 +37,10 @@ impl FieldLayout {
     }
 
     /// The layout of the two directions of a look-ahead pair.
+    #[expect(
+        dead_code,
+        reason = "it mirrors the window layout for look-ahead pair fields, which no mapping reads"
+    )]
     pub(crate) fn pair(ctx: &MotionCtx) -> Self {
         Self {
             stride: ctx.pair_direction_stride(),

@@ -1,6 +1,5 @@
 mod analyse;
 mod chain;
-#[expect(dead_code, reason = "the chroma pass uses the mapping once it reads luma motion")]
 mod chroma_map;
 mod compensate;
 mod confidence;
@@ -8,6 +7,7 @@ mod context;
 mod escalate;
 mod global;
 pub(crate) mod kernels;
+mod luma_ring;
 mod pyramid;
 mod search;
 pub(crate) mod truemotion;
@@ -25,7 +25,6 @@ pub(crate) use self::analyse::{
     run_seeded_refine,
 };
 pub(crate) use self::chain::{neighbour_idx_for_k, pair_byte_offset, run_pair_analyse, zero_pair_slot};
-#[expect(unused_imports, reason = "the chroma pass uses the mapping once it reads luma motion")]
 pub(crate) use self::chroma_map::{FieldLayout, Subsampling, map_luma_fields};
 pub(crate) use self::compensate::run_compensate;
 pub(crate) use self::confidence::{THSAD_PIXEL, run_confidence, sad_noise_floor, thsad};
@@ -53,6 +52,7 @@ pub use self::global::{
     run_compose_models,
 };
 pub(crate) use self::global::{SharedMotion, producer_buffer_sizes};
+pub(crate) use self::luma_ring::{LumaMotionRing, RingRole};
 pub(crate) use self::pyramid::{
     level_dims,
     pyramid_pixels_per_frame,

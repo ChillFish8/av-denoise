@@ -29,6 +29,7 @@ use crate::motion::{
     MatchTargets,
     MotionCompensationMode,
     MotionCtx,
+    RingRole,
     escalation_state_len,
     run_analyse,
     thsad,
@@ -99,6 +100,8 @@ pub(crate) struct SharedMotion {
     pub ring: ModelRing,
     pub scale_x: f32,
     pub scale_y: f32,
+    /// How the pass shares its window motion with the other pass, when both compensate motion.
+    pub luma_motion: Option<RingRole>,
 }
 
 /// The consecutive stream frames taken since the producer last started over.

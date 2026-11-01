@@ -44,6 +44,7 @@ impl ModelFitter {
             ring,
             scale_x,
             scale_y,
+            luma_motion: None,
         }
     }
 

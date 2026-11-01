@@ -2,12 +2,21 @@ use cubecl::prelude::*;
 
 #[cfg(test)]
 use super::PassEngine;
+use super::align::StorageAlign;
 use super::planar::PlanarEngine;
 use super::{ChromaLayout, EdgePadding, Engine, FramePass, Geometry, PassGeometry, WindowSpan};
 use crate::error::Error;
 #[cfg(test)]
 use crate::motion::ModelRing;
-use crate::motion::{MotionCompensationMode, PairModelProducer, SharedMotion, producer_buffer_sizes};
+use crate::motion::{
+    LumaMotionRing,
+    MotionCompensationMode,
+    MotionCtx,
+    PairModelProducer,
+    RingRole,
+    SharedMotion,
+    producer_buffer_sizes,
+};
 use crate::nl4d::{Nl4d, Nl4dOptions};
 use crate::nlmeans::denoiser::check_u32_indexable;
 use crate::nlmeans::{ChannelMode, Nlmeans, NlmeansAlgorithm, resolve_params};
@@ -219,7 +228,11 @@ impl EngineSpec {
         }
     }
 
-    /// Rejects a spec that cleans nothing, cleans chroma a frame lacks, or mixes window spans.
+    /// Rejects a spec that cleans nothing, cleans chroma a frame lacks, mixes window spans, or gives
+    /// the passes different motion settings.
+    ///
+    /// The chroma pass takes its window motion from the luma pass, so both need the same motion
+    /// search and temporal radius.
     ///
     /// A plane group passed through is copied word for word, so it also needs matching input and
     /// output formats.
@@ -261,9 +274,39 @@ impl EngineSpec {
                     format!("the luma pass reads {luma_span:?} but the chroma pass reads {chroma_span:?}");
                 return Err(Error::InvalidOptions(message));
             }
+
+            // The chroma pass takes its window motion from the luma pass.
+            let luma_motion = luma.motion();
+            let chroma_motion = chroma.motion();
+            if luma_motion != chroma_motion {
+                let message = format!(
+                    "the chroma pass takes its motion from the luma pass, so both need the same motion \
+                     search and temporal radius, got {luma_motion:?} and {chroma_motion:?}"
+                );
+                return Err(Error::InvalidOptions(message));
+            }
         }
 
         Ok(())
+    }
+
+    /// The ring the luma pass shares its window motion with the chroma pass through.
+    ///
+    /// It exists only when the spec runs both passes and both compensate motion.
+    pub(crate) fn luma_motion_ring(&self, client: &Client) -> Option<LumaMotionRing> {
+        let (luma, chroma) = self.passes();
+        let luma_motion = luma.and_then(|pass| pass.motion());
+        let chroma_pass = chroma?;
+        chroma_pass.motion()?;
+        let (mode, radius) = luma_motion?;
+
+        let chroma_geometry = chroma_pass.geometry();
+        let align = StorageAlign::from_client(client);
+        let chroma_ctx = MotionCtx::new(mode, chroma_geometry.width, chroma_geometry.height, align)?;
+        let subsampling = self.geometry().chroma.subsampling();
+        let ring = LumaMotionRing::new(client, &chroma_ctx, radius, subsampling);
+
+        Some(ring)
     }
 
     /// Builds the engine on `client`, picking each pass's launch site candidates from `kernels`.
@@ -359,15 +402,20 @@ impl EngineSpec {
         let producer = self.pair_model_producer(client)?;
         let ring = producer.as_ref().map(|producer| producer.ring());
         let (chroma_scale_x, chroma_scale_y) = geometry.chroma.chroma_scale();
+        let luma_motion_ring = self.luma_motion_ring(client);
+        let writer = luma_motion_ring.clone().map(RingRole::Writer);
+        let reader = luma_motion_ring.clone().map(RingRole::Reader);
         let luma_motion = ring.map(|ring| SharedMotion {
             ring: ring.clone(),
             scale_x: 1.0,
             scale_y: 1.0,
+            luma_motion: writer,
         });
         let chroma_motion = ring.map(|ring| SharedMotion {
             ring: ring.clone(),
             scale_x: chroma_scale_x,
             scale_y: chroma_scale_y,
+            luma_motion: reader,
         });
 
         let (luma, chroma) = self.passes();
@@ -384,7 +432,15 @@ impl EngineSpec {
             })
             .transpose()?;
 
-        let engine = PlanarEngine::new(client, geometry, luma_pass, chroma_pass, producer, warns);
+        let engine = PlanarEngine::new(
+            client,
+            geometry,
+            luma_pass,
+            chroma_pass,
+            producer,
+            luma_motion_ring,
+            warns,
+        );
 
         Ok(engine)
     }

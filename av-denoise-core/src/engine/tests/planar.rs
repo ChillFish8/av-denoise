@@ -13,6 +13,7 @@ use crate::engine::planar::{GRAY_WARNING, stream_warning};
 use crate::engine::{
     ChromaLayout,
     DevicePlane,
+    EdgePadding,
     Engine,
     EngineSpec,
     FramePass,
@@ -22,9 +23,10 @@ use crate::engine::{
     SampleFormat,
 };
 use crate::error::Error;
-use crate::motion::{PairModelProducer, SharedMotion};
+use crate::motion::{MotionCompensationMode, MotionSearch, PairModelProducer, SharedMotion};
 use crate::nl4d::Nl4dOptions;
 use crate::nl4d::tests::helpers::noisy_frames;
+use crate::nlmeans::tests::models::{PanShape, pan_clip};
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansHqOptions, NlmeansOptions};
 use crate::tune::EngineKernels;
 
@@ -33,6 +35,8 @@ const HEIGHT: u32 = 48;
 /// Enough frames for a radius 1 engine to emit some frames from pushes through its noise look-ahead.
 const FRAMES: usize = 14;
 const CONTEXT_FRAMES: usize = 4;
+/// Enough frames to hold a whole reseed window, noise look-ahead included, mid-clip.
+const RESEED_FRAMES: usize = 30;
 
 type Planes = Vec<Vec<u8>>;
 
@@ -87,6 +91,38 @@ fn specs(geometry: Geometry, luma: bool, chroma: bool) -> [EngineSpec; 2] {
     [nl4d, nlmeans]
 }
 
+/// HQ nlmeans at radius 1 compensating motion with `motion`.
+fn nlmeans_mc_algorithm(motion: MotionCompensationMode) -> NlmeansAlgorithm {
+    let nlm = NlmeansOptions {
+        mode: DenoisingMode::Temporal { radius: 1 },
+        motion_compensation: motion,
+        ..NlmeansOptions::default()
+    };
+    let hq = NlmeansHqOptions {
+        nlm,
+        ..NlmeansHqOptions::default()
+    };
+
+    NlmeansAlgorithm::Hq(hq)
+}
+
+/// An nl4d and a motion-compensated nlmeans spec, each cleaning luma and chroma.
+fn motion_specs(geometry: Geometry) -> [EngineSpec; 2] {
+    let motion = MotionCompensationMode::mvtools_default();
+    let nl4d = EngineSpec::Nl4d {
+        luma: Some(nl4d_options()),
+        chroma: Some(nl4d_options()),
+        geometry,
+    };
+    let nlmeans = EngineSpec::Nlmeans {
+        luma: Some(nlmeans_mc_algorithm(motion)),
+        chroma: Some(nlmeans_mc_algorithm(motion)),
+        geometry,
+    };
+
+    [nl4d, nlmeans]
+}
+
 fn default_kernels(_pass: &PassSpec) -> EngineKernels {
     EngineKernels::default()
 }
@@ -135,6 +171,7 @@ fn seeded_pass(client: &Client, spec: &EngineSpec, luma: bool, clip: &[Planes]) 
         ring: producer.ring().clone(),
         scale_x,
         scale_y,
+        luma_motion: None,
     });
     let kernels = EngineKernels::default();
     let pass = pass.build_pass(client, kernels, motion).expect("build pass");
@@ -159,8 +196,13 @@ fn deinterleave(frame: &[f32], channel: usize) -> Vec<f32> {
 
 /// A noisy 4:2:0 clip of `FRAMES` frames as `u8` planes, with distinct luma and chroma content.
 fn clip() -> Vec<Planes> {
-    let luma_frames = noisy_frames(WIDTH, HEIGHT, 1, FRAMES);
-    let chroma_frames = noisy_frames(WIDTH / 2, HEIGHT / 2, 2, FRAMES);
+    clip_of(FRAMES)
+}
+
+/// [clip] at `count` frames.
+fn clip_of(count: usize) -> Vec<Planes> {
+    let luma_frames = noisy_frames(WIDTH, HEIGHT, 1, count);
+    let chroma_frames = noisy_frames(WIDTH / 2, HEIGHT / 2, 2, count);
 
     luma_frames
         .iter()
@@ -169,6 +211,27 @@ fn clip() -> Vec<Planes> {
             let u_plane = deinterleave(chroma, 0);
             let v_plane = deinterleave(chroma, 1);
             vec![to_codes(luma), to_codes(&u_plane), to_codes(&v_plane)]
+        })
+        .collect()
+}
+
+/// A noisy 4:2:0 textured pan of `count` frames as `u8` planes, moving 2 luma pixels a frame.
+fn pan_planes(count: usize) -> Vec<Planes> {
+    let shape = PanShape {
+        width: WIDTH,
+        height: HEIGHT,
+        chroma_scale: (2, 2),
+        shift: (2, 0),
+        sigma: 2.0 / 255.0,
+    };
+    let frames = pan_clip(shape, count, 5);
+
+    frames
+        .iter()
+        .map(|frame| {
+            let u_plane = deinterleave(&frame.chroma, 0);
+            let v_plane = deinterleave(&frame.chroma, 1);
+            vec![to_codes(&frame.luma), to_codes(&u_plane), to_codes(&v_plane)]
         })
         .collect()
 }
@@ -316,18 +379,17 @@ fn drive(
 }
 
 #[test]
-fn luma_and_chroma_match_the_two_pass_engines() {
+fn luma_output_is_unchanged_with_the_ring() {
     let client = client();
     let clip = clip();
     let geometry = geometry(ChromaLayout::Yuv420);
 
-    for spec in specs(geometry, true, true) {
+    for spec in motion_specs(geometry) {
+        assert!(spec.luma_motion_ring(&client).is_some(), "{spec:?}");
+
         let mut luma_engine = seeded_pass(&client, &spec, true, &clip);
-        let mut chroma_engine = seeded_pass(&client, &spec, false, &clip);
         let luma_frames = luma_of(&clip);
-        let chroma_frames = chroma_of(&clip);
         let luma_expected = drive(&mut luma_engine, &client, &luma_frames, 0, true);
-        let chroma_expected = drive(&mut chroma_engine, &client, &chroma_frames, 0, false);
 
         let mut engine = build(&client, &spec).expect("build");
         let merged = drive(&mut engine, &client, &clip, 0, true);
@@ -336,13 +398,182 @@ fn luma_and_chroma_match_the_two_pass_engines() {
         assert_eq!(luma_expected.len(), FRAMES, "{spec:?}");
         for (index, frame) in merged.iter().enumerate() {
             assert_eq!(frame[0], luma_expected[index][0], "{spec:?} frame {index} luma");
-            assert_eq!(
-                frame[1..],
-                chroma_expected[index][..],
-                "{spec:?} frame {index} chroma"
-            );
         }
     }
+}
+
+#[test]
+fn chroma_without_a_luma_pass_matches_its_pass_engine() {
+    let client = client();
+    let clip = clip();
+    let geometry = geometry(ChromaLayout::Yuv420);
+
+    for spec in specs(geometry, false, true) {
+        assert!(spec.luma_motion_ring(&client).is_none(), "{spec:?}");
+
+        let mut chroma_engine = seeded_pass(&client, &spec, false, &clip);
+        let chroma_frames = chroma_of(&clip);
+        let expected = drive(&mut chroma_engine, &client, &chroma_frames, 0, false);
+
+        let mut engine = build(&client, &spec).expect("build");
+        let merged = drive(&mut engine, &client, &clip, 0, true);
+
+        assert_eq!(merged.len(), expected.len(), "{spec:?}");
+        for (index, frame) in merged.iter().enumerate() {
+            assert_eq!(frame[1..], expected[index][..], "{spec:?} frame {index} chroma");
+        }
+    }
+}
+
+/// The output of the frame at `target` after a reseed, as the host runs one.
+///
+/// A shifted-edge engine takes the frames behind the target as context and pushes the rest. A
+/// repeated-edge engine takes every frame but the last as context.
+fn reseed_at(engine: &mut Box<dyn Engine>, client: &Client, clip: &[Planes], target: usize) -> Planes {
+    let span = engine.window_span();
+    let first = target - span.behind;
+    let window = &clip[first..first + span.frame_count()];
+    let context = match span.edges {
+        EdgePadding::Shifted => span.behind,
+        EdgePadding::Repeat => span.behind + span.ahead,
+    };
+    let dims = plane_dims(3, true);
+    let mut outputs = Vec::new();
+
+    engine.reset();
+    for (index, frame) in window.iter().enumerate() {
+        let handles = upload(client, frame);
+        let planes = as_planes(&handles, &dims);
+
+        if index < context {
+            engine.push_context(&planes).expect("push_context");
+            continue;
+        }
+
+        let ready = engine.push(&planes).expect("push");
+        emit(engine, client, &dims, ready, &mut outputs);
+    }
+
+    outputs.pop().expect("a full window emits its target")
+}
+
+/// The frame a reseed targets, mid-clip with its whole window inside a clip of `frames`.
+fn reseed_target(engine: &dyn Engine, frames: usize) -> usize {
+    let span = engine.window_span();
+    let target = frames / 2;
+    let inside = target > span.behind && target + span.ahead + 1 < frames;
+    assert!(inside, "test premise: {span:?} fits around frame {target}");
+
+    target
+}
+
+#[test]
+fn reseed_equals_streaming_for_luma_and_chroma() {
+    let client = client();
+    let clip = pan_planes(RESEED_FRAMES);
+    let geometry = geometry(ChromaLayout::Yuv420);
+
+    for spec in motion_specs(geometry) {
+        let mut engine = build(&client, &spec).expect("build");
+        let streamed = drive(&mut engine, &client, &clip, 0, true);
+        let target = reseed_target(engine.as_ref(), clip.len());
+
+        let reseeded = reseed_at(&mut engine, &client, &clip, target);
+
+        assert_eq!(reseeded, streamed[target], "{spec:?}");
+    }
+}
+
+#[test]
+fn a_reseed_never_reads_stale_luma_motion() {
+    let client = client();
+    let clip = clip_of(RESEED_FRAMES);
+    let other_clip: Vec<Planes> = clip.iter().rev().cloned().collect();
+    let geometry = geometry(ChromaLayout::Yuv420);
+    let dims = plane_dims(3, true);
+
+    for spec in motion_specs(geometry) {
+        let mut fresh = build(&client, &spec).expect("build");
+        let target = reseed_target(fresh.as_ref(), clip.len());
+        let expected = reseed_at(&mut fresh, &client, &clip, target);
+
+        // A stream of other frames leaves its luma motion in the ring before the reseed.
+        let mut engine = build(&client, &spec).expect("build");
+        let mut outputs = Vec::new();
+        for frame in &other_clip {
+            let handles = upload(&client, frame);
+            let planes = as_planes(&handles, &dims);
+            let ready = engine.push(&planes).expect("push");
+            emit(&mut engine, &client, &dims, ready, &mut outputs);
+        }
+
+        let reseeded = reseed_at(&mut engine, &client, &clip, target);
+
+        assert_eq!(reseeded, expected, "{spec:?}");
+    }
+}
+
+#[test]
+fn mismatched_pass_settings_are_rejected() {
+    let client = client();
+    let geometry = geometry(ChromaLayout::Yuv420);
+    let narrow_search = MotionSearch {
+        search_radius: 2,
+        ..MotionSearch::default()
+    };
+    let narrow_nl4d = Nl4dOptions {
+        motion: narrow_search,
+        ..nl4d_options()
+    };
+    let narrow_motion = MotionCompensationMode::from(narrow_search);
+    let mismatched = [
+        EngineSpec::Nl4d {
+            luma: Some(nl4d_options()),
+            chroma: Some(narrow_nl4d),
+            geometry,
+        },
+        EngineSpec::Nlmeans {
+            luma: Some(nlmeans_mc_algorithm(MotionCompensationMode::mvtools_default())),
+            chroma: Some(nlmeans_mc_algorithm(narrow_motion)),
+            geometry,
+        },
+        EngineSpec::Nlmeans {
+            luma: Some(nlmeans_mc_algorithm(MotionCompensationMode::mvtools_default())),
+            chroma: Some(nlmeans_algorithm()),
+            geometry,
+        },
+    ];
+
+    for spec in mismatched {
+        let result = build(&client, &spec);
+        let Err(Error::InvalidOptions(message)) = result else {
+            panic!("{spec:?} built with mismatched motion settings");
+        };
+
+        assert!(
+            message.contains("takes its motion from the luma pass"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn greyscale_builds_no_ring() {
+    let client = client();
+    let gray = geometry(ChromaLayout::Gray);
+    let yuv = geometry(ChromaLayout::Yuv420);
+    let [nl4d_gray, _] = specs(gray, true, false);
+    let [nl4d_luma, _] = specs(yuv, true, false);
+    let [nl4d_chroma, _] = specs(yuv, false, true);
+    let [nl4d_both, nlmeans_both] = motion_specs(yuv);
+    let [_, nlmeans_without_motion] = specs(yuv, true, true);
+
+    assert!(nl4d_gray.luma_motion_ring(&client).is_none());
+    assert!(nl4d_luma.luma_motion_ring(&client).is_none());
+    assert!(nl4d_chroma.luma_motion_ring(&client).is_none());
+    assert!(nlmeans_without_motion.luma_motion_ring(&client).is_none());
+    assert!(nl4d_both.luma_motion_ring(&client).is_some());
+    assert!(nlmeans_both.luma_motion_ring(&client).is_some());
 }
 
 /// Checks a merged engine cleaning one plane group matches its pass engine there, and that the

@@ -2,7 +2,16 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NlmDenoiser;
-use crate::motion::{AFFINE_WORDS, NO_PAIR, SharedMotion, compose_gaps, run_compose_models};
+use crate::motion::{
+    AFFINE_WORDS,
+    NO_PAIR,
+    RingRole,
+    SharedMotion,
+    compose_gaps,
+    pyramid_pixels_per_frame,
+    run_compose_models,
+};
+use crate::nlmeans::dispatch::MAPPED_REFINE_RADIUS;
 use crate::nlmeans::mirror::MirroredBuffer;
 use crate::noise::DERIVED_WORDS;
 use crate::tune::gpu::zeroed_words;
@@ -178,7 +187,7 @@ impl ModelSeeds {
 }
 
 impl NlmDenoiser {
-    /// Starts every motion search from the camera models in `motion`.
+    /// Starts every motion search from the camera models in `motion`, and joins its luma motion ring.
     ///
     /// It does nothing without motion compensation, and must be called before the first push.
     pub(crate) fn set_shared_motion(&mut self, motion: SharedMotion) {
@@ -186,15 +195,54 @@ impl NlmDenoiser {
             return;
         }
 
+        let role = motion.luma_motion.clone();
         let seeds = ModelSeeds::new(&self.client, motion, self.params.temporal_radius);
         self.seeds = Some(seeds);
+
+        if let Some(RingRole::Reader(_)) = role.as_ref() {
+            self.drop_window_search();
+        }
+
+        self.luma_motion = role;
+    }
+
+    /// Swaps the window search's buffers for the single-level refine of a front that reads luma motion.
+    ///
+    /// The look-ahead still runs its own search, so it keeps the escalation state.
+    fn drop_window_search(&mut self) {
+        let motion_ctx = self.motion_ctx();
+        let refine_ctx = motion_ctx.single_level(MAPPED_REFINE_RADIUS);
+        let pyramid_pixels = pyramid_pixels_per_frame(self.width, self.height, 1, refine_ctx.align);
+        let frames = self.params.total_frames() as usize;
+        let pyramid_bytes = pyramid_pixels * frames * size_of::<f32>();
+
+        let input_pyramid = self.client.empty(pyramid_bytes);
+        self.pyramid_input = Some(input_pyramid);
+        if self.pyramid_reference.is_some() {
+            let reference_pyramid = self.client.empty(pyramid_bytes);
+            self.pyramid_reference = Some(reference_pyramid);
+        }
+
+        self.truemotion_bufs = None;
+        self.pair_ring_buf = None;
+        self.ring_slot_tables.clear();
+        if self.lookahead.is_none() {
+            self.escalation_buf = None;
+        }
+
+        self.refine_ctx = Some(refine_ctx);
+    }
+
+    /// Whether the front refines the luma pass's window motion instead of searching its own.
+    pub(in crate::nlmeans) fn reads_luma_motion(&self) -> bool {
+        matches!(self.luma_motion, Some(RingRole::Reader(_)))
     }
 
     /// Uploads the gap table of the window centred on logical position `center_t`.
     ///
     /// Only a `Direct` search reads it, and the upload must come before the search's device span.
     pub(in crate::nlmeans) fn update_window_seeds(&mut self, center_t: u32) {
-        if self.seeds.is_none() || self.is_chained() {
+        if self.seeds.is_none() || self.is_chained() || self.reads_luma_motion() {
             return;
         }
 

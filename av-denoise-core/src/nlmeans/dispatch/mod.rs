@@ -3,6 +3,7 @@ mod motion;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+pub(super) use self::motion::MAPPED_REFINE_RADIUS;
 pub(crate) use self::motion::mc_sad_noise_floor_sigma;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(super) use self::motion::{BILATERAL_RESIDUAL_FRACTION, NLM_SPATIAL_RESIDUAL_FRACTION};

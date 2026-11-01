@@ -20,7 +20,7 @@ use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
 use crate::engine::align::StorageAlign;
 use crate::engine::timing::DeviceTimer;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
-use crate::motion::{self, MotionCtx, MotionEstimation};
+use crate::motion::{self, MotionCtx, MotionEstimation, RingRole};
 use crate::noise::{DerivedValues, NoiseState};
 use crate::tune::KernelSelector;
 
@@ -114,7 +114,8 @@ pub struct NlmDenoiser {
     pub(super) mv_field_buf: Option<Handle>,
     /// Adjacent-frame motion fields for chained estimation, by slot, then direction, then block.
     ///
-    /// Direction 0 runs from the older frame to the newer one.
+    /// Direction 0 runs from the older frame to the newer one. It is present only when the front
+    /// searches its own window motion with `Chained` estimation.
     pub(super) pair_ring_buf: Option<Handle>,
     /// What the motion searches record for blocks that fail their first window, present when
     /// the search escalates.
@@ -130,6 +131,13 @@ pub struct NlmDenoiser {
     pub(super) pyramid_input: Option<Handle>,
     /// The luma pyramid built from the reference ring.
     pub(super) pyramid_reference: Option<Handle>,
+    /// How this front shares its window motion with the other pass, when it does.
+    pub(super) luma_motion: Option<RingRole>,
+    /// The single-level search a chroma front refines the luma pass's vectors with.
+    ///
+    /// It is present only when the front reads the luma motion ring, and its pyramids then hold
+    /// one level.
+    pub(super) refine_ctx: Option<MotionCtx>,
 
     /// Block geometry for the confidence pass that runs without motion compensation.
     pub(super) confidence_ctx: Option<MotionCtx>,
@@ -403,6 +411,8 @@ impl NlmDenoiser {
             truemotion_bufs,
             pyramid_input,
             pyramid_reference,
+            luma_motion: None,
+            refine_ctx: None,
             confidence_ctx,
             confidence_buf,
             confidence_pyramid,

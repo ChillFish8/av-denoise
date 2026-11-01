@@ -104,6 +104,17 @@ impl MotionCtx {
         }
     }
 
+    /// This block grid with a single pyramid level and one fixed search of `radius`.
+    pub fn single_level(&self, radius: u32) -> Self {
+        Self {
+            search_radius: radius,
+            coarse_search_radius: radius,
+            pyramid_levels: 1,
+            schedule: SearchSchedule::fixed(radius),
+            ..self.clone()
+        }
+    }
+
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub fn mv_slots_per_neighbour(&self) -> usize {
         (self.blocks_x * self.blocks_y) as usize

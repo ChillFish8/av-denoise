@@ -3,6 +3,7 @@ use cubecl::server::Handle;
 
 use super::{DevicePlane, SampleFormat};
 use crate::error::Error;
+use crate::motion::Subsampling;
 
 /// How a frame stores its colour planes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -45,6 +46,17 @@ impl ChromaLayout {
             ChromaLayout::Yuv422 => (2.0, 1.0),
             ChromaLayout::Gray | ChromaLayout::Yuv444 => (1.0, 1.0),
         }
+    }
+
+    /// The chroma subsampling as a power of two per axis.
+    pub(crate) fn subsampling(self) -> Subsampling {
+        let (shift_x, shift_y) = match self {
+            ChromaLayout::Yuv420 => (1, 1),
+            ChromaLayout::Yuv422 => (1, 0),
+            ChromaLayout::Gray | ChromaLayout::Yuv444 => (0, 0),
+        };
+
+        Subsampling { shift_x, shift_y }
     }
 }
 

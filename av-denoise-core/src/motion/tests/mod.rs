@@ -2,6 +2,7 @@ mod block_match;
 mod blocked_equivalence;
 mod chroma_map;
 mod escalate;
+mod luma_ring;
 mod merged;
 mod model_candidate;
 mod paths;
