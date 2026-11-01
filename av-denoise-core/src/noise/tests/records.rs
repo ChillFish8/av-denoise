@@ -32,10 +32,10 @@ pub(crate) struct QuarterSpec {
 
 /// The target statistics of one block record.
 ///
-/// `mean` is every channel's mean residual and `rho` channel 0's lag-1 correlation.
+/// `mean` is each channel's mean residual and `rho` channel 0's lag-1 correlation.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct BlockSpec {
-    pub mean: f32,
+    pub mean: [f32; NOISE_CHANNELS as usize],
     pub sigma: [f32; NOISE_CHANNELS as usize],
     pub rho: f32,
     pub texture: f32,
@@ -47,7 +47,7 @@ impl BlockSpec {
     /// A block whose channels all share `sigma`, with quiet quarters.
     pub(crate) fn uniform(mean: f32, sigma: f32, rho: f32) -> Self {
         Self {
-            mean,
+            mean: [mean; NOISE_CHANNELS as usize],
             sigma: [sigma; NOISE_CHANNELS as usize],
             rho,
             texture: 0.0,
@@ -101,13 +101,13 @@ pub(crate) fn frame_records(width: u32, height: u32, channels: u32, blocks: &[Bl
         let record = &mut records[index * record_len..(index + 1) * record_len];
 
         for channel in 0..channel_count {
-            let (sum_d, sum_d2) = channel_sums(spec.mean, spec.sigma[channel], pixels);
+            let (sum_d, sum_d2) = channel_sums(spec.mean[channel], spec.sigma[channel], pixels);
             record[channel] = sum_d;
             record[channel_count + channel] = sum_d2;
         }
 
         let variance = 2.0 * spec.sigma[0] * spec.sigma[0];
-        let mean_square = spec.mean * spec.mean;
+        let mean_square = spec.mean[0] * spec.mean[0];
         record[2 * channel_count] = (spec.rho * variance + mean_square) * pairs;
         record[2 * channel_count + BLOCK_TEXTURE_LANE as usize] = spec.texture;
         record[2 * channel_count + BLOCK_MOVED_LANE as usize] = if spec.moved { 1.0 } else { 0.0 };
@@ -164,7 +164,7 @@ pub(crate) fn static_block(seed: u32, index: u32) -> BlockSpec {
     }
 
     BlockSpec {
-        mean,
+        mean: [mean; NOISE_CHANNELS as usize],
         sigma,
         rho,
         ..BlockSpec::default()

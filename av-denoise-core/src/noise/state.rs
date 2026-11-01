@@ -16,12 +16,12 @@ use super::history::{ReadingHistory, history_capacity};
 use super::reading::{
     CURVE_TAGS,
     IMMERKAER_SPATIAL_TAGS,
-    IMMERKAER_TAGS,
     READING_WORDS,
-    SAMPLE_TAGS,
     curve_queries,
     immerkaer_queries,
+    immerkaer_tags,
     sample_queries,
+    sample_tags,
 };
 use super::select::{SelectBatch, histogram_len};
 use super::spatial::{IMMERKAER_LANES, RESULTS_PER_SLOT, noise_partials_slot_stride_bytes, partials_len};
@@ -69,16 +69,28 @@ pub(crate) const SAMPLE_RUN_RHO: u32 = NOISE_CHANNELS;
 /// The quarters fill [TEMPORAL_QUARTERS](crate::noise::temporal::TEMPORAL_QUARTERS) runs, with each
 /// block's quarters side by side.
 pub(crate) const SAMPLE_RUN_QUARTERS: u32 = SAMPLE_RUN_RHO + 1;
-/// The sample batch's run of accepted flag lanes.
+/// The sample batch's run of channel 0's accepted flag lanes.
+///
+/// Channel `c`'s run is `c` past it.
 pub(crate) const SAMPLE_RUN_ACCEPTED: u32 = SAMPLE_RUN_QUARTERS + TEMPORAL_QUARTERS;
-/// The sample batch's lanes per block.
-pub(crate) const SAMPLE_LANES_PER_BLOCK: u32 = SAMPLE_RUN_ACCEPTED + 1;
 /// The curve batch's lanes per block, one per static quarter.
 pub(crate) const CURVE_LANES_PER_BLOCK: u32 = TEMPORAL_QUARTERS;
-/// The block flag of a block whose mean residual passes the static gate.
+/// The block flag of a block whose channel 0 mean residual passes the static gate.
 pub(crate) const BLOCK_CANDIDATE: u32 = 1;
-/// The block flag of a block accepted as static noise.
+/// The block flag of a block channel 0 accepts as static noise.
 pub(crate) const BLOCK_ACCEPTED: u32 = 2;
+/// The bits each channel's block flags take.
+const BLOCK_CHANNEL_FLAG_BITS: u32 = 2;
+
+/// Channel `channel`'s copy of a channel 0 block flag.
+pub(crate) const fn channel_flag(flag: u32, channel: u32) -> u32 {
+    flag << (BLOCK_CHANNEL_FLAG_BITS * channel)
+}
+
+/// The sample batch's lanes per block.
+pub(crate) const fn sample_lanes_per_block(channels: u32) -> u32 {
+    SAMPLE_RUN_ACCEPTED + channels
+}
 
 /// What one slot's reading measures.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -115,8 +127,8 @@ pub(super) struct Measurement {
     pub(super) stats: Option<Handle>,
     /// One reading of [READING_WORDS](crate::noise::reading::READING_WORDS) values per slot.
     pub(super) readings: Handle,
-    /// Each Immerkær cube's sigmas and, with temporal stats, each candidate block's channel-0 sigma
-    /// and texture.
+    /// Each Immerkær cube's sigmas and, with temporal stats, each candidate block's per-channel
+    /// sigmas and texture.
     pub(super) immerkaer_batch: SelectBatch,
     /// The per-block scratch and the sample batch, when temporal stats are measured.
     pub(super) sample: Option<SampleScratch>,
@@ -397,18 +409,22 @@ pub(super) fn block_count(shape: NoiseShape) -> u32 {
     blocks_x * blocks_y
 }
 
-/// The immerkaer batch's lanes, one per cube for each channel plus, with temporal stats, two per
-/// block.
+/// The immerkaer batch's lanes, one per cube for each channel plus, with temporal stats, one per
+/// block for each active channel and one per block for the texture.
 fn immerkaer_lanes(shape: NoiseShape) -> u32 {
     let cubes = cube_count(shape);
-    let block_lanes = if shape.temporal { 2 * block_count(shape) } else { 0 };
+    let block_lanes = if shape.temporal {
+        (shape.channels + 1) * block_count(shape)
+    } else {
+        0
+    };
 
     NOISE_CHANNELS * cubes + block_lanes
 }
 
 fn immerkaer_tag_count(shape: NoiseShape) -> u32 {
     if shape.temporal {
-        IMMERKAER_TAGS
+        immerkaer_tags(shape.channels)
     } else {
         IMMERKAER_SPATIAL_TAGS
     }
@@ -418,7 +434,7 @@ fn immerkaer_batch(client: &Client, shape: NoiseShape) -> SelectBatch {
     let len = immerkaer_lanes(shape);
     let tag_count = immerkaer_tag_count(shape);
     let min_counts = vec![0u32; tag_count as usize];
-    let queries = immerkaer_queries(shape.temporal);
+    let queries = immerkaer_queries(shape.temporal, shape.channels);
 
     SelectBatch::new(client, len, &min_counts, &queries)
 }
@@ -471,7 +487,7 @@ pub(crate) fn reading_buffer_sizes(shape: NoiseShape) -> Vec<BufferSize> {
     let immerkaer_lane_count = immerkaer_lanes(shape);
     let immerkaer_len = u64::from(immerkaer_lane_count);
     let immerkaer_tags = immerkaer_tag_count(shape);
-    let immerkaer_queries = immerkaer_queries(shape.temporal).len() as u32;
+    let immerkaer_queries = immerkaer_queries(shape.temporal, shape.channels).len() as u32;
     push_batch_sizes(
         &mut buffers,
         &IMMERKAER_BATCH,
@@ -485,13 +501,15 @@ pub(crate) fn reading_buffer_sizes(shape: NoiseShape) -> Vec<BufferSize> {
         buffers.push((BLOCK_VALUES, values));
         buffers.push((BLOCK_FLAGS, Some(blocks)));
 
-        let sample_len = blocks.checked_mul(u64::from(SAMPLE_LANES_PER_BLOCK));
-        let sample_queries = sample_queries().len() as u32;
+        let sample_lanes = sample_lanes_per_block(shape.channels);
+        let sample_len = blocks.checked_mul(u64::from(sample_lanes));
+        let sample_tags = sample_tags(shape.channels);
+        let sample_queries = sample_queries(shape.channels).len() as u32;
         push_batch_sizes(
             &mut buffers,
             &SAMPLE_BATCH,
             sample_len,
-            SAMPLE_TAGS,
+            sample_tags,
             sample_queries,
         );
 
@@ -528,14 +546,16 @@ fn push_batch_sizes(
     buffers.push((names.histogram, Some(histogram_words)));
 }
 
-/// The block scratch and the sample batch of [SAMPLE_LANES_PER_BLOCK] lanes per block.
+/// The block scratch and the sample batch of [sample_lanes_per_block] lanes per block.
 fn sample_scratch(client: &Client, shape: NoiseShape) -> SampleScratch {
     let blocks = block_count(shape);
     let values_bytes = (blocks * BLOCK_FIELDS) as usize * size_of::<f32>();
     let flags_bytes = blocks as usize * size_of::<u32>();
-    let min_counts = vec![0u32; SAMPLE_TAGS as usize];
-    let queries = sample_queries();
-    let len = SAMPLE_LANES_PER_BLOCK * blocks;
+    let tag_count = sample_tags(shape.channels);
+    let min_counts = vec![0u32; tag_count as usize];
+    let queries = sample_queries(shape.channels);
+    let lanes = sample_lanes_per_block(shape.channels);
+    let len = lanes * blocks;
     let batch = SelectBatch::new(client, len, &min_counts, &queries);
 
     SampleScratch {

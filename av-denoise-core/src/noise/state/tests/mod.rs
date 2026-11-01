@@ -1,16 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::{
-    BLOCK_ACCEPTED,
-    BLOCK_CANDIDATE,
-    BLOCK_FIELDS,
-    Measurement,
-    NoiseShape,
-    NoiseState,
-    ReadingSettings,
-    block_count,
-};
+use super::{BLOCK_FIELDS, Measurement, NoiseShape, NoiseState, ReadingSettings, block_count};
 #[cfg(any(feature = "vulkan", feature = "metal"))]
 use super::{
     BLOCK_FLAGS,
@@ -263,11 +254,11 @@ impl NoiseState {
     /// Fills every batch's keys and tags and the block scratch with values no reading may keep.
     ///
     /// Every lane carries tag 1 or 2 with a key far above any sigma, and every block reads as an
-    /// accepted candidate with garbage values.
+    /// accepted candidate of every channel with garbage values.
     pub(crate) fn poison_for_test(&mut self) {
         let client = self.client.clone();
         let shape = self.shape;
-        let immerkaer_queries = immerkaer_queries(shape.temporal);
+        let immerkaer_queries = immerkaer_queries(shape.temporal, shape.channels);
         let measurement = self.measurement_mut();
         let immerkaer_batch = &measurement.immerkaer_batch;
         measurement.immerkaer_batch = poisoned_batch(&client, immerkaer_batch, 0, &immerkaer_queries);
@@ -275,13 +266,13 @@ impl NoiseState {
         if let Some(sample) = measurement.sample.as_mut() {
             let blocks = block_count(shape) as usize;
             let values = vec![7.5f32; blocks * BLOCK_FIELDS as usize];
-            let flags = vec![BLOCK_CANDIDATE | BLOCK_ACCEPTED; blocks];
+            let flags = vec![u32::MAX; blocks];
             let value_bytes = f32::as_bytes(&values);
             let flag_bytes = u32::as_bytes(&flags);
 
             sample.block_values = client.create_from_slice(value_bytes);
             sample.block_flags = client.create_from_slice(flag_bytes);
-            let sample_queries = sample_queries();
+            let sample_queries = sample_queries(shape.channels);
             sample.batch = poisoned_batch(&client, &sample.batch, 0, &sample_queries);
         }
 
@@ -335,6 +326,19 @@ impl NoiseState {
 
         let handle = curve.tags().clone();
         let bytes = self.client.read_one(handle).expect("the curve tags read back");
+        let tags = u32::from_bytes(&bytes);
+
+        tags.to_vec()
+    }
+
+    /// Reads every lane's tag of the sample batch back, empty without temporal stats.
+    pub(crate) fn read_sample_tags(&self) -> Vec<u32> {
+        let Some(sample) = self.measurement().sample.as_ref() else {
+            return Vec::new();
+        };
+
+        let handle = sample.batch.tags().clone();
+        let bytes = self.client.read_one(handle).expect("the sample tags read back");
         let tags = u32::from_bytes(&bytes);
 
         tags.to_vec()

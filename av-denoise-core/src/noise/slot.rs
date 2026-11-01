@@ -402,6 +402,7 @@ impl NoiseState {
                 measurement.min_accepted,
                 immerkaer.tag_count(),
                 immerkaer.query_count(),
+                shape.channels,
                 shape.temporal,
                 measurement.curve.is_some(),
                 threads,

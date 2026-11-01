@@ -312,20 +312,42 @@ pub(crate) struct TemporalNoiseSample {
     pub static_fraction: f32,
 }
 
-/// A block that passed [STATIC_GATE], held until the outlier ceiling is known.
+/// One block's stats, held until each channel's checks are known.
 #[cfg(test)]
-struct StaticGateCandidate {
+struct BlockStats {
     index: usize,
     width: u32,
     height: u32,
+    means: [f32; NOISE_CHANNELS as usize],
     sigmas: [f32; NOISE_CHANNELS as usize],
-    sigma_ch0: f32,
     var_ch0: f32,
-    mean0: f32,
     mean_lag: f32,
     n_pairs: f32,
     texture: f32,
     moved: bool,
+}
+
+#[cfg(test)]
+impl BlockStats {
+    /// Whether the block's mean residual in `channel` passes [STATIC_GATE].
+    fn is_candidate(&self, channel: usize) -> bool {
+        self.means[channel].abs() < STATIC_GATE
+    }
+
+    /// Whether the block's sigma joins the sample, which a moved block above `threshold` does not.
+    fn keeps_sigma(&self, threshold: Option<f32>) -> bool {
+        let textured = threshold.is_some_and(|threshold| self.texture > threshold);
+
+        !(self.moved && textured)
+    }
+
+    fn to_accepted(&self) -> AcceptedBlock {
+        AcceptedBlock {
+            index: self.index,
+            width: self.width,
+            height: self.height,
+        }
+    }
 }
 
 /// One block [accepted_static_blocks] counted as static noise.
@@ -337,23 +359,42 @@ pub(crate) struct AcceptedBlock {
     pub(crate) width: u32,
     /// The in-frame height, which a ragged edge truncates.
     pub(crate) height: u32,
-    /// The per-channel sigma, with entries past the active channel count at 0.
-    pub(crate) sigmas: [f32; NOISE_CHANNELS as usize],
-    /// Channel 0's mean residual.
-    pub(crate) mean0: f32,
-    /// Channel 0's mean lag-1 product over adjacent pixel pairs.
-    pub(crate) mean_lag: f32,
-    /// Channel 0's residual variance.
-    pub(crate) var_ch0: f32,
-    /// How many adjacent pixel pairs the block holds.
-    pub(crate) n_pairs: f32,
-    /// Channel 0's gradient energy on the frame being read.
-    pub(crate) texture: f32,
-    /// Whether the block was differenced along a non-zero motion vector.
-    pub(crate) moved: bool,
 }
 
-/// Picks out the blocks in one slot's records that count as static noise.
+/// Picks out the blocks in one slot's records that channel 0 counts as static noise.
+#[cfg(test)]
+pub(crate) fn accepted_static_blocks(
+    records: &[f32],
+    channels: u32,
+    width: u32,
+    height: u32,
+) -> Option<Vec<AcceptedBlock>> {
+    let blocks = block_stats(records, channels, width, height);
+    let accepted = channel_accepted_blocks(&blocks, 0)?;
+    let accepted_blocks = accepted.into_iter().map(BlockStats::to_accepted).collect();
+
+    Some(accepted_blocks)
+}
+
+/// The indices of the blocks channel `channel` counts as static noise.
+///
+/// It returns `None` when the channel's outlier ceiling cannot be trusted.
+#[cfg(test)]
+pub(crate) fn accepted_channel_indices(
+    records: &[f32],
+    channels: u32,
+    width: u32,
+    height: u32,
+    channel: u32,
+) -> Option<Vec<usize>> {
+    let blocks = block_stats(records, channels, width, height);
+    let accepted = channel_accepted_blocks(&blocks, channel as usize)?;
+    let indices = accepted.iter().map(|block| block.index).collect();
+
+    Some(indices)
+}
+
+/// The blocks channel `channel` counts as static noise, judged on that channel's numbers alone.
 ///
 /// Three filters run in turn. [STATIC_GATE] keeps blocks whose mean residual is near zero, which a
 /// block panning across texture also passes. [SIGMA_OUTLIER_FACTOR] then rejects blocks far above
@@ -367,33 +408,29 @@ pub(crate) struct AcceptedBlock {
 /// no spread beside excluded blocks is reported as `None` rather than as a sigma texture may have
 /// inflated.
 #[cfg(test)]
-pub(crate) fn accepted_static_blocks(
-    records: &[f32],
-    channels: u32,
-    width: u32,
-    height: u32,
-) -> Option<Vec<AcceptedBlock>> {
-    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
-    let total_blocks = (blocks_x * blocks_y) as usize;
-    if total_blocks == 0 {
+fn channel_accepted_blocks(blocks: &[BlockStats], channel: usize) -> Option<Vec<&BlockStats>> {
+    if blocks.is_empty() {
         return None;
     }
 
-    let candidates = static_gate_candidates(records, channels, width, height);
+    let candidates: Vec<&BlockStats> = blocks
+        .iter()
+        .filter(|block| block.is_candidate(channel))
+        .collect();
 
     // Perfectly static blocks such as letterbox bars read a sigma of 0. Left in the reference they
     // drag the quartile to 0, which rejects every block with real noise.
-    let mut reference_sigma_ch0: Vec<f32> = candidates
+    let mut reference_sigma: Vec<f32> = candidates
         .iter()
-        .map(|candidate| candidate.sigma_ch0)
+        .map(|candidate| candidate.sigmas[channel])
         .filter(|&sigma| sigma > RHO_SIGMA_GATE)
         .collect();
-    sort_ascending(&mut reference_sigma_ch0);
+    sort_ascending(&mut reference_sigma);
 
     // A reference with no spread beside excluded blocks may be all texture setting its own
     // ceiling. With nothing excluded the population is trusted directly.
-    let candidates_were_excluded = candidates.len() > reference_sigma_ch0.len();
-    let reference_has_spread = match (reference_sigma_ch0.first(), reference_sigma_ch0.last()) {
+    let candidates_were_excluded = candidates.len() > reference_sigma.len();
+    let reference_has_spread = match (reference_sigma.first(), reference_sigma.last()) {
         (Some(&lowest), Some(&highest)) => highest > lowest,
         (None, _) | (_, None) => false,
     };
@@ -401,53 +438,33 @@ pub(crate) fn accepted_static_blocks(
         return None;
     }
 
-    let sigma_ceiling = if reference_sigma_ch0.is_empty() {
+    let sigma_ceiling = if reference_sigma.is_empty() {
         0.0
     } else {
-        lower_quartile(&reference_sigma_ch0) * SIGMA_OUTLIER_FACTOR
+        lower_quartile(&reference_sigma) * SIGMA_OUTLIER_FACTOR
     };
 
-    let mut accepted = Vec::new();
-
-    for candidate in candidates {
-        if candidate.sigma_ch0 > sigma_ceiling {
-            continue;
-        }
-
-        // A zero-sigma block carries no measurable noise, and a population of them would drag
-        // the lower quartile to 0.
-        if candidate.sigma_ch0 <= RHO_SIGMA_GATE {
-            continue;
-        }
-
-        accepted.push(AcceptedBlock {
-            index: candidate.index,
-            width: candidate.width,
-            height: candidate.height,
-            sigmas: candidate.sigmas,
-            mean0: candidate.mean0,
-            mean_lag: candidate.mean_lag,
-            var_ch0: candidate.var_ch0,
-            n_pairs: candidate.n_pairs,
-            texture: candidate.texture,
-            moved: candidate.moved,
-        });
-    }
+    let accepted = candidates
+        .into_iter()
+        .filter(|candidate| {
+            let sigma = candidate.sigmas[channel];
+            sigma <= sigma_ceiling && sigma > RHO_SIGMA_GATE
+        })
+        .collect();
 
     Some(accepted)
 }
 
 /// The texture above which a moved block's sigma is left out of the sample.
 ///
-/// It is the 40th percentile of the moved candidates above [RHO_SIGMA_GATE], or `None` when no
-/// such candidate exists.
+/// It is the 40th percentile of the moved blocks channel 0 holds candidates above
+/// [RHO_SIGMA_GATE], or `None` when no such block exists.
 #[cfg(test)]
-fn moved_texture_threshold(records: &[f32], channels: u32, width: u32, height: u32) -> Option<f32> {
-    let candidates = static_gate_candidates(records, channels, width, height);
-    let mut textures: Vec<f32> = candidates
+fn moved_texture_threshold(blocks: &[BlockStats]) -> Option<f32> {
+    let mut textures: Vec<f32> = blocks
         .iter()
-        .filter(|candidate| candidate.moved && candidate.sigma_ch0 > RHO_SIGMA_GATE)
-        .map(|candidate| candidate.texture)
+        .filter(|block| block.is_candidate(0) && block.moved && block.sigmas[0] > RHO_SIGMA_GATE)
+        .map(|block| block.texture)
         .collect();
     sort_ascending(&mut textures);
 
@@ -462,21 +479,16 @@ fn moved_texture_threshold(records: &[f32], channels: u32, width: u32, height: u
     Some(threshold)
 }
 
-/// Every block in one slot's records whose mean residual passes [STATIC_GATE].
+/// Every block's stats in one slot's records.
 #[cfg(test)]
-fn static_gate_candidates(
-    records: &[f32],
-    channels: u32,
-    width: u32,
-    height: u32,
-) -> Vec<StaticGateCandidate> {
+fn block_stats(records: &[f32], channels: u32, width: u32, height: u32) -> Vec<BlockStats> {
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
     let record_len = temporal_stats_record_len(channels) as usize;
     let texture_lane = (2 * channels + BLOCK_TEXTURE_LANE) as usize;
     let moved_lane = (2 * channels + BLOCK_MOVED_LANE) as usize;
     let channel_count = channels as usize;
 
-    let mut candidates = Vec::new();
+    let mut blocks = Vec::new();
 
     for block_y in 0..blocks_y {
         for block_x in 0..blocks_x {
@@ -490,21 +502,16 @@ fn static_gate_candidates(
             let pixel_count = (block_width * block_height) as f32;
             let n_pairs = (block_height * block_width.saturating_sub(1)) as f32;
 
-            let mean0 = record[0] / pixel_count;
-            if mean0.abs() >= STATIC_GATE {
-                continue;
-            }
-
+            let mut means = [0.0f32; NOISE_CHANNELS as usize];
             let mut sigmas = [0.0f32; NOISE_CHANNELS as usize];
-            let mut sigma_ch0 = 0.0f32;
             let mut var_ch0 = 0.0f32;
             for channel in 0..channel_count {
                 let mean = record[channel] / pixel_count;
                 let variance = (record[channel_count + channel] / pixel_count - mean * mean).max(0.0);
                 let sigma_block = variance.sqrt() / std::f32::consts::SQRT_2;
+                means[channel] = mean;
                 sigmas[channel] = sigma_block;
                 if channel == 0 {
-                    sigma_ch0 = sigma_block;
                     var_ch0 = variance;
                 }
             }
@@ -517,14 +524,13 @@ fn static_gate_candidates(
             let texture = record[texture_lane];
             let moved = record[moved_lane] != 0.0;
 
-            candidates.push(StaticGateCandidate {
+            blocks.push(BlockStats {
                 index: block_index,
                 width: block_width,
                 height: block_height,
+                means,
                 sigmas,
-                sigma_ch0,
                 var_ch0,
-                mean0,
                 mean_lag,
                 n_pairs,
                 texture,
@@ -533,15 +539,28 @@ fn static_gate_candidates(
         }
     }
 
-    candidates
+    blocks
 }
 
-/// Whether `block`'s sigma joins the sample, which a moved block above `threshold` does not.
+/// The median and lower quartile of the sigmas channel `channel` keeps from its `accepted` blocks,
+/// both 0 when it keeps none.
 #[cfg(test)]
-fn keeps_sigma(block: &AcceptedBlock, threshold: Option<f32>) -> bool {
-    let textured = threshold.is_some_and(|threshold| block.texture > threshold);
+fn channel_sigma(accepted: &[&BlockStats], channel: usize, threshold: Option<f32>) -> (f32, f32) {
+    let mut sigmas: Vec<f32> = accepted
+        .iter()
+        .filter(|block| block.keeps_sigma(threshold))
+        .map(|block| block.sigmas[channel])
+        .collect();
 
-    !(block.moved && textured)
+    if sigmas.is_empty() {
+        return (0.0, 0.0);
+    }
+
+    sort_ascending(&mut sigmas);
+    let sigma = median(&sigmas);
+    let sigma_low = lower_quartile(&sigmas);
+
+    (sigma, sigma_low)
 }
 
 /// The scalar sample [temporal_noise_reading] builds, without a curve.
@@ -575,15 +594,18 @@ impl TemporalNoiseReading {
     }
 }
 
-/// Builds one centre slot's [TemporalNoiseReading] from a single [accepted_static_blocks] call.
+/// Builds one centre slot's [TemporalNoiseReading].
 ///
-/// Sharing that selection keeps the scalar sample and the curve agreeing on which blocks are
-/// static noise. The sample is `None` when the outlier ceiling cannot be trusted, when the static
-/// fraction falls below [STATIC_FRACTION_MIN], or when no static block carries measurable noise,
-/// as in a zero-filled duplicate slot.
+/// Channel 0's [channel_accepted_blocks] selection sets the correlation, the static fraction and the
+/// curve, which keeps the scalar sample and the curve agreeing on which blocks are static noise.
+/// The sample is `None` when channel 0's outlier ceiling cannot be trusted, when the static fraction
+/// falls below [STATIC_FRACTION_MIN], or when no static block carries measurable noise, as in a
+/// zero-filled duplicate slot.
 ///
-/// A moved block whose texture is above [moved_texture_threshold] leaves `sigma` and `sigma_low`
-/// but still counts everywhere else. The sample is also `None` when that leaves no sigma.
+/// Each channel's `sigma` and `sigma_low` come from the blocks that channel accepts on its own
+/// numbers. A moved block whose texture is above [moved_texture_threshold] leaves them but still
+/// counts everywhere else. The sample is also `None` when that leaves channel 0 no sigma. Another
+/// channel left with no sigma, or with an untrusted ceiling, reads 0.
 ///
 /// The curve needs `with_curve` and a sample, since a frame too unreliable for a scalar sample is
 /// too unreliable for a curve.
@@ -600,46 +622,46 @@ pub(crate) fn temporal_noise_reading(
     let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
     let total_blocks = (blocks_x * blocks_y) as usize;
 
-    let Some(accepted) = accepted_static_blocks(records, channels, width, height) else {
+    let blocks = block_stats(records, channels, width, height);
+    let Some(accepted) = channel_accepted_blocks(&blocks, 0) else {
         return none;
     };
 
-    let threshold = moved_texture_threshold(records, channels, width, height);
+    let threshold = moved_texture_threshold(&blocks);
     let channel_count = channels as usize;
 
     let mut rho_samples = Vec::new();
     for block in &accepted {
         if block.n_pairs > 0.0 {
-            let rho = (block.mean_lag - block.mean0 * block.mean0) / block.var_ch0;
+            let mean0 = block.means[0];
+            let rho = (block.mean_lag - mean0 * mean0) / block.var_ch0;
             let clamped_rho = rho.clamp(0.0, 1.0);
             rho_samples.push(clamped_rho);
         }
     }
 
-    let sigma_blocks: Vec<&AcceptedBlock> = accepted
+    let kept_ch0 = accepted
         .iter()
-        .filter(|block| keeps_sigma(block, threshold))
-        .collect();
+        .filter(|block| block.keeps_sigma(threshold))
+        .count();
 
     let static_fraction = accepted.len() as f32 / total_blocks as f32;
     let below_fraction = static_fraction < STATIC_FRACTION_MIN;
-    if below_fraction || rho_samples.is_empty() || sigma_blocks.is_empty() {
+    if below_fraction || rho_samples.is_empty() || kept_ch0 == 0 {
         return none;
-    }
-
-    let mut static_sigmas: Vec<Vec<f32>> = vec![Vec::new(); channel_count];
-    for block in sigma_blocks {
-        for (channel, sigmas) in static_sigmas.iter_mut().enumerate().take(channel_count) {
-            sigmas.push(block.sigmas[channel]);
-        }
     }
 
     let mut sigma = [0.0f32; NOISE_CHANNELS as usize];
     let mut sigma_low = [0.0f32; NOISE_CHANNELS as usize];
-    for (channel, sigmas) in static_sigmas.iter_mut().enumerate() {
-        sort_ascending(sigmas);
-        sigma[channel] = median(sigmas);
-        sigma_low[channel] = lower_quartile(sigmas);
+    let (sigma_ch0, sigma_low_ch0) = channel_sigma(&accepted, 0, threshold);
+    sigma[0] = sigma_ch0;
+    sigma_low[0] = sigma_low_ch0;
+
+    for channel in 1..channel_count {
+        let channel_accepted = channel_accepted_blocks(&blocks, channel).unwrap_or_default();
+        let (channel_median, channel_low) = channel_sigma(&channel_accepted, channel, threshold);
+        sigma[channel] = channel_median;
+        sigma_low[channel] = channel_low;
     }
 
     sort_ascending(&mut rho_samples);
@@ -653,7 +675,8 @@ pub(crate) fn temporal_noise_reading(
     };
 
     let curve = if with_curve {
-        build_noise_curve(records, channels, &accepted, sample.sigma[0])
+        let accepted_blocks: Vec<AcceptedBlock> = accepted.into_iter().map(BlockStats::to_accepted).collect();
+        build_noise_curve(records, channels, &accepted_blocks, sample.sigma[0])
     } else {
         None
     };

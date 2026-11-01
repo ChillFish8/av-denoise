@@ -13,36 +13,48 @@ use crate::engine::align::StorageAlign;
 use crate::noise::NOISE_CHANNELS;
 use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
 use crate::noise::reading::{
+    BLOCK_SET_QUERIES,
+    BLOCK_SET_TAGS,
     IMMERKAER_CHANNEL_QUERIES,
-    IMMERKAER_QUERIES,
-    IMMERKAER_QUERY_EXCLUDED,
-    IMMERKAER_QUERY_REFERENCE,
-    IMMERKAER_QUERY_TEXTURE,
+    IMMERKAER_QUERY_EXCLUDED_BASE,
+    IMMERKAER_QUERY_REFERENCE_BASE,
     READING_CURVE_VALID,
     READING_SAMPLE_VALID,
+    READING_WORDS,
     ReadingRecord,
     SAMPLE_CHANNEL_QUERIES,
-    SAMPLE_QUERIES,
     SAMPLE_QUERY_ACCEPTED,
     SAMPLE_QUERY_QUARTER,
     SAMPLE_QUERY_RHO,
     TAG_ACCEPTED,
-    TAG_EXCLUDED,
-    TAG_MOVED_TEXTURE,
+    TAG_EXCLUDED_BASE,
     TAG_QUARTER,
-    TAG_REFERENCE,
+    TAG_REFERENCE_BASE,
     TAG_RHO,
     immerkaer_queries,
+    immerkaer_query_count,
+    immerkaer_query_texture,
     sample_queries,
+    sample_query_count,
+    tag_moved_texture,
 };
 use crate::noise::select::{RankRule, SelectQuery};
 use crate::noise::spatial::{RESULTS_PER_SLOT, sigma_block_p25_from_partials};
-use crate::noise::state::{BLOCK_ACCEPTED, NoiseShape, NoiseState, ReadingSettings, SlotStats};
-use crate::noise::stats::lower_quartile;
+use crate::noise::state::{
+    BLOCK_ACCEPTED,
+    NoiseShape,
+    NoiseState,
+    ReadingSettings,
+    SAMPLE_RUN_ACCEPTED,
+    SlotStats,
+    channel_flag,
+};
+use crate::noise::stats::{lower_quartile, median};
 use crate::noise::temporal::{
     RHO_SIGMA_GATE,
     STATIC_GATE,
     TemporalNoiseSample,
+    accepted_channel_indices,
     accepted_static_blocks,
     min_static_blocks,
     temporal_noise_reading,
@@ -282,10 +294,6 @@ fn assert_query_run(queries: &[SelectQuery], first: u32, tag: u32, rules: &[Rank
 
 #[test]
 fn the_query_indices_name_their_queries() {
-    let spatial = immerkaer_queries(false);
-    let immerkaer = immerkaer_queries(true);
-    let sample = sample_queries();
-
     let quartile_pair = [RankRule::QuartileLow, RankRule::QuartileHigh];
     let median_pair = [RankRule::MedianLow, RankRule::MedianHigh];
     let sample_channel = [
@@ -301,35 +309,43 @@ fn the_query_indices_name_their_queries() {
         RankRule::Last,
     ];
 
-    assert_eq!(spatial.len(), IMMERKAER_QUERY_REFERENCE as usize);
-    assert_eq!(immerkaer.len(), IMMERKAER_QUERIES as usize);
-    assert_eq!(sample.len(), SAMPLE_QUERIES as usize);
+    for channels in 1..=NOISE_CHANNELS {
+        let spatial = immerkaer_queries(false, channels);
+        let immerkaer = immerkaer_queries(true, channels);
+        let sample = sample_queries(channels);
 
-    for channel in 0..NOISE_CHANNELS {
-        let immerkaer_first = IMMERKAER_CHANNEL_QUERIES * channel;
-        let sample_first = SAMPLE_CHANNEL_QUERIES * channel;
+        assert_eq!(spatial.len(), IMMERKAER_QUERY_REFERENCE_BASE as usize);
+        assert_eq!(immerkaer.len(), immerkaer_query_count(channels) as usize);
+        assert_eq!(sample.len(), sample_query_count(channels) as usize);
 
-        assert_query_run(&spatial, immerkaer_first, channel, &quartile_pair);
-        assert_query_run(&immerkaer, immerkaer_first, channel, &quartile_pair);
-        assert_query_run(&sample, sample_first, channel, &sample_channel);
+        for channel in 0..NOISE_CHANNELS {
+            let immerkaer_first = IMMERKAER_CHANNEL_QUERIES * channel;
+            let sample_first = SAMPLE_CHANNEL_QUERIES * channel;
+
+            assert_query_run(&spatial, immerkaer_first, channel, &quartile_pair);
+            assert_query_run(&immerkaer, immerkaer_first, channel, &quartile_pair);
+            assert_query_run(&sample, sample_first, channel, &sample_channel);
+        }
+
+        for channel in 0..channels {
+            let reference_query = IMMERKAER_QUERY_REFERENCE_BASE + BLOCK_SET_QUERIES * channel;
+            let excluded_query = IMMERKAER_QUERY_EXCLUDED_BASE + BLOCK_SET_QUERIES * channel;
+            let reference_tag = TAG_REFERENCE_BASE + BLOCK_SET_TAGS * channel;
+            let excluded_tag = TAG_EXCLUDED_BASE + BLOCK_SET_TAGS * channel;
+            let accepted_query = SAMPLE_QUERY_ACCEPTED + channel;
+            let accepted_tag = TAG_ACCEPTED + channel;
+
+            assert_query_run(&immerkaer, reference_query, reference_tag, &reference);
+            assert_query_run(&immerkaer, excluded_query, excluded_tag, &[RankRule::First]);
+            assert_query_run(&sample, accepted_query, accepted_tag, &[RankRule::First]);
+        }
+
+        let texture_query = immerkaer_query_texture(channels);
+        let texture_tag = tag_moved_texture(channels);
+        assert_query_run(&immerkaer, texture_query, texture_tag, &[RankRule::TextureShare]);
+        assert_query_run(&sample, SAMPLE_QUERY_RHO, TAG_RHO, &median_pair);
+        assert_query_run(&sample, SAMPLE_QUERY_QUARTER, TAG_QUARTER, &median_pair);
     }
-
-    assert_query_run(&immerkaer, IMMERKAER_QUERY_REFERENCE, TAG_REFERENCE, &reference);
-    assert_query_run(
-        &immerkaer,
-        IMMERKAER_QUERY_EXCLUDED,
-        TAG_EXCLUDED,
-        &[RankRule::First],
-    );
-    assert_query_run(
-        &immerkaer,
-        IMMERKAER_QUERY_TEXTURE,
-        TAG_MOVED_TEXTURE,
-        &[RankRule::TextureShare],
-    );
-    assert_query_run(&sample, SAMPLE_QUERY_RHO, TAG_RHO, &median_pair);
-    assert_query_run(&sample, SAMPLE_QUERY_QUARTER, TAG_QUARTER, &median_pair);
-    assert_query_run(&sample, SAMPLE_QUERY_ACCEPTED, TAG_ACCEPTED, &[RankRule::First]);
 }
 
 #[test]
@@ -784,4 +800,222 @@ fn a_reading_with_every_sigma_left_out_has_no_sample() {
 
     assert_sampled(&gpu, &host, false);
     assert_eq!(gpu.accepted, 12);
+}
+
+/// A luma frame with moved texture, outliers, quiet blocks, moving blocks and curve quarters.
+fn recorded_luma_blocks() -> Vec<BlockSpec> {
+    let plane = Plane::luma(256, 192);
+    let mut blocks = moved_blocks(plane, 101);
+
+    for (index, block) in blocks.iter_mut().enumerate() {
+        let luma = 0.2 + 0.2 * (index % 4) as f32;
+        let quarter = QuarterSpec {
+            mean: 0.0,
+            sigma: block.sigma[0],
+            luma,
+            flatness: 0.0,
+            luma_min: luma - 0.01,
+            luma_max: luma + 0.01,
+        };
+        block.quarters = [quarter; 4];
+    }
+
+    for index in [7, 33, 120] {
+        blocks[index].sigma = [40.0 / 255.0; NOISE_CHANNELS as usize];
+    }
+
+    for index in [2, 58] {
+        blocks[index].sigma = [0.5 * RHO_SIGMA_GATE; NOISE_CHANNELS as usize];
+    }
+
+    for index in [11, 90, 150, 151] {
+        blocks[index] = moving_block(3.0 / 255.0);
+    }
+
+    blocks
+}
+
+/// The reading words of [recorded_luma_blocks], recorded before each channel had its own checks.
+const RECORDED_LUMA_WORDS: [u32; READING_WORDS as usize] = [
+    0x3adaa02c, 0x00000000, 0x3f800000, 0x3c3c3903, 0x00000000, 0x3c1cd525, 0x00000000, 0x3e8cd626,
+    0x3f73ffff, 0x43370000, 0x3f800000, 0x3c47f521, 0x40800000, 0x3f6b3254, 0x3f6b3254, 0x3f6b3254,
+    0x3f6b3254, 0x3f72067f, 0x3f78daab, 0x3f7faed7, 0x3f7b0aa1, 0x3f76666a, 0x3f71c234, 0x3f808b01,
+    0x3f8834e8, 0x3f8fdecf, 0x3f8fdecf, 0x3f8fdecf, 0x3f8fdecf,
+];
+
+#[test]
+fn a_single_channel_reading_matches_the_channel_0_rules_word_for_word() {
+    let client = test_client();
+    let plane = Plane::luma(256, 192);
+    let partials = hashed_partials(plane.width, plane.height, 101);
+    let blocks = recorded_luma_blocks();
+    let records = plane.records(&blocks);
+    let settings = ReadingSettings { luma_fields: true };
+    let state = state_for(&client, plane, true, settings, &partials, &records);
+    state.queue_reading(0).expect("the reading queues");
+
+    let (gpu, _) = read_back(&state, 0);
+    let words = gpu.to_words();
+    let bits: Vec<u32> = words.iter().map(|word| word.to_bits()).collect();
+
+    assert_eq!(bits, RECORDED_LUMA_WORDS);
+}
+
+/// The median and lower quartile of channel `channel`'s sigma over every block not in `left_out`.
+fn expected_channel_sigma(blocks: &[BlockSpec], channel: usize, left_out: &[usize]) -> (f32, f32) {
+    let mut sigmas: Vec<f32> = blocks
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !left_out.contains(index))
+        .map(|(_, block)| block.sigma[channel])
+        .collect();
+    sigmas.sort_by(f32::total_cmp);
+
+    let sigma = median(&sigmas);
+    let sigma_low = lower_quartile(&sigmas);
+
+    (sigma, sigma_low)
+}
+
+fn assert_within(actual: f32, expected: f32, what: &str) {
+    let gap = (actual - expected).abs();
+    assert!(gap <= 1e-6, "{what}: {actual} expected {expected}");
+}
+
+/// Asserts channel `channel` of `sample` reads the sigma of every block not in `left_out`.
+fn assert_channel_excludes(
+    sample: TemporalNoiseSample,
+    blocks: &[BlockSpec],
+    channel: usize,
+    left_out: &[usize],
+) {
+    let (sigma, sigma_low) = expected_channel_sigma(blocks, channel, left_out);
+    let sigma_what = format!("sigma[{channel}]");
+    let low_what = format!("sigma_low[{channel}]");
+
+    assert_within(sample.sigma[channel], sigma, &sigma_what);
+    assert_within(sample.sigma_low[channel], sigma_low, &low_what);
+}
+
+/// Static grain where every fourth block carries texture in channel 1 alone.
+///
+/// Half the textured blocks pan past the static gate and half sit far above the outlier ceiling.
+fn channel_1_textured_blocks(plane: Plane, seed: u32) -> (Vec<BlockSpec>, Vec<usize>) {
+    let mut blocks = static_blocks(plane, seed);
+    let mut textured = Vec::new();
+
+    for (index, block) in blocks.iter_mut().enumerate() {
+        match index % 8 {
+            0 => {
+                block.mean[1] = 4.0 * STATIC_GATE;
+                block.sigma[1] = 20.0 / 255.0;
+            },
+            4 => block.sigma[1] = 30.0 / 255.0,
+            _ => continue,
+        }
+
+        textured.push(index);
+    }
+
+    (blocks, textured)
+}
+
+/// Asserts each channel's accepted flags and accepted lanes name the blocks the host accepts, and
+/// returns how many blocks each channel accepted.
+fn assert_channel_accepted(plane: Plane, partials: &[f32], records: &[f32]) -> Vec<usize> {
+    let client = test_client();
+    let settings = ReadingSettings::default();
+    let state = state_for(&client, plane, true, settings, partials, records);
+    state.queue_reading(0).expect("the reading queues");
+
+    let flags = state.read_block_flags();
+    let sample_tags = state.read_sample_tags();
+    let block_count = plane.blocks();
+    let mut counts = Vec::new();
+
+    for channel in 0..plane.channels {
+        let host = accepted_channel_indices(records, plane.channels, plane.width, plane.height, channel);
+        let host_indices = host.expect("the channel's ceiling is trusted");
+        let flag = channel_flag(BLOCK_ACCEPTED, channel);
+        let flagged: Vec<usize> = (0..block_count)
+            .filter(|&index| flags[index] & flag != 0)
+            .collect();
+
+        let run_start = (SAMPLE_RUN_ACCEPTED + channel) as usize * block_count;
+        let accepted_tag = TAG_ACCEPTED + channel;
+        let tagged: Vec<usize> = (0..block_count)
+            .filter(|&index| sample_tags[run_start + index] == accepted_tag)
+            .collect();
+
+        assert_eq!(flagged, host_indices, "channel {channel} accepted flags");
+        assert_eq!(tagged, host_indices, "channel {channel} accepted lanes");
+        counts.push(host_indices.len());
+    }
+
+    counts
+}
+
+#[test]
+fn a_channel_1_moving_texture_block_is_excluded_from_channel_1_only() {
+    let client = test_client();
+    let plane = Plane::chroma(256, 192);
+    let luma = Plane::luma(plane.width, plane.height);
+    let partials = hashed_partials(plane.width, plane.height, 103);
+    let (blocks, textured) = channel_1_textured_blocks(plane, 103);
+    let records = plane.records(&blocks);
+    let (gpu, host) = check_plane(plane, &partials, &records);
+
+    let sample = gpu.sample.expect("the chroma frame has a sample");
+    let host_sample = host.sample.expect("the host has a sample");
+    assert_channel_excludes(sample, &blocks, 1, &textured);
+    assert_channel_excludes(host_sample, &blocks, 1, &textured);
+    assert_channel_excludes(sample, &blocks, 0, &[]);
+
+    let luma_records = luma.records(&blocks);
+    let (luma_gpu, _) = gpu_reading(&client, luma, true, &partials, &luma_records);
+    let luma_sample = luma_gpu.sample.expect("the channel 0 frame has a sample");
+
+    assert_eq!(sample.sigma[0].to_bits(), luma_sample.sigma[0].to_bits());
+    assert_eq!(sample.sigma_low[0].to_bits(), luma_sample.sigma_low[0].to_bits());
+    assert_eq!(sample.rho.to_bits(), luma_sample.rho.to_bits());
+    assert_eq!(
+        sample.static_fraction.to_bits(),
+        luma_sample.static_fraction.to_bits()
+    );
+    assert_eq!(gpu.accepted, luma_gpu.accepted);
+
+    let block_count = plane.blocks();
+    let counts = assert_channel_accepted(plane, &partials, &records);
+    assert_eq!(counts, [block_count, block_count - textured.len()]);
+}
+
+#[test]
+fn each_channel_rejects_its_own_outliers() {
+    let plane = Plane::chroma(256, 192);
+    let partials = hashed_partials(plane.width, plane.height, 107);
+    let mut blocks = static_blocks(plane, 107);
+    let channel_0_outliers = [5, 40, 77, 130];
+    let channel_1_outliers = [9, 60, 101, 170];
+
+    for index in channel_0_outliers {
+        blocks[index].sigma[0] = 30.0 / 255.0;
+    }
+
+    for index in channel_1_outliers {
+        blocks[index].sigma[1] = 30.0 / 255.0;
+    }
+
+    let records = plane.records(&blocks);
+    let (gpu, host) = check_plane(plane, &partials, &records);
+
+    let sample = gpu.sample.expect("the chroma frame has a sample");
+    let host_sample = host.sample.expect("the host has a sample");
+    assert_channel_excludes(sample, &blocks, 0, &channel_0_outliers);
+    assert_channel_excludes(sample, &blocks, 1, &channel_1_outliers);
+    assert_channel_excludes(host_sample, &blocks, 0, &channel_0_outliers);
+    assert_channel_excludes(host_sample, &blocks, 1, &channel_1_outliers);
+
+    let block_count = plane.blocks();
+    let counts = assert_channel_accepted(plane, &partials, &records);
+    assert_eq!(counts, [block_count - 4, block_count - 4]);
 }
