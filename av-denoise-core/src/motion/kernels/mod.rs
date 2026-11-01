@@ -1,6 +1,7 @@
 mod block_match;
 mod candidates;
 mod chain;
+mod chroma_map;
 mod compensate;
 mod escalate;
 mod global;
@@ -19,6 +20,7 @@ pub use self::block_match::{
 pub use self::candidates::MODEL_CANDIDATE_BIAS;
 pub(crate) use self::candidates::{BlockVector, model_displacement, predicts_motion};
 pub use self::chain::{mc_chain_compose, mc_pair_zero};
+pub use self::chroma_map::mc_map_luma_fields;
 pub use self::compensate::mc_warp;
 pub use self::escalate::{
     ESCALATE_BELOW_CONFIDENCE,

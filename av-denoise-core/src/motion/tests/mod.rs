@@ -1,5 +1,6 @@
 mod block_match;
 mod blocked_equivalence;
+mod chroma_map;
 mod escalate;
 mod merged;
 mod model_candidate;

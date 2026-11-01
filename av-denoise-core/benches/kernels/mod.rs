@@ -20,6 +20,7 @@ pub mod ingest;
 pub mod mc_block_match_coarse;
 pub mod mc_block_match_fine;
 pub mod mc_chain_compose;
+pub mod mc_chroma_map;
 pub mod mc_compose_models;
 pub mod mc_confidence;
 pub mod mc_downscale;

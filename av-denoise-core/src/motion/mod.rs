@@ -1,5 +1,7 @@
 mod analyse;
 mod chain;
+#[expect(dead_code, reason = "the chroma pass uses the mapping once it reads luma motion")]
+mod chroma_map;
 mod compensate;
 mod confidence;
 mod context;
@@ -23,6 +25,8 @@ pub(crate) use self::analyse::{
     run_seeded_refine,
 };
 pub(crate) use self::chain::{neighbour_idx_for_k, pair_byte_offset, run_pair_analyse, zero_pair_slot};
+#[expect(unused_imports, reason = "the chroma pass uses the mapping once it reads luma motion")]
+pub(crate) use self::chroma_map::{FieldLayout, Subsampling, map_luma_fields};
 pub(crate) use self::compensate::run_compensate;
 pub(crate) use self::confidence::{THSAD_PIXEL, run_confidence, sad_noise_floor, thsad};
 pub(crate) use self::context::{MotionCtx, pair_ring_slot_count};
