@@ -202,9 +202,7 @@ impl NlmDenoiser {
 
         // The window's derived noise is also the floor the truemotion penalty scales with. Chained
         // seeds come from pair fields that already ended with the stage, so the refine skips it.
-        let truemotion = self
-            .truemotion_targets(true)
-            .filter(|_| !self.is_chained());
+        let truemotion = self.truemotion_targets(true).filter(|_| !self.is_chained());
 
         let targets = MatchTargets {
             pyramid: analyse_pyramid,
@@ -238,7 +236,7 @@ impl NlmDenoiser {
         let centre_frame = self.slot_frame(centre_slot);
         let slot = ring.window_slot(centre_frame);
         let luma = FieldLayout::window(motion_ctx);
-        let chroma = ring.chroma_layout();
+        let chroma = ring.window_layout();
         let subsampling = ring.subsampling();
         let mv_field = self.window_field();
 

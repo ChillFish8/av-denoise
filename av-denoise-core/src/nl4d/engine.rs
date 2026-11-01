@@ -93,7 +93,14 @@ impl Nl4d {
         let ring_slots = 1 + 2 * u64::from(params.temporal_radius);
         geometry.check_ring_fits(ring_slots)?;
 
-        let sizes = buffer_sizes(client, &params, geometry.width, geometry.height);
+        let reads_luma_motion = motion.as_ref().is_some_and(SharedMotion::reads_luma_motion);
+        let sizes = buffer_sizes(
+            client,
+            &params,
+            geometry.width,
+            geometry.height,
+            reads_luma_motion,
+        );
         let indexable = check_u32_indexable(&sizes);
         indexable.map_err(Error::InvalidGeometry)?;
 

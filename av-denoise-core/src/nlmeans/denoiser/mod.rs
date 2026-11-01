@@ -131,7 +131,7 @@ pub struct NlmDenoiser {
     pub(super) pyramid_input: Option<Handle>,
     /// The luma pyramid built from the reference ring.
     pub(super) pyramid_reference: Option<Handle>,
-    /// How this front shares its window motion with the other pass, when it does.
+    /// How this front shares its motion with the other pass, when it does.
     pub(super) luma_motion: Option<RingRole>,
     /// The single-level search a chroma front refines the luma pass's vectors with.
     ///

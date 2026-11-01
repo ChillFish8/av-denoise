@@ -10,6 +10,7 @@ mod gpu_noise;
 mod gpu_submit;
 mod hq;
 mod lookahead;
+pub(crate) mod luma_motion;
 mod machinery;
 mod mirror;
 pub(crate) mod models;

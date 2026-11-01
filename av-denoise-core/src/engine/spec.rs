@@ -231,8 +231,8 @@ impl EngineSpec {
     /// Rejects a spec that cleans nothing, cleans chroma a frame lacks, mixes window spans, or gives
     /// the passes different motion settings.
     ///
-    /// The chroma pass takes its window motion from the luma pass, so both need the same motion
-    /// search and temporal radius.
+    /// The chroma pass takes its motion from the luma pass, so both need the same motion search and
+    /// temporal radius.
     ///
     /// A plane group passed through is copied word for word, so it also needs matching input and
     /// output formats.
@@ -275,7 +275,7 @@ impl EngineSpec {
                 return Err(Error::InvalidOptions(message));
             }
 
-            // The chroma pass takes its window motion from the luma pass.
+            // The chroma pass takes its motion from the luma pass.
             let luma_motion = luma.motion();
             let chroma_motion = chroma.motion();
             if luma_motion != chroma_motion {
@@ -290,7 +290,7 @@ impl EngineSpec {
         Ok(())
     }
 
-    /// The ring the luma pass shares its window motion with the chroma pass through.
+    /// The ring the luma pass shares its motion with the chroma pass through.
     ///
     /// It exists only when the spec runs both passes and both compensate motion.
     pub(crate) fn luma_motion_ring(&self, client: &Client) -> Option<LumaMotionRing> {

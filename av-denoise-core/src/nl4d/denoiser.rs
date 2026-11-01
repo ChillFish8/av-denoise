@@ -117,12 +117,19 @@ pub struct Nl4dDenoiser {
 ///
 /// The front end is sized at the grouping radius, as `new` sets it. `accum` holds as many elements
 /// as the frame ring, and `wsum`, `outputs` and `group_weight` hold fewer. The grain's saved vectors
-/// span one more frame than the motion field, so they are counted here.
-pub(crate) fn buffer_sizes(client: &Client, params: &Nl4dParams, width: u32, height: u32) -> Vec<BufferSize> {
+/// span one more frame than the motion field, so they are counted here. With `reads_luma_motion`,
+/// the front end is sized as one that refines luma motion.
+pub(crate) fn buffer_sizes(
+    client: &Client,
+    params: &Nl4dParams,
+    width: u32,
+    height: u32,
+    reads_luma_motion: bool,
+) -> Vec<BufferSize> {
     let mut nlm_params = params.nlm.clone();
     nlm_params.temporal_radius = params.temporal_radius;
 
-    let front = front_buffer_sizes(client, &nlm_params, width, height);
+    let front = front_buffer_sizes(client, &nlm_params, width, height, reads_luma_motion);
     let mut buffers = front.buffers;
 
     let exports_grain = params.grain_export && nlm_params.channels != ChannelMode::Chroma;

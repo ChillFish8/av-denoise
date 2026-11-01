@@ -1,3 +1,5 @@
+use std::ops::RangeInclusive;
+
 use anyhow::Context;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -5,9 +7,22 @@ use cubecl::server::Handle;
 use super::NlmDenoiser;
 use super::noise::measures_noise;
 use super::seeds::PairSeeds;
+use crate::engine::align::StorageAlign;
 use crate::engine::timing::timed;
-use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
-use crate::motion::{self, Escalation, MatchTargets, MotionCtx, run_analyse, run_pyramid_build};
+use crate::engine::{DevicePlane, IngestTarget, SampleFormat, copy_words_into, ingest};
+use crate::motion::{
+    self,
+    Escalation,
+    FieldLayout,
+    MatchTargets,
+    MotionCtx,
+    RingRole,
+    map_luma_fields,
+    run_analyse,
+    run_pyramid_build,
+    run_seeded_refine,
+};
+use crate::nlmeans::dispatch::MAPPED_REFINE_RADIUS;
 use crate::nlmeans::params::NlmParams;
 use crate::noise::{DERIVED_SAD_FLOOR, NOISE_WINDOW_RADIUS, StatsMotion};
 
@@ -64,10 +79,8 @@ impl LookAhead {
         let input = client.empty(frame_bytes * slots);
 
         let pyramid = mc_ctx.map(|motion_ctx| {
-            let pyramid_pixels =
-                motion::pyramid_pixels_per_frame(width, height, motion_ctx.pyramid_levels, motion_ctx.align);
-            let pyramid_bytes = pyramid_pixels * slots * size_of::<f32>();
-            client.empty(pyramid_bytes)
+            let levels = motion_ctx.pyramid_levels;
+            pyramid_ring(client, width, height, levels, motion_ctx.align)
         });
 
         let pair_field = mc_ctx.map(|motion_ctx| {
@@ -119,6 +132,18 @@ impl LookAhead {
         self.released = 0;
     }
 
+    /// Replaces the pyramid ring with one that holds only the full-resolution level.
+    pub(super) fn keep_one_pyramid_level(
+        &mut self,
+        client: &Client,
+        width: u32,
+        height: u32,
+        align: StorageAlign,
+    ) {
+        let pyramid = pyramid_ring(client, width, height, 1, align);
+        self.pyramid = Some(pyramid);
+    }
+
     /// The look-ahead's buffers by the names the buffer sizes list them under.
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn buffers_for_test(&self) -> [(&'static str, Option<&Handle>); 3] {
@@ -130,9 +155,26 @@ impl LookAhead {
     }
 }
 
+/// A pyramid of `levels` levels for every held frame.
+fn pyramid_ring(client: &Client, width: u32, height: u32, levels: u32, align: StorageAlign) -> Handle {
+    let pyramid_pixels = motion::pyramid_pixels_per_frame(width, height, levels, align);
+    let pyramid_bytes = pyramid_pixels * LOOKAHEAD_FRAMES as usize * size_of::<f32>();
+
+    client.empty(pyramid_bytes)
+}
+
 /// The look-ahead slot of stream frame `frame`.
 fn lookahead_slot(frame: u32) -> u32 {
     frame % LOOKAHEAD_FRAMES
+}
+
+/// The pair-field directions a search between two frames writes.
+fn searched_directions(both_ways: bool) -> RangeInclusive<u32> {
+    if both_ways {
+        OLDER_TO_NEWER..=NEWER_TO_OLDER
+    } else {
+        NEWER_TO_OLDER..=NEWER_TO_OLDER
+    }
 }
 
 impl NlmDenoiser {
@@ -247,15 +289,16 @@ impl NlmDenoiser {
     /// Builds the pyramid of stream frame `frame` and searches its motion to the frame before it.
     ///
     /// The second frame of a stream is also searched the other way, so the first frame can be read
-    /// against it, and so is every frame under `Chained` estimation. It does nothing without motion
-    /// compensation.
+    /// against it, and so is every frame under `Chained` estimation. A front that reads luma motion
+    /// refines the luma pass's pair instead. It does nothing without motion compensation.
     fn search_lookahead(&self, frame: u32) -> Result<(), anyhow::Error> {
         let Some(motion_ctx) = self.mc_ctx.as_ref() else {
             return Ok(());
         };
 
         let slot = lookahead_slot(frame);
-        self.build_lookahead_pyramid(motion_ctx, slot)?;
+        let pyramid_ctx = self.refine_ctx.as_ref().unwrap_or(motion_ctx);
+        self.build_lookahead_pyramid(pyramid_ctx, slot)?;
 
         let Some(previous) = frame.checked_sub(1) else {
             return Ok(());
@@ -263,8 +306,128 @@ impl NlmDenoiser {
 
         let previous_slot = lookahead_slot(previous);
         let both_ways = frame == 1 || self.is_chained();
+        if self.reads_luma_motion() {
+            return self.refine_lookahead_motion(frame, previous_slot, slot, both_ways);
+        }
+
         let seeds = self.compose_pair_seeds(previous, frame, both_ways);
-        self.search_lookahead_pair(motion_ctx, previous_slot, slot, both_ways, seeds)
+        self.search_lookahead_pair(motion_ctx, previous_slot, slot, both_ways, seeds)?;
+        self.share_lookahead_motion(motion_ctx, frame, both_ways);
+
+        Ok(())
+    }
+
+    /// Maps the pair just searched for stream frame `frame` into the luma motion ring, on a front
+    /// that writes it.
+    fn share_lookahead_motion(&self, motion_ctx: &MotionCtx, frame: u32, both_ways: bool) {
+        let Some(RingRole::Writer(ring)) = self.luma_motion.as_ref() else {
+            return;
+        };
+
+        let directions = searched_directions(both_ways);
+        let first = *directions.start();
+        let fields = directions.count() as u32;
+
+        let luma = FieldLayout::pair(motion_ctx);
+        let luma_offset = luma.field_byte_offset(first);
+        let luma_field = self.lookahead().pair_field().clone().offset_start(luma_offset);
+
+        let chroma = ring.pair_layout();
+        let chroma_offset = chroma.field_byte_offset(first);
+        let slot = ring.lookahead_slot(frame);
+        let chroma_field = slot.offset_start(chroma_offset);
+
+        map_luma_fields(
+            &self.client,
+            &luma_field,
+            luma,
+            &chroma_field,
+            chroma,
+            ring.subsampling(),
+            fields,
+        );
+    }
+
+    /// Refines the luma pass's mapped pair for stream frame `frame`, held in `newer_slot`, against
+    /// the frame in `older_slot`.
+    ///
+    /// Each vector is searched [MAPPED_REFINE_RADIUS] pixels around on this front's own plane.
+    fn refine_lookahead_motion(
+        &self,
+        frame: u32,
+        older_slot: u32,
+        newer_slot: u32,
+        both_ways: bool,
+    ) -> Result<(), anyhow::Error> {
+        let Some(RingRole::Reader(ring)) = self.luma_motion.as_ref() else {
+            anyhow::bail!("only a front that reads luma motion refines it");
+        };
+
+        let Some(mapped) = ring.read_lookahead(frame) else {
+            anyhow::bail!("the luma pass has not shared the look-ahead motion of stream frame {frame}");
+        };
+
+        let refine_ctx = self
+            .refine_ctx
+            .as_ref()
+            .expect("a front that reads luma motion has a refine search");
+
+        // Only the searched directions are copied, since only those are refined and read.
+        let directions = searched_directions(both_ways);
+        let first = *directions.start();
+        let fields = directions.count() as u32;
+        let layout = FieldLayout::pair(refine_ctx);
+        let offset = layout.field_byte_offset(first);
+        let source = mapped.offset_start(offset);
+        let lookahead = self.lookahead();
+        let pair_field = lookahead.pair_field();
+        let destination = pair_field.clone().offset_start(offset);
+        let words = (fields * layout.stride) as usize;
+        copy_words_into(&self.client, &source, &destination, words);
+
+        let noise = self.derived_handle();
+        let thsad = self.search_thsad(refine_ctx);
+        for direction in searched_directions(both_ways) {
+            let (centre_slot, neighbour_slot) = if direction == OLDER_TO_NEWER {
+                (older_slot, newer_slot)
+            } else {
+                (newer_slot, older_slot)
+            };
+
+            let direction_offset = motion::pair_byte_offset(refine_ctx, 0, direction);
+            let mv_field = pair_field.clone().offset_start(direction_offset);
+            let targets = MatchTargets {
+                pyramid: lookahead.pyramid(),
+                frame_count: LOOKAHEAD_FRAMES,
+                centre_slot,
+                neighbour_slots: &lookahead.slot_tables[neighbour_slot as usize],
+                neighbours: 1,
+                mv_field: &mv_field,
+                mv_len: refine_ctx.pair_direction_len() as usize,
+                confidence: &self.confidence_dummy,
+                conf_len: 1,
+                write_confidence: false,
+                predictions: None,
+                sad: None,
+                escalation: None,
+                truemotion: None,
+            };
+
+            run_seeded_refine(
+                &self.client,
+                refine_ctx,
+                self.width,
+                self.height,
+                &targets,
+                MAPPED_REFINE_RADIUS,
+                &noise,
+                DERIVED_SAD_FLOOR,
+                thsad,
+            )
+            .context("look-ahead refine dispatch failed")?;
+        }
+
+        Ok(())
     }
 
     /// Reads and records the noise of stream frame `frame`, just written to the look-ahead.

@@ -100,8 +100,15 @@ pub(crate) struct SharedMotion {
     pub ring: ModelRing,
     pub scale_x: f32,
     pub scale_y: f32,
-    /// How the pass shares its window motion with the other pass, when both compensate motion.
+    /// How the pass shares its motion with the other pass, when both compensate motion.
     pub luma_motion: Option<RingRole>,
+}
+
+impl SharedMotion {
+    /// Whether the pass refines the luma pass's motion instead of searching its own.
+    pub(crate) fn reads_luma_motion(&self) -> bool {
+        matches!(self.luma_motion, Some(RingRole::Reader(_)))
+    }
 }
 
 /// The consecutive stream frames taken since the producer last started over.

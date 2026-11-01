@@ -43,3 +43,21 @@ fn clear_empties_every_slot() {
 
     assert!(ring.read_window(FRAME).is_none());
 }
+
+#[test]
+fn a_lookahead_pair_reads_back_only_for_its_frame() {
+    let ring = ring();
+    ring.lookahead_slot(FRAME);
+
+    assert!(ring.read_lookahead(FRAME).is_some());
+    assert!(ring.read_lookahead(FRAME + 1).is_none());
+}
+
+#[test]
+fn clear_empties_the_lookahead_slot() {
+    let ring = ring();
+    ring.lookahead_slot(FRAME);
+    ring.clear();
+
+    assert!(ring.read_lookahead(FRAME).is_none());
+}

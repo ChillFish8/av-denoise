@@ -88,8 +88,8 @@ impl<'s> StagedFrame<'s> {
 /// A plane group without a pass is held in a [PassthroughRing] under the stream frame it came in
 /// with, and written out when the cleaned pass emits that same frame. With a
 /// [PairModelProducer], every frame's luma plane is fitted into a camera model before the passes
-/// see the frame. With a [LumaMotionRing], the chroma pass refines the luma pass's window motion
-/// instead of searching its own.
+/// see the frame. With a [LumaMotionRing], the chroma pass refines the luma pass's motion instead
+/// of searching its own.
 pub(crate) struct PlanarEngine {
     geometry: Geometry,
     luma: Option<Box<dyn FramePass>>,

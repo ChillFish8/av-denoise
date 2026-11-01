@@ -189,27 +189,26 @@ impl ModelSeeds {
 impl NlmDenoiser {
     /// Starts every motion search from the camera models in `motion`, and joins its luma motion ring.
     ///
-    /// It does nothing without motion compensation, and must be called before the first push.
+    /// A front that reads luma motion runs no search, so it takes no camera models. It does nothing
+    /// without motion compensation, and must be called before the first push.
     pub(crate) fn set_shared_motion(&mut self, motion: SharedMotion) {
         if self.mc_ctx.is_none() {
             return;
         }
 
         let role = motion.luma_motion.clone();
-        let seeds = ModelSeeds::new(&self.client, motion, self.params.temporal_radius);
-        self.seeds = Some(seeds);
-
-        if let Some(RingRole::Reader(_)) = role.as_ref() {
-            self.drop_window_search();
+        if motion.reads_luma_motion() {
+            self.drop_motion_search();
+        } else {
+            let seeds = ModelSeeds::new(&self.client, motion, self.params.temporal_radius);
+            self.seeds = Some(seeds);
         }
 
         self.luma_motion = role;
     }
 
-    /// Swaps the window search's buffers for the single-level refine of a front that reads luma motion.
-    ///
-    /// The look-ahead still runs its own search, so it keeps the escalation state.
-    fn drop_window_search(&mut self) {
+    /// Swaps the motion search's buffers for the single-level refine of a front that reads luma motion.
+    fn drop_motion_search(&mut self) {
         let motion_ctx = self.motion_ctx();
         let refine_ctx = motion_ctx.single_level(MAPPED_REFINE_RADIUS);
         let pyramid_pixels = pyramid_pixels_per_frame(self.width, self.height, 1, refine_ctx.align);
@@ -223,17 +222,18 @@ impl NlmDenoiser {
             self.pyramid_reference = Some(reference_pyramid);
         }
 
+        if let Some(lookahead) = self.lookahead.as_mut() {
+            lookahead.keep_one_pyramid_level(&self.client, self.width, self.height, refine_ctx.align);
+        }
+
         self.truemotion_bufs = None;
         self.pair_ring_buf = None;
         self.ring_slot_tables.clear();
-        if self.lookahead.is_none() {
-            self.escalation_buf = None;
-        }
-
+        self.escalation_buf = None;
         self.refine_ctx = Some(refine_ctx);
     }
 
-    /// Whether the front refines the luma pass's window motion instead of searching its own.
+    /// Whether the front refines the luma pass's motion instead of searching its own.
     pub(in crate::nlmeans) fn reads_luma_motion(&self) -> bool {
         matches!(self.luma_motion, Some(RingRole::Reader(_)))
     }
@@ -242,7 +242,7 @@ impl NlmDenoiser {
     ///
     /// Only a `Direct` search reads it, and the upload must come before the search's device span.
     pub(in crate::nlmeans) fn update_window_seeds(&mut self, center_t: u32) {
-        if self.seeds.is_none() || self.is_chained() || self.reads_luma_motion() {
+        if self.seeds.is_none() || self.is_chained() {
             return;
         }
 

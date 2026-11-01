@@ -6,16 +6,9 @@ use crate::engine::align::StorageAlign;
 use crate::motion::{LumaMotionRing, MotionCtx, RingRole, SharedMotion, Subsampling};
 use crate::nl4d::{MotionSnapshot, Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
-use crate::nlmeans::tests::models::{
-    ModelFitter,
-    PanShape,
-    matched_flags,
-    mean_over_blocks,
-    pan_clip,
-    stays_inside,
-};
+use crate::nlmeans::tests::luma_motion::{flat_chroma, panning_luma};
+use crate::nlmeans::tests::models::{ModelFitter, matched_flags, mean_over_blocks, stays_inside};
 use crate::nlmeans::{ChannelMode, NlmParams};
-use crate::tune::tests::fixtures::noisy_field_over;
 
 const WIDTH: u32 = 192;
 const HEIGHT: u32 = 96;
@@ -40,37 +33,6 @@ fn chroma_params() -> Nl4dParams {
     };
 
     Nl4dParams { nlm, ..defaults }
-}
-
-/// Interleaved chroma frames of flat grey plus grain, so no chroma search can find the pan.
-fn flat_chroma(count: usize) -> Vec<Vec<f32>> {
-    let flat = vec![0.5f32; (CHROMA_WIDTH * CHROMA_HEIGHT) as usize];
-
-    (0..count as u32)
-        .map(|index| {
-            let u_plane = noisy_field_over(&flat, CHROMA_WIDTH, CHROMA_HEIGHT, SIGMA, 2 * index + 1);
-            let v_plane = noisy_field_over(&flat, CHROMA_WIDTH, CHROMA_HEIGHT, SIGMA, 2 * index + 2);
-
-            u_plane
-                .iter()
-                .zip(&v_plane)
-                .flat_map(|(&u_value, &v_value)| [u_value, v_value])
-                .collect()
-        })
-        .collect()
-}
-
-fn luma_frames(count: usize) -> Vec<Vec<f32>> {
-    let shape = PanShape {
-        width: WIDTH,
-        height: HEIGHT,
-        chroma_scale: (2, 2),
-        shift: (PAN, 0),
-        sigma: SIGMA,
-    };
-    let frames = pan_clip(shape, count, 11);
-
-    frames.into_iter().map(|frame| frame.luma).collect()
 }
 
 fn ring(client: &Client, params: &Nl4dParams) -> LumaMotionRing {
@@ -103,8 +65,8 @@ fn chroma_motion(shared: bool) -> MotionSnapshot {
         chroma.set_shared_motion(chroma_motion);
     }
 
-    let luma_clip = luma_frames(FRAMES);
-    let chroma_clip = flat_chroma(FRAMES);
+    let luma_clip = panning_luma(WIDTH, HEIGHT, PAN, SIGMA, FRAMES);
+    let chroma_clip = flat_chroma(CHROMA_WIDTH, CHROMA_HEIGHT, SIGMA, FRAMES);
     for (luma_frame, chroma_frame) in luma_clip.iter().zip(&chroma_clip) {
         fitter.fit(luma_frame);
         luma.push_frame(luma_frame);

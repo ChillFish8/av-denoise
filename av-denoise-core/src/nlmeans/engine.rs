@@ -77,7 +77,14 @@ impl Nlmeans {
         let ring_slots = u64::from(params.total_frames());
         geometry.check_ring_fits(ring_slots)?;
 
-        let sizes = front_buffer_sizes(client, &params, geometry.width, geometry.height);
+        let reads_luma_motion = motion.as_ref().is_some_and(SharedMotion::reads_luma_motion);
+        let sizes = front_buffer_sizes(
+            client,
+            &params,
+            geometry.width,
+            geometry.height,
+            reads_luma_motion,
+        );
         let indexable = check_u32_indexable(&sizes.buffers);
         indexable.map_err(Error::InvalidGeometry)?;
 

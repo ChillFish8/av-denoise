@@ -37,15 +37,18 @@ impl FieldLayout {
     }
 
     /// The layout of the two directions of a look-ahead pair.
-    #[expect(
-        dead_code,
-        reason = "it mirrors the window layout for look-ahead pair fields, which no mapping reads"
-    )]
     pub(crate) fn pair(ctx: &MotionCtx) -> Self {
         Self {
             stride: ctx.pair_direction_stride(),
             ..Self::window(ctx)
         }
+    }
+
+    /// The byte offset of field `index`.
+    pub(crate) fn field_byte_offset(&self, index: u32) -> u64 {
+        let words = u64::from(index * self.stride);
+
+        words * size_of::<i32>() as u64
     }
 }
 
