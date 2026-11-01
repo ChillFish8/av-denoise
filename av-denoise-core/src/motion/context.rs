@@ -1,4 +1,5 @@
 use super::search::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP, MotionCompensationMode, MotionEstimation};
+use super::truemotion::TruemotionParams;
 use crate::engine::align::StorageAlign;
 
 /// The widening stages a search runs for blocks that fail their first window.
@@ -60,6 +61,8 @@ pub(crate) struct MotionCtx {
     pub pyramid_levels: u32,
     /// How the search widens, from `search_radius` up to the mode's `max_search_escalation`.
     pub schedule: SearchSchedule,
+    /// How the truemotion stage that ends every search picks its vectors.
+    pub truemotion: TruemotionParams,
     pub blocks_x: u32,
     pub blocks_y: u32,
     /// The alignment each per-slot slice of the motion field, confidence, pair ring and pyramid
@@ -98,10 +101,21 @@ impl MotionCtx {
             coarse_block_factor: 1,
             pyramid_levels,
             schedule,
+            truemotion: TruemotionParams::for_schedule(schedule),
             blocks_x,
             blocks_y,
             align,
         })
+    }
+
+    /// This geometry with the truemotion stage's penalty at `field_lambda`, which 0 turns off.
+    pub fn with_field_lambda(self, field_lambda: f32) -> Self {
+        let truemotion = TruemotionParams {
+            field_lambda,
+            ..self.truemotion
+        };
+
+        Self { truemotion, ..self }
     }
 
     /// This geometry with the coarse pass searching `radius` with blocks `block_factor` times wider.

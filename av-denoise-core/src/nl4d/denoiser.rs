@@ -109,10 +109,6 @@ pub struct Nl4dDenoiser {
     stream_start: StreamStart,
     /// The field buffers the last pass handed the fused kernel.
     pub(super) last_fields: Option<LastFields>,
-    pub(super) field_lambda: f32,
-    /// The regularised motion field, allocated only when `field_lambda > 0.0`.
-    pub(super) reg_mv: Option<Handle>,
-    pub(super) reg_conf: Option<Handle>,
     /// Present only when grain export is on.
     grain: Option<GrainExport>,
 }
@@ -120,9 +116,8 @@ pub struct Nl4dDenoiser {
 /// The element count of every geometry-sized buffer [Nl4dDenoiser::new] allocates beyond its frame rings.
 ///
 /// The front end is sized at the grouping radius, as `new` sets it. `accum` holds as many elements
-/// as the frame ring, `wsum`, `outputs` and `group_weight` hold fewer, and `reg_mv` and `reg_conf`
-/// match the front end's motion field and confidence. The grain's saved vectors span one more frame
-/// than the motion field, so they are counted here.
+/// as the frame ring, and `wsum`, `outputs` and `group_weight` hold fewer. The grain's saved vectors
+/// span one more frame than the motion field, so they are counted here.
 pub(crate) fn buffer_sizes(client: &Client, params: &Nl4dParams, width: u32, height: u32) -> Vec<BufferSize> {
     let mut nlm_params = params.nlm.clone();
     nlm_params.temporal_radius = params.temporal_radius;
@@ -194,6 +189,7 @@ impl Nl4dDenoiser {
         front.set_luma_noise_fields(apply_noise_map);
 
         front.set_shifted_edges(true);
+        front.set_field_lambda(params.field_lambda);
 
         // Only the NLM pilot reads an offset table on this front.
         let pilot_prefilter = matches!(params.nlm.prefilter, PrefilterMode::NlmSpatial { .. });
@@ -254,20 +250,6 @@ impl Nl4dDenoiser {
             client.empty(frame_len * size_of::<f32>()),
         ];
 
-        // `motion_ctx()` panics without motion compensation, which `validate` already requires.
-        let (reg_mv, reg_conf) = if params.field_lambda > 0.0 {
-            let motion_ctx = front.motion_ctx();
-            let neighbours = 2 * params.temporal_radius as u64;
-            let mv_bytes = neighbours * motion_ctx.mv_field_bytes_per_neighbour();
-            let conf_bytes = neighbours * motion_ctx.confidence_bytes_per_neighbour();
-            let reg_mv = client.empty(mv_bytes as usize);
-            let reg_conf = client.empty(conf_bytes as usize);
-
-            (Some(reg_mv), Some(reg_conf))
-        } else {
-            (None, None)
-        };
-
         let exports_grain = params.grain_export && channels != ChannelMode::Chroma;
         let grain = if exports_grain {
             let motion_ctx = front.motion_ctx();
@@ -318,9 +300,6 @@ impl Nl4dDenoiser {
             passes_run: 0,
             stream_start: StreamStart::SceneStart,
             last_fields: None,
-            field_lambda: params.field_lambda,
-            reg_mv,
-            reg_conf,
             grain,
         })
     }

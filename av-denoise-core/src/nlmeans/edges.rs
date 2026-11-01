@@ -35,6 +35,17 @@ impl NlmDenoiser {
         self.shifted_edges = on;
     }
 
+    /// Sets the truemotion stage's penalty to `field_lambda`, which 0 turns off.
+    ///
+    /// It does nothing without motion compensation.
+    pub(crate) fn set_field_lambda(&mut self, field_lambda: f32) {
+        let tuned = self
+            .mc_ctx
+            .take()
+            .map(|motion_ctx| motion_ctx.with_field_lambda(field_lambda));
+        self.mc_ctx = tuned;
+    }
+
     /// Copies the last pushed frame forward until every ring slot holds a frame.
     ///
     /// A stream shorter than the ring uses this at flush so its real frames can run as centres.

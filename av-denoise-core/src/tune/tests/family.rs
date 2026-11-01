@@ -5,8 +5,8 @@ use crate::tune::sites::{
     Centre,
     CollabVariant,
     FilterCandidate,
-    RegulariseCandidate,
     SearchVariant,
+    TruemotionCandidate,
     Walk,
     WindowCandidate,
 };
@@ -201,10 +201,10 @@ fn assert_value_of_inverts_compose<C: SiteCandidate>() {
 
 #[test]
 fn removed_candidates_are_gone() {
-    assert_eq!(RegulariseCandidate::from_name("coop64"), None);
+    assert_eq!(TruemotionCandidate::from_name("coop64"), None);
     assert_eq!(WindowCandidate::from_name("16x16"), None);
 
-    assert!(RegulariseCandidate::from_name("coop32").is_some());
+    assert!(TruemotionCandidate::from_name("coop32").is_some());
     assert!(WindowCandidate::from_name("16x16_separable").is_some());
     assert!(CollabVariant::from_name("groups8_uniform").is_some());
 }
@@ -216,7 +216,7 @@ fn every_candidate_is_reachable_from_its_families() {
     assert_reachable::<FilterCandidate>();
     assert_reachable::<WindowCandidate>();
     assert_reachable::<AccumulateCandidate>();
-    assert_reachable::<RegulariseCandidate>();
+    assert_reachable::<TruemotionCandidate>();
 }
 
 #[test]
@@ -226,7 +226,7 @@ fn family_ids_are_unique_within_each_site() {
     assert_ids_unique::<FilterCandidate>();
     assert_ids_unique::<WindowCandidate>();
     assert_ids_unique::<AccumulateCandidate>();
-    assert_ids_unique::<RegulariseCandidate>();
+    assert_ids_unique::<TruemotionCandidate>();
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn flat_families_are_disjoint_and_hold_their_representative() {
     assert_flat_families_hold_their_members::<FilterCandidate>();
     assert_flat_families_hold_their_members::<WindowCandidate>();
     assert_flat_families_hold_their_members::<AccumulateCandidate>();
-    assert_flat_families_hold_their_members::<RegulariseCandidate>();
+    assert_flat_families_hold_their_members::<TruemotionCandidate>();
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn the_baseline_is_a_representative_of_every_site() {
     assert_baseline_is_a_representative::<FilterCandidate>();
     assert_baseline_is_a_representative::<WindowCandidate>();
     assert_baseline_is_a_representative::<AccumulateCandidate>();
-    assert_baseline_is_a_representative::<RegulariseCandidate>();
+    assert_baseline_is_a_representative::<TruemotionCandidate>();
 }
 
 #[test]

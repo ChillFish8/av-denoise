@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::fixtures::{AccumulateSpec, accumulate_site, regularise_site};
+use super::fixtures::{AccumulateSpec, accumulate_site, truemotion_site};
 use super::probe::{ProbeCandidate, ProbeSite, small_device_limits};
-use super::regularise::regularise_specs;
 use super::runtime::test_client;
+use super::truemotion::truemotion_specs;
 use crate::nlmeans::ChannelMode;
 use crate::tests::compilation_cache::install_test_compilation_cache;
 use crate::tune::ledger::Observed;
@@ -12,7 +12,7 @@ use crate::tune::precompile::CompileAccount;
 use crate::tune::sites::{
     AccumulateCandidate,
     CollabVariant,
-    RegulariseCandidate,
+    TruemotionCandidate,
     WindowCandidate,
     candidate_known,
 };
@@ -56,7 +56,7 @@ fn every_shipped_candidate_name_is_known() {
     assert_all_known::<WindowCandidate>();
     assert_all_known::<AccumulateCandidate>();
     assert_all_known::<CollabVariant>();
-    assert_all_known::<RegulariseCandidate>();
+    assert_all_known::<TruemotionCandidate>();
 }
 
 #[test]
@@ -233,8 +233,8 @@ fn only_one_caller_claims_the_target() {
 #[test]
 fn deterministic_ledgers_count_only_exact_representatives() {
     let client = test_client();
-    let specs = regularise_specs();
-    let site = regularise_site(&client, &specs[0]);
+    let specs = truemotion_specs();
+    let site = truemotion_site(&client, &specs[0]);
     let deterministic = TuneLedger::new(true);
     let rounding = TuneLedger::new(false);
     let deterministic_selector = selector_for(&deterministic);

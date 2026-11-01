@@ -341,6 +341,7 @@ fn run_analyse_fills_confidence_buffer() {
         predictions: None,
         sad: None,
         escalation: None,
+        truemotion: None,
     };
     run_analyse(
         &client,
@@ -418,6 +419,7 @@ fn run_confidence_fills_confidence_buffer() {
         predictions: None,
         sad: None,
         escalation: None,
+        truemotion: None,
     };
     run_confidence(
         &client,

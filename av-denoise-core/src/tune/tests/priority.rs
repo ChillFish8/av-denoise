@@ -4,10 +4,10 @@ use crate::tune::sites::{
     COLLAB_SEARCH,
     CollabVariant,
     FilterCandidate,
-    NL4D_MV_REGULARISE,
+    MC_TRUEMOTION,
     NLM_WINDOW,
-    RegulariseCandidate,
     SearchVariant,
+    TruemotionCandidate,
     WindowCandidate,
 };
 use crate::tune::{
@@ -105,7 +105,7 @@ fn every_site() -> Vec<SiteFamilies> {
         site_families(&[FilterCandidate::baseline()]),
         site_families(&[WindowCandidate::baseline()]),
         site_families(&[AccumulateCandidate::baseline()]),
-        site_families(&[RegulariseCandidate::baseline()]),
+        site_families(&[TruemotionCandidate::baseline()]),
     ]
 }
 
@@ -278,7 +278,7 @@ fn family_order_puts_unlisted_families_last_in_declaration_order() {
     let expected = vec![FamilyId("c"), FamilyId("a"), FamilyId("b"), FamilyId("d")];
     assert_eq!(ordered, expected);
 
-    let other_site = family_order(&table, NL4D_MV_REGULARISE, &families);
+    let other_site = family_order(&table, MC_TRUEMOTION, &families);
     assert_eq!(other_site, families.to_vec());
 }
 

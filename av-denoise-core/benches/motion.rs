@@ -10,7 +10,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use av_denoise_core::bench_api::motion::{DEFAULT_MAX_SEARCH_ESCALATION, PairModelProducer};
-use av_denoise_core::bench_api::tune_sites::RegulariseCandidate;
+use av_denoise_core::bench_api::tune_sites::TruemotionCandidate;
 use av_denoise_core::bench_api::{
     ChannelMode,
     Device,
@@ -36,7 +36,7 @@ use kernels::mc_block_match_fine::BlockMatchFineBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
-use kernels::mv_regularise::MvRegulariseBench;
+use kernels::mv_truemotion::MvTruemotionBench;
 use kernels::{BENCH_NEIGHBOURS, CHANNELS, make_synthetic_frame, print_header, run};
 
 const WIDTH: u32 = 1920;
@@ -322,8 +322,8 @@ fn run_kernels(backend: &str, client: &Client) {
     }
 
     for &neighbours in BENCH_NEIGHBOURS {
-        for &candidate in RegulariseCandidate::ALL {
-            run(MvRegulariseBench {
+        for &candidate in TruemotionCandidate::ALL {
+            run(MvTruemotionBench {
                 client: client.clone(),
                 candidate,
                 neighbours,

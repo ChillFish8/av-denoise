@@ -1,4 +1,5 @@
 use crate::bench_api::HostIo;
+use crate::motion::truemotion::DEFAULT_FIELD_LAMBDA;
 use crate::motion::{MAX_SEARCH_RADIUS, MotionCompensationMode, MotionCtx, MotionEstimation, MotionSearch};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::{correlated_noisy_frame, make_client, noisy_field_over};
@@ -59,9 +60,19 @@ fn hq_params(motion_compensation: MotionCompensationMode) -> NlmParams {
 /// A front searching with `motion_compensation`, fed every frame of `frames` and returned after its
 /// last submit.
 fn run_front(motion_compensation: MotionCompensationMode, frames: &[Vec<f32>]) -> NlmDenoiser {
+    run_front_at(motion_compensation, frames, DEFAULT_FIELD_LAMBDA)
+}
+
+/// [run_front] with the truemotion stage's penalty at `field_lambda`, which 0 turns off.
+fn run_front_at(
+    motion_compensation: MotionCompensationMode,
+    frames: &[Vec<f32>],
+    field_lambda: f32,
+) -> NlmDenoiser {
     let client = make_client();
     let params = hq_params(motion_compensation);
     let mut denoiser = NlmDenoiser::new(&client, params, WIDTH, HEIGHT);
+    denoiser.set_field_lambda(field_lambda);
 
     for frame in frames {
         denoiser.push_frame(frame);
@@ -312,13 +323,14 @@ fn escalation_rescues_a_fast_local_object() {
     }
 }
 
+/// The truemotion stage alone recovers part of the object, so both searches run without it.
 #[test]
 fn chained_escalation_rescues_a_fast_local_object() {
     let frames = object_frames();
     let chained = MotionEstimation::chained_default();
 
     let fixed_mode = mode(2, 2, chained);
-    let fixed = run_front(fixed_mode, &frames);
+    let fixed = run_front_at(fixed_mode, &frames, 0.0);
     let fixed_matched = object_matched(&fixed);
     let misses = fixed_matched.iter().all(|&matched| matched < MISSED);
     assert!(
@@ -327,12 +339,32 @@ fn chained_escalation_rescues_a_fast_local_object() {
     );
 
     let escalated_mode = mode(2, 8, chained);
-    let escalated = run_front(escalated_mode, &frames);
+    let escalated = run_front_at(escalated_mode, &frames, 0.0);
     let escalated_matched = object_matched(&escalated);
     for (neighbour, &matched) in escalated_matched.iter().enumerate() {
         assert!(
             matched > FOLLOWED,
             "escalation must find the object for neighbour {neighbour}, got {escalated_matched:?}"
+        );
+    }
+}
+
+#[test]
+fn the_truemotion_stage_recovers_part_of_a_chained_fast_local_object() {
+    let frames = object_frames();
+    let chained = MotionEstimation::chained_default();
+    let fixed_mode = mode(2, 2, chained);
+
+    let unstaged = run_front_at(fixed_mode, &frames, 0.0);
+    let staged = run_front(fixed_mode, &frames);
+    let unstaged_matched = object_matched(&unstaged);
+    let staged_matched = object_matched(&staged);
+
+    // The stage lifts every neighbour by at least 0.2 of the object's blocks today.
+    for (neighbour, (&before, &after)) in unstaged_matched.iter().zip(&staged_matched).enumerate() {
+        assert!(
+            after >= before + 0.15,
+            "neighbour {neighbour}: {before} without the stage, {after} with it"
         );
     }
 }

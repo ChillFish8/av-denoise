@@ -47,9 +47,9 @@ applies on top of whatever is pinned.
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates.
 
 **`--field-lambda` pulls each block's motion vector toward its neighbours.** `1.0` (the library
-default) is the shipped calibration and smooths the tracked field. Raise it further on noisy or
-flat content where vectors wander, at the cost of following small objects less closely. `0` turns
-the smoothing off and leaves the tracked field as it is.
+default) is the shipped calibration and smooths the tracked field, more strongly as the noise
+grows. Raise it further on noisy or flat content where vectors wander, at the cost of following
+small objects less closely. `0` turns the smoothing off and leaves the tracked field as it is.
 
 **`--no-noise-map` turns off the luma noise map.** The noise map is on by default. It scales the
 luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones

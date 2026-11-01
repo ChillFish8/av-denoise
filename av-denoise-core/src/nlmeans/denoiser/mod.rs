@@ -121,6 +121,11 @@ pub struct NlmDenoiser {
     ///
     /// The look-ahead, pair and window searches run one after another, so they share it.
     pub(super) escalation_buf: Option<Handle>,
+    /// The truemotion stage's seeds and field between passes, each shaped like `mv_field_buf`, then
+    /// its change flags, two confidence layouts of `u32`.
+    ///
+    /// The look-ahead, pair and window searches run one after another, so they share them.
+    pub(super) truemotion_bufs: Option<[Handle; 3]>,
     /// The luma pyramid, indexed by level, then frame, then pixel.
     pub(super) pyramid_input: Option<Handle>,
     /// The luma pyramid built from the reference ring.
@@ -270,6 +275,16 @@ impl NlmDenoiser {
             (None, None, None, None, None)
         };
 
+        let truemotion_bufs = mc_ctx.as_ref().map(|motion_ctx| {
+            let neighbours = (2 * params.temporal_radius) as u64;
+            let field_bytes = neighbours * motion_ctx.mv_field_bytes_per_neighbour();
+            let changes_bytes = 2 * neighbours * motion_ctx.confidence_bytes_per_neighbour();
+            let seeds = client.empty(field_bytes as usize);
+            let field = client.empty(field_bytes as usize);
+            let changes = client.empty(changes_bytes as usize);
+            [seeds, field, changes]
+        });
+
         let escalating_ctx = mc_ctx
             .as_ref()
             .filter(|motion_ctx| motion_ctx.schedule.escalates());
@@ -385,6 +400,7 @@ impl NlmDenoiser {
             mv_field_buf,
             pair_ring_buf,
             escalation_buf,
+            truemotion_bufs,
             pyramid_input,
             pyramid_reference,
             confidence_ctx,

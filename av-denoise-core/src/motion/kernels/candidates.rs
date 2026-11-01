@@ -13,9 +13,9 @@ pub const MODEL_CANDIDATE_BIAS: f32 = 0.125;
 
 /// A search centre in a level's pixels.
 #[derive(CubeType, Clone, Copy)]
-pub(super) struct BlockVector {
-    pub(super) dx: i32,
-    pub(super) dy: i32,
+pub(crate) struct BlockVector {
+    pub(crate) dx: i32,
+    pub(crate) dy: i32,
 }
 
 /// The search centres one block evaluates, in order of preference.
@@ -78,7 +78,7 @@ pub(super) fn candidate_count(model_candidate: bool) -> u32 {
     clippy::too_many_arguments,
     reason = "every argument is a buffer, position or comptime shape the prediction reads"
 )]
-pub(super) fn model_displacement(
+pub(crate) fn model_displacement(
     predictions: &[f32],
     neighbour_index: u32,
     block_origin_x: i32,
@@ -124,7 +124,7 @@ pub(super) fn model_displacement(
 ///
 /// A neighbour without a model composes to an exact identity, which adds no search centre.
 #[cube]
-pub(super) fn predicts_motion(predictions: &[f32], neighbour_index: u32) -> bool {
+pub(crate) fn predicts_motion(predictions: &[f32], neighbour_index: u32) -> bool {
     let base = (neighbour_index * AFFINE_WORDS) as usize;
     let scales = predictions[base] != 1.0f32 || predictions[base + 3] != 1.0f32;
     let shears = predictions[base + 1] != 0.0f32 || predictions[base + 2] != 0.0f32;

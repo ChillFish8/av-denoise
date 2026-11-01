@@ -4,6 +4,7 @@ use cubecl::server::Handle;
 use super::MotionCtx;
 use super::analyse::{Escalation, MatchTargets, run_analyse};
 use super::kernels::mc_pair_zero;
+use super::truemotion::TruemotionTargets;
 use crate::engine::{BLOCK_1D, MAX_GRID_1D};
 use crate::noise::DERIVED_SAD_FLOOR;
 
@@ -27,7 +28,8 @@ pub(crate) fn pair_byte_offset(motion_ctx: &MotionCtx, pair_slot: u32, direction
 /// derived noise values. With `predictions`, each direction also searches around its camera model
 /// prediction, older to newer first. With `escalation`, blocks that fail search again as
 /// [run_analyse] describes, judged with `thsad`, and the two directions share the state one after
-/// the other.
+/// the other. With `truemotion`, each direction ends with the truemotion stage, which shares its
+/// buffers the same way and keeps the unscaled penalty.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -48,12 +50,17 @@ pub(crate) fn run_pair_analyse(
     noise: &Handle,
     predictions: Option<[&Handle; 2]>,
     escalation: Option<&Handle>,
+    truemotion: Option<TruemotionTargets<'_>>,
     thsad: f32,
 ) -> Result<(), anyhow::Error> {
     // The pair searches score against zeroed or stale noise, so they measure their own floor.
     let escalation = escalation.map(|state| Escalation {
         state,
         reads_floor: false,
+    });
+    let truemotion = truemotion.map(|stage| TruemotionTargets {
+        reads_floor: false,
+        ..stage
     });
     let (older_to_newer_predictions, newer_to_older_predictions) = match predictions {
         Some([older_to_newer, newer_to_older]) => (Some(older_to_newer), Some(newer_to_older)),
@@ -78,6 +85,7 @@ pub(crate) fn run_pair_analyse(
         predictions: older_to_newer_predictions,
         sad: None,
         escalation,
+        truemotion,
     };
     run_analyse(
         client,
@@ -106,6 +114,7 @@ pub(crate) fn run_pair_analyse(
         predictions: newer_to_older_predictions,
         sad: None,
         escalation,
+        truemotion,
     };
     run_analyse(
         client,

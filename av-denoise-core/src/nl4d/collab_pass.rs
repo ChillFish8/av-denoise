@@ -11,7 +11,6 @@ use crate::collab::geometry::{ref_count, refs_along};
 use crate::collab::grid_frames;
 use crate::collab::kernels::aggregate::collab_zero_accum;
 use crate::engine::timing::timed;
-use crate::motion::truemotion::run_regularise;
 use crate::nlmeans::{MAX_GRID_1D, RingView};
 use crate::tune::sites::{
     CollabFilterSite,
@@ -86,9 +85,8 @@ impl Nl4dDenoiser {
 
         self.passes_run += 1;
 
-        // The regularise launch and the scatter run in separate device spans, so each span fits
-        // one compute pass.
-        let (mv_field, confidence) = timed(&client, self, |denoiser| denoiser.regularise_fields(view))?;
+        let mv_field = view.mv_field.clone();
+        let confidence = view.confidence.clone();
 
         self.last_fields = Some(LastFields {
             mv_field: mv_field.clone(),
@@ -113,35 +111,6 @@ impl Nl4dDenoiser {
         timed(&client, self, move |denoiser| {
             denoiser.scatter_pass(view, cleared_slots, pass)
         })
-    }
-
-    /// Regularises the view's motion fields when the field regulariser is on.
-    ///
-    /// Returns the motion field and confidence the pass groups with.
-    fn regularise_fields(&self, view: &RingView) -> Result<(Handle, Handle), anyhow::Error> {
-        let (Some(reg_mv), Some(reg_conf)) = (self.reg_mv.as_ref(), self.reg_conf.as_ref()) else {
-            let fields = (view.mv_field.clone(), view.confidence.clone());
-            return Ok(fields);
-        };
-
-        let motion_ctx = self.front.motion_ctx();
-        let noise = self.front.derived_handle();
-        let thsad = self.front.thsad_value();
-        run_regularise(
-            &self.kernels,
-            motion_ctx,
-            view,
-            self.width,
-            self.height,
-            self.field_lambda,
-            &noise,
-            thsad,
-            reg_mv,
-            reg_conf,
-        )?;
-
-        let fields = (reg_mv.clone(), reg_conf.clone());
-        Ok(fields)
     }
 
     /// Zeroes the accumulator regions in `cleared_slots`, then groups, filters and scatters one pass.

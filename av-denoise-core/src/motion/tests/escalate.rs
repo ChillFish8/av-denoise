@@ -276,6 +276,7 @@ impl Buffers {
             predictions: None,
             sad: Some(&self.sad),
             escalation: tracked.then_some(self.escalation()),
+            truemotion: None,
         }
     }
 

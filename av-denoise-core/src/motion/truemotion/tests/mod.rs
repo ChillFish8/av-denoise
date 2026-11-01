@@ -1,4 +1,6 @@
-mod regularise;
+mod harness;
+mod legacy;
+mod stage;
 
 use cubecl::prelude::*;
 

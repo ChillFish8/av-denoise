@@ -1,13 +1,6 @@
-use cubecl::prelude::*;
-
+use super::harness::{BLKSIZE, STEP, StageInput, run_stage, shifted, textured, uniform_field};
 use super::make_client;
-use crate::motion::THSAD_PIXEL;
-use crate::motion::truemotion::kernels::nl4d_mv_regularise;
-use crate::noise::tests::sad_floor_buffer;
-use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
-
-const BLKSIZE: u32 = 16;
-const STEP: u32 = 8;
+use crate::motion::truemotion::TruemotionParams;
 
 /// [run_with_floor] with a SAD floor of 0.
 fn run(
@@ -21,10 +14,10 @@ fn run(
     run_with_floor(width, height, centre, neighbour, mv_in, lambda, 0.0)
 }
 
-/// One launch over a `blocks_x x blocks_y` grid, returning the output field and confidence.
+/// One pass of the stage's own candidates at `lambda`, with no noise scaling, fade, surcharge or
+/// refine, returning the output field and confidence.
 ///
-/// The centre sits in slot 0 of a two-slot frame buffer and the neighbour in slot 1. The derived
-/// buffer holds `sad_floor` in its SAD floor word and other values in every other word.
+/// The confidence is scored against `sad_floor`.
 fn run_with_floor(
     width: u32,
     height: u32,
@@ -35,117 +28,21 @@ fn run_with_floor(
     sad_floor: f32,
 ) -> (Vec<i32>, Vec<f32>) {
     let client = make_client();
-    let blocks_x = width.div_ceil(STEP);
-    let blocks_y = height.div_ceil(STEP);
-    let blocks = (blocks_x * blocks_y) as usize;
-    assert_eq!(mv_in.len(), 2 * blocks);
-    assert_eq!(neighbour.len(), centre.len());
+    let input = StageInput {
+        width,
+        height,
+        centre,
+        neighbour,
+        field: mv_in,
+        seeds: None,
+        prediction: None,
+        sad_floor,
+        reads_floor: false,
+    };
+    let params = TruemotionParams::legacy(lambda);
+    let output = run_stage(&client, &input, params);
 
-    let mut frames = centre.to_vec();
-    frames.extend_from_slice(neighbour);
-
-    let frame_bytes = f32::as_bytes(&frames);
-    let neighbour_table = [1u32];
-    let table_bytes = u32::as_bytes(&neighbour_table);
-    let mv_in_bytes = i32::as_bytes(mv_in);
-    let frame_buf = client.create_from_slice(frame_bytes);
-    let table_buf = client.create_from_slice(table_bytes);
-    let mv_in_buf = client.create_from_slice(mv_in_bytes);
-    let mv_out = client.empty(2 * blocks * size_of::<i32>());
-    let conf_out = client.empty(blocks * size_of::<f32>());
-    let thsad = (BLKSIZE * BLKSIZE) as f32 * THSAD_PIXEL;
-    let lambda_pixel = lambda * (BLKSIZE * BLKSIZE) as f32 * THSAD_PIXEL;
-    let slot_pixels = centre.len() as u32;
-    let mv_stride = 2 * blocks as u32;
-    let conf_stride = blocks as u32;
-
-    let grid = CubeCount::new_3d(blocks_x, blocks_y, 1);
-    let dim = CubeDim::new_2d(8, 8);
-
-    unsafe {
-        let frames_len = frames.len();
-        let neighbour_table_len = neighbour_table.len();
-        let mv_out_handle = mv_out.clone();
-        let conf_out_handle = conf_out.clone();
-        let frame_arg = BufferArg::from_raw_parts(frame_buf, frames_len);
-        let table_arg = BufferArg::from_raw_parts(table_buf, neighbour_table_len);
-        let mv_in_arg = BufferArg::from_raw_parts(mv_in_buf, 2 * blocks);
-        let mv_out_arg = BufferArg::from_raw_parts(mv_out_handle, 2 * blocks);
-        let conf_out_arg = BufferArg::from_raw_parts(conf_out_handle, blocks);
-
-        let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_floor);
-        let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
-
-        nl4d_mv_regularise::launch_unchecked(
-            &client,
-            grid,
-            dim,
-            frame_arg,
-            table_arg,
-            mv_in_arg,
-            mv_out_arg,
-            conf_out_arg,
-            0u32,
-            lambda_pixel,
-            noise_arg,
-            thsad,
-            width,
-            height,
-            slot_pixels,
-            BLKSIZE,
-            STEP,
-            blocks_x,
-            blocks_y,
-            mv_stride,
-            conf_stride,
-        );
-    }
-
-    let mv_bytes = client.read_one(mv_out).expect("mv readback");
-    let conf_bytes = client.read_one(conf_out).expect("conf readback");
-    let field = i32::from_bytes(&mv_bytes)[..2 * blocks].to_vec();
-    let confidence = f32::from_bytes(&conf_bytes)[..blocks].to_vec();
-
-    (field, confidence)
-}
-
-/// A frame with distinct values everywhere.
-fn textured(width: u32, height: u32, seed: u32) -> Vec<f32> {
-    (0..width * height)
-        .map(|index| {
-            let mut hash = index
-                .wrapping_mul(2654435761)
-                .wrapping_add(seed.wrapping_mul(0x9E37_79B9));
-            hash ^= hash >> 15;
-            hash = hash.wrapping_mul(0x85EB_CA6B);
-            hash ^= hash >> 13;
-            0.2 + 0.6 * (hash as f32 / u32::MAX as f32)
-        })
-        .collect()
-}
-
-/// `neighbour(x, y) = centre(x - dx, y - dy)`, so the true vector is `(dx, dy)`.
-fn shifted(centre: &[f32], width: u32, height: u32, dx: i32, dy: i32) -> Vec<f32> {
-    let mut frame = vec![0.0f32; (width * height) as usize];
-    for y in 0..height as i32 {
-        for x in 0..width as i32 {
-            let source_x = (x - dx).clamp(0, width as i32 - 1) as u32;
-            let source_y = (y - dy).clamp(0, height as i32 - 1) as u32;
-            frame[(y as u32 * width + x as u32) as usize] = centre[(source_y * width + source_x) as usize];
-        }
-    }
-
-    frame
-}
-
-fn uniform_field(blocks: usize, vector: [i32; 2]) -> Vec<i32> {
-    let mut field = Vec::with_capacity(2 * blocks);
-    for _ in 0..blocks {
-        field.push(vector[0]);
-        field.push(vector[1]);
-    }
-
-    field
+    (output.field, output.confidence)
 }
 
 /// A flat centre and neighbour score the same SAD at every candidate, so an outlier in a smooth

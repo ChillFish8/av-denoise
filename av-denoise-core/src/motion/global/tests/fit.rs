@@ -751,6 +751,7 @@ fn a_block_matched_roll_and_shift_follows_the_field_sign() {
         predictions: None,
         sad: None,
         escalation: None,
+        truemotion: None,
     };
     run_analyse(
         &client,

@@ -5,7 +5,7 @@ use av_denoise_core::bench_api::noise_reading::ReadingStage;
 use av_denoise_core::bench_api::tune_sites::{
     AccumulateCandidate,
     CollabVariant,
-    RegulariseCandidate,
+    TruemotionCandidate,
     WindowCandidate,
 };
 use av_denoise_core::testing;
@@ -47,7 +47,7 @@ use kernels::mc_escalate::{
 };
 use kernels::mc_fit_model::{FitKernel, FitModelBench};
 use kernels::mc_warp::WarpBench;
-use kernels::mv_regularise::MvRegulariseBench;
+use kernels::mv_truemotion::MvTruemotionBench;
 use kernels::noise_gpu::{FoldBench, FoldStage, ReadingBench, SelectBench, SelectShape, SelectStage};
 use kernels::noise_partial::NoisePartialBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
@@ -365,10 +365,10 @@ fn run_all(backend: &str, client: Client) {
         });
     }
 
-    // Each regularise launch covers every neighbour, so every candidate runs at one neighbour and at four.
+    // Each truemotion launch covers every neighbour, so every candidate runs at one neighbour and at four.
     for &neighbours in BENCH_NEIGHBOURS {
-        for &candidate in RegulariseCandidate::ALL {
-            run(MvRegulariseBench {
+        for &candidate in TruemotionCandidate::ALL {
+            run(MvTruemotionBench {
                 client: client.clone(),
                 candidate,
                 neighbours,
@@ -377,9 +377,9 @@ fn run_all(backend: &str, client: Client) {
         }
     }
 
-    // A zero motion field, where six of every block's seven candidates repeat.
-    for &candidate in RegulariseCandidate::ALL {
-        run(MvRegulariseBench {
+    // Zero fields, where every candidate but the camera model's repeats.
+    for &candidate in TruemotionCandidate::ALL {
+        run(MvTruemotionBench {
             client: client.clone(),
             candidate,
             neighbours: 4,

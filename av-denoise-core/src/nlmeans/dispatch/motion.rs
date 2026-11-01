@@ -4,6 +4,7 @@ use cubecl::server::Handle;
 use crate::engine::timing::{timed, units_per_span};
 use crate::engine::{BLOCK_1D, MAX_GRID_1D};
 use crate::motion::kernels::mc_chain_compose;
+use crate::motion::truemotion::TruemotionTargets;
 use crate::motion::{
     self,
     Escalation,
@@ -196,6 +197,12 @@ impl NlmDenoiser {
             reads_floor: true,
         });
 
+        // The window's derived noise is also the floor the truemotion penalty scales with. Chained
+        // seeds come from pair fields that already ended with the stage, so the refine skips it.
+        let truemotion = self
+            .truemotion_targets(true)
+            .filter(|_| !self.is_chained());
+
         let targets = MatchTargets {
             pyramid: analyse_pyramid,
             frame_count,
@@ -210,9 +217,25 @@ impl NlmDenoiser {
             predictions,
             sad: None,
             escalation,
+            truemotion,
         };
 
         self.run_match(motion_ctx, &targets, thsad)
+    }
+
+    /// The truemotion stage a motion search ends with, scaling its penalty by the floor in the
+    /// search's noise when `reads_floor`.
+    pub(crate) fn truemotion_targets(&self, reads_floor: bool) -> Option<TruemotionTargets<'_>> {
+        let [seeds, field, changes] = self.truemotion_bufs.as_ref()?;
+        let targets = TruemotionTargets {
+            kernels: &self.kernels,
+            seeds,
+            field,
+            changes,
+            reads_floor,
+        };
+
+        Some(targets)
     }
 
     /// Runs the block match for every neighbour in `targets` in one launch per level.
@@ -435,6 +458,7 @@ impl NlmDenoiser {
             predictions: None,
             sad: None,
             escalation: None,
+            truemotion: None,
         };
 
         run_confidence(

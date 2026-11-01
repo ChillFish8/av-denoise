@@ -344,6 +344,8 @@ impl NlmDenoiser {
             reads_floor: false,
         });
         let thsad = self.search_thsad(motion_ctx);
+        // The look-ahead's noise is not this window's, so its truemotion penalty stays unscaled.
+        let truemotion = self.truemotion_targets(false);
 
         if both_ways {
             let predictions = seeds.as_ref().and_then(PairSeeds::both_ways);
@@ -363,6 +365,7 @@ impl NlmDenoiser {
                 &noise,
                 predictions,
                 escalation_state,
+                truemotion,
                 thsad,
             )
             .context("look-ahead pair analyse dispatch failed");
@@ -386,6 +389,7 @@ impl NlmDenoiser {
             predictions: newer_to_older_prediction,
             sad: None,
             escalation,
+            truemotion,
         };
 
         run_analyse(

@@ -29,6 +29,11 @@ fn assert_sizes_match_allocations(params: NlmParams) {
     // The sizes count the curve batch, which only these settings allocate.
     denoiser.set_luma_noise_fields(true);
 
+    let truemotion = denoiser.truemotion_bufs.as_ref();
+    let truemotion_seeds = truemotion.map(|[seeds, _, _]| seeds);
+    let truemotion_field = truemotion.map(|[_, field, _]| field);
+    let truemotion_changes = truemotion.map(|[_, _, changes]| changes);
+
     let noise = denoiser.measured_noise();
     let partials = noise.map(|noise| noise.partials());
     let stats = noise.and_then(|noise| noise.stats());
@@ -38,6 +43,9 @@ fn assert_sizes_match_allocations(params: NlmParams) {
         ("noise partials ring", partials),
         ("temporal stats ring", stats),
         ("motion field", denoiser.mv_field_buf.as_ref()),
+        ("truemotion seeds", truemotion_seeds),
+        ("truemotion field", truemotion_field),
+        ("truemotion changes", truemotion_changes),
         ("motion pyramid ring", denoiser.pyramid_input.as_ref()),
         ("motion pair ring", denoiser.pair_ring_buf.as_ref()),
         ("motion escalation state", denoiser.escalation_buf.as_ref()),

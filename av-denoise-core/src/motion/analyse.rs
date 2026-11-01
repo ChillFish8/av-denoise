@@ -14,8 +14,10 @@ use super::kernels::{
     mc_block_match_fine_tracked,
 };
 use super::pyramid::{level_dims, pyramid_level_offset, pyramid_pixels_per_frame, pyramid_slot_pixels};
+use super::truemotion::{TruemotionTargets, run_truemotion};
 #[cfg(test)]
 use crate::engine::align::StorageAlign;
+use crate::engine::copy_words_into;
 use crate::noise::DERIVED_WORDS;
 
 /// Where a neighbour's motion-field slice starts.
@@ -45,7 +47,8 @@ pub(crate) fn confidence_byte_offset(motion_ctx: &MotionCtx, neighbour_idx: u32)
 /// in the confidence layout, then each block's window mean SAD in the same layout after it.
 ///
 /// With `escalation` and a [MotionCtx] schedule that escalates, the fine pass also records what
-/// [run_escalation] needs.
+/// [run_escalation] needs. With `truemotion`, the truemotion stage of the [MotionCtx] ends the
+/// search.
 pub(crate) struct MatchTargets<'a> {
     pub pyramid: &'a Handle,
     /// Frame slots the pyramid holds.
@@ -65,6 +68,7 @@ pub(crate) struct MatchTargets<'a> {
     /// Holds twice `neighbours` confidence strides of `f32` when set.
     pub sad: Option<&'a Handle>,
     pub escalation: Option<Escalation<'a>>,
+    pub truemotion: Option<TruemotionTargets<'a>>,
 }
 
 /// Where a search keeps what its escalation needs, and where its SAD floor comes from.
@@ -162,7 +166,8 @@ fn coarse_floor_scale(coarse_blksize: u32, blksize: u32, coarse_scale: u32) -> f
 /// the derived word of `noise` at index `sad_field`. Otherwise `confidence` is never indexed, so a
 /// placeholder buffer works. `thsad` may stay at 0.0 only when confidence is unwritten and the
 /// schedule does not escalate, because escalation scores every block's confidence to decide which
-/// ones fail.
+/// ones fail. When `targets` carries a truemotion stage that is on, it picks each block's final
+/// vector last, with the coarse pass's seeds among its candidates.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -182,6 +187,7 @@ pub(crate) fn run_analyse(
     let slots_len = targets.neighbours as usize;
     let mv_stride = motion_ctx.mv_stride();
     let coarse = coarse_level(motion_ctx, width, height, targets.frame_count);
+    let seeded = coarse.is_some();
 
     if let Some(coarse) = coarse {
         let grid = CubeCount::new_3d(coarse.blocks_x, coarse.blocks_y, targets.neighbours);
@@ -232,7 +238,11 @@ pub(crate) fn run_analyse(
         // A single level has no coarse seed, and the fine pass then treats the seed as zero.
     }
 
-    let seeded = if motion_ctx.pyramid_levels > 1 { 1u32 } else { 0u32 };
+    if seeded {
+        keep_seeds(client, motion_ctx, targets);
+    }
+
+    let use_seed = u32::from(seeded);
     launch_fine(
         client,
         motion_ctx,
@@ -240,7 +250,7 @@ pub(crate) fn run_analyse(
         height,
         targets,
         motion_ctx.schedule.first_radius,
-        seeded,
+        use_seed,
         noise,
         sad_field,
         thsad,
@@ -248,6 +258,51 @@ pub(crate) fn run_analyse(
 
     run_escalation(
         client, motion_ctx, width, height, targets, noise, sad_field, thsad, true,
+    )?;
+
+    finish_truemotion(
+        motion_ctx, width, height, targets, seeded, noise, sad_field, thsad,
+    )
+}
+
+/// Copies the seeds in `targets`' field to its truemotion stage, when the stage runs.
+fn keep_seeds(client: &Client, motion_ctx: &MotionCtx, targets: &MatchTargets<'_>) {
+    let Some(stage) = targets.truemotion.as_ref() else {
+        return;
+    };
+
+    if motion_ctx.truemotion.enabled() {
+        copy_words_into(client, targets.mv_field, stage.seeds, targets.mv_len);
+    }
+}
+
+/// Runs the truemotion stage over the search's field when `targets` has one and the stage is on.
+///
+/// `seeded` says whether [keep_seeds] kept the search's seeds.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the stage binds"
+)]
+fn finish_truemotion(
+    motion_ctx: &MotionCtx,
+    width: u32,
+    height: u32,
+    targets: &MatchTargets<'_>,
+    seeded: bool,
+    noise: &Handle,
+    sad_field: u32,
+    thsad: f32,
+) -> Result<(), anyhow::Error> {
+    let Some(stage) = targets.truemotion.as_ref() else {
+        return Ok(());
+    };
+
+    if !motion_ctx.truemotion.enabled() {
+        return Ok(());
+    }
+
+    run_truemotion(
+        motion_ctx, width, height, targets, stage, seeded, noise, sad_field, thsad,
     )
 }
 
@@ -256,7 +311,9 @@ pub(crate) fn run_analyse(
 /// It searches `refine_radius` around the seed and writes the corrected vector back. There is no
 /// coarse pass, because the joined seed already carries the large movement. When the schedule
 /// escalates, [run_escalation] then searches the blocks that fail again with wider windows, up to
-/// the schedule's ceiling. Confidence is written the same way as in [run_analyse].
+/// the schedule's ceiling. Confidence is written the same way as in [run_analyse]. The chained
+/// seeds join pair fields that each ended with the truemotion stage, so the refine runs none, and
+/// `targets` must not carry one.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -277,6 +334,11 @@ pub(crate) fn run_seeded_refine(
         schedule,
         ..motion_ctx.clone()
     };
+
+    debug_assert!(
+        targets.truemotion.is_none(),
+        "the seeded refine runs no truemotion stage"
+    );
 
     launch_fine(
         client,

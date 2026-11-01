@@ -11,7 +11,7 @@ use av_denoise_core::bench_api::Device;
 use av_denoise_core::bench_api::tune_sites::{
     CollabSite,
     CollabVariant,
-    RegulariseCandidate,
+    TruemotionCandidate,
     WindowCandidate,
 };
 use av_denoise_core::bench_api::tune_timing::{calibrate, gpu_sampler, rewarm, sync};
@@ -33,7 +33,7 @@ use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use kernels::collab_fused::CollabFusedBench;
 use kernels::fused_window::{WindowBench, WindowKernel};
-use kernels::mv_regularise::MvRegulariseBench;
+use kernels::mv_truemotion::MvTruemotionBench;
 
 /// How long the device is kept busy before wall-clock batches start.
 const HEAT: Duration = Duration::from_secs(1);
@@ -97,8 +97,8 @@ fn run_repeats(client: &Client, repeats: usize) {
         let collab = collab_site(client);
         disagreements += compare_site(&collab, &limits, "collab_fused luma 1080p");
 
-        let regularise = regularise_site(client);
-        disagreements += compare_site(&regularise, &limits, "nl4d_mv_regularise 1080p");
+        let truemotion = truemotion_site(client);
+        disagreements += compare_site(&truemotion, &limits, "mc_truemotion 1080p");
     }
 
     println!();
@@ -118,10 +118,10 @@ fn window_site(client: &Client) -> impl VariantSite<Candidate = WindowCandidate>
     site
 }
 
-fn regularise_site(client: &Client) -> impl VariantSite<Candidate = RegulariseCandidate> {
-    let bench = MvRegulariseBench {
+fn truemotion_site(client: &Client) -> impl VariantSite<Candidate = TruemotionCandidate> {
+    let bench = MvTruemotionBench {
         client: client.clone(),
-        candidate: RegulariseCandidate::baseline(),
+        candidate: TruemotionCandidate::baseline(),
         neighbours: 4,
         static_field: false,
     };

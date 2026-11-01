@@ -1,7 +1,7 @@
 mod accumulate;
 mod collab;
 mod collab_split;
-mod regularise;
+mod truemotion;
 mod window;
 
 use cubecl::prelude::*;
@@ -28,15 +28,16 @@ pub use self::collab_split::{
     SearchVariant,
 };
 #[cfg(test)]
-pub(crate) use self::regularise::compare_fields;
-pub use self::regularise::{
+pub(crate) use self::truemotion::compare_fields;
+pub use self::truemotion::{
     COOP_MAX_ABS,
     COOP_MAX_FLIPPED_SHARE,
     COOP_MIN_PSNR,
-    RegulariseCandidate,
-    RegulariseLayout,
-    RegulariseOutputs,
-    RegulariseSite,
+    TruemotionCandidate,
+    TruemotionLayout,
+    TruemotionOutputs,
+    TruemotionSite,
+    TruemotionValues,
 };
 #[cfg(test)]
 pub(crate) use self::window::estimate_planes;
@@ -66,8 +67,8 @@ pub const NLM_WINDOW: &str = "nlm_window";
 pub const NLM_ACCUMULATE: &str = "nlm_accumulate";
 /// The nl4d grouping, filtering and scatter kernel.
 pub const COLLAB_FUSED: &str = "collab_fused";
-/// The nl4d motion field regularisation pass.
-pub const NL4D_MV_REGULARISE: &str = "nl4d_mv_regularise";
+/// One pass of the truemotion stage every motion search ends with.
+pub const MC_TRUEMOTION: &str = "mc_truemotion";
 
 /// Whether `name` is a candidate of the site `site` in this build.
 pub fn candidate_known(site: &str, name: &str) -> bool {
@@ -77,7 +78,7 @@ pub fn candidate_known(site: &str, name: &str) -> bool {
         COLLAB_FUSED => CollabVariant::from_name(name).is_some(),
         COLLAB_SEARCH => SearchVariant::from_name(name).is_some(),
         COLLAB_FILTER => FilterCandidate::from_name(name).is_some(),
-        NL4D_MV_REGULARISE => RegulariseCandidate::from_name(name).is_some(),
+        MC_TRUEMOTION => TruemotionCandidate::from_name(name).is_some(),
         _ => false,
     }
 }

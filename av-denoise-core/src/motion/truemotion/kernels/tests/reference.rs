@@ -1,7 +1,10 @@
 use cubecl::prelude::*;
 
-use crate::motion::truemotion::kernels::REGULARISE_CANDIDATES;
 use crate::noise::DERIVED_SAD_FLOOR;
+
+/// How many vectors each block scores, its own, the neighbourhood median, its four adjacent
+/// blocks' and zero.
+const REGULARISE_CANDIDATES: u32 = 7;
 
 /// The most neighbours a block has in its 3x3 neighbourhood.
 const NEIGHBOURHOOD: u32 = 8;

@@ -22,6 +22,7 @@ use crate::motion::kernels::{
     mc_model_identity,
 };
 use crate::motion::pyramid::{pyramid_pixels_per_frame, pyramid_slot_byte_offset, run_pyramid_downscale};
+use crate::motion::truemotion::TruemotionTargets;
 use crate::motion::{
     Escalation,
     MAX_PYRAMID_LEVELS,
@@ -33,6 +34,7 @@ use crate::motion::{
     thsad,
 };
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
+use crate::tune::KernelSelector;
 use crate::tune::gpu::{bind, zeroed_words};
 
 /// Frames the producer's pyramid holds, the newest and the one before it.
@@ -155,6 +157,11 @@ pub struct PairModelProducer {
     /// What both matches record for blocks that fail their first window, present when the search
     /// escalates.
     escalation: Option<Handle>,
+    /// The seeds, the field between passes and the change flags of the first match's truemotion
+    /// stage.
+    truemotion: [Handle; 3],
+    /// Launches the truemotion stage's baseline.
+    kernels: KernelSelector,
     /// Zeroed noise values, so the search prefers its existing seed only on exact ties.
     noise: Handle,
     plane_placeholder: Handle,
@@ -204,6 +211,13 @@ impl PairModelProducer {
             let state_len = escalation_state_len(&ctx, 1);
             client.empty(state_len * size_of::<f32>())
         });
+        let changes_bytes = 2 * ctx.confidence_bytes_per_neighbour() as usize;
+        let truemotion = [
+            client.empty(field_bytes),
+            client.empty(field_bytes),
+            client.empty(changes_bytes),
+        ];
+        let kernels = KernelSelector::baseline(client);
         let noise = zeroed_words(client, DERIVED_WORDS as usize);
         let plane_placeholder = client.empty(size_of::<u32>());
         let ring = ModelRing::new(client, depth);
@@ -228,6 +242,8 @@ impl PairModelProducer {
             luma_rows,
             confidence_placeholder,
             escalation,
+            truemotion,
+            kernels,
             noise,
             plane_placeholder,
             run: None,
@@ -411,6 +427,10 @@ impl PairModelProducer {
     /// means stay those of the first window, so every block's fit contrast measures the same
     /// window size. The failure test scores with the library's unscaled `thsad`, since the producer
     /// serves every pass whatever its own `thsad` scale.
+    ///
+    /// The unseeded first match ends with the truemotion stage, whose winning SADs replace the
+    /// search's. The seeded match keeps its raw vectors, because the refit reads sub-pixel motion
+    /// from how they spread between neighbouring whole pixels.
     fn match_pair(
         &self,
         ctx: &MotionCtx,
@@ -424,6 +444,15 @@ impl PairModelProducer {
             state,
             reads_floor: false,
         });
+        let [seeds, field, changes] = &self.truemotion;
+        let stage = TruemotionTargets {
+            kernels: &self.kernels,
+            seeds,
+            field,
+            changes,
+            reads_floor: false,
+        };
+        let truemotion = (!seeded).then_some(stage);
         let targets = MatchTargets {
             pyramid: &self.pyramid,
             frame_count: PYRAMID_SLOTS,
@@ -438,6 +467,7 @@ impl PairModelProducer {
             predictions,
             sad: Some(&self.sad),
             escalation,
+            truemotion,
         };
         let match_thsad = thsad(ctx.blksize, 1.0);
 
@@ -526,6 +556,7 @@ pub(crate) fn producer_buffer_sizes(
     let sad_bytes = sad_bytes.and_then(|bytes| align.checked_pad_bytes(bytes));
     let sad_stride = sad_bytes.map(|bytes| bytes / size_of::<f32>() as u64);
     let sad = checked_times(sad_stride, 3);
+    let changes = checked_times(sad_stride, 2);
     let plane = u64::from(luma_width) * u64::from(luma_height);
     let escalation_sections = checked_times(sad_stride, u64::from(STATE_SECTIONS));
     let escalation = escalation_sections.and_then(|values| values.checked_add(1));
@@ -537,6 +568,9 @@ pub(crate) fn producer_buffer_sizes(
     let mut sizes = vec![
         ("pair model pyramid", pyramid),
         ("pair model field", field),
+        ("pair model truemotion seeds", field),
+        ("pair model truemotion field", field),
+        ("pair model truemotion changes", changes),
         ("pair model SAD", sad),
         ("pair model luma", Some(plane)),
         ("pair model luma rows", Some(plane)),

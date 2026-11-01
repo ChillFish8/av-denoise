@@ -11,8 +11,14 @@ use crate::engine::align::StorageAlign;
 use crate::motion::THSAD_PIXEL;
 use crate::nl4d::nl4d_pool_ratio;
 use crate::nlmeans::ChannelMode;
-use crate::noise::tests::{CollabNoise, collab_noise_buffer, nlm_noise_buffer};
-use crate::noise::{DERIVED_H2_INV_NORM, DERIVED_PILOT_H2_INV_NORM, DerivedValues, NOISE_CURVE_BINS};
+use crate::noise::tests::{CollabNoise, collab_noise_buffer, nlm_noise_buffer, sad_floor_buffer};
+use crate::noise::{
+    DERIVED_H2_INV_NORM,
+    DERIVED_PILOT_H2_INV_NORM,
+    DERIVED_SAD_FLOOR,
+    DerivedValues,
+    NOISE_CURVE_BINS,
+};
 use crate::tune::SiteCandidate;
 use crate::tune::gpu::zero_words;
 use crate::tune::sites::{
@@ -26,9 +32,10 @@ use crate::tune::sites::{
     CollabValues,
     CollabVariant,
     ConfidenceBinding,
-    RegulariseOutputs,
-    RegulariseSite,
     SearchOutputs,
+    TruemotionOutputs,
+    TruemotionSite,
+    TruemotionValues,
     WindowPass,
     WindowSite,
     allocate_accum,
@@ -249,7 +256,7 @@ pub(crate) fn accumulate_site(client: &Client, spec: &AccumulateSpec) -> Accumul
     }
 }
 
-/// Motion block geometry of the collab and regularise fixtures.
+/// Motion block geometry of the collab and truemotion fixtures.
 pub(crate) const BLK_STEP: u32 = 8;
 pub(crate) const BLKSIZE: u32 = 16;
 
@@ -500,9 +507,9 @@ pub(crate) fn split_sites<S: Float>(site: &CollabSite<S>) -> (CollabSearchSite<S
     (search, filter)
 }
 
-/// The content a regularise fixture scores its candidates against.
+/// The content a truemotion fixture scores its candidates against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RegulariseContent {
+pub(crate) enum TruemotionContent {
     /// Distinct values everywhere. Neighbour `n` is the centre shifted by `(2 - n, 1 + n % 2)` and
     /// lightly perturbed.
     Textured,
@@ -512,37 +519,54 @@ pub(crate) enum RegulariseContent {
     Periodic,
 }
 
+/// Which candidates and penalty a truemotion fixture runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TruemotionStage {
+    /// The field's own candidates under the unscaled penalty, as the verbatim reference runs them.
+    Legacy,
+    /// Seeds, a camera model, the refine, the surcharge, the fade and the noise-scaled penalty.
+    Shipped,
+}
+
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RegulariseSpec {
+pub(crate) struct TruemotionSpec {
     pub(crate) width: u32,
     pub(crate) height: u32,
-    pub(crate) content: RegulariseContent,
+    pub(crate) content: TruemotionContent,
     pub(crate) field_lambda: f32,
     pub(crate) neighbours: u32,
+    pub(crate) stage: TruemotionStage,
+}
+
+/// The shift textured neighbour `neighbour` holds the centre at.
+fn truemotion_shift(neighbour: u32) -> (i32, i32) {
+    let shift_x = 2 - neighbour as i32;
+    let shift_y = 1 + (neighbour as i32 % 2);
+    (shift_x, shift_y)
 }
 
 /// The centre frame and one frame per neighbour.
 ///
 /// Textured neighbours are each shifted by their own amount. Flat and periodic neighbours repeat
 /// the centre, so their candidates keep tying pixel for pixel.
-fn regularise_frames(spec: &RegulariseSpec) -> Vec<Vec<f32>> {
+fn truemotion_frames(spec: &TruemotionSpec) -> Vec<Vec<f32>> {
     let pixels = (spec.width * spec.height) as usize;
     let tile: Vec<f32> = (0..16).map(|index| hashed_unit(index, 11)).collect();
     let centre: Vec<f32> = match spec.content {
-        RegulariseContent::Flat => vec![0.5f32; pixels],
-        RegulariseContent::Periodic => (0..pixels as u32)
+        TruemotionContent::Flat => vec![0.5f32; pixels],
+        TruemotionContent::Periodic => (0..pixels as u32)
             .map(|index| {
                 let x = index % spec.width;
                 let y = index / spec.width;
                 tile[((y % 4) * 4 + x % 4) as usize]
             })
             .collect(),
-        RegulariseContent::Textured => (0..pixels as u32).map(|index| hashed_unit(index, 12)).collect(),
+        TruemotionContent::Textured => (0..pixels as u32).map(|index| hashed_unit(index, 12)).collect(),
     };
 
     let mut frames = vec![centre.clone()];
 
-    if spec.content != RegulariseContent::Textured {
+    if spec.content != TruemotionContent::Textured {
         for _ in 0..spec.neighbours {
             let duplicate = centre.clone();
             frames.push(duplicate);
@@ -552,8 +576,7 @@ fn regularise_frames(spec: &RegulariseSpec) -> Vec<Vec<f32>> {
     }
 
     for neighbour in 0..spec.neighbours {
-        let shift_x = 2 - neighbour as i32;
-        let shift_y = 1 + (neighbour as i32 % 2);
+        let (shift_x, shift_y) = truemotion_shift(neighbour);
         let moved: Vec<f32> = (0..pixels as u32)
             .map(|index| {
                 let x = (index % spec.width) as i32;
@@ -571,23 +594,37 @@ fn regularise_frames(spec: &RegulariseSpec) -> Vec<Vec<f32>> {
     frames
 }
 
-/// The pyramid slot a regularise fixture stores neighbour `neighbour` in.
+/// The pyramid slot a truemotion fixture stores neighbour `neighbour` in.
 ///
 /// The neighbours fill slots `0..neighbours` in reverse, so the table is never the identity once
 /// there are two or more. The centre takes the last slot.
-pub(crate) fn regularise_neighbour_slot(neighbours: u32, neighbour: u32) -> u32 {
+pub(crate) fn truemotion_neighbour_slot(neighbours: u32, neighbour: u32) -> u32 {
     neighbours - 1 - neighbour
 }
 
-/// A regularise site over `spec.neighbours` neighbours laid out with the production padding.
-pub(crate) fn regularise_site(client: &Client, spec: &RegulariseSpec) -> RegulariseSite {
+/// A motion field of `neighbours` neighbours, `mv_stride` values apart, from a hashed pattern.
+fn patterned_field(neighbours: usize, mv_stride: usize, blocks: usize, seed: i32) -> Vec<i32> {
+    let mut field_values = vec![0i32; neighbours * mv_stride];
+    for neighbour in 0..neighbours {
+        for index in 0..2 * blocks {
+            let pattern = (index % 7) as i32 - 3 + ((index / 14) % 3) as i32;
+            let value = pattern + neighbour as i32 + seed * ((index / 6) % 2) as i32;
+            field_values[neighbour * mv_stride + index] = value;
+        }
+    }
+
+    field_values
+}
+
+/// A truemotion site over `spec.neighbours` neighbours laid out with the production padding.
+pub(crate) fn truemotion_site(client: &Client, spec: &TruemotionSpec) -> TruemotionSite {
     let align = StorageAlign::from_client(client);
     let pixels = (spec.width * spec.height) as usize;
     let slot_pixels = align.pad_elems::<f32>(pixels);
-    let frames = regularise_frames(spec);
+    let frames = truemotion_frames(spec);
 
     let neighbour_table: Vec<u32> = (0..spec.neighbours)
-        .map(|neighbour| regularise_neighbour_slot(spec.neighbours, neighbour))
+        .map(|neighbour| truemotion_neighbour_slot(spec.neighbours, neighbour))
         .collect();
 
     let mut pyramid_values = vec![0.0f32; frames.len() * slot_pixels];
@@ -611,24 +648,36 @@ pub(crate) fn regularise_site(client: &Client, spec: &RegulariseSpec) -> Regular
     let conf_stride = align.pad_elems::<f32>(blocks);
     let neighbours = spec.neighbours as usize;
 
-    let mut field_values = vec![0i32; neighbours * mv_stride];
-    for neighbour in 0..neighbours {
-        for index in 0..2 * blocks {
-            let value = (index % 7) as i32 - 3 + ((index / 14) % 3) as i32 + neighbour as i32;
-            field_values[neighbour * mv_stride + index] = value;
-        }
-    }
-
+    let field_values = patterned_field(neighbours, mv_stride, blocks, 0);
     let field_bytes = i32::as_bytes(&field_values);
     let mv_in = client.create_from_slice(field_bytes);
 
-    let vectors = client.empty(neighbours * mv_stride * size_of::<i32>());
-    let confidence = client.empty(neighbours * conf_stride * size_of::<f32>());
-    zero_words(client, &vectors, neighbours * mv_stride);
-    zero_words(client, &confidence, neighbours * conf_stride);
-    let outputs = RegulariseOutputs {
+    let shipped = spec.stage == TruemotionStage::Shipped;
+    let vectors_len = neighbours * mv_stride;
+    let confidence_len = neighbours * conf_stride;
+    let vectors = client.empty(vectors_len * size_of::<i32>());
+    let confidence = client.empty(confidence_len * size_of::<f32>());
+    zero_words(client, &vectors, vectors_len);
+    zero_words(client, &confidence, confidence_len);
+    let sad = shipped.then(|| {
+        let sad_len = 2 * confidence_len;
+        let sad = client.empty(sad_len * size_of::<f32>());
+        zero_words(client, &sad, sad_len);
+        sad
+    });
+    let changes = shipped.then(|| {
+        let changes = client.empty(confidence_len * size_of::<u32>());
+        zero_words(client, &changes, confidence_len);
+        changes
+    });
+    let outputs = TruemotionOutputs {
         vectors,
+        vectors_len,
         confidence,
+        confidence_len,
+        writes_confidence: true,
+        sad,
+        changes,
         blocks,
         neighbours: spec.neighbours,
         mv_stride: mv_stride as u32,
@@ -637,10 +686,76 @@ pub(crate) fn regularise_site(client: &Client, spec: &RegulariseSpec) -> Regular
 
     let block_area = (BLKSIZE * BLKSIZE) as f32;
     let thsad = block_area * THSAD_PIXEL;
-    let noise_words = DerivedValues::default().to_words();
-    let noise = upload(client, &noise_words);
+    let lambda_base = spec.field_lambda * thsad;
 
-    RegulariseSite {
+    if !shipped {
+        let noise_words = DerivedValues::default().to_words();
+        let noise = upload(client, &noise_words);
+        let values = TruemotionValues {
+            lambda_base,
+            lambda_noise: 0.0,
+            surcharge: 0.0,
+            fade_level: 0.0,
+            thsad,
+            sad_field: DERIVED_SAD_FLOOR,
+        };
+
+        return TruemotionSite {
+            client: client.clone(),
+            pyramid,
+            pyramid_len: pyramid_values.len(),
+            centre_slot: spec.neighbours,
+            neighbour_slots,
+            slot_pixels: slot_pixels as u32,
+            mv_in,
+            seeds: None,
+            predictions: None,
+            changes_in: None,
+            outputs,
+            values,
+            noise,
+            reads_floor: false,
+            refine_radius: 0,
+            width: spec.width,
+            height: spec.height,
+            blksize: BLKSIZE,
+            step: BLK_STEP,
+            blocks_x,
+            blocks_y,
+        };
+    }
+
+    let seed_values = patterned_field(neighbours, mv_stride, blocks, 3);
+    let seed_bytes = i32::as_bytes(&seed_values);
+    let seeds = client.create_from_slice(seed_bytes);
+
+    let mut prediction_words = Vec::with_capacity(neighbours * 6);
+    for neighbour in 0..spec.neighbours {
+        let (shift_x, shift_y) = truemotion_shift(neighbour);
+        let model = [1.0, 0.0, 0.0, 1.0, shift_x as f32, shift_y as f32];
+        prediction_words.extend_from_slice(&model);
+    }
+
+    let predictions = upload(client, &prediction_words);
+
+    // Every third block and its neighbours rescore, the rest keep their vectors unscored.
+    let change_words: Vec<u32> = (0..confidence_len)
+        .map(|index| u32::from(index % 3 == 0))
+        .collect();
+    let change_bytes = u32::as_bytes(&change_words);
+    let changes_in = client.create_from_slice(change_bytes);
+    let sad_floor = 0.3 * thsad;
+    let noise = sad_floor_buffer(client, DERIVED_SAD_FLOOR, sad_floor);
+    let values = TruemotionValues {
+        lambda_base,
+        lambda_noise: spec.field_lambda,
+        surcharge: 0.125,
+        fade_level: 2.0 * thsad,
+        thsad,
+        sad_field: DERIVED_SAD_FLOOR,
+    };
+
+    TruemotionSite {
         client: client.clone(),
         pyramid,
         pyramid_len: pyramid_values.len(),
@@ -648,10 +763,14 @@ pub(crate) fn regularise_site(client: &Client, spec: &RegulariseSpec) -> Regular
         neighbour_slots,
         slot_pixels: slot_pixels as u32,
         mv_in,
+        seeds: Some(seeds),
+        predictions: Some(predictions),
+        changes_in: Some(changes_in),
         outputs,
-        lambda_pixel: spec.field_lambda * thsad,
+        values,
         noise,
-        thsad,
+        reads_floor: true,
+        refine_radius: 1,
         width: spec.width,
         height: spec.height,
         blksize: BLKSIZE,

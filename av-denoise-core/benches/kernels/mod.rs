@@ -26,7 +26,7 @@ pub mod mc_downscale;
 pub mod mc_escalate;
 pub mod mc_fit_model;
 pub mod mc_warp;
-pub mod mv_regularise;
+pub mod mv_truemotion;
 pub mod nl4d_geometry;
 pub mod noise_gpu;
 pub mod noise_partial;

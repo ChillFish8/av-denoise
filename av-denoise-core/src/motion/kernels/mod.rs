@@ -17,6 +17,7 @@ pub use self::block_match::{
     mc_block_match_fine,
 };
 pub use self::candidates::MODEL_CANDIDATE_BIAS;
+pub(crate) use self::candidates::{BlockVector, model_displacement, predicts_motion};
 pub use self::chain::{mc_chain_compose, mc_pair_zero};
 pub use self::compensate::mc_warp;
 pub use self::escalate::{

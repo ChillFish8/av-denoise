@@ -118,6 +118,12 @@ pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32
         let field_bytes = padded_slot_bytes(field_len, align);
         let field = slot_ring(field_bytes, neighbours);
         buffers.push(("motion field", field));
+        buffers.push(("truemotion seeds", field));
+        buffers.push(("truemotion field", field));
+
+        let flag_bytes = padded_slot_bytes(motion_blocks, align);
+        let flags = slot_ring(flag_bytes, 2 * neighbours);
+        buffers.push(("truemotion changes", flags));
 
         let pyramid = pyramid_ring(width, height, motion_ctx.pyramid_levels, align, total_frames);
         buffers.push(("motion pyramid ring", pyramid));
