@@ -223,15 +223,22 @@ fn fit_pairs(
     sad: Option<&[f32]>,
     prior: Option<Similarity>,
 ) -> Fitted {
-    let ring = ring_with_prior(client, prior);
-    let blocks = ctx.blocks_x * ctx.blocks_y;
-    let scratch = FitScratch::new(client, blocks);
     let sad_handle = sad.map(|values| upload(client, values));
     let field = FitField {
         pairs,
         direction,
         sad: sad_handle.as_ref(),
+        has_contrast: false,
     };
+
+    fit_field(client, ctx, field, prior)
+}
+
+/// Fits `field` and reads back the model it writes.
+fn fit_field(client: &Client, ctx: &MotionCtx, field: FitField<'_>, prior: Option<Similarity>) -> Fitted {
+    let ring = ring_with_prior(client, prior);
+    let blocks = ctx.blocks_x * ctx.blocks_y;
+    let scratch = FitScratch::new(client, blocks);
     let prior_slot = prior.map(|_| PRIOR_SLOT);
 
     run_model_fit(
@@ -466,6 +473,114 @@ fn a_pillarboxed_pan_is_recovered() {
     let fitted = fit_forward(&client, &ctx, &field, None);
 
     fitted.assert_matches(camera);
+}
+
+/// One block's winning SAD, window mean SAD and mean sample.
+#[derive(Debug, Clone, Copy)]
+struct BlockStats {
+    best: f32,
+    mean: f32,
+    luma: f32,
+}
+
+/// Fits an older-to-newer field whose blocks carry `stats(row)`, laid out as the producer writes
+/// them.
+fn fit_forward_with_stats(
+    client: &Client,
+    ctx: &MotionCtx,
+    field: &[[i32; 2]],
+    stats: impl Fn(u32) -> BlockStats,
+) -> Fitted {
+    let other = random_field(ctx, 91);
+    let pairs = upload_pair(client, ctx, field, &other);
+    let stride = ctx.conf_stride() as usize;
+    let mut values = vec![0.0f32; 3 * stride];
+    for block in 0..block_count(ctx) {
+        let row = block as u32 / ctx.blocks_x;
+        let block_stats = stats(row);
+        values[block] = block_stats.best;
+        values[stride + block] = block_stats.mean;
+        values[2 * stride + block] = block_stats.luma;
+    }
+
+    let sad = upload(client, &values);
+    let fit_input = FitField {
+        pairs: &pairs,
+        direction: 0,
+        sad: Some(&sad),
+        has_contrast: true,
+    };
+
+    fit_field(client, ctx, fit_input, None)
+}
+
+/// A still field with a layer moving across the middle third of the block rows.
+fn layer_between_bands(ctx: &MotionCtx) -> (Vec<[i32; 2]>, impl Fn(u32) -> bool + Copy) {
+    let band_rows = (ctx.blocks_y as f64 * 0.33).floor() as u32;
+    let first_layer_row = band_rows;
+    let last_layer_row = ctx.blocks_y - band_rows;
+    let in_layer = move |row: u32| row >= first_layer_row && row < last_layer_row;
+    let mut field = vec![[0, 0]; block_count(ctx)];
+    for (block, vector) in field.iter_mut().enumerate() {
+        let row = block as u32 / ctx.blocks_x;
+        if in_layer(row) {
+            *vector = [6, 0];
+        }
+    }
+
+    (field, in_layer)
+}
+
+const DETAILED: BlockStats = BlockStats {
+    best: 1.0,
+    mean: 4.0,
+    luma: 0.4,
+};
+
+#[test]
+fn still_dark_bands_with_detail_are_not_bars() {
+    let client = test_client();
+    let ctx = fit_ctx(&client, 4, 2);
+    let (field, in_layer) = layer_between_bands(&ctx);
+    let dark_detail = BlockStats {
+        luma: 18.0 / 255.0,
+        ..DETAILED
+    };
+    let stats = |row: u32| if in_layer(row) { DETAILED } else { dark_detail };
+
+    let field_only = fit_forward(&client, &ctx, &field, None);
+    let with_stats = fit_forward_with_stats(&client, &ctx, &field, stats);
+
+    assert_eq!(
+        field_only.valid, 1.0,
+        "premise: without stats the bands pass as bars"
+    );
+    with_stats.assert_identity_fallback();
+}
+
+#[test]
+fn only_dark_flat_bands_are_bars() {
+    let client = test_client();
+    let ctx = fit_ctx(&client, 4, 2);
+    let (field, in_layer) = layer_between_bands(&ctx);
+    // A contrast of 0.24 sits just inside the bar limit and still keeps about half its weight.
+    let band_at = |luma: f32| BlockStats {
+        best: 1.0,
+        mean: 1.24,
+        luma,
+    };
+    let stats_with = |band: BlockStats| move |row: u32| if in_layer(row) { DETAILED } else { band };
+    let grey = band_at(0.5);
+    let black = band_at(18.0 / 255.0);
+
+    let grey_bands = fit_forward_with_stats(&client, &ctx, &field, stats_with(grey));
+    let black_bands = fit_forward_with_stats(&client, &ctx, &field, stats_with(black));
+
+    grey_bands.assert_identity_fallback();
+    assert_eq!(
+        black_bands.valid, 1.0,
+        "black bars should leave the layer, got {black_bands:?}"
+    );
 }
 
 #[test]

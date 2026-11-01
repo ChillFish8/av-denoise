@@ -11,10 +11,9 @@ use crate::tune::gpu::zeroed_words;
 pub(in crate::nlmeans) struct PairSeeds<'a> {
     /// The older-to-newer prediction, present when the pair was composed both ways.
     pub older_to_newer: Option<&'a Handle>,
+    /// The newer-to-older prediction.
     pub newer_to_older: &'a Handle,
     /// Zeroed noise values, so a pair search keeps its seed only on exact ties.
-    ///
-    /// The front's own noise values belong to an earlier window, or to the stream before a reset.
     pub noise: &'a Handle,
 }
 

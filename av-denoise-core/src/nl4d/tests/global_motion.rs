@@ -133,7 +133,8 @@ fn pass_fits(frames: &[PanFrame], seeded: bool) -> (Vec<NeighbourFit>, Vec<Neigh
 
 #[test]
 fn nl4d_direct_matches_a_pan_beyond_reach() {
-    let frames = pan_clip(shape(FAST_PAN), FRAMES, 21);
+    let fast_shape = shape(FAST_PAN);
+    let frames = pan_clip(fast_shape, FRAMES, 21);
 
     let (unseeded_centred, _) = pass_fits(&frames, false);
     assert_premise_misses(&unseeded_centred, "nl4d");
@@ -152,7 +153,8 @@ fn bits(frames: &[Vec<f32>]) -> Vec<Vec<u32>> {
 
 #[test]
 fn a_static_nl4d_stream_is_bit_identical_to_unseeded() {
-    let frames = pan_clip(shape(0), FRAMES, 22);
+    let still_shape = shape(0);
+    let frames = pan_clip(still_shape, FRAMES, 22);
 
     let (mut unseeded_denoiser, mut unseeded) = run_stream(&frames, false);
     run_tail(&mut unseeded_denoiser, &mut unseeded);

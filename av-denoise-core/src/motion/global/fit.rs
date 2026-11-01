@@ -58,6 +58,12 @@ pub(crate) struct FitField<'a> {
     /// Only each SAD's size relative to the field's mean matters, so any noise level works. Without
     /// it every block counts as an equally good match.
     pub sad: Option<&'a Handle>,
+    /// Whether `sad` also holds each block's window mean SAD and then its mean sample, each one
+    /// [MotionCtx::conf_stride] after the last.
+    ///
+    /// A block whose winner barely stands out from its window, such as a flat wall, then counts
+    /// for little in the solve and in the score. Only flat, dark still blocks can form bars.
+    pub has_contrast: bool,
 }
 
 /// The device buffers one fit works in, reusable from fit to fit.
@@ -209,13 +215,36 @@ impl FitLaunch<'_> {
         self.field.pairs.clone().offset_start(direction_offset)
     }
 
+    fn has_contrast(&self) -> bool {
+        self.field.sad.is_some() && self.field.has_contrast
+    }
+
+    /// The SAD buffer bound over the words the kernels read, or a placeholder without one.
+    fn sad_arg(&self) -> BufferArg {
+        let blocks = self.scratch.blocks as usize;
+        let means_offset = self.ctx.conf_stride() as usize;
+        let sad_len = if self.has_contrast() {
+            2 * means_offset + blocks
+        } else {
+            blocks
+        };
+
+        match self.field.sad {
+            Some(sad) => bind(sad, sad_len),
+            None => bind(&self.scratch.sad_placeholder, 1),
+        }
+    }
+
     fn bands(&self) {
         let direction_len = self.ctx.pair_direction_len() as usize;
         let direction = self.direction();
+        let has_contrast = self.has_contrast();
+        let means_offset = self.ctx.conf_stride();
         let cube_count = CubeCount::new_1d(1);
         let cube_dim = CubeDim::new_1d(FIT_THREADS);
 
         let field_arg = bind(&direction, direction_len);
+        let sad_arg = self.sad_arg();
         let bands_arg = bind(&self.scratch.bands, FIT_BAND_WORDS as usize);
 
         // SAFETY: each binding covers the words its buffer holds, and the kernel reads only blocks
@@ -226,7 +255,10 @@ impl FitLaunch<'_> {
                 cube_count,
                 cube_dim,
                 field_arg,
+                sad_arg,
                 bands_arg,
+                has_contrast,
+                means_offset,
                 self.width,
                 self.height,
                 self.ctx.blksize,
@@ -245,14 +277,13 @@ impl FitLaunch<'_> {
         let direction = self.direction();
         let older_to_newer = self.field.direction == 0;
         let has_sad = self.field.sad.is_some();
+        let has_contrast = self.has_contrast();
+        let means_offset = self.ctx.conf_stride();
         let cube_count = CubeCount::new_1d(partial_count);
         let cube_dim = CubeDim::new_1d(FIT_THREADS);
 
         let field_arg = bind(&direction, direction_len);
-        let sad_arg = match self.field.sad {
-            Some(sad) => bind(sad, blocks),
-            None => bind(&self.scratch.sad_placeholder, 1),
-        };
+        let sad_arg = self.sad_arg();
         let bands_arg = bind(&self.scratch.bands, FIT_BAND_WORDS as usize);
         let weights_arg = bind(&self.scratch.weights, blocks);
         let state_arg = bind(&self.scratch.state, FIT_STATE_WORDS as usize);
@@ -277,6 +308,8 @@ impl FitLaunch<'_> {
                 self.prior_slot(),
                 stage,
                 has_sad,
+                has_contrast,
+                means_offset,
                 older_to_newer,
                 self.width,
                 self.height,

@@ -123,6 +123,41 @@ pub fn mc_compose_models(
     out[base + 5] = acc_ty / scale_y;
 }
 
+/// Writes each block's mean sample of `plane` to `out`, one `f32` per block in block-row-major order.
+///
+/// One thread handles one block and sums its pixels in row-major order, clamped to the frame.
+#[cube(launch_unchecked)]
+pub fn mc_block_means(
+    plane: &[f32],
+    out: &mut [f32],
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] blksize: u32,
+    #[comptime] step: u32,
+    #[comptime] blocks_x: u32,
+    #[comptime] blocks_y: u32,
+) {
+    let block = ABSOLUTE_POS_X;
+    if block >= comptime!(blocks_x * blocks_y) {
+        terminate!();
+    }
+
+    let inverse_pixels = comptime!(1.0f32 / (blksize * blksize) as f32);
+    let origin_x = (block % blocks_x) * step;
+    let origin_y = (block / blocks_x) * step;
+    let mut total = 0.0f32;
+
+    for pixel_y in 0..blksize {
+        let source_y = u32::min(origin_y + pixel_y, comptime!(height - 1));
+        for pixel_x in 0..blksize {
+            let source_x = u32::min(origin_x + pixel_x, comptime!(width - 1));
+            total += plane[(source_y * width + source_x) as usize];
+        }
+    }
+
+    out[block as usize] = total * inverse_pixels;
+}
+
 /// Writes identity with `valid` at 0 to ring slot `slot`.
 #[cube(launch_unchecked)]
 pub fn mc_model_identity(models: &mut [f32], slot: u32) {
@@ -209,6 +244,27 @@ const STATE_SCALE_LIMIT: u32 = 6;
 /// The scale limit of a fit that starts from scratch, high enough to never bind.
 const UNLIMITED_SCALE: f32 = 1.0e30;
 
+/// The contrast at which a block keeps half its weight.
+///
+/// Contrast is how far a block's window mean SAD sits above its winning SAD, relative to the
+/// winner. A block of flat grain matches about as well everywhere and lands near 0.
+const CONTRAST_HALF_WEIGHT: f32 = 0.25;
+
+/// The smallest winning SAD the contrast divides by.
+const CONTRAST_MIN_SAD: f32 = 1e-6;
+
+/// The highest contrast a still block may have and still count toward a bar.
+///
+/// Letterbox bars are flat, so their blocks match equally well everywhere. A still block with
+/// detail belongs to the picture.
+const BAR_MAX_CONTRAST: f32 = CONTRAST_HALF_WEIGHT;
+
+/// The brightest mean sample, normalised, a still block may have and still count toward a bar.
+///
+/// Bars are black. Limited-range black sits at 16/255, so 32/255 leaves room for grain and for
+/// the lifted blacks of film scans, while a flat grey or bright band stays part of the picture.
+const BAR_MAX_LUMA: f32 = 32.0 / 255.0;
+
 /// How much a zero vector counts in a solve, so static overlays cannot anchor a moving fit.
 const ZERO_VECTOR_WEIGHT: f32 = 0.2;
 
@@ -244,13 +300,21 @@ const MAX_CORNER_SHIFT: f32 = 400.0;
 ///
 /// A bar is a run of block rows, or columns, whose vectors are all zero, starting at the frame's
 /// edge and no longer than a third of the lines. The line just past it must move in almost every
-/// block, and the opposite edge must hold a bar of nearly the same length. A still background
-/// beside a moving layer that spans the frame can still pass for a symmetric pair of bars. One
-/// workgroup writes the four band words to `bands`.
+/// block, and the opposite edge must hold a bar of nearly the same length. One workgroup writes
+/// the four band words to `bands`.
+///
+/// With `has_contrast` set, `sad` holds each block's winning SAD, then `means_offset` words later
+/// its window mean SAD, and as far again its mean sample. A still block then belongs to a bar
+/// only when it is flat, at most [BAR_MAX_CONTRAST], and dark, at most [BAR_MAX_LUMA]. Without
+/// them, a still background beside a moving layer that spans the frame can pass for a symmetric
+/// pair of bars.
 #[cube(launch_unchecked)]
 pub fn mc_fit_bands(
     field: &[i32],
+    sad: &[f32],
     bands: &mut [u32],
+    #[comptime] has_contrast: bool,
+    #[comptime] means_offset: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] blksize: u32,
@@ -275,7 +339,8 @@ pub fn mc_fit_bands(
         let mut moving = 0u32;
         if row >= 1 && row <= last_row {
             for col in 1..comptime!(last_col + 1) {
-                moving += block_moves(field, row * blocks_x + col);
+                let block = row * blocks_x + col;
+                moving += block_in_picture(field, sad, block, has_contrast, means_offset);
             }
         }
 
@@ -288,7 +353,8 @@ pub fn mc_fit_bands(
         let mut moving = 0u32;
         if col >= 1 && col <= last_col {
             for row in 1..comptime!(last_row + 1) {
-                moving += block_moves(field, row * blocks_x + col);
+                let block = row * blocks_x + col;
+                moving += block_in_picture(field, sad, block, has_contrast, means_offset);
             }
         }
 
@@ -334,7 +400,9 @@ pub fn mc_fit_bands(
 /// blocks into `partials` in a fixed order. Each point is a block centre, `origin + blksize / 2`,
 /// measured from the frame centre, and its motion is the block's vector. With `older_to_newer`
 /// unset, `field` is the newer-to-older direction and each block is turned around, so every
-/// stage sees the older frame's points moving into the newer frame.
+/// stage sees the older frame's points moving into the newer frame. With `has_contrast` set, `sad`
+/// holds each block's window mean SAD `means_offset` words after its winning SAD, and the weigh
+/// stage scales each block by its contrast.
 #[cube(launch_unchecked)]
 pub fn mc_fit_sums(
     field: &[i32],
@@ -348,6 +416,8 @@ pub fn mc_fit_sums(
     prior_slot: u32,
     #[comptime] stage: u32,
     #[comptime] has_sad: bool,
+    #[comptime] has_contrast: bool,
+    #[comptime] means_offset: u32,
     #[comptime] older_to_newer: bool,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -403,9 +473,14 @@ pub fn mc_fit_sums(
         let scale_sq = scale * scale;
 
         if weigh {
-            let base = block_base_weight(
+            let mut base = block_base_weight(
                 field, bands, col, row, mvx, mvy, width, height, blksize, step, blocks_x, blocks_y,
             );
+            if has_contrast {
+                let mean_sad = sad[(means_offset + block) as usize];
+                base *= contrast_weight(block_sad, mean_sad);
+            }
+
             weights[block as usize] = base;
 
             let base_sad = base * block_sad;
@@ -673,6 +748,26 @@ fn beats_still(model_score: f32, still_score: f32, weight: f32) -> bool {
     moving && better
 }
 
+/// How much a block's match stands out from its window, between 0 and 1.
+///
+/// A winner of zero SAD counts fully when the window holds any other SAD, and not at all when the
+/// whole window is zero.
+#[cube]
+fn contrast_weight(best_sad: f32, mean_sad: f32) -> f32 {
+    let contrast = block_contrast(best_sad, mean_sad);
+
+    contrast / (contrast + CONTRAST_HALF_WEIGHT)
+}
+
+/// How far a block's window mean SAD sits above its winning SAD, relative to the winner.
+#[cube]
+fn block_contrast(best_sad: f32, mean_sad: f32) -> f32 {
+    let gap = f32::max(mean_sad - best_sad, 0.0f32);
+    let safe_best = f32::max(best_sad, CONTRAST_MIN_SAD);
+
+    gap / safe_best
+}
+
 /// The base weight of one block of the pair field.
 ///
 /// Border blocks, bar blocks, blocks reaching past the frame and blocks whose match lands outside
@@ -738,13 +833,31 @@ fn neighbour_agrees(field: &[i32], neighbour: u32, mvx: i32, mvy: i32, tolerance
     select(close_x && close_y, 1u32, 0u32)
 }
 
-/// 1 when the block's vector is not zero.
+/// 1 when the block cannot be part of a bar, because it moves or, with `has_contrast`, holds
+/// detail or is not dark.
 #[cube]
-fn block_moves(field: &[i32], block: u32) -> u32 {
+fn block_in_picture(
+    field: &[i32],
+    sad: &[f32],
+    block: u32,
+    #[comptime] has_contrast: bool,
+    #[comptime] means_offset: u32,
+) -> u32 {
     let mvx = field[(block * 2) as usize];
     let mvy = field[(block * 2 + 1) as usize];
+    let mut in_picture = mvx != 0i32 || mvy != 0i32;
 
-    select(mvx != 0i32 || mvy != 0i32, 1u32, 0u32)
+    if has_contrast {
+        let best_sad = sad[block as usize];
+        let mean_sad = sad[(means_offset + block) as usize];
+        let luma = sad[(2 * means_offset + block) as usize];
+        let contrast = block_contrast(best_sad, mean_sad);
+        let detailed = contrast > BAR_MAX_CONTRAST;
+        let bright = luma > BAR_MAX_LUMA;
+        in_picture = in_picture || detailed || bright;
+    }
+
+    select(in_picture, 1u32, 0u32)
 }
 
 /// The length of the bar of still lines from line `start` inward, or 0 when it is not a bar.

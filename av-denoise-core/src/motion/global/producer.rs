@@ -14,7 +14,7 @@ use super::{
 };
 use crate::engine::align::StorageAlign;
 use crate::engine::{BufferSize, DevicePlane, IngestTarget, SampleFormat, ingest};
-use crate::motion::kernels::mc_model_identity;
+use crate::motion::kernels::{mc_block_means, mc_box_rows, mc_high_pass_cols, mc_model_identity};
 use crate::motion::pyramid::{pyramid_pixels_per_frame, pyramid_slot_byte_offset, run_pyramid_downscale};
 use crate::motion::{MAX_PYRAMID_LEVELS, MatchTargets, MotionCompensationMode, MotionCtx, run_analyse};
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
@@ -22,6 +22,15 @@ use crate::tune::gpu::{bind, zeroed_words};
 
 /// Frames the producer's pyramid holds, the newest and the one before it.
 const PYRAMID_SLOTS: u32 = 2;
+
+/// How far either side, in luma pixels, the local mean each frame loses before matching reaches.
+///
+/// A flickering lamp or a flare changes the brightness of whole regions between two frames, which
+/// swamps their SADs. Removing the local mean keeps the detail the match needs.
+const HIGH_PASS_RADIUS: u32 = 8;
+
+/// The side of the square workgroup the high-pass kernels run.
+const HIGH_PASS_TILE: u32 = 16;
 
 /// The coarse search radius of a pair's first match, on its quarter-resolution level.
 const ACQUISITION_COARSE_RADIUS: u32 = 12;
@@ -94,7 +103,8 @@ impl Run {
 
 /// Fits one camera model per adjacent frame pair from the luma plane, into a [ModelRing].
 ///
-/// Each push matches the new frame against the one before it, fits a model to the block vectors,
+/// Each frame loses its local mean first, so a change of lighting does not swamp the match. Each
+/// push matches the new frame against the one before it, fits a model to the block vectors,
 /// matches again around that model and fits once more. The first match runs a deep search, so a
 /// fast pan is found without a model to start from. Each model depends on its own pair alone, and
 /// the first frame of a run writes identity.
@@ -116,7 +126,14 @@ pub struct PairModelProducer {
     gap_tables: Vec<Handle>,
     predictions: Handle,
     field: Handle,
+    /// Each block's winning SAD, window mean SAD and mean sample, one confidence stride apart.
+    ///
+    /// The mean sample is of the newer frame, which matches the older one on every still block.
     sad: Handle,
+    /// The newest frame's normalised luma before the high-pass.
+    luma: Handle,
+    /// The newest frame's luma averaged along each row.
+    luma_rows: Handle,
     confidence_placeholder: Handle,
     /// Zeroed noise values, so the search prefers its existing seed only on exact ties.
     noise: Handle,
@@ -154,10 +171,13 @@ impl PairModelProducer {
         let gap_tables = (0..depth).map(|slot| single_word_table(client, slot)).collect();
 
         let field_bytes = ctx.pair_direction_bytes() as usize;
-        let sad_bytes = ctx.confidence_bytes_per_neighbour() as usize;
+        let sad_bytes = 3 * ctx.confidence_bytes_per_neighbour() as usize;
         let predictions_bytes = AFFINE_WORDS as usize * size_of::<f32>();
         let field = client.empty(field_bytes);
         let sad = client.empty(sad_bytes);
+        let plane_bytes = (luma_width * luma_height) as usize * size_of::<f32>();
+        let luma = client.empty(plane_bytes);
+        let luma_rows = client.empty(plane_bytes);
         let predictions = client.empty(predictions_bytes);
         let confidence_placeholder = zeroed_words(client, 1);
         let noise = zeroed_words(client, DERIVED_WORDS as usize);
@@ -180,6 +200,8 @@ impl PairModelProducer {
             predictions,
             field,
             sad,
+            luma,
+            luma_rows,
             confidence_placeholder,
             noise,
             plane_placeholder,
@@ -232,23 +254,22 @@ impl PairModelProducer {
         Ok(())
     }
 
-    /// Normalises `luma` into pyramid slot `slot` and builds its coarser levels.
+    /// Normalises `luma`, measures its block means, and writes it high-passed into pyramid slot
+    /// `slot` with its coarser levels.
     fn build_pyramid(&self, luma: &DevicePlane<'_>, slot: u32) {
-        let align = self.deep_ctx.align;
-        let levels = self.deep_ctx.pyramid_levels;
-        let pyramid_pixels = pyramid_pixels_per_frame(self.width, self.height, levels, align);
-        let offset_bytes = pyramid_slot_byte_offset(self.width, self.height, PYRAMID_SLOTS, 0, slot, align);
-        let offset = offset_bytes / size_of::<f32>() as u64;
+        let pixels = self.width * self.height;
         let target = IngestTarget {
-            ring: &self.pyramid,
-            ring_len: pyramid_pixels * PYRAMID_SLOTS as usize,
-            offset: offset as u32,
-            pixels: self.width * self.height,
+            ring: &self.luma,
+            ring_len: pixels as usize,
+            offset: 0,
+            pixels,
             channels: 1,
         };
         let planes = [*luma];
 
         ingest(&self.client, &planes, self.input, &self.plane_placeholder, target);
+        self.measure_block_means();
+        self.high_pass_into(slot);
         run_pyramid_downscale(
             &self.client,
             &self.deep_ctx,
@@ -258,6 +279,87 @@ impl PairModelProducer {
             slot,
             &self.pyramid,
         );
+    }
+
+    /// Writes the block means of the newest luma to the third confidence stride of `sad`.
+    fn measure_block_means(&self) {
+        let pixels = (self.width * self.height) as usize;
+        let blocks = self.ctx.blocks_x * self.ctx.blocks_y;
+        let means_offset = 2 * self.ctx.confidence_bytes_per_neighbour();
+        let means = self.sad.clone().offset_start(means_offset);
+        let cube_count = CubeCount::new_1d(blocks.div_ceil(FIT_THREADS));
+        let cube_dim = CubeDim::new_1d(FIT_THREADS);
+
+        let luma_arg = bind(&self.luma, pixels);
+        let means_arg = bind(&means, blocks as usize);
+
+        // SAFETY: the bindings cover the luma plane and one stride of `sad`, and the kernel guards
+        // every block index.
+        unsafe {
+            mc_block_means::launch_unchecked(
+                &self.client,
+                cube_count,
+                cube_dim,
+                luma_arg,
+                means_arg,
+                self.width,
+                self.height,
+                self.ctx.blksize,
+                self.ctx.step,
+                self.ctx.blocks_x,
+                self.ctx.blocks_y,
+            );
+        }
+    }
+
+    /// Writes the newest luma minus its local mean to level 0 of pyramid slot `slot`.
+    fn high_pass_into(&self, slot: u32) {
+        let pixels = (self.width * self.height) as usize;
+        let align = self.deep_ctx.align;
+        let offset_bytes = pyramid_slot_byte_offset(self.width, self.height, PYRAMID_SLOTS, 0, slot, align);
+        let level0 = self.pyramid.clone().offset_start(offset_bytes);
+        let cubes_x = self.width.div_ceil(HIGH_PASS_TILE);
+        let cubes_y = self.height.div_ceil(HIGH_PASS_TILE);
+
+        let luma_arg = bind(&self.luma, pixels);
+        let rows_arg = bind(&self.luma_rows, pixels);
+        let grid = CubeCount::new_2d(cubes_x, cubes_y);
+        let dim = CubeDim::new_2d(HIGH_PASS_TILE, HIGH_PASS_TILE);
+
+        // SAFETY: both bindings cover a whole luma plane, and the kernel guards every pixel.
+        unsafe {
+            mc_box_rows::launch_unchecked(
+                &self.client,
+                grid,
+                dim,
+                luma_arg,
+                rows_arg,
+                self.width,
+                self.height,
+                HIGH_PASS_RADIUS,
+            );
+        }
+
+        let luma_arg = bind(&self.luma, pixels);
+        let rows_arg = bind(&self.luma_rows, pixels);
+        let level0_arg = bind(&level0, pixels);
+        let grid = CubeCount::new_2d(cubes_x, cubes_y);
+        let dim = CubeDim::new_2d(HIGH_PASS_TILE, HIGH_PASS_TILE);
+
+        // SAFETY: every binding covers one luma plane, and level 0 of a slot holds a whole plane.
+        unsafe {
+            mc_high_pass_cols::launch_unchecked(
+                &self.client,
+                grid,
+                dim,
+                luma_arg,
+                rows_arg,
+                level0_arg,
+                self.width,
+                self.height,
+                HIGH_PASS_RADIUS,
+            );
+        }
     }
 
     /// Composes the one-step prediction of the model in ring slot `slot`.
@@ -320,6 +422,7 @@ impl PairModelProducer {
             pairs: &self.field,
             direction: 0,
             sad: Some(&self.sad),
+            has_contrast: true,
         };
 
         run_model_fit(
@@ -384,7 +487,9 @@ pub(crate) fn producer_buffer_sizes(
     let field = field_bytes.map(|bytes| bytes / size_of::<i32>() as u64);
     let sad_bytes = checked_times(blocks, size_of::<f32>() as u64);
     let sad_bytes = sad_bytes.and_then(|bytes| align.checked_pad_bytes(bytes));
-    let sad = sad_bytes.map(|bytes| bytes / size_of::<f32>() as u64);
+    let sad_stride = sad_bytes.map(|bytes| bytes / size_of::<f32>() as u64);
+    let sad = checked_times(sad_stride, 3);
+    let plane = u64::from(luma_width) * u64::from(luma_height);
 
     let partial_count = blocks.map(|blocks| blocks.div_ceil(u64::from(FIT_THREADS)));
     let partials = checked_times(partial_count, u64::from(FIT_LANES));
@@ -394,6 +499,8 @@ pub(crate) fn producer_buffer_sizes(
         ("pair model pyramid", pyramid),
         ("pair model field", field),
         ("pair model SAD", sad),
+        ("pair model luma", Some(plane)),
+        ("pair model luma rows", Some(plane)),
         ("pair model fit weights", blocks),
         ("pair model fit partials", partials),
         ("pair model ring", Some(ring)),

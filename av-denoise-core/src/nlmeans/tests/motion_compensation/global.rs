@@ -324,8 +324,10 @@ fn models_do_not_leak_across_reset() {
         geometry,
     };
 
-    let before = pan_clip(luma_shape((0, 24)), FRAMES, 14);
-    let after = pan_clip(luma_shape((FAST_PAN, 0)), FRAMES, 15);
+    let before_shape = luma_shape((0, 24));
+    let after_shape = luma_shape((FAST_PAN, 0));
+    let before = pan_clip(before_shape, FRAMES, 14);
+    let after = pan_clip(after_shape, FRAMES, 15);
 
     for spec in [nlmeans, nl4d] {
         let mut reset_engine = spec.build(&client, default_kernels).expect("the spec builds");

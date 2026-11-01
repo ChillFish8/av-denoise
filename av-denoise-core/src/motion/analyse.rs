@@ -33,7 +33,7 @@ pub(crate) fn confidence_byte_offset(motion_ctx: &MotionCtx, neighbour_idx: u32)
 ///
 /// With `predictions`, every block also searches around its neighbour's camera model prediction,
 /// [AFFINE_WORDS] words per neighbour. With `sad`, the fine pass writes each block's winning SAD
-/// in the confidence layout.
+/// in the confidence layout, then each block's window mean SAD in the same layout after it.
 pub(crate) struct MatchTargets<'a> {
     pub pyramid: &'a Handle,
     /// Frame slots the pyramid holds.
@@ -50,7 +50,7 @@ pub(crate) struct MatchTargets<'a> {
     pub conf_len: usize,
     pub write_confidence: bool,
     pub predictions: Option<&'a Handle>,
-    /// Holds `neighbours` confidence strides of `f32` when set.
+    /// Holds twice `neighbours` confidence strides of `f32` when set.
     pub sad: Option<&'a Handle>,
 }
 
@@ -243,7 +243,7 @@ pub(super) fn launch_fine(
     let write_sad = targets.sad.is_some();
     // An unwritten SAD output binds the confidence buffer, which the kernel then never indexes.
     let (sad, sad_len) = match targets.sad {
-        Some(handle) => (handle.clone(), (targets.neighbours * conf_stride) as usize),
+        Some(handle) => (handle.clone(), (2 * targets.neighbours * conf_stride) as usize),
         None => (targets.confidence.clone(), targets.conf_len),
     };
     let noise = noise.clone();

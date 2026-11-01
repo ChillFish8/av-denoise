@@ -186,6 +186,7 @@ pub fn mc_block_match_coarse(
         blksize,
         search_radius,
         count,
+        false,
     );
 
     if site.thread_id != 0 {
@@ -251,8 +252,9 @@ pub fn mc_block_match_coarse(
 /// noisy copies of the same content show, and `thsad` is how far past it the confidence reaches
 /// zero. `thsad` must be positive, or a perfect match divides zero by zero.
 ///
-/// When `write_sad` is set, each block also writes its winning SAD to `sad`. Each output that is
-/// unset is never touched and can be a placeholder.
+/// When `write_sad` is set, each block also writes its winning SAD to `sad`. After every
+/// neighbour's SADs come the window means in the same layout, each the mean SAD over the window
+/// the winner came from. Each output that is unset is never touched and can be a placeholder.
 ///
 /// The neighbour pixels the search reaches are staged into shared memory once per centre, clamped
 /// to the frame.
@@ -342,6 +344,7 @@ pub fn mc_block_match_fine(
         blksize,
         search_radius,
         count,
+        write_sad,
     );
 
     if site.thread_id != 0 {
@@ -354,7 +357,9 @@ pub fn mc_block_match_fine(
     let block_slot = (conf_base + block_row * blocks_x + block_col) as usize;
 
     if write_sad {
+        let means_base = (CUBE_COUNT_Z * conf_stride) as usize;
         sad[block_slot] = best.sad;
+        sad[means_base + block_slot] = best.mean;
     }
 
     if write_confidence {
@@ -378,8 +383,8 @@ pub fn mc_block_match_fine(
 /// Searches a window around each of a block's `count` centres and keeps the best.
 ///
 /// The first centre is the incumbent. A later one replaces it only when [beats_incumbent] prefers it
-/// under `bias`, and a later centre equal to the first is skipped. Only thread 0's result is
-/// meaningful.
+/// under `bias`, and a later centre equal to the first is skipped. With `measure_mean` set, the
+/// result also carries the winning window's mean SAD. Only thread 0's result is meaningful.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -395,6 +400,7 @@ fn search_candidates(
     #[comptime] blksize: u32,
     #[comptime] search_radius: u32,
     #[comptime] count: u32,
+    #[comptime] measure_mean: bool,
 ) -> WindowBest {
     let window_side = comptime!(2 * search_radius + 1);
     let candidates = comptime!(window_side * window_side);
@@ -423,8 +429,10 @@ fn search_candidates(
         height,
         blksize,
         search_radius,
+        measure_mean,
     );
     let mut best_sad = incumbent.sad;
+    let mut best_mean = incumbent.mean;
     let mut best_dx = incumbent.dx;
     let mut best_dy = incumbent.dy;
 
@@ -444,9 +452,11 @@ fn search_candidates(
                 height,
                 blksize,
                 search_radius,
+                measure_mean,
             );
             let takes_challenger = beats_incumbent(challenger.sad, best_sad, bias);
             best_sad = select(takes_challenger, challenger.sad, best_sad);
+            best_mean = select(takes_challenger, challenger.mean, best_mean);
             best_dx = select(takes_challenger, challenger.dx, best_dx);
             best_dy = select(takes_challenger, challenger.dy, best_dy);
         }
@@ -454,6 +464,7 @@ fn search_candidates(
 
     WindowBest {
         sad: best_sad,
+        mean: best_mean,
         dx: best_dx,
         dy: best_dy,
     }
@@ -488,7 +499,8 @@ fn stage_centre(
 /// Scores every offset in the window around `centre` and returns the lowest.
 ///
 /// A tie picks the first offset in row-major order, and the centre itself wins a tie with that
-/// pick. Only thread 0's result is meaningful, and every thread must call it.
+/// pick. With `measure_mean` set, thread 0 also sums every offset's SAD in row-major order for the
+/// window's mean. Only thread 0's result is meaningful, and every thread must call it.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -503,9 +515,11 @@ fn search_window(
     #[comptime] height: u32,
     #[comptime] blksize: u32,
     #[comptime] search_radius: u32,
+    #[comptime] measure_mean: bool,
 ) -> WindowBest {
     let window_side = comptime!(2 * search_radius + 1);
     let candidates = comptime!(window_side * window_side);
+    let inverse_candidates = comptime!(1.0f32 / candidates as f32);
 
     let window_x0 = site.origin_x + centre.dx - search_radius as i32;
     let window_y0 = site.origin_y + centre.dy - search_radius as i32;
@@ -550,6 +564,7 @@ fn search_window(
 
     // A huge start rather than a negative initialiser, which cubecl's macro does not lift cleanly.
     let mut best_sad = 1.0e30f32;
+    let mut mean_sad = 0.0f32;
     let mut best_dx = centre.dx;
     let mut best_dy = centre.dy;
 
@@ -585,10 +600,20 @@ fn search_window(
             best_dx = centre.dx;
             best_dy = centre.dy;
         }
+
+        if measure_mean {
+            let mut total = 0.0f32;
+            for index in 0..candidates {
+                total += scratch.sad_scratch[index as usize];
+            }
+
+            mean_sad = total * inverse_candidates;
+        }
     }
 
     WindowBest {
         sad: best_sad,
+        mean: mean_sad,
         dx: best_dx,
         dy: best_dy,
     }

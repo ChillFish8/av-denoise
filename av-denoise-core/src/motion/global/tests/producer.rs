@@ -211,8 +211,13 @@ fn value_noise(x: f64, y: f64, cell: f64, seed: u32) -> f64 {
 
 /// A continuous texture with no repeat, so every block has one clear match.
 fn texture(x: f64, y: f64) -> f32 {
-    let fine = value_noise(x, y, TEXTURE_CELLS[0], 1);
-    let coarse = value_noise(x, y, TEXTURE_CELLS[1], 2);
+    texture_layer(x, y, 1)
+}
+
+/// The [texture] of layer `seed`, so layers never match each other.
+fn texture_layer(x: f64, y: f64, seed: u32) -> f32 {
+    let fine = value_noise(x, y, TEXTURE_CELLS[0], seed);
+    let coarse = value_noise(x, y, TEXTURE_CELLS[1], seed + 1);
     let value = 0.6 * fine + 0.4 * coarse;
 
     value as f32
@@ -422,6 +427,210 @@ fn the_first_frame_and_after_reset_are_identity() {
     push_frame(&client, &mut producer, camera_at(resumed), resumed);
     let fitted = read_slot(&client, producer.ring(), resumed);
     fitted.assert_matches(step, PAN_TOLERANCE, "the frame after the restart");
+}
+
+/// The grain every scene frame carries.
+const SCENE_GRAIN: f32 = 0.01;
+
+/// The seed of the textured layer that moves on its own in a scene.
+const LAYER_SEED: u32 = 5;
+
+/// Pushes frame `frame` of a scene, each pixel given by `sample(frame, x, y)` plus `grain`.
+fn push_scene(
+    client: &Client,
+    producer: &mut PairModelProducer,
+    frame: u32,
+    grain: f32,
+    sample: &impl Fn(u32, f64, f64) -> f32,
+) {
+    let mut clean = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let value = sample(frame, x as f64, y as f64);
+            clean.push(value);
+        }
+    }
+
+    let samples = noisy_field_over(&clean, WIDTH, HEIGHT, grain, frame);
+    let handle = upload(client, &samples);
+    let plane = DevicePlane::new(&handle, WIDTH, HEIGHT);
+
+    producer.push(&plane, frame).unwrap();
+}
+
+/// Pushes four frames of a scene and checks every pair fits no camera motion.
+fn assert_still_camera(client: &Client, sample: &impl Fn(u32, f64, f64) -> f32, label: &str) {
+    let mut producer = producer(client, default_mode());
+
+    for frame in 0..4u32 {
+        push_scene(client, &mut producer, frame, SCENE_GRAIN, sample);
+        if frame == 0 {
+            continue;
+        }
+
+        let fitted = read_slot(client, producer.ring(), frame);
+        let pair_label = format!("{label}, frame {frame}");
+        fitted.assert_identity(&pair_label);
+    }
+}
+
+/// Pushes four frames of a scene with `grain` and checks every pair fits `expected`.
+fn assert_scene_pan(
+    client: &Client,
+    grain: f32,
+    sample: &impl Fn(u32, f64, f64) -> f32,
+    expected: Similarity,
+    label: &str,
+) {
+    let mut producer = producer(client, default_mode());
+
+    for frame in 0..4u32 {
+        push_scene(client, &mut producer, frame, grain, sample);
+        if frame == 0 {
+            continue;
+        }
+
+        let fitted = read_slot(client, producer.ring(), frame);
+        let pair_label = format!("{label}, frame {frame}");
+        fitted.assert_matches(expected, SUBPIXEL_TOLERANCE, &pair_label);
+    }
+}
+
+/// Whether `value` lies between `low` and `high` shares of `extent`.
+fn within_share(value: f64, extent: u32, low: f64, high: f64) -> bool {
+    let start = low * extent as f64;
+    let end = high * extent as f64;
+
+    value >= start && value < end
+}
+
+#[test]
+fn a_moving_subject_on_a_still_camera_fits_no_motion() {
+    let client = test_client();
+    let scene = |frame: u32, x: f64, y: f64| {
+        let subject_x = x - 12.0 * frame as f64;
+        let inside_x = within_share(subject_x, WIDTH, 0.2, 0.83);
+        let inside_y = within_share(y, HEIGHT, 0.2, 0.83);
+        if inside_x && inside_y {
+            texture_layer(subject_x, y, LAYER_SEED)
+        } else {
+            texture(x, y)
+        }
+    };
+
+    assert_still_camera(&client, &scene, "a subject over 40% of the frame");
+}
+
+#[test]
+fn a_layer_crossing_mid_frame_on_a_still_camera_fits_no_motion() {
+    let client = test_client();
+    let scene = |frame: u32, x: f64, y: f64| {
+        let layer_x = x - 20.0 * frame as f64;
+        if within_share(y, HEIGHT, 0.32, 0.68) {
+            texture_layer(layer_x, y, LAYER_SEED)
+        } else {
+            texture(x, y)
+        }
+    };
+
+    assert_still_camera(&client, &scene, "a full-width layer");
+}
+
+#[test]
+fn a_strip_moving_down_mid_frame_on_a_still_camera_fits_no_motion() {
+    let client = test_client();
+    let scene = |frame: u32, x: f64, y: f64| {
+        let strip_y = y - 16.0 * frame as f64;
+        if within_share(x, WIDTH, 0.32, 0.68) {
+            texture_layer(x, strip_y, LAYER_SEED)
+        } else {
+            texture(x, y)
+        }
+    };
+
+    assert_still_camera(&client, &scene, "a full-height strip");
+}
+
+#[test]
+fn still_low_detail_grey_bands_around_a_moving_layer_fit_no_motion() {
+    let client = test_client();
+    let scene = |frame: u32, x: f64, y: f64| {
+        let layer_x = x - 20.0 * frame as f64;
+        if within_share(y, HEIGHT, 0.32, 0.68) {
+            texture_layer(layer_x, y, LAYER_SEED)
+        } else {
+            let detail = texture_layer(x, y, 7) - 0.5;
+            0.5 + 0.2 * detail
+        }
+    };
+
+    assert_still_camera(&client, &scene, "grey bands");
+}
+
+#[test]
+fn a_letterboxed_pan_with_grainy_black_bars_is_recovered() {
+    let client = test_client();
+    let bar_level = 18.0 / 255.0;
+    let scene = |frame: u32, x: f64, y: f64| {
+        let picture_x = x - 30.0 * frame as f64;
+        if within_share(y, HEIGHT, 0.12, 0.88) {
+            texture(picture_x, y)
+        } else {
+            bar_level
+        }
+    };
+    let expected = Similarity::shift(30.0, 0.0);
+
+    assert_scene_pan(&client, SCENE_GRAIN, &scene, expected, "a letterboxed pan");
+}
+
+/// How much a soft lamp glow centred on the frame lights each pixel on odd frames, up to 0.4.
+fn lamp_glow(frame: u32, x: f64, y: f64) -> f32 {
+    if frame.is_multiple_of(2) {
+        return 0.0;
+    }
+
+    let offset_x = x - WIDTH as f64 / 2.0;
+    let offset_y = y - HEIGHT as f64 / 2.0;
+    let distance_sq = offset_x * offset_x + offset_y * offset_y;
+    let falloff = (-distance_sq / (2.0 * 250.0 * 250.0)).exp();
+
+    (0.4 * falloff) as f32
+}
+
+#[test]
+fn a_pan_under_a_flickering_lamp_is_recovered() {
+    let client = test_client();
+    let scene = |frame: u32, x: f64, y: f64| {
+        let picture_x = x - 30.0 * frame as f64;
+        let glow = lamp_glow(frame, x, y);
+        let lit = texture(picture_x, y) * (1.0 + glow);
+        lit + 0.5 * glow
+    };
+    let expected = Similarity::shift(30.0, 0.0);
+
+    assert_scene_pan(&client, SCENE_GRAIN, &scene, expected, "a flickering pan");
+}
+
+/// The wall has no grain, so its flat blocks match every offset equally and settle on zero.
+#[test]
+fn a_fast_pan_over_a_flat_wall_with_its_own_foreground_is_recovered() {
+    let client = test_client();
+    let scene = |frame: u32, x: f64, y: f64| {
+        let wall_x = x - 35.0 * frame as f64;
+        let foreground_x = x + 10.0 * frame as f64;
+        let on_strip = wall_x.rem_euclid(160.0) < 24.0;
+        if within_share(y, HEIGHT, 0.6, 0.65) {
+            texture_layer(foreground_x, y, LAYER_SEED)
+        } else if on_strip {
+            texture(wall_x, y)
+        } else {
+            0.4
+        }
+    };
+    let expected = Similarity::shift(35.0, 0.0);
+
+    assert_scene_pan(&client, 0.0, &scene, expected, "a flat wall pan");
 }
 
 fn temporal_nlmeans(motion_compensation: MotionCompensationMode, radius: u32) -> NlmeansAlgorithm {

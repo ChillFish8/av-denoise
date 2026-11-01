@@ -90,10 +90,12 @@ impl FitModelBench {
         let cube_dim = CubeDim::new_1d(FIT_THREADS);
 
         let field = args.field.clone();
+        let sad = args.sad.clone();
         let bands = args.scratch.bands().clone();
 
         unsafe {
             let field_arg = BufferArg::from_raw_parts(field, 2 * blocks);
+            let sad_arg = BufferArg::from_raw_parts(sad, blocks);
             let bands_arg = BufferArg::from_raw_parts(bands, FIT_BAND_WORDS as usize);
 
             mc_fit_bands::launch_unchecked(
@@ -101,7 +103,10 @@ impl FitModelBench {
                 cube_count,
                 cube_dim,
                 field_arg,
+                sad_arg,
                 bands_arg,
+                false,
+                0,
                 WIDTH,
                 HEIGHT,
                 FIT_BLKSIZE,
@@ -151,6 +156,8 @@ impl FitModelBench {
                 0,
                 stage,
                 true,
+                false,
+                0,
                 true,
                 WIDTH,
                 HEIGHT,

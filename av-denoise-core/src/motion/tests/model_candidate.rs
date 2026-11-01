@@ -77,6 +77,7 @@ struct FineSearch {
 struct FineOutput {
     vectors: Vec<i32>,
     confidence: Vec<f32>,
+    /// The winning SADs, then the window means, each in the confidence layout.
     sad: Vec<f32>,
 }
 
@@ -117,6 +118,7 @@ impl FineSearch {
         let mv_stride = 2 * self.blocks();
         let mv_len = (mv_stride * neighbour_count) as usize;
         let conf_len = (self.conf_stride() * neighbour_count) as usize;
+        let sad_len = 2 * conf_len;
         let (seed_dx, seed_dy) = seed.unwrap_or((0, 0));
         let seeds: Vec<i32> = (0..mv_len)
             .map(|index| if index % 2 == 0 { seed_dx } else { seed_dy })
@@ -124,8 +126,8 @@ impl FineSearch {
         let seed_bytes = i32::as_bytes(&seeds);
         let mv_field = client.create_from_slice(seed_bytes);
         let use_seed = u32::from(seed.is_some());
-        let unwritten = vec![f32::NAN; conf_len];
-        let confidence = upload(&client, &unwritten);
+        let unwritten = vec![f32::NAN; sad_len];
+        let confidence = upload(&client, &unwritten[..conf_len]);
         let sad = upload(&client, &unwritten);
 
         let blocks_y = self.height.div_ceil(self.step);
@@ -137,7 +139,7 @@ impl FineSearch {
         let slots_arg = bind(&neighbour_slots, neighbours.len());
         let mv_field_arg = bind(&mv_field, mv_len);
         let confidence_arg = bind(&confidence, conf_len);
-        let sad_arg = bind(&sad, conf_len);
+        let sad_arg = bind(&sad, sad_len);
         let predictions_arg = bind(&prediction_words, prediction_len);
         let noise_arg = bind(&noise, DERIVED_WORDS as usize);
 
@@ -175,7 +177,7 @@ impl FineSearch {
 
         let vectors = read_i32(&client, &mv_field, mv_len).expect("the field reads back");
         let confidence = read_f32(&client, &confidence, conf_len).expect("confidence reads back");
-        let sad = read_f32(&client, &sad, conf_len).expect("the SAD reads back");
+        let sad = read_f32(&client, &sad, sad_len).expect("the SAD reads back");
 
         FineOutput {
             vectors,
@@ -383,6 +385,58 @@ fn a_model_one_past_the_seed_window_searches_its_own_window() {
     assert_eq!(&with_model.vectors[..2], &[2, 0]);
 }
 
+/// One 16x16 block at the origin whose content sits 2 pixels down in the neighbour, searched 1
+/// pixel around zero, so only a model window can reach the match.
+fn match_two_pixels_down(predictions: Option<&[f32]>) -> FineOutput {
+    let search = FineSearch {
+        width: 16,
+        height: 64,
+        blksize: 16,
+        step: 16,
+        search_radius: 1,
+        sad_floor: 1.0,
+        write_sad: true,
+    };
+    let centre = texture(search.width, search.height, 17);
+    let mut neighbour = texture(search.width, search.height, 18);
+
+    for y in 0..16 {
+        for x in 0..16 {
+            neighbour[(y + 2) * 16 + x] = centre[y * 16 + x];
+        }
+    }
+
+    let neighbours = [neighbour];
+
+    search.run(&centre, &neighbours, predictions)
+}
+
+#[test]
+fn a_model_inside_the_seed_window_on_y_gives_the_seed_only_result() {
+    let at_reach = translation(0.0, 1.0);
+
+    let without_model = match_two_pixels_down(None);
+    let with_model = match_two_pixels_down(Some(&at_reach));
+
+    assert_ne!(
+        &without_model.vectors[..2],
+        &[0, 2],
+        "premise: the seed window cannot reach the match"
+    );
+    assert_eq!(with_model.vectors, without_model.vectors);
+    assert_eq!(bits(&with_model.confidence), bits(&without_model.confidence));
+    assert_eq!(bits(&with_model.sad), bits(&without_model.sad));
+}
+
+#[test]
+fn a_model_one_past_the_seed_window_on_y_searches_its_own_window() {
+    let past_reach = translation(0.0, 2.0);
+
+    let with_model = match_two_pixels_down(Some(&past_reach));
+
+    assert_eq!(&with_model.vectors[..2], &[0, 2]);
+}
+
 #[test]
 fn a_static_overlay_on_a_pan_keeps_its_own_seed() {
     let search = pan_search();
@@ -546,23 +600,91 @@ fn the_winning_sad_lands_in_the_confidence_layout() {
 
     let output = search.run(&centre, &neighbours, None);
 
+    // A window of one offset has its winning SAD as its mean, written after both neighbours.
     let blocks = search.blocks() as usize;
     let stride = search.conf_stride() as usize;
+    let means_base = 2 * stride;
     for (neighbour, expected) in [(0usize, 25.6f32), (1, 12.8)] {
-        let start = neighbour * stride;
-        let values = &output.sad[start..start + blocks];
-        let padding = &output.sad[start + blocks..start + stride];
+        for base in [0, means_base] {
+            let start = base + neighbour * stride;
+            let values = &output.sad[start..start + blocks];
+            let padding = &output.sad[start + blocks..start + stride];
 
-        for value in values {
+            for value in values {
+                assert!(
+                    (value - expected).abs() < 0.01,
+                    "neighbour {neighbour} at {base}: value {value}"
+                );
+            }
+
             assert!(
-                (value - expected).abs() < 0.01,
-                "neighbour {neighbour} SAD {value}"
+                padding.iter().all(|value| value.is_nan()),
+                "neighbour {neighbour} at {base}: padding"
             );
         }
+    }
+}
 
+/// The SAD of the block at `(origin_x, 0)` against `neighbour` shifted by `(dx, dy)`, read clamped
+/// to the frame as the kernel stages it.
+fn clamped_sad(
+    centre: &[f32],
+    neighbour: &[f32],
+    search: &FineSearch,
+    origin_x: i32,
+    dx: i32,
+    dy: i32,
+) -> f32 {
+    let width = search.width as i32;
+    let height = search.height as i32;
+    let mut total = 0.0f32;
+
+    for y in 0..search.blksize as i32 {
+        for x in 0..search.blksize as i32 {
+            let source_x = (origin_x + x + dx).clamp(0, width - 1);
+            let source_y = (y + dy).clamp(0, height - 1);
+            let centre_value = centre[(y * width + origin_x + x) as usize];
+            let neighbour_value = neighbour[(source_y * width + source_x) as usize];
+            total += (centre_value - neighbour_value).abs();
+        }
+    }
+
+    total
+}
+
+#[test]
+fn the_window_mean_averages_every_offset() {
+    let search = FineSearch {
+        width: 64,
+        height: 16,
+        blksize: 16,
+        step: 16,
+        search_radius: 1,
+        sad_floor: 0.0,
+        write_sad: true,
+    };
+    let centre = texture(search.width, search.height, 15);
+    let neighbour = texture(search.width, search.height, 16);
+    let neighbours = [neighbour.clone()];
+
+    let output = search.run(&centre, &neighbours, None);
+
+    let means_base = search.conf_stride() as usize;
+    for block in 0..search.blocks() {
+        let origin_x = (block * search.step) as i32;
+        let mut total = 0.0f32;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                total += clamped_sad(&centre, &neighbour, &search, origin_x, dx, dy);
+            }
+        }
+
+        let expected = total / 9.0;
+        let mean = output.sad[means_base + block as usize];
+        let error = (mean - expected).abs();
         assert!(
-            padding.iter().all(|value| value.is_nan()),
-            "neighbour {neighbour} padding"
+            error < 1e-3 * expected,
+            "block {block}: mean {mean}, expected {expected}"
         );
     }
 }
@@ -724,6 +846,29 @@ fn a_coarse_model_at_the_window_edge_adds_no_window() {
     );
     assert_eq!(inside, without_model);
     assert_eq!(&outside[..2], &[6, 0]);
+}
+
+#[test]
+fn a_coarse_model_at_the_window_edge_on_y_adds_no_window() {
+    let search = coarse_search();
+    let centre = texture(search.level_width, search.level_height, 15);
+    let neighbour = frame_shifted_by(&centre, search.level_width, search.level_height, 0, 3);
+    // 4 full-resolution pixels are 2 on the level, exactly the search radius.
+    let at_reach = translation(0.0, 4.0);
+    // 6 full-resolution pixels are 3 on the level, one past it.
+    let past_reach = translation(0.0, 6.0);
+
+    let without_model = search.run(&centre, &neighbour, None);
+    let inside = search.run(&centre, &neighbour, Some(&at_reach));
+    let outside = search.run(&centre, &neighbour, Some(&past_reach));
+
+    assert_ne!(
+        &without_model[..2],
+        &[0, 6],
+        "premise: the zero window cannot reach the match"
+    );
+    assert_eq!(inside, without_model);
+    assert_eq!(&outside[..2], &[0, 6]);
 }
 
 /// Halves a frame by averaging each 2x2 square, as the pyramid build does.

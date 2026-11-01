@@ -51,6 +51,8 @@ impl CandidateList {
 #[derive(CubeType, Clone, Copy)]
 pub(super) struct WindowBest {
     pub(super) sad: f32,
+    /// The mean SAD over every offset of the window, or 0 when it was not measured.
+    pub(super) mean: f32,
     pub(super) dx: i32,
     pub(super) dy: i32,
 }
