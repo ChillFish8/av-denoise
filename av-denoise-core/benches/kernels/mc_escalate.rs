@@ -25,8 +25,8 @@ const THSAD: f32 = 5.12;
 const GRAIN_SIGMA: f32 = 4.0 / 255.0;
 /// The first-pass radius of the adaptive grain row.
 const GRAIN_FIRST_RADIUS: u32 = 2;
-/// The radius of each widening stage the adaptive grain row runs after its first pass.
-const GRAIN_STAGE_RADII: [u32; 2] = [3, 4];
+/// The radius the adaptive grain row widens failing blocks to after its first pass.
+const GRAIN_CEILING: u32 = 4;
 /// The vector a disagreeing block holds, past [NEIGHBOUR_DISAGREEMENT] from its zero neighbours.
 const OUTLIER_DX: i32 = NEIGHBOUR_DISAGREEMENT + 2;
 
@@ -390,7 +390,7 @@ impl Benchmark for FlagFailuresBench {
     }
 }
 
-/// One escalation stage at `stage_radius`, its failure flags then its search, over a 1080p field.
+/// The escalation at `stage_radius`, its failure flags then its widened search, over a 1080p field.
 ///
 /// Every launch covers the whole grid, so the `none` row is the floor an all-passing frame costs.
 /// Subtract [FlagFailuresBench] for the search alone.
@@ -589,7 +589,7 @@ fn launch_plain(client: &Client, input: &EscalateInput, neighbours: u32, radius:
 
 /// The whole fine search over grainy panning frames, fixed at radius 4 or adaptive from radius 2.
 ///
-/// The adaptive row runs the tracked first pass, then flags and a search at each stage radius, so
+/// The adaptive row runs the tracked first pass, then flags and one search at [GRAIN_CEILING], so
 /// its escalation share is whatever the grain and the thresholds produce.
 pub struct GrainSearchBench {
     pub client: Client,
@@ -613,10 +613,8 @@ impl Benchmark for GrainSearchBench {
 
         launch_tracked(&self.client, &args, self.neighbours, GRAIN_FIRST_RADIUS);
         launch_floor(&self.client, &args, self.neighbours);
-        for stage_radius in GRAIN_STAGE_RADII {
-            launch_flags(&self.client, &args, self.neighbours);
-            launch_escalate(&self.client, &args, self.neighbours, stage_radius);
-        }
+        launch_flags(&self.client, &args, self.neighbours);
+        launch_escalate(&self.client, &args, self.neighbours, GRAIN_CEILING);
 
         Ok(())
     }

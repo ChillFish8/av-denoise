@@ -709,8 +709,8 @@ fn reseed_equals_streaming() {
     let field = vec![0i32; 2 * pan.blocks()];
     let input = pan.input(&field);
 
-    // Three passes make the last pass read the change flags the second pass wrote.
-    for passes in 1..=3u32 {
+    // Two passes make the second pass read the change flags the first pass wrote.
+    for passes in 1..=2u32 {
         let params = TruemotionParams {
             passes,
             ..TruemotionParams::default()
@@ -747,7 +747,7 @@ fn deterministic_runs_are_bit_identical() {
     let field = vec![0i32; 2 * pan.blocks()];
     let input = pan.input(&field);
 
-    for passes in 1..=3u32 {
+    for passes in 1..=2u32 {
         let params = TruemotionParams {
             passes,
             ..TruemotionParams::default()
@@ -777,7 +777,6 @@ fn a_search_that_escalates_runs_a_second_pass() {
     let escalating = SearchSchedule {
         first_radius: 4,
         ceiling: 8,
-        steps: 1,
     };
 
     let fixed_stage = TruemotionParams::for_schedule(fixed);

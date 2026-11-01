@@ -151,9 +151,8 @@ Motion tracking is always on, and the temporal window always reaches at
 least one frame, which this algorithm needs. There is no NLMeans weighting pass, so none of
 the NLMeans knobs below exist here.
 
-NL4D runs the `base` and `slow` presets. `slow` is `base` with `--mc-max-search-escalation 8`, so
-badly matched motion blocks search again with a wider window. It runs about 17-18% slower than
-`base` at 1080p, and its quality measured within noise of `base`. Otherwise, trade speed for quality
+NL4D runs the `base` and `slow` presets. `slow` widens the search for motion blocks whose match
+fails, up to `--mc-max-search-escalation` (8), and runs slower. Otherwise, trade speed for quality
 with `--temporal-radius` and `--spatial-radius`.
 
 | Flag                               | What it does                                                                                                                                                                                                                    | Default                  |
@@ -197,8 +196,8 @@ What `--preset` fills in:
 | `veryslow` | `hq`    | 8               | 4             | 8                     |
 
 The motion search ceiling is `--mc-max-search-escalation`, and it only applies with
-`--motion-compensation`. At 8, badly matched motion blocks search again with a wider window, which
-costs about 17-18% of speed at 1080p for quality within noise.
+`--motion-compensation`. At 8, motion blocks whose match fails search again with a wider window,
+which runs slower.
 
 | Flag                    | What it does                                                                                                                                                                                   | Default         |
 |-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------|

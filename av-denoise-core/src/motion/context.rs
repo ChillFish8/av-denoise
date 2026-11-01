@@ -2,18 +2,14 @@ use super::search::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP, MotionCompensationMode, Mo
 use super::truemotion::TruemotionParams;
 use crate::engine::align::StorageAlign;
 
-/// The widening stages a search runs for blocks that fail their first window.
-pub(crate) const DEFAULT_ESCALATION_STEPS: u32 = 1;
-
 /// How a block search widens for blocks that fail a small first window.
 ///
-/// The first pass searches `first_radius`. Blocks that fail search again in `steps` widening stages,
-/// the last at `ceiling`. A `first_radius` equal to `ceiling` searches once.
+/// The first pass searches `first_radius`. Blocks that fail search again once at `ceiling`.
+/// A `first_radius` equal to `ceiling` searches once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SearchSchedule {
     pub first_radius: u32,
     pub ceiling: u32,
-    pub steps: u32,
 }
 
 impl SearchSchedule {
@@ -22,29 +18,11 @@ impl SearchSchedule {
         Self {
             first_radius: radius,
             ceiling: radius,
-            steps: 1,
         }
     }
 
     pub fn escalates(&self) -> bool {
         self.first_radius < self.ceiling
-    }
-
-    /// The radius of each widening stage, ending at `ceiling`.
-    ///
-    /// The stages split the gap above `first_radius` evenly, rounding up. `steps` is clamped
-    /// between 1 and the gap, so every stage is wider than the one before.
-    pub fn stage_radii(&self) -> Vec<u32> {
-        if !self.escalates() {
-            return Vec::new();
-        }
-
-        let span = self.ceiling - self.first_radius;
-        let steps = self.steps.clamp(1, span);
-
-        (1..=steps)
-            .map(|stage| self.first_radius + (span * stage).div_ceil(steps))
-            .collect()
     }
 }
 
@@ -90,7 +68,6 @@ impl MotionCtx {
         let schedule = SearchSchedule {
             first_radius: search_radius,
             ceiling: max_search_escalation.max(search_radius),
-            steps: DEFAULT_ESCALATION_STEPS,
         };
 
         Some(Self {
@@ -236,40 +213,10 @@ mod tests {
     }
 
     #[test]
-    fn fixed_schedule_has_no_stages() {
+    fn fixed_schedule_does_not_escalate() {
         let schedule = SearchSchedule::fixed(4);
 
         assert!(!schedule.escalates());
-        assert!(schedule.stage_radii().is_empty());
-    }
-
-    #[test]
-    fn stage_radii_split_the_gap_and_end_at_the_ceiling() {
-        let schedule = SearchSchedule {
-            first_radius: 2,
-            ceiling: 8,
-            steps: 4,
-        };
-        let radii = schedule.stage_radii();
-
-        assert_eq!(radii, vec![4, 5, 7, 8]);
-    }
-
-    #[test]
-    fn stage_radii_clamp_steps_to_the_gap() {
-        let many_steps = SearchSchedule {
-            first_radius: 2,
-            ceiling: 4,
-            steps: 9,
-        };
-        let no_steps = SearchSchedule {
-            first_radius: 2,
-            ceiling: 4,
-            steps: 0,
-        };
-
-        assert_eq!(many_steps.stage_radii(), vec![3, 4]);
-        assert_eq!(no_steps.stage_radii(), vec![4]);
     }
 
     #[test]
@@ -303,7 +250,6 @@ mod tests {
         let expected = SearchSchedule {
             first_radius: 4,
             ceiling: 8,
-            steps: DEFAULT_ESCALATION_STEPS,
         };
 
         assert_eq!(ctx.schedule, expected);

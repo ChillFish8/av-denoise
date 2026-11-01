@@ -1,6 +1,6 @@
 /// The motion search's tuning, for a denoiser that always tracks motion.
 ///
-/// [MotionCompensationMode::Mvtools] carries the same five values.
+/// [MotionCompensationMode::Mvtools] carries the same values.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MotionSearch {
     /// The side length of each search block, in pixels at the finest pyramid level.

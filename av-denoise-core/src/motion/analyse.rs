@@ -567,7 +567,6 @@ mod tests {
         let escalating = SearchSchedule {
             first_radius: 4,
             ceiling: 8,
-            steps: 1,
         };
         let fixed = SearchSchedule::fixed(4);
         let expected = SearchSchedule {

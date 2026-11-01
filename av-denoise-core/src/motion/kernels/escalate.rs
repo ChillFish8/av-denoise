@@ -451,8 +451,7 @@ fn vector_gap(mv_field: &[i32], slot: u32, dx: i32, dy: i32) -> i32 {
 /// when its SAD beats the kept SAD in `state` by more than [ESCALATE_SAD_MARGIN] times the SAD
 /// floor in `state`, so ties and near-ties keep the earlier result. A kept winner replaces the
 /// block's vector, its SAD in `sad` when `write_sad` is set, its confidence when `write_confidence`
-/// is set, and its kept SAD in `state`. The window mean in `sad` stays the first pass's. The flag
-/// word then holds the kept winner's edge bar, or 0 when nothing was kept.
+/// is set, and its kept SAD in `state`. The window mean in `sad` stays the first pass's.
 ///
 /// Each block reads and writes only its own slots, so the launch order never changes the output.
 /// Buffers, layouts and the confidence follow [mc_block_match_fine](super::mc_block_match_fine)
@@ -589,8 +588,6 @@ pub fn mc_escalate_search(
             confidence[block_slot as usize] = match_confidence(best.sad, sad_noise_floor, thsad);
         }
     }
-
-    state[flag_slot] = select(improves, best.edge_bar, 0.0f32);
 }
 
 /// Searches a block's coarse level around no motion and the camera model's prediction, and returns

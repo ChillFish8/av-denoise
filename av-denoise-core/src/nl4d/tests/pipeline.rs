@@ -834,7 +834,7 @@ fn motion_snapshot_reports_the_field_the_pass_used() {
 /// With `field_lambda` on, the snapshot shows the flat block pulled to its neighbours' vector.
 /// With it off, the snapshot shows the estimator's field.
 #[test]
-fn field_regularisation_reaches_the_snapshot() {
+fn the_truemotion_stage_reaches_the_snapshot() {
     let client = make_client();
     let (width, height) = (128u32, 96u32);
     let radius = 1u32;
@@ -891,7 +891,7 @@ fn field_regularisation_reaches_the_snapshot() {
     );
     assert_eq!(on.vectors[forward_neighbour][flat_block], [3, 0]);
 
-    // A textured block is unchanged by the pass.
+    // A textured block is unchanged by the truemotion stage.
     let textured_block = (2 * off.blocks_x + 2) as usize;
     assert_eq!(off.vectors[forward_neighbour][textured_block], [3, 0]);
     assert_eq!(on.vectors[forward_neighbour][textured_block], [3, 0]);
@@ -901,7 +901,7 @@ fn field_regularisation_reaches_the_snapshot() {
 /// synthesise a single plane.
 ///
 /// The other tests here pin `field_lambda` to 0.0 so their recorded values stay stable, while the
-/// shipped default of 1.0 runs the field-regularisation pass.
+/// shipped default of 1.0 runs the truemotion stage with its penalty on.
 fn shipped_default_params() -> Nl4dParams {
     let defaults = Nl4dParams::default();
     let nlm = NlmParams {
@@ -919,13 +919,13 @@ fn shipped_default_params() -> Nl4dParams {
 
 /// Runs the shipped defaults over a clean static clip, then a noisy one.
 ///
-/// A static clip's true motion is zero everywhere, so the regularised field must read exactly zero
+/// A static clip's true motion is zero everywhere, so the tracked field must read exactly zero
 /// at an interior block. A dispatch that read the wrong pyramid slot, neighbour or stride would
 /// pull in a mismatched vector. The clean clip has no noise, because the estimator's noise-driven
 /// wobble would mask that small displacement. The noisy clip must then gain at least 6 dB, since a
 /// corrupt field would feed grouping the wrong candidates.
 #[test]
-fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
+fn shipped_defaults_denoise_a_static_clip_and_track_its_field_as_zero() {
     let client = make_client();
     let (width, height) = (96u32, 96u32);
     let base = textured_base(width, height);
@@ -949,9 +949,9 @@ fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
         assert_eq!(
             snapshot.vectors[neighbour][interior_block],
             [0, 0],
-            "neighbour k={k}: a static, noiseless clip's regularised field must read exactly \
+            "neighbour k={k}: a static, noiseless clip's tracked field must read exactly \
              zero at an interior block; a nonzero vector here is what a wrong pyramid slot, \
-             neighbour index, or stride in the smoothing dispatch looks like"
+             neighbour index, or stride in the truemotion stage looks like"
         );
     }
 

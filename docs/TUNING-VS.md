@@ -51,11 +51,10 @@ clean = avd.Nl4d(clip)
 clean.set_output()
 ```
 
-NL4D runs the `base` and `slow` presets. `slow` searches badly matched motion blocks again with a
-wider window, up to radius 8. It costs about 17-18% of speed at 1080p and measured within noise of
-`base`. `temporal_radius` sets how many neighbouring frames are searched on each side, between 1
-and 8, and defaults to 2. NL4D always needs at least 1, since it has nothing to group without
-neighbours.
+NL4D runs the `base` and `slow` presets. `slow` widens the search for motion blocks whose match
+fails, up to radius 8, and runs slower. `temporal_radius` sets how many neighbouring frames are
+searched on each side, between 1 and 8, and defaults to 2. NL4D always needs at least 1, since it
+has nothing to group without neighbours.
 
 ### The NL4D dials
 
@@ -125,7 +124,7 @@ clean.set_output()
 through 3 frames at `fast` to 17 at `veryslow`. The variant is already fixed to HQ by calling
 `NlmHQ`, so unlike the CLI, `preset="veryfast"` here still runs the noise estimator, just with
 nothing but the current frame to work from. With `motion_compensation=True`, `slow` and `veryslow`
-also search badly matched motion blocks again up to radius 8, for about 17-18% of speed at 1080p.
+also widen the search for motion blocks whose match fails, up to radius 8, and run slower.
 
 | Symptom                        | First thing to try                 | Second                     |
 |--------------------------------|------------------------------------|----------------------------|

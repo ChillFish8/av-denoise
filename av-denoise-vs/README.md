@@ -84,7 +84,7 @@ clean.set_output()
 |-------------------|-----------------|-------------------------|------------------------|
 | `lambda_ht_scale` | float           | `--lambda-ht-scale`     | yes, the main dial     |
 | `sigma_scale`     | float           | `--sigma-scale`         | yes                    |
-| `preset`          | string          | `--preset`              | no, `base` only        |
+| `preset`          | string          | `--preset`              | no, `base` or `slow`   |
 | `refine`          | int             | `--refine`              | yes                    |
 | `spatial_radius`  | int             | `--spatial-radius`      | yes, the speed dial    |
 | `lambda_ht`       | float           | `--lambda-ht`           | situational, see below |
@@ -180,8 +180,8 @@ clean.set_output()
 `preset` is the main quality-versus-speed dial for `Nlm` and `NlmHQ`. It takes one of five values,
 from fastest to slowest and best-quality: `veryfast`, `fast`, `base`, `slow`, `veryslow`.
 Each preset resolves every unset numeric and string parameter to a value tuned for that speed tier.
-`Nl4d` runs `base` and `slow`, and any other preset raises `vs.Error`. `slow` searches badly
-matched motion blocks again with a wider window, for about 17-18% of speed at 1080p. `Nlm` and
+`Nl4d` runs `base` and `slow`, and any other preset raises `vs.Error`. `slow` widens the search
+for motion blocks whose match fails, up to radius 8, and runs slower. `Nlm` and
 `NlmHQ` do the same at `slow` and `veryslow` when `motion_compensation=True`.
 
 Any parameter you set explicitly overrides what the preset would have chosen for it,

@@ -24,9 +24,8 @@ you're following the guide for the algorithm you're using specifically.
 av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
-NL4D runs the `base` and `slow` presets. `slow` adds `--mc-max-search-escalation 8`, so badly
-matched motion blocks search again with a wider window. It costs about 17-18% of speed at 1080p and
-measured within noise of `base`, so `base` stays the default. `--temporal-radius` sets how many
+NL4D runs the `base` and `slow` presets. `slow` widens the search for motion blocks whose match
+fails, up to `--mc-max-search-escalation` (8), and runs slower. `--temporal-radius` sets how many
 neighbouring frames are searched on each side, between 1 and 8, and defaults to 2. NL4D always needs
 at least 1, since it has nothing to group without neighbours.
 
@@ -97,9 +96,8 @@ av-denoise nlmeans --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 cle
 
 `--preset` picks the variant as well as the window: `veryfast` runs the `fast` variant with no
 temporal window at all, and everything above it runs NLMeans-HQ with a window from 3 frames at `fast`
-to 17 at `veryslow`. With `--motion-compensation`, `slow` and `veryslow` also search badly matched
-motion blocks again up to radius 8, which costs about 17-18% of speed at 1080p for quality within
-noise.
+to 17 at `veryslow`. With `--motion-compensation`, `slow` and `veryslow` also widen the search for
+motion blocks whose match fails, up to `--mc-max-search-escalation` (8), and run slower.
 
 | Symptom                        | First thing to try                 | Second                      |
 |--------------------------------|------------------------------------|-----------------------------|

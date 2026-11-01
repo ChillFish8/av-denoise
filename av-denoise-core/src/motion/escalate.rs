@@ -19,9 +19,9 @@ use crate::noise::DERIVED_WORDS;
 /// It runs after a fine pass that recorded its escalation state in `targets`. It first writes the
 /// SAD floor every failure test and margin scales by, as
 /// [mc_measure_floor](super::kernels::mc_measure_floor) describes.
-/// Each stage of the schedule then flags the blocks that still fail and searches them again around
-/// the centre of their first-pass window, so the schedule's ceiling bounds the total reach. With
-/// `widen_coarse`, a stage wider than the coarse pass's radius searches the coarse level again too.
+/// It then flags the blocks that fail and searches them again at the schedule's ceiling, around the
+/// centre of their first-pass window, so the ceiling bounds the total reach. With `widen_coarse`, a
+/// ceiling wider than the coarse pass's radius searches the coarse level again too.
 /// A block keeps a wider result only when it beats the kept SAD by a floor-scaled margin. The
 /// vectors, SADs and confidence in `targets` always describe the kept result, with confidence
 /// scored against the derived word of `noise` at `sad_field` as in
@@ -64,16 +64,13 @@ pub(crate) fn run_escalation(
         thsad,
     };
     launch_floor(client, motion_ctx, targets, &escalation, &scoring);
+    launch_flags(client, motion_ctx, targets, state, thsad);
 
-    for stage_radius in motion_ctx.schedule.stage_radii() {
-        launch_flags(client, motion_ctx, targets, state, thsad);
-
-        let stage = Stage {
-            radius: stage_radius,
-            widen_coarse,
-        };
-        launch_escalate(client, motion_ctx, width, height, targets, state, stage, &scoring);
-    }
+    let stage = Stage {
+        radius: motion_ctx.schedule.ceiling,
+        widen_coarse,
+    };
+    launch_escalate(client, motion_ctx, width, height, targets, state, stage, &scoring);
 
     Ok(())
 }
@@ -85,7 +82,7 @@ pub(super) struct Scoring<'a> {
     pub(super) thsad: f32,
 }
 
-/// One widening stage of an escalation.
+/// The widened search of an escalation.
 #[derive(Clone, Copy)]
 struct Stage {
     radius: u32,
@@ -160,10 +157,10 @@ pub(super) fn launch_flags(
     }
 }
 
-/// Launches one escalation stage over every block of every neighbour.
+/// Launches the widened search over every block of every neighbour.
 ///
-/// The stage searches the coarse level again only when asked, the pyramid has one, and the stage
-/// is wider than the coarse pass's own radius.
+/// It searches the coarse level again only when asked, the pyramid has one, and its radius is wider
+/// than the coarse pass's own radius.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -206,7 +203,7 @@ fn launch_escalate(
     let reaches_further = stage.radius > motion_ctx.coarse_search_radius;
     let coarse = coarse.filter(|_| stage.widen_coarse && reaches_further);
     let widen_coarse = coarse.is_some();
-    // A stage that keeps to the fine level never reads these, so they take the fine level's shape.
+    // A search that keeps to the fine level never reads these, so they take the fine level's shape.
     let (level_width, level_height, level_offset, level_slot_pixels) = match coarse.as_ref() {
         Some(level) => (level.width, level.height, level.level_offset, level.slot_pixels),
         None => (fine_width, fine_height, 0, slot_pixels),

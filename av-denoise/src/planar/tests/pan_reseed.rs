@@ -1,6 +1,15 @@
 use super::reseed::{reseed_shifted, shifted_output_count, test_plane_options, window_of_span};
 use super::*;
-use crate::{MotionCompensationMode, MotionSearch, Nl4dOptions, NlmeansHqOptions, NlmeansOptions};
+use crate::{
+    MotionCompensationMode,
+    MotionSearch,
+    Nl4dOptions,
+    NlmeansHqOptions,
+    NlmeansOptions,
+    Preset,
+    nlmeans_temporal_radius_for,
+    search_escalation_for,
+};
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 192;
@@ -275,6 +284,44 @@ fn reseed_equals_streaming_with_a_small_first_window() {
 
             let label = format!("nlmeans {name} k={target}");
             assert_same_frame(&got, &nlmeans_streamed[target], &label);
+        }
+    }
+}
+
+/// nlmeans as the slow preset runs it, at temporal radius 4 where Auto resolves to Chained.
+#[test]
+fn chained_reseed_equals_streaming_with_escalation() {
+    let ceiling = search_escalation_for(Preset::Slow).expect("slow escalates");
+    let temporal_radius = nlmeans_temporal_radius_for(Preset::Slow);
+    let search = MotionSearch {
+        max_search_escalation: ceiling,
+        ..MotionSearch::default()
+    };
+    let motion = MotionCompensationMode::from(search);
+    let hq = NlmeansHqOptions {
+        nlm: NlmeansOptions {
+            motion_compensation: motion,
+            ..NlmeansOptions::default()
+        },
+        ..NlmeansHqOptions::default()
+    };
+    let options = PlaneOptions {
+        algorithm: Algorithm::NlmeansHq(hq),
+        ..test_plane_options(temporal_radius)
+    };
+
+    for (name, frames) in clips() {
+        let mut denoiser = PlanarDenoiser::create(&options, pan_layout()).unwrap();
+        let streamed = stream(&mut denoiser, &frames);
+        assert_eq!(streamed.len(), FRAMES, "{name}");
+
+        for target in [FRAMES / 3, FRAMES / 2, 2 * FRAMES / 3] {
+            let span = denoiser.window_span();
+            let window = window_of_span(&frames, target, span);
+            let got = denoiser.reseed(&window).unwrap();
+
+            let label = format!("chained {name} k={target}");
+            assert_same_frame(&got, &streamed[target], &label);
         }
     }
 }

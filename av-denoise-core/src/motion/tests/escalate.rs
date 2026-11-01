@@ -129,11 +129,10 @@ impl World {
     }
 }
 
-fn schedule(first_radius: u32, ceiling: u32, steps: u32) -> SearchSchedule {
+fn schedule(first_radius: u32, ceiling: u32) -> SearchSchedule {
     SearchSchedule {
         first_radius,
         ceiling,
-        steps,
     }
 }
 
@@ -430,7 +429,7 @@ fn assert_bits_eq(left: &[f32], right: &[f32], what: &str) {
 #[test]
 fn in_window_motion_needs_no_escalation() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 6, 2));
+    let ctx = ctx_with(&client, schedule(2, 6));
     let world = hashed_world(3);
     let centre = world.frame(0, 0);
     let neighbour = world.frame(1, 1);
@@ -459,7 +458,7 @@ fn in_window_motion_needs_no_escalation() {
 #[test]
 fn edge_minimum_escalates_and_finds_the_true_motion() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let ctx = ctx_with(&client, schedule(2, 4));
     let world = smooth_world();
     let centre = world.frame(0, 0);
     let neighbour = world.frame(3, 0);
@@ -485,7 +484,7 @@ fn edge_minimum_escalates_and_finds_the_true_motion() {
 #[test]
 fn low_confidence_blocks_escalate() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let ctx = ctx_with(&client, schedule(2, 4));
     let world = hashed_world(5);
     let still = world.frame(0, 0);
     let frames = upload_frames(&client, &ctx, &[still.clone(), still]);
@@ -512,7 +511,7 @@ fn low_confidence_blocks_escalate() {
 #[test]
 fn neighbour_disagreement_escalates() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 8, 1));
+    let ctx = ctx_with(&client, schedule(2, 8));
     let world = hashed_world(7);
     let still = world.frame(0, 0);
     let frames = upload_frames(&client, &ctx, &[still.clone(), still]);
@@ -543,7 +542,7 @@ fn neighbour_disagreement_escalates() {
 #[test]
 fn escalation_reaches_the_ceiling_and_no_further() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 4, 2));
+    let ctx = ctx_with(&client, schedule(2, 4));
     let world = smooth_world();
     let centre = world.frame(0, 0);
     let within = world.frame(4, 0);
@@ -576,7 +575,7 @@ fn escalation_reaches_the_ceiling_and_no_further() {
 #[test]
 fn output_is_independent_of_neighbour_order_and_repeats() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 6, 2));
+    let ctx = ctx_with(&client, schedule(2, 6));
     let world = smooth_world();
     let centre = world.frame(0, 0);
     let right = world.frame(5, 1);
@@ -626,7 +625,7 @@ fn output_is_independent_of_neighbour_order_and_repeats() {
 #[test]
 fn no_failing_blocks_and_all_failing_blocks_both_work() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 4, 2));
+    let ctx = ctx_with(&client, schedule(2, 4));
     let world = hashed_world(9);
     let still = world.frame(0, 0);
     let frames = upload_frames(&client, &ctx, &[still.clone(), still]);
@@ -666,7 +665,7 @@ fn first_radius_equal_to_ceiling_is_bit_identical() {
     let second = world.frame(-2, 5);
     let fixed_ctx = ctx_with(&client, SearchSchedule::fixed(4));
     let frames = upload_frames(&client, &fixed_ctx, &[centre, first, second]);
-    let equal_ctx = ctx_with(&client, schedule(4, 4, 3));
+    let equal_ctx = ctx_with(&client, schedule(4, 4));
 
     let plain = analyse(&client, &fixed_ctx, &frames, &[1, 2], EXACT, false);
     let tracked = analyse(&client, &equal_ctx, &frames, &[1, 2], EXACT, true);
@@ -683,7 +682,7 @@ fn first_radius_equal_to_ceiling_is_bit_identical() {
 #[test]
 fn tracked_first_pass_matches_the_plain_fine_pass() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(3, 6, 1));
+    let ctx = ctx_with(&client, schedule(3, 6));
     let world = hashed_world(13);
     let centre = world.frame(0, 0);
     let neighbour = world.frame(2, -3);
@@ -743,7 +742,7 @@ fn tracked_first_pass_matches_the_plain_fine_pass() {
 #[test]
 fn flat_grain_rarely_escalates_or_moves() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 6, 2));
+    let ctx = ctx_with(&client, schedule(2, 6));
     let sigma = 4.0 / 255.0;
     let flat = vec![0.5f32; (WIDTH * HEIGHT) as usize];
     let centre = noisy_field_over(&flat, WIDTH, HEIGHT, sigma, 21);
@@ -773,7 +772,7 @@ fn flat_grain_rarely_escalates_or_moves() {
 #[test]
 fn a_flagged_block_that_finds_nothing_better_keeps_its_first_pass() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 8, 1));
+    let ctx = ctx_with(&client, schedule(2, 8));
     let world = hashed_world(15);
     let still = world.frame(0, 0);
     let frames = upload_frames(&client, &ctx, &[still.clone(), still]);
@@ -789,13 +788,12 @@ fn a_flagged_block_that_finds_nothing_better_keeps_its_first_pass() {
     assert_eq!(escalated.sad[outlier], UNWRITTEN);
     assert_eq!(escalated.confidence[outlier], UNWRITTEN);
     assert_eq!(escalated.state_word(&ctx, SAD_SECTION, outlier), 0.0);
-    assert_eq!(escalated.state_word(&ctx, FLAG_SECTION, outlier), 0.0);
 }
 
 #[test]
 fn an_escalating_schedule_rejects_a_zero_thsad() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let ctx = ctx_with(&client, schedule(2, 4));
     let world = hashed_world(17);
     let still = world.frame(0, 0);
     let frames = upload_frames(&client, &ctx, &[still.clone(), still]);
@@ -861,7 +859,7 @@ fn planted_floor(client: &Client, ctx: &MotionCtx, kept_sads: &[Vec<f32>]) -> f3
 #[test]
 fn the_floor_is_the_quarter_rank_of_the_grainy_kept_sads() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let ctx = ctx_with(&client, schedule(2, 4));
     let blocks = block_count(&ctx);
     // Block 0 matches exactly and is left out, which leaves 1 up to 127 with a median of 64.
     let ramp: Vec<f32> = (0..blocks).map(|block| block as f32).collect();
@@ -883,7 +881,7 @@ fn the_floor_is_the_quarter_rank_of_the_grainy_kept_sads() {
 #[test]
 fn a_positive_reading_is_the_floor() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let ctx = ctx_with(&client, schedule(2, 4));
     let blocks = block_count(&ctx);
     let ramp: Vec<f32> = (0..blocks).map(|block| block as f32).collect();
     let buffers = Buffers::new(&client, &ctx, &[1], None, FLOOR_SAD);
@@ -897,7 +895,7 @@ fn a_positive_reading_is_the_floor() {
 #[test]
 fn exact_matches_leave_a_zero_floor() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let ctx = ctx_with(&client, schedule(2, 4));
     let blocks = block_count(&ctx);
     let exact = vec![0.0f32; blocks];
 
@@ -909,7 +907,7 @@ fn exact_matches_leave_a_zero_floor() {
 #[test]
 fn the_floor_pools_every_neighbour() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let ctx = ctx_with(&client, schedule(2, 4));
     let blocks = block_count(&ctx);
     let missed = vec![POOR_SAD; blocks];
     let matched = vec![FLOOR_SAD; blocks];
@@ -954,7 +952,7 @@ fn escalation_widens_the_coarse_level() {
     let neighbour = world.frame(12, 0);
     let frames = [centre, neighbour];
     let (fixed_ctx, pyramid) = pyramid_frames(&client, SearchSchedule::fixed(2), &frames);
-    let (ctx, _) = pyramid_frames(&client, schedule(2, 4, 1), &frames);
+    let (ctx, _) = pyramid_frames(&client, schedule(2, 4), &frames);
 
     let fixed = analyse(&client, &fixed_ctx, &pyramid, &[1], LENIENT, false);
     let escalated = analyse(&client, &ctx, &pyramid, &[1], LENIENT, true);
@@ -979,7 +977,7 @@ fn escalation_widens_the_coarse_level() {
 #[test]
 fn a_seeded_refine_escalates_up_to_the_ceiling() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(4, 6, 1));
+    let ctx = ctx_with(&client, schedule(4, 6));
     let world = smooth_world();
     let centre = world.frame(0, 0);
     let within = world.frame(5, 0);
@@ -1038,7 +1036,7 @@ fn letterboxed_grain_frame(world: &World, sigma: f32, seed: u32) -> Vec<f32> {
 #[test]
 fn faint_bars_neither_collapse_the_floor_nor_flag_the_picture() {
     let client = test_client();
-    let ctx = ctx_with(&client, schedule(2, 4, 1));
+    let ctx = ctx_with(&client, schedule(2, 4));
     let sigma = 4.0 / 255.0;
     let world = hashed_world(23);
     let centre = letterboxed_grain_frame(&world, sigma, 31);

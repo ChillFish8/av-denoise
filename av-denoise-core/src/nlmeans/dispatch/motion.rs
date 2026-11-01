@@ -223,6 +223,17 @@ impl NlmDenoiser {
         self.run_match(motion_ctx, &targets, thsad)
     }
 
+    /// Sets the truemotion stage's penalty to `field_lambda`, which 0 turns off.
+    ///
+    /// It does nothing without motion compensation.
+    pub(crate) fn set_field_lambda(&mut self, field_lambda: f32) {
+        let tuned = self
+            .mc_ctx
+            .take()
+            .map(|motion_ctx| motion_ctx.with_field_lambda(field_lambda));
+        self.mc_ctx = tuned;
+    }
+
     /// The truemotion stage that ends a motion search, when the search runs one.
     ///
     /// With `reads_floor`, the penalty scales with the floor in the search's noise.
