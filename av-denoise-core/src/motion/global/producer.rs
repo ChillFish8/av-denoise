@@ -94,12 +94,10 @@ fn acquisition_ctx(
     Some(wide)
 }
 
-/// The camera models every pass reads, with the scale from a pass's pixels to luma pixels.
+/// The camera models a pass searches from, in luma pixels, and its part in the luma motion ring.
 #[derive(Debug, Clone)]
 pub(crate) struct SharedMotion {
     pub ring: ModelRing,
-    pub scale_x: f32,
-    pub scale_y: f32,
     /// How the pass shares its motion with the other pass, when both compensate motion.
     pub luma_motion: Option<RingRole>,
 }
@@ -417,17 +415,7 @@ impl PairModelProducer {
     fn predict(&self, slot: u32) {
         let gaps = &self.gap_tables[slot as usize];
 
-        run_compose_models(
-            &self.client,
-            &self.ring,
-            gaps,
-            &self.predictions,
-            1,
-            0,
-            1,
-            1.0,
-            1.0,
-        );
+        run_compose_models(&self.client, &self.ring, gaps, &self.predictions, 1, 0, 1);
     }
 
     /// Matches the older frame's blocks into the newer frame with the search of `ctx`, also around

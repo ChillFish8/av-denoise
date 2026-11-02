@@ -45,12 +45,13 @@ impl Nlmeans {
     #[cfg(test)]
     pub fn new(client: &Client, algorithm: NlmeansAlgorithm, geometry: PassGeometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
-        Self::with_kernels(client, algorithm, geometry, kernels, None)
+        Self::with_kernels(client, algorithm, geometry, kernels, None, false)
     }
 
     /// Builds the engine with each launch site's candidate picked from `kernels`.
     ///
-    /// Its motion searches start from the camera models in `motion` when given. Returns
+    /// Its motion searches start from the camera models in `motion` when given. With `guides_only`,
+    /// it runs only its motion and noise reading and its emits write nothing. Returns
     /// [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
     pub fn with_kernels(
         client: &Client,
@@ -58,6 +59,7 @@ impl Nlmeans {
         geometry: PassGeometry,
         kernels: EngineKernels,
         motion: Option<SharedMotion>,
+        guides_only: bool,
     ) -> Result<Self, Error> {
         geometry.validate()?;
 
@@ -92,6 +94,10 @@ impl Nlmeans {
         let mut front = NlmDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
         if let Some(motion) = motion {
             front.set_shared_motion(motion);
+        }
+
+        if guides_only {
+            front.set_guides_only();
         }
 
         Ok(Self {
@@ -153,7 +159,12 @@ impl Nlmeans {
         }
     }
 
+    /// Writes `frame` into `planes`, unless the engine only guides.
     fn write_out(&self, frame: &Handle, planes: &[DevicePlane<'_>]) {
+        if self.front.guides_only() {
+            return;
+        }
+
         let channels = self.geometry.channels;
         // The constructor bounds the ring to `u32` elements, so one plane always fits.
         let pixels = self.geometry.pixels() as u32;
@@ -298,5 +309,9 @@ impl FramePass for Nlmeans {
 
     fn emitted_frame(&self) -> Option<u32> {
         self.emitted
+    }
+
+    fn guides_only(&self) -> bool {
+        self.front.guides_only()
     }
 }

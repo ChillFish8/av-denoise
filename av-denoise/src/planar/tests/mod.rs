@@ -1,4 +1,7 @@
 mod chroma_dims;
+// Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
+mod chroma_guide;
 mod cli_options;
 mod layout;
 // Gated on `vulkan` because `luma_chroma_options` names the `Vulkan` accelerator variant.

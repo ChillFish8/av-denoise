@@ -59,8 +59,8 @@ fn chroma_motion(shared: bool) -> MotionSnapshot {
     if shared {
         let writer = RingRole::Writer(ring.clone());
         let reader = RingRole::Reader(ring);
-        let luma_motion = shared_motion(&fitter, 1.0, writer);
-        let chroma_motion = shared_motion(&fitter, 2.0, reader);
+        let luma_motion = shared_motion(&fitter, writer);
+        let chroma_motion = shared_motion(&fitter, reader);
         luma.set_shared_motion(luma_motion);
         chroma.set_shared_motion(chroma_motion);
     }
@@ -100,10 +100,9 @@ fn followed_shares(snapshot: &MotionSnapshot) -> Vec<f32> {
         .collect()
 }
 
-/// The camera models of `fitter` at `scale` luma pixels per pixel, playing `role` in a luma motion
-/// ring.
-fn shared_motion(fitter: &ModelFitter, scale: f32, role: RingRole) -> SharedMotion {
-    let motion = fitter.motion(scale, scale);
+/// The camera models of `fitter`, playing `role` in a luma motion ring.
+fn shared_motion(fitter: &ModelFitter, role: RingRole) -> SharedMotion {
+    let motion = fitter.motion();
 
     SharedMotion {
         luma_motion: Some(role),

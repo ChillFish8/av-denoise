@@ -71,18 +71,6 @@ fn inverse(affine: Affine) -> Affine {
     [m00, m01, m10, m11, tx, ty]
 }
 
-/// Rewrites a luma affine in pass pixels, where `x_luma = x_pass * scale` per axis.
-fn in_pass_pixels(affine: Affine, scale_x: f64, scale_y: f64) -> Affine {
-    [
-        affine[0],
-        affine[1] * scale_y / scale_x,
-        affine[2] * scale_x / scale_y,
-        affine[3],
-        affine[4] / scale_x,
-        affine[5] / scale_y,
-    ]
-}
-
 /// A ring whose slot for each listed stream frame holds that pair model.
 fn ring_with(client: &Client, pairs: &[(u32, Similarity, bool)]) -> ModelRing {
     let mut words = vec![0.0f32; (RING_DEPTH * MODEL_WORDS) as usize];
@@ -103,13 +91,7 @@ fn ring_with(client: &Client, pairs: &[(u32, Similarity, bool)]) -> ModelRing {
 }
 
 /// Composes every neighbour of the window `slot_frames`, centred on logical slot `RADIUS`.
-fn compose(
-    client: &Client,
-    ring: &ModelRing,
-    slot_frames: &[u32],
-    scale_x: f32,
-    scale_y: f32,
-) -> Vec<Affine> {
+fn compose(client: &Client, ring: &ModelRing, slot_frames: &[u32]) -> Vec<Affine> {
     let gaps = compose_gaps(slot_frames, RADIUS, RADIUS, ring);
     let gap_bytes = u32::as_bytes(&gaps);
     let gaps_handle = client.create_from_slice(gap_bytes);
@@ -124,8 +106,6 @@ fn compose(
         NEIGHBOURS as u32,
         RADIUS as u32,
         RADIUS as u32,
-        scale_x,
-        scale_y,
     );
 
     let words = read_f32(client, &out, out_len).expect("composed predictions read back");
@@ -162,7 +142,7 @@ fn composed_forward_matches_the_product_of_pair_models() {
     let client = test_client();
     let pairs = window_pairs();
     let ring = ring_with(&client, &pairs);
-    let predictions = compose(&client, &ring, &[8, 9, 10, 11, 12], 1.0, 1.0);
+    let predictions = compose(&client, &ring, &[8, 9, 10, 11, 12]);
 
     let one_step = as_affine(pairs[2].1);
     let second_step = as_affine(pairs[3].1);
@@ -177,7 +157,7 @@ fn composed_past_neighbour_is_the_inverse_product() {
     let client = test_client();
     let pairs = window_pairs();
     let ring = ring_with(&client, &pairs);
-    let predictions = compose(&client, &ring, &[8, 9, 10, 11, 12], 1.0, 1.0);
+    let predictions = compose(&client, &ring, &[8, 9, 10, 11, 12]);
 
     let older_pair = as_affine(pairs[0].1);
     let newer_pair = as_affine(pairs[1].1);
@@ -194,7 +174,7 @@ fn no_pair_gaps_compose_to_identity() {
     let client = test_client();
     let pairs = window_pairs();
     let ring = ring_with(&client, &pairs);
-    let predictions = compose(&client, &ring, &[10, 10, 10, 10, 10], 1.0, 1.0);
+    let predictions = compose(&client, &ring, &[10, 10, 10, 10, 10]);
 
     for (neighbour, prediction) in predictions.into_iter().enumerate() {
         let label = format!("neighbour {neighbour}");
@@ -207,45 +187,12 @@ fn invalid_models_compose_to_identity() {
     let client = test_client();
     let pairs = window_pairs().map(|(frame, model, _)| (frame, model, false));
     let ring = ring_with(&client, &pairs);
-    let predictions = compose(&client, &ring, &[8, 9, 10, 11, 12], 1.0, 1.0);
+    let predictions = compose(&client, &ring, &[8, 9, 10, 11, 12]);
 
     for (neighbour, prediction) in predictions.into_iter().enumerate() {
         let label = format!("neighbour {neighbour}");
         assert_affine_close(prediction, IDENTITY, &label);
     }
-}
-
-#[test]
-fn chroma_scale_at_422_gives_the_anisotropic_affine() {
-    let client = test_client();
-    let pairs = window_pairs();
-    let ring = ring_with(&client, &pairs);
-    let predictions = compose(&client, &ring, &[8, 9, 10, 11, 12], 2.0, 1.0);
-
-    let first_step = as_affine(pairs[2].1);
-    let second_step = as_affine(pairs[3].1);
-    let forward = then(first_step, second_step);
-    let past_pair = as_affine(pairs[1].1);
-    let past = inverse(past_pair);
-    let forward_expected = in_pass_pixels(forward, 2.0, 1.0);
-    let past_expected = in_pass_pixels(past, 2.0, 1.0);
-
-    assert_affine_close(predictions[3], forward_expected, "+2 at 4:2:2");
-    assert_affine_close(predictions[1], past_expected, "-1 at 4:2:2");
-    assert!((predictions[3][1] - predictions[3][2]).abs() > 1e-3);
-}
-
-#[test]
-fn chroma_scale_at_420_halves_the_shift() {
-    let client = test_client();
-    let pairs = window_pairs();
-    let ring = ring_with(&client, &pairs);
-    let predictions = compose(&client, &ring, &[8, 9, 10, 11, 12], 2.0, 2.0);
-
-    let forward = as_affine(pairs[2].1);
-    let forward_expected = in_pass_pixels(forward, 2.0, 2.0);
-
-    assert_affine_close(predictions[2], forward_expected, "+1 at 4:2:0");
 }
 
 #[test]
@@ -311,17 +258,7 @@ fn an_off_centre_window_composes_its_past_neighbours() {
     let out_len = NEIGHBOURS * AFFINE_WORDS as usize;
     let out = client.empty(out_len * size_of::<f32>());
 
-    run_compose_models(
-        &client,
-        &ring,
-        &gaps_handle,
-        &out,
-        NEIGHBOURS as u32,
-        3,
-        3,
-        1.0,
-        1.0,
-    );
+    run_compose_models(&client, &ring, &gaps_handle, &out, NEIGHBOURS as u32, 3, 3);
 
     let words = read_f32(&client, &out, out_len).expect("composed predictions read back");
     let (predictions, _) = words.as_chunks::<{ AFFINE_WORDS as usize }>();

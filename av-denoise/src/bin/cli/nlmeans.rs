@@ -1,4 +1,5 @@
 use av_denoise::{
+    ChannelIntent,
     DenoisingMode,
     MotionCompensationMode,
     NlmTuning,
@@ -362,6 +363,10 @@ impl NlmeansArgs {
             mode,
         };
 
+        let guides_motion = self.motion_compensation && resolved.temporal_radius > 0;
+        self.warn_on_dead_per_plane_flags(intent);
+        self.warn_on_guide_pilot_strength(intent, prefilter, guides_motion);
+
         let algorithm = self.resolve_algorithm(resolved, nlm)?;
         let planes = PlaneOptions {
             accelerators: globals.accelerators.clone(),
@@ -386,6 +391,41 @@ impl NlmeansArgs {
             timing_report: self.common.timing_report,
             shared_device: self.common.shared_device,
         })
+    }
+
+    fn warn_on_dead_per_plane_flags(&self, intent: ChannelIntent) {
+        match intent {
+            ChannelIntent::Luma if self.chroma_strength.is_some() => {
+                tracing::warn!("--chroma-strength is ignored when chroma is not being denoised");
+            },
+            ChannelIntent::Chroma if self.luma_strength.is_some() => {
+                tracing::warn!("--luma-strength is ignored when luma is not being denoised");
+            },
+            _ => {},
+        }
+    }
+
+    /// Warns when a chroma only run's luma motion follows a per-plane strength.
+    ///
+    /// The luma guide of a chroma only run takes the chroma strength, and the NLM pilot it searches
+    /// on scales with that strength. Its motion, and so the chroma output, then differs from a
+    /// `luma,chroma` run's.
+    fn warn_on_guide_pilot_strength(
+        &self,
+        intent: ChannelIntent,
+        prefilter: PrefilterMode,
+        guides_motion: bool,
+    ) {
+        let pilot = matches!(prefilter, PrefilterMode::NlmSpatial { .. });
+        let per_plane_strength = self.luma_strength.is_some() || self.chroma_strength.is_some();
+        let chroma_only = intent == ChannelIntent::Chroma;
+
+        if chroma_only && pilot && guides_motion && per_plane_strength {
+            tracing::warn!(
+                "--prefilter nlm with --channel-mode chroma searches luma motion on a pilot at the \
+                 chroma strength, so chroma differs from a luma,chroma run with per-plane strengths"
+            );
+        }
     }
 }
 

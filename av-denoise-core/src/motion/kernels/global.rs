@@ -15,7 +15,7 @@ use crate::motion::global::{
     NO_PAIR,
 };
 
-/// Composes the camera model from the centre frame to each neighbour, in the pass's own pixels.
+/// Composes the camera model from the centre frame to each neighbour, in luma pixels.
 ///
 /// One thread handles one neighbour, in motion-field order with the first `past_neighbours`
 /// behind the centre. Its `max_steps` gap entries name the model-ring slots between the centre
@@ -24,8 +24,7 @@ use crate::motion::global::{
 /// its inverse.
 /// A `NO_PAIR` entry, or a model whose `valid` word is zero, counts as no motion.
 ///
-/// Models are in luma pixels and each output is `m00, m01, m10, m11, tx, ty` with
-/// `x_luma = x_pass * scale` per axis.
+/// Each output is `m00, m01, m10, m11, tx, ty`.
 #[cube(launch_unchecked)]
 pub fn mc_compose_models(
     models: &[f32],
@@ -34,8 +33,6 @@ pub fn mc_compose_models(
     #[comptime] neighbours: u32,
     #[comptime] max_steps: u32,
     past_neighbours: u32,
-    scale_x: f32,
-    scale_y: f32,
 ) {
     let neighbour = ABSOLUTE_POS_X;
     if neighbour >= neighbours {
@@ -116,11 +113,11 @@ pub fn mc_compose_models(
 
     let base = (neighbour * AFFINE_WORDS) as usize;
     out[base] = acc_a;
-    out[base + 1] = -acc_b * scale_y / scale_x;
-    out[base + 2] = acc_b * scale_x / scale_y;
+    out[base + 1] = -acc_b;
+    out[base + 2] = acc_b;
     out[base + 3] = acc_a;
-    out[base + 4] = acc_tx / scale_x;
-    out[base + 5] = acc_ty / scale_y;
+    out[base + 4] = acc_tx;
+    out[base + 5] = acc_ty;
 }
 
 /// Writes each block's mean sample of `plane` to `out`, one `f32` per block in block-row-major order.

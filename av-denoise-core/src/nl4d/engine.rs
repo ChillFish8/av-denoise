@@ -55,12 +55,13 @@ impl Nl4d {
     #[cfg(test)]
     pub fn new(client: &Client, options: Nl4dOptions, geometry: PassGeometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
-        Self::with_kernels(client, options, geometry, kernels, None)
+        Self::with_kernels(client, options, geometry, kernels, None, false)
     }
 
     /// Builds the engine with each launch site's candidate picked from `kernels`.
     ///
-    /// Its motion searches start from the camera models in `motion` when given. Returns
+    /// Its motion searches start from the camera models in `motion` when given. With `guides_only`,
+    /// it runs only its motion and noise reading and its emits write nothing. Returns
     /// [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
     pub fn with_kernels(
         client: &Client,
@@ -68,6 +69,7 @@ impl Nl4d {
         geometry: PassGeometry,
         kernels: EngineKernels,
         motion: Option<SharedMotion>,
+        guides_only: bool,
     ) -> Result<Self, Error> {
         if geometry.width < PATCH_SIZE || geometry.height < PATCH_SIZE {
             let message = format!(
@@ -105,7 +107,14 @@ impl Nl4d {
         indexable.map_err(Error::InvalidGeometry)?;
 
         let selector = KernelSelector::new(client, kernels);
-        let inner = Nl4dDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
+        let inner = Nl4dDenoiser::with_kernels(
+            client,
+            params,
+            geometry.width,
+            geometry.height,
+            selector,
+            guides_only,
+        );
         let mut inner = inner.map_err(Error::InvalidOptions)?;
         if let Some(motion) = motion {
             inner.set_shared_motion(motion);
@@ -277,8 +286,10 @@ impl PassEngine for Nl4d {
         let emitted = self.inner.front.slot_frame(region.slot);
         self.emitted = Some(emitted);
 
-        let frame = self.inner.read_region(region);
-        self.write_out(&frame, planes);
+        if !self.inner.guides_only() {
+            let frame = self.inner.read_region(region);
+            self.write_out(&frame, planes);
+        }
 
         if self.tail_remaining > 0 {
             self.tail_remaining -= 1;
@@ -354,5 +365,9 @@ impl FramePass for Nl4d {
 
     fn emitted_frame(&self) -> Option<u32> {
         self.emitted
+    }
+
+    fn guides_only(&self) -> bool {
+        self.inner.guides_only()
     }
 }

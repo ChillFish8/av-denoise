@@ -119,7 +119,7 @@ pub(crate) fn nlmeans_outputs(
         ..EngineKernels::default()
     };
     let mut engine =
-        Nlmeans::with_kernels(&client, algorithm, geometry, kernels, None).expect("the engine builds");
+        Nlmeans::with_kernels(&client, algorithm, geometry, kernels, None, false).expect("the engine builds");
 
     run_engine(&client, &mut engine, width, height, frames).expect("the frames denoise")
 }
@@ -153,7 +153,7 @@ pub(crate) fn nl4d_outputs_with(
     let client = test_client();
     let geometry = f32_geometry(width, height, channels);
     let mut engine =
-        Nl4d::with_kernels(&client, options, geometry, kernels, None).expect("the engine builds");
+        Nl4d::with_kernels(&client, options, geometry, kernels, None, false).expect("the engine builds");
 
     run_engine(&client, &mut engine, width, height, frames).expect("the frames denoise")
 }

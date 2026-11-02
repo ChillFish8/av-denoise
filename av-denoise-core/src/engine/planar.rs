@@ -5,7 +5,17 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::passthrough::PassthroughRing;
-use super::{ChromaLayout, DevicePlane, Engine, FramePass, Geometry, PassTimings, PlaneSource, WindowSpan};
+use super::{
+    ChromaLayout,
+    DevicePlane,
+    Engine,
+    EngineTiming,
+    FramePass,
+    Geometry,
+    PassTimings,
+    PlaneSource,
+    WindowSpan,
+};
 use crate::error::Error;
 #[cfg(test)]
 use crate::motion::ModelRing;
@@ -90,8 +100,13 @@ impl<'s> StagedFrame<'s> {
 /// [PairModelProducer], every frame's luma plane is fitted into a camera model before the passes
 /// see the frame. With a [LumaMotionRing], the chroma pass refines the luma pass's motion instead
 /// of searching its own.
+///
+/// A chroma only run whose chroma pass compensates motion runs a luma pass that only guides it.
+/// That pass moves in lockstep with the chroma pass and writes nothing out, so luma passes through
+/// the ring and the guide's device time counts as chroma's.
 pub(crate) struct PlanarEngine {
     geometry: Geometry,
+    /// The pass that cleans luma, or the guide pass of a chroma only run.
     luma: Option<Box<dyn FramePass>>,
     chroma: Option<Box<dyn FramePass>>,
     producer: Option<PairModelProducer>,
@@ -134,7 +149,7 @@ impl PlanarEngine {
             poisoned: false,
         };
 
-        let passes_through = !gray && engine.luma.is_some() != engine.chroma.is_some();
+        let passes_through = !gray && engine.cleans_luma() != engine.chroma.is_some();
         if passes_through {
             let ring = engine.passthrough_ring(client);
             engine.passthrough = Some(ring);
@@ -146,7 +161,7 @@ impl PlanarEngine {
     /// A ring for the uncleaned plane group, one slot longer than the cleaned pass holds frames.
     fn passthrough_ring(&self, client: &Client) -> PassthroughRing {
         let slots = self.lead().max_held_frames() + 1;
-        let (index, planes) = if self.luma.is_some() { (1, 2) } else { (0, 1) };
+        let (index, planes) = if self.cleans_luma() { (1, 2) } else { (0, 1) };
         let (width, height) = self.geometry.plane_dims(index);
         let pixels = u64::from(width) * u64::from(height);
         let bytes = self.geometry.input.plane_bytes(pixels);
@@ -185,9 +200,15 @@ impl PlanarEngine {
         pass.expect("a validated spec has at least one pass")
     }
 
+    /// Whether a luma pass cleans luma, rather than only guiding the chroma pass's motion.
+    fn cleans_luma(&self) -> bool {
+        let luma = self.luma.as_deref();
+        luma.is_some_and(|pass| !pass.guides_only())
+    }
+
     /// The plane group no pass cleans.
     fn uncleaned_group(&self) -> PlaneGroup {
-        if self.luma.is_some() {
+        if self.cleans_luma() {
             PlaneGroup::Chroma
         } else {
             PlaneGroup::Luma
@@ -433,7 +454,8 @@ impl Engine for PlanarEngine {
     fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, Error> {
         self.check_usable()?;
 
-        let Some(luma) = self.luma.as_deref_mut() else {
+        let luma = self.luma.as_deref_mut();
+        let Some(luma) = luma.filter(|pass| !pass.guides_only()) else {
             return Ok(Vec::new());
         };
 
@@ -441,10 +463,21 @@ impl Engine for PlanarEngine {
     }
 
     fn timing(&mut self) -> PassTimings {
+        let cleans_luma = self.cleans_luma();
         let luma = self.luma.as_deref_mut().map(|pass| pass.timing());
         let chroma = self.chroma.as_deref_mut().map(|pass| pass.timing());
 
-        PassTimings { luma, chroma }
+        let guide = luma.filter(|_| !cleans_luma);
+        let Some(guide) = guide else {
+            return PassTimings { luma, chroma };
+        };
+
+        let chroma = chroma.map(|timing| EngineTiming {
+            device_time: timing.device_time + guide.device_time,
+            ..timing
+        });
+
+        PassTimings { luma: None, chroma }
     }
 
     fn sample_device_time(&mut self, every: u32) {

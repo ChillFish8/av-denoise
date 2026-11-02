@@ -45,14 +45,14 @@ fn mode(estimation: MotionEstimation) -> MotionCompensationMode {
     }
 }
 
-fn hq_params(channels: ChannelMode, estimation: MotionEstimation) -> NlmParams {
+fn hq_params(estimation: MotionEstimation) -> NlmParams {
     NlmParams {
         temporal_radius: RADIUS,
         search_radius: 2,
         patch_radius: 2,
         strength: 1.2,
         self_weight: 1.0,
-        channels,
+        channels: ChannelMode::Luma,
         prefilter: PrefilterMode::None,
         motion_compensation: mode(estimation),
         hq: Some(HqParams::default()),
@@ -69,15 +69,7 @@ fn luma_shape(shift: (u32, u32)) -> PanShape {
     }
 }
 
-/// The plane of `frame` a front with `channels` cleans.
-fn plane_of(frame: &PanFrame, channels: ChannelMode) -> &[f32] {
-    match channels {
-        ChannelMode::Chroma => &frame.chroma,
-        _ => &frame.luma,
-    }
-}
-
-/// A front fed every frame of `frames`, seeded from luma camera models when `seeded`.
+/// A luma front fed every frame of `frames`, seeded from luma camera models when `seeded`.
 ///
 /// Returns the front after its last submit and every frame it put out, the flushed tail included
 /// when `flush`.
@@ -89,28 +81,18 @@ fn run_front(
     flush: bool,
 ) -> (NlmDenoiser, Vec<Vec<f32>>) {
     let client = make_client();
-    let channels = params.channels;
-    let is_chroma = channels == ChannelMode::Chroma;
-    let (width, height) = if is_chroma {
-        shape.chroma_dims()
-    } else {
-        (shape.width, shape.height)
-    };
-    let (scale_x, scale_y) = if is_chroma { shape.chroma_scale } else { (1, 1) };
-
     let mode = params.motion_compensation;
     let mut fitter = ModelFitter::new(&client, shape.width, shape.height, mode);
-    let mut denoiser = NlmDenoiser::new(&client, params, width, height);
+    let mut denoiser = NlmDenoiser::new(&client, params, shape.width, shape.height);
     if seeded {
-        let motion = fitter.motion(scale_x as f32, scale_y as f32);
+        let motion = fitter.motion();
         denoiser.set_shared_motion(motion);
     }
 
     let mut outputs = Vec::new();
     for frame in frames {
         fitter.fit(&frame.luma);
-        let plane = plane_of(frame, channels);
-        denoiser.push_frame(plane);
+        denoiser.push_frame(&frame.luma);
 
         let output = denoiser.denoise().expect("denoise failed");
         outputs.extend(output);
@@ -127,7 +109,7 @@ fn run_front(
 
 /// The last pass's fit to each neighbour, over the blocks that stay inside both frames.
 ///
-/// Neighbours come oldest first, and the content moves `shift` pass pixels left and up per frame.
+/// Neighbours come oldest first, and the content moves `shift` pixels left and up per frame.
 fn neighbour_fits(denoiser: &NlmDenoiser, shift: (u32, u32)) -> Vec<NeighbourFit> {
     let motion_ctx = denoiser.motion_ctx();
     let blocks_x = motion_ctx.blocks_x;
@@ -180,7 +162,7 @@ fn neighbour_fits(denoiser: &NlmDenoiser, shift: (u32, u32)) -> Vec<NeighbourFit
 fn assert_tracks_fast_pan(estimation: MotionEstimation, label: &str) {
     let shape = luma_shape((FAST_PAN, 0));
     let frames = pan_clip(shape, FRAMES, 11);
-    let params = hq_params(ChannelMode::Luma, estimation);
+    let params = hq_params(estimation);
 
     let (unseeded, _) = run_front(params.clone(), shape, &frames, false, false);
     let unseeded_fits = neighbour_fits(&unseeded, shape.shift);
@@ -217,7 +199,7 @@ fn a_static_stream_is_bit_identical_to_unseeded() {
     let chained = MotionEstimation::chained_default();
 
     for estimation in [MotionEstimation::Direct, chained] {
-        let params = hq_params(ChannelMode::Luma, estimation);
+        let params = hq_params(estimation);
         let (_, unseeded) = run_front(params.clone(), shape, &frames, false, true);
         let (_, seeded) = run_front(params, shape, &frames, true, true);
 
@@ -227,33 +209,6 @@ fn a_static_stream_is_bit_identical_to_unseeded() {
             "{estimation:?}: a static stream must match the unseeded output bit for bit"
         );
     }
-}
-
-fn assert_chroma_follows_scaled_models(chroma_scale: (u32, u32), label: &str) {
-    let shape = PanShape {
-        width: 512,
-        height: 384,
-        chroma_scale,
-        shift: (FAST_PAN, FAST_PAN),
-        sigma: SIGMA,
-    };
-    let frames = pan_clip(shape, FRAMES, 13);
-    let params = hq_params(ChannelMode::Chroma, MotionEstimation::Direct);
-    let chroma_shift = (FAST_PAN / chroma_scale.0, FAST_PAN / chroma_scale.1);
-
-    let (unseeded, _) = run_front(params.clone(), shape, &frames, false, false);
-    let unseeded_fits = neighbour_fits(&unseeded, chroma_shift);
-    assert_premise_misses(&unseeded_fits, label);
-
-    let (seeded, _) = run_front(params, shape, &frames, true, false);
-    let seeded_fits = neighbour_fits(&seeded, chroma_shift);
-    assert_follows(&seeded_fits, label);
-}
-
-#[test]
-fn the_chroma_pass_uses_scaled_luma_models() {
-    assert_chroma_follows_scaled_models((2, 2), "4:2:0");
-    assert_chroma_follows_scaled_models((2, 1), "4:2:2");
 }
 
 fn gray_geometry() -> Geometry {

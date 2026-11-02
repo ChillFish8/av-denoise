@@ -43,8 +43,13 @@ impl Nl4dDenoiser {
     /// Each filtered member scatters into the accumulator region of the frame it came from, so one
     /// pass adds to every region in the ring. `clear` picks which regions are zeroed first. The
     /// newest region is the slot `temporal_radius` ahead of the centre, which the newest frame has
-    /// just taken over.
+    /// just taken over. A denoiser that only guides counts the pass and launches nothing.
     pub(super) fn run_pass(&mut self, view: &RingView, clear: AccumClear) -> Result<(), anyhow::Error> {
+        if self.guides_only {
+            self.passes_run += 1;
+            return Ok(());
+        }
+
         let centre_slot = view.centre_slot;
         let client = self.front.compute_client().clone();
 

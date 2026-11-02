@@ -111,6 +111,8 @@ pub struct Nl4dDenoiser {
     pub(super) last_fields: Option<LastFields>,
     /// Present only when grain export is on.
     grain: Option<GrainExport>,
+    /// Whether the passes run only the front's motion and noise machinery and scatter nothing.
+    pub(super) guides_only: bool,
 }
 
 /// The element count of every geometry-sized buffer [Nl4dDenoiser::new] allocates beyond its frame rings.
@@ -152,7 +154,7 @@ impl Nl4dDenoiser {
     /// Builds the denoiser, rejecting invalid `params` and frames smaller than one patch.
     pub fn new(client: &Client, params: Nl4dParams, width: u32, height: u32) -> Result<Self, String> {
         let kernels = KernelSelector::baseline(client);
-        Self::with_kernels(client, params, width, height, kernels)
+        Self::with_kernels(client, params, width, height, kernels, false)
     }
 
     /// [Nl4dDenoiser::new] with each launch site's candidate picked through `kernels`.
@@ -161,12 +163,17 @@ impl Nl4dDenoiser {
     /// the f16 search keep the f16 search ring off. The
     /// [SplitSearch](crate::tune::PipelineProfile::SplitSearch) profile runs the collab search and
     /// filter as two launches. A device with planes narrower than 8 lanes is an error.
+    ///
+    /// With `guides_only`, every pass runs only the front's motion and noise machinery. The passes
+    /// still count towards the regions they complete, so the denoiser keeps its emit order. It then
+    /// allocates no filter buffers, f16 search ring, grain export or luma noise map.
     pub fn with_kernels(
         client: &Client,
         mut params: Nl4dParams,
         width: u32,
         height: u32,
         kernels: KernelSelector,
+        guides_only: bool,
     ) -> Result<Self, String> {
         params.validate()?;
 
@@ -190,9 +197,13 @@ impl Nl4dDenoiser {
         let nlm_params = params.nlm.clone();
         let front_kernels = kernels.clone();
         let mut front = NlmDenoiser::with_kernels(client, nlm_params, width, height, front_kernels);
+        if guides_only {
+            front.set_guides_only();
+        }
 
+        // Only the filter reads the luma noise map, so a guide skips it.
         let channels = params.nlm.channels;
-        let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma;
+        let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma && !guides_only;
         front.set_luma_noise_fields(apply_noise_map);
 
         front.set_shifted_edges(true);
@@ -205,7 +216,7 @@ impl Nl4dDenoiser {
         let profile_allows_f16 = kernels.profile() != PipelineProfile::F32Search;
         let legality = *kernels.legality();
         let device_supports_f16 = supports_f16_search(client);
-        let f16_search = device_supports_f16 && profile_allows_f16 && legality.f16_search;
+        let f16_search = device_supports_f16 && profile_allows_f16 && legality.f16_search && !guides_only;
         if f16_search {
             front.enable_search_ring();
         }
@@ -219,11 +230,15 @@ impl Nl4dDenoiser {
         let pixels = (width * height) as usize;
         let frame_len = pixels * channel_count as usize;
 
-        let group_weight = client.empty(refs * size_of::<f32>());
+        // A guide never runs the filter, so its filter buffers are 4-byte placeholders.
+        let filter_bytes = |bytes: usize| if guides_only { 4 } else { bytes };
+
+        let group_weight_bytes = filter_bytes(refs * size_of::<f32>());
+        let group_weight = client.empty(group_weight_bytes);
 
         // The search writes every live reference's words before the filter reads them, so the
         // member buffer needs no clearing.
-        let split_search = kernels.profile() == PipelineProfile::SplitSearch;
+        let split_search = kernels.profile() == PipelineProfile::SplitSearch && !guides_only;
         let members = split_search.then(|| {
             let member_bytes = refs * MEMBER_WORDS as usize * size_of::<u32>();
             client.empty(member_bytes)
@@ -250,14 +265,14 @@ impl Nl4dDenoiser {
         // `client.empty` memory is not zeroed, so a stream's first pass zeroes the whole ring.
         let ring_frames = 1 + 2 * params.temporal_radius;
         let (accum_len, wsum_len) = accumulator_lens(pixels, channel_count, ring_frames);
-        let accum = client.empty(accum_len * size_of::<i32>());
-        let wsum = client.empty(wsum_len * size_of::<i32>());
-        let outputs = [
-            client.empty(frame_len * size_of::<f32>()),
-            client.empty(frame_len * size_of::<f32>()),
-        ];
+        let accum_bytes = filter_bytes(accum_len * size_of::<i32>());
+        let wsum_bytes = filter_bytes(wsum_len * size_of::<i32>());
+        let output_bytes = filter_bytes(frame_len * size_of::<f32>());
+        let accum = client.empty(accum_bytes);
+        let wsum = client.empty(wsum_bytes);
+        let outputs = [client.empty(output_bytes), client.empty(output_bytes)];
 
-        let exports_grain = params.grain_export && channels != ChannelMode::Chroma;
+        let exports_grain = params.grain_export && channels != ChannelMode::Chroma && !guides_only;
         let grain = if exports_grain {
             let motion_ctx = front.motion_ctx();
             let geometry = GrainGeometry {
@@ -308,6 +323,7 @@ impl Nl4dDenoiser {
             stream_start: StreamStart::SceneStart,
             last_fields: None,
             grain,
+            guides_only,
         })
     }
 
@@ -416,6 +432,10 @@ impl Nl4dDenoiser {
     /// Starts every motion search from the camera models in `motion`, before the first push.
     pub(crate) fn set_shared_motion(&mut self, motion: SharedMotion) {
         self.front.set_shared_motion(motion);
+    }
+
+    pub(crate) fn guides_only(&self) -> bool {
+        self.guides_only
     }
 
     /// Runs the front end's motion and noise machinery for a pass centred on logical position `centre`.

@@ -36,14 +36,12 @@ impl ModelFitter {
         }
     }
 
-    /// The models as a pass whose pixels are `scale_x` by `scale_y` luma pixels reads them.
-    pub(crate) fn motion(&self, scale_x: f32, scale_y: f32) -> SharedMotion {
+    /// The models as a pass that searches luma motion reads them.
+    pub(crate) fn motion(&self) -> SharedMotion {
         let ring = self.producer.ring().clone();
 
         SharedMotion {
             ring,
-            scale_x,
-            scale_y,
             luma_motion: None,
         }
     }

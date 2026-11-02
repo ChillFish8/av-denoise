@@ -39,15 +39,6 @@ impl ChromaLayout {
         }
     }
 
-    /// The luma pixels one chroma pixel spans along each axis.
-    pub(crate) fn chroma_scale(self) -> (f32, f32) {
-        match self {
-            ChromaLayout::Yuv420 => (2.0, 2.0),
-            ChromaLayout::Yuv422 => (2.0, 1.0),
-            ChromaLayout::Gray | ChromaLayout::Yuv444 => (1.0, 1.0),
-        }
-    }
-
     /// The chroma subsampling as a power of two per axis.
     pub(crate) fn subsampling(self) -> Subsampling {
         let (shift_x, shift_y) = match self {

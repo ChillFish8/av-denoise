@@ -5,7 +5,7 @@ use super::ModelRing;
 use crate::motion::kernels::mc_compose_models;
 use crate::tune::gpu::bind;
 
-/// The `f32` words of one composed prediction, `m00, m01, m10, m11, tx, ty`, in a pass's pixels.
+/// The `f32` words of one composed prediction, `m00, m01, m10, m11, tx, ty`, in luma pixels.
 pub const AFFINE_WORDS: u32 = 6;
 
 /// A gap-table entry with no pair model, which composes as no motion.
@@ -64,10 +64,6 @@ pub fn compose_gaps(window_frames: &[u32], centre: usize, max_steps: usize, ring
 /// `gaps` holds the table [compose_gaps] builds for `neighbours` neighbours with `max_steps`
 /// entries each, the first `past_neighbours` of them behind the centre. `out` takes
 /// [AFFINE_WORDS] words per neighbour.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the dispatch threads through every buffer and shape the kernel binds"
-)]
 pub fn run_compose_models(
     client: &Client,
     ring: &ModelRing,
@@ -76,8 +72,6 @@ pub fn run_compose_models(
     neighbours: u32,
     past_neighbours: u32,
     max_steps: u32,
-    scale_x: f32,
-    scale_y: f32,
 ) {
     let gaps_len = (neighbours * max_steps) as usize;
     let out_len = (neighbours * AFFINE_WORDS) as usize;
@@ -102,8 +96,6 @@ pub fn run_compose_models(
             neighbours,
             max_steps,
             past_neighbours,
-            scale_x,
-            scale_y,
         );
     }
 }

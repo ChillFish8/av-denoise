@@ -116,34 +116,12 @@ impl ModelSeeds {
             slot => slot,
         };
         let table = &self.pair_gaps[table_index as usize];
-        let scale_x = self.motion.scale_x;
-        let scale_y = self.motion.scale_y;
 
         if both_ways {
-            run_compose_models(
-                client,
-                &self.motion.ring,
-                table,
-                &self.older_to_newer,
-                1,
-                0,
-                1,
-                scale_x,
-                scale_y,
-            );
+            run_compose_models(client, &self.motion.ring, table, &self.older_to_newer, 1, 0, 1);
         }
 
-        run_compose_models(
-            client,
-            &self.motion.ring,
-            table,
-            &self.newer_to_older,
-            1,
-            1,
-            1,
-            scale_x,
-            scale_y,
-        );
+        run_compose_models(client, &self.motion.ring, table, &self.newer_to_older, 1, 1, 1);
 
         let older_to_newer = both_ways.then_some(&self.older_to_newer);
 
@@ -167,8 +145,6 @@ impl ModelSeeds {
     /// Composes every neighbour's prediction for the window last uploaded.
     pub(super) fn compose_window(&self, client: &Client) -> &Handle {
         let gaps = self.window_gaps.handle();
-        let scale_x = self.motion.scale_x;
-        let scale_y = self.motion.scale_y;
 
         run_compose_models(
             client,
@@ -178,8 +154,6 @@ impl ModelSeeds {
             self.neighbours,
             self.past_neighbours,
             self.neighbours,
-            scale_x,
-            scale_y,
         );
 
         &self.window_predictions

@@ -135,7 +135,7 @@ fn luma_motion_reader_sizes_match_the_allocations() {
     let fitter = ModelFitter::new(&client, WIDTH, HEIGHT, motion);
     let shared = SharedMotion {
         luma_motion: Some(RingRole::Reader(ring)),
-        ..fitter.motion(1.0, 1.0)
+        ..fitter.motion()
     };
 
     assert_front_sizes_match(&client, params, Some(shared));

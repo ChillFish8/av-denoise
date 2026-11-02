@@ -91,28 +91,39 @@ impl PassSpec {
         client: &Client,
         kernels: EngineKernels,
     ) -> Result<Box<dyn PassEngine>, Error> {
-        let engine: Box<dyn PassEngine> = self.build_pass(client, kernels, None)?;
+        let engine: Box<dyn PassEngine> = self.build_pass(client, kernels, None, false)?;
         Ok(engine)
     }
 
     /// Builds the engine as a [FramePass] that names the frame behind each emit.
     ///
-    /// `motion` holds the camera models of the frames the pass sees, when they are fitted.
+    /// `motion` holds the camera models of the frames the pass sees, when they are fitted. With
+    /// `guides_only`, the pass runs its motion and noise reading but cleans nothing.
     pub(crate) fn build_pass(
         &self,
         client: &Client,
         kernels: EngineKernels,
         motion: Option<SharedMotion>,
+        guides_only: bool,
     ) -> Result<Box<dyn FramePass>, Error> {
         match *self {
             PassSpec::Nlmeans { algorithm, geometry } => {
-                let engine = Nlmeans::with_kernels(client, algorithm, geometry, kernels, motion)?;
+                let engine =
+                    Nlmeans::with_kernels(client, algorithm, geometry, kernels, motion, guides_only)?;
                 Ok(Box::new(engine))
             },
             PassSpec::Nl4d { options, geometry } => {
-                let engine = Nl4d::with_kernels(client, options, geometry, kernels, motion)?;
+                let engine = Nl4d::with_kernels(client, options, geometry, kernels, motion, guides_only)?;
                 Ok(Box::new(engine))
             },
+        }
+    }
+
+    /// This pass's settings at another plane's `geometry`.
+    fn with_geometry(&self, geometry: PassGeometry) -> PassSpec {
+        match *self {
+            PassSpec::Nlmeans { algorithm, .. } => PassSpec::Nlmeans { algorithm, geometry },
+            PassSpec::Nl4d { options, .. } => PassSpec::Nl4d { options, geometry },
         }
     }
 }
@@ -147,13 +158,7 @@ impl EngineSpec {
     /// Each runs at its own plane size, luma at the frame size and chroma at the chroma size.
     pub(crate) fn passes(&self) -> (Option<PassSpec>, Option<PassSpec>) {
         let geometry = self.geometry();
-        let luma_geometry = PassGeometry {
-            width: geometry.width,
-            height: geometry.height,
-            channels: ChannelMode::Luma,
-            input: geometry.input,
-            output: geometry.output,
-        };
+        let luma_geometry = self.luma_geometry();
         let chroma_dims = geometry.chroma.chroma_dims(geometry.width, geometry.height);
         let chroma_geometry = chroma_dims.map(|(width, height)| PassGeometry {
             width,
@@ -189,7 +194,44 @@ impl EngineSpec {
         }
     }
 
-    /// Every pass the spec runs, luma before chroma.
+    /// The luma plane's pass geometry.
+    fn luma_geometry(&self) -> PassGeometry {
+        let geometry = self.geometry();
+
+        PassGeometry {
+            width: geometry.width,
+            height: geometry.height,
+            channels: ChannelMode::Luma,
+            input: geometry.input,
+            output: geometry.output,
+        }
+    }
+
+    /// The luma pass a chroma only run builds to search the motion its chroma pass reads.
+    ///
+    /// It takes the chroma pass's settings at the luma plane's size. It exists only when the spec
+    /// has no luma pass and its chroma pass compensates motion.
+    fn guide_pass(&self) -> Option<PassSpec> {
+        let (luma, chroma) = self.passes();
+        if luma.is_some() {
+            return None;
+        }
+
+        let chroma = chroma?;
+        chroma.motion()?;
+
+        let luma_geometry = self.luma_geometry();
+        let guide = chroma.with_geometry(luma_geometry);
+        Some(guide)
+    }
+
+    /// The pass that searches luma motion, the luma pass or else the guide pass.
+    fn luma_motion_pass(&self) -> Option<PassSpec> {
+        let (luma, _) = self.passes();
+        luma.or_else(|| self.guide_pass())
+    }
+
+    /// Every pass that cleans a plane group, luma before chroma.
     pub(crate) fn pass_specs(&self) -> Vec<PassSpec> {
         let (luma, chroma) = self.passes();
         luma.into_iter().chain(chroma).collect()
@@ -265,7 +307,8 @@ impl EngineSpec {
             return Err(Error::InvalidGeometry(message));
         }
 
-        let (luma, chroma) = self.passes();
+        let (_, chroma) = self.passes();
+        let luma = self.luma_motion_pass();
         if let (Some(luma), Some(chroma)) = (luma, chroma) {
             let luma_span = luma.window_span();
             let chroma_span = chroma.window_span();
@@ -292,13 +335,15 @@ impl EngineSpec {
 
     /// The ring the luma pass shares its motion with the chroma pass through.
     ///
-    /// It exists only when the spec runs both passes and both compensate motion.
+    /// It exists only when the chroma pass compensates motion, which a luma pass or the guide pass
+    /// then searches.
     pub(crate) fn luma_motion_ring(&self, client: &Client) -> Option<LumaMotionRing> {
-        let (luma, chroma) = self.passes();
-        let luma_motion = luma.and_then(|pass| pass.motion());
+        let (_, chroma) = self.passes();
         let chroma_pass = chroma?;
         chroma_pass.motion()?;
-        let (mode, radius) = luma_motion?;
+
+        let luma_pass = self.luma_motion_pass()?;
+        let (mode, radius) = luma_pass.motion()?;
 
         let chroma_geometry = chroma_pass.geometry();
         let align = StorageAlign::from_client(client);
@@ -344,13 +389,12 @@ impl EngineSpec {
 
     /// The producer of the frame pair camera models, when any pass compensates motion.
     ///
-    /// It fits on the luma plane with the luma pass's search, or the chroma pass's when only that
-    /// one searches. Its ring covers the frames the passes hold and their temporal window.
+    /// It fits on the luma plane with the search of the pass that searches luma motion. Its ring
+    /// covers the frames the passes hold and their temporal window.
     pub(crate) fn pair_model_producer(&self, client: &Client) -> Result<Option<PairModelProducer>, Error> {
-        let (luma, chroma) = self.passes();
-        let luma_motion = luma.and_then(|pass| pass.motion());
-        let chroma_motion = chroma.and_then(|pass| pass.motion());
-        let Some((mode, radius)) = luma_motion.or(chroma_motion) else {
+        let luma_pass = self.luma_motion_pass();
+        let luma_motion = luma_pass.and_then(|pass| pass.motion());
+        let Some((mode, radius)) = luma_motion else {
             return Ok(None);
         };
 
@@ -401,34 +445,32 @@ impl EngineSpec {
         let geometry = self.geometry();
         let producer = self.pair_model_producer(client)?;
         let ring = producer.as_ref().map(|producer| producer.ring());
-        let (chroma_scale_x, chroma_scale_y) = geometry.chroma.chroma_scale();
         let luma_motion_ring = self.luma_motion_ring(client);
         let writer = luma_motion_ring.clone().map(RingRole::Writer);
         let reader = luma_motion_ring.clone().map(RingRole::Reader);
         let luma_motion = ring.map(|ring| SharedMotion {
             ring: ring.clone(),
-            scale_x: 1.0,
-            scale_y: 1.0,
             luma_motion: writer,
         });
         let chroma_motion = ring.map(|ring| SharedMotion {
             ring: ring.clone(),
-            scale_x: chroma_scale_x,
-            scale_y: chroma_scale_y,
             luma_motion: reader,
         });
 
         let (luma, chroma) = self.passes();
+        let guide = self.guide_pass();
+        let guides_only = guide.is_some();
         let luma_pass = luma
+            .or(guide)
             .map(|pass| {
                 let pass_kernels = kernels(&pass);
-                pass.build_pass(client, pass_kernels, luma_motion)
+                pass.build_pass(client, pass_kernels, luma_motion, guides_only)
             })
             .transpose()?;
         let chroma_pass = chroma
             .map(|pass| {
                 let pass_kernels = kernels(&pass);
-                pass.build_pass(client, pass_kernels, chroma_motion)
+                pass.build_pass(client, pass_kernels, chroma_motion, false)
             })
             .transpose()?;
 

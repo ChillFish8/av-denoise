@@ -167,7 +167,7 @@ fn seeded_pan_sigma(params: Nl4dParams, frames: &[Vec<f32>], seeded: bool) -> f3
     let mut denoiser =
         Nl4dDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT).expect("construction failed");
     if seeded {
-        let motion = fitter.motion(1.0, 1.0);
+        let motion = fitter.motion();
         denoiser.set_shared_motion(motion);
     }
 

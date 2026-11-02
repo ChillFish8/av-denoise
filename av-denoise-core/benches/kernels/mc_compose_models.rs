@@ -69,8 +69,6 @@ impl Benchmark for ComposeModelsBench {
                 COMPOSE_NEIGHBOURS,
                 COMPOSE_RADIUS,
                 COMPOSE_RADIUS,
-                2.0f32,
-                2.0f32,
             );
         }
 

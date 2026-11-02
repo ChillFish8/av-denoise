@@ -121,6 +121,9 @@ pub(crate) trait FramePass: PassEngine {
 
     /// The stream frame the last [PassEngine::emit_into] wrote out.
     fn emitted_frame(&self) -> Option<u32>;
+
+    /// Whether the pass only shares its motion, so its emits write nothing out.
+    fn guides_only(&self) -> bool;
 }
 
 /// Uploads a frame's planes when an [Engine] asks for them.

@@ -15,9 +15,9 @@ const WIDTH: u32 = 320;
 const HEIGHT: u32 = 192;
 /// Past the 12 px an unseeded search reaches, so the camera model decides the vectors.
 const PAN: f32 = 30.0;
-const FRAMES: usize = 30;
+pub(super) const FRAMES: usize = 30;
 
-fn pan_layout() -> FrameLayout {
+pub(super) fn pan_layout() -> FrameLayout {
     FrameLayout {
         width: WIDTH,
         height: HEIGHT,
@@ -130,7 +130,7 @@ fn ramp_travel(index: usize) -> f32 {
 
 /// The clips every test runs, steady fast pans the camera model decides, a slow periodic pan and a
 /// pan ramping past the model's reach.
-fn clips() -> [(&'static str, Vec<Planes>); 4] {
+pub(super) fn clips() -> [(&'static str, Vec<Planes>); 4] {
     [
         (
             "value noise fast pan",
@@ -149,7 +149,7 @@ fn clips() -> [(&'static str, Vec<Planes>); 4] {
 }
 
 /// Streams every frame through `denoiser` and returns what it puts out, the flushed tail included.
-fn stream(denoiser: &mut PlanarDenoiser, frames: &[Planes]) -> Vec<Planes> {
+pub(super) fn stream(denoiser: &mut PlanarDenoiser, frames: &[Planes]) -> Vec<Planes> {
     let mut outputs = Vec::new();
     for frame in frames {
         denoiser.push(frame).unwrap();

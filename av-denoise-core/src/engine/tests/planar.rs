@@ -26,6 +26,7 @@ use crate::error::Error;
 use crate::motion::{MotionCompensationMode, MotionSearch, PairModelProducer, SharedMotion};
 use crate::nl4d::Nl4dOptions;
 use crate::nl4d::tests::helpers::noisy_frames;
+use crate::nlmeans::tests::luma_motion::{flat_chroma, panning_luma};
 use crate::nlmeans::tests::models::{PanShape, pan_clip};
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansHqOptions, NlmeansOptions};
 use crate::tune::EngineKernels;
@@ -123,6 +124,30 @@ fn motion_specs(geometry: Geometry) -> [EngineSpec; 2] {
     [nl4d, nlmeans]
 }
 
+/// `spec` with its luma pass dropped, so it cleans chroma alone.
+fn without_luma(spec: EngineSpec) -> EngineSpec {
+    match spec {
+        EngineSpec::Nl4d { chroma, geometry, .. } => EngineSpec::Nl4d {
+            luma: None,
+            chroma,
+            geometry,
+        },
+        EngineSpec::Nlmeans { chroma, geometry, .. } => EngineSpec::Nlmeans {
+            luma: None,
+            chroma,
+            geometry,
+        },
+    }
+}
+
+/// [motion_specs] and the same specs cleaning chroma alone.
+fn motion_and_chroma_only_specs(geometry: Geometry) -> Vec<EngineSpec> {
+    let both = motion_specs(geometry);
+    let chroma_only = both.map(without_luma);
+
+    both.into_iter().chain(chroma_only).collect()
+}
+
 fn default_kernels(_pass: &PassSpec) -> EngineKernels {
     EngineKernels::default()
 }
@@ -160,21 +185,16 @@ fn seeded_pass(client: &Client, spec: &EngineSpec, luma: bool, clip: &[Planes]) 
     let (luma_pass, chroma_pass) = spec.passes();
     let pass = if luma { luma_pass } else { chroma_pass };
     let pass = pass.expect("the spec has this pass");
-    let (scale_x, scale_y) = if luma {
-        (1.0, 1.0)
-    } else {
-        spec.geometry().chroma.chroma_scale()
-    };
 
     let producer = spec.pair_model_producer(client).expect("the producer builds");
     let motion = producer.as_ref().map(|producer| SharedMotion {
         ring: producer.ring().clone(),
-        scale_x,
-        scale_y,
         luma_motion: None,
     });
     let kernels = EngineKernels::default();
-    let pass = pass.build_pass(client, kernels, motion).expect("build pass");
+    let pass = pass
+        .build_pass(client, kernels, motion, false)
+        .expect("build pass");
     let luma = clip
         .iter()
         .map(|frame| client.create_from_slice(&frame[0]))
@@ -232,6 +252,25 @@ fn pan_planes(count: usize) -> Vec<Planes> {
             let u_plane = deinterleave(&frame.chroma, 0);
             let v_plane = deinterleave(&frame.chroma, 1);
             vec![to_codes(&frame.luma), to_codes(&u_plane), to_codes(&v_plane)]
+        })
+        .collect()
+}
+
+/// A noisy 4:2:0 clip of `count` frames whose luma pans 4 pixels a frame over flat chroma grain.
+///
+/// No chroma search finds the pan, so the chroma output shows whether luma motion guided it.
+fn luma_panning_over_flat_chroma(count: usize) -> Vec<Planes> {
+    let sigma = 2.0 / 255.0;
+    let luma_frames = panning_luma(WIDTH, HEIGHT, 4, sigma, count);
+    let chroma_frames = flat_chroma(WIDTH / 2, HEIGHT / 2, sigma, count);
+
+    luma_frames
+        .iter()
+        .zip(&chroma_frames)
+        .map(|(luma, chroma)| {
+            let u_plane = deinterleave(chroma, 0);
+            let v_plane = deinterleave(chroma, 1);
+            vec![to_codes(luma), to_codes(&u_plane), to_codes(&v_plane)]
         })
         .collect()
 }
@@ -403,24 +442,75 @@ fn luma_output_is_unchanged_with_the_ring() {
 }
 
 #[test]
-fn chroma_without_a_luma_pass_matches_its_pass_engine() {
+fn chroma_only_without_motion_matches_its_pass_engine() {
     let client = client();
     let clip = clip();
     let geometry = geometry(ChromaLayout::Yuv420);
+    let [_, spec] = specs(geometry, false, true);
+    assert!(spec.luma_motion_ring(&client).is_none(), "{spec:?}");
 
-    for spec in specs(geometry, false, true) {
-        assert!(spec.luma_motion_ring(&client).is_none(), "{spec:?}");
+    let mut chroma_engine = seeded_pass(&client, &spec, false, &clip);
+    let chroma_frames = chroma_of(&clip);
+    let expected = drive(&mut chroma_engine, &client, &chroma_frames, 0, false);
 
-        let mut chroma_engine = seeded_pass(&client, &spec, false, &clip);
-        let chroma_frames = chroma_of(&clip);
-        let expected = drive(&mut chroma_engine, &client, &chroma_frames, 0, false);
+    let mut engine = build(&client, &spec).expect("build");
+    let merged = drive(&mut engine, &client, &clip, 0, true);
 
+    assert_eq!(merged.len(), expected.len(), "{spec:?}");
+    for (index, frame) in merged.iter().enumerate() {
+        assert_eq!(frame[1..], expected[index][..], "{spec:?} frame {index} chroma");
+    }
+}
+
+#[test]
+fn chroma_only_matches_the_luma_plus_chroma_chroma() {
+    let client = client();
+    let clip = luma_panning_over_flat_chroma(RESEED_FRAMES);
+    let geometry = geometry(ChromaLayout::Yuv420);
+
+    for spec in motion_specs(geometry) {
+        let chroma_only = without_luma(spec);
+        let mut both_engine = build(&client, &spec).expect("build");
+        let mut engine = build(&client, &chroma_only).expect("build");
+
+        // A context-led stream, then a scene-start stream on the same engines.
+        for context in [CONTEXT_FRAMES, 0] {
+            let expected = drive(&mut both_engine, &client, &clip, context, true);
+            let actual = drive(&mut engine, &client, &clip, context, true);
+
+            assert_eq!(actual.len(), expected.len(), "{chroma_only:?}");
+            for (index, frame) in actual.iter().enumerate() {
+                assert_eq!(
+                    frame[1..],
+                    expected[index][1..],
+                    "{chroma_only:?} context {context} frame {index} chroma"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn chroma_only_passes_luma_through_unchanged() {
+    let client = client();
+    let clip = pan_planes(RESEED_FRAMES);
+    let geometry = geometry(ChromaLayout::Yuv420);
+
+    for spec in motion_specs(geometry).map(without_luma) {
         let mut engine = build(&client, &spec).expect("build");
-        let merged = drive(&mut engine, &client, &clip, 0, true);
 
-        assert_eq!(merged.len(), expected.len(), "{spec:?}");
-        for (index, frame) in merged.iter().enumerate() {
-            assert_eq!(frame[1..], expected[index][..], "{spec:?} frame {index} chroma");
+        for context in [CONTEXT_FRAMES, 0] {
+            let outputs = drive(&mut engine, &client, &clip, context, true);
+
+            // The outputs are the clip's last frames in order.
+            let first = RESEED_FRAMES - outputs.len();
+            for (index, frame) in outputs.iter().enumerate() {
+                let source = &clip[first + index];
+                assert_eq!(
+                    frame[0], source[0],
+                    "{spec:?} context {context} frame {index} luma"
+                );
+            }
         }
     }
 }
@@ -473,7 +563,7 @@ fn reseed_equals_streaming_for_luma_and_chroma() {
     let clip = pan_planes(RESEED_FRAMES);
     let geometry = geometry(ChromaLayout::Yuv420);
 
-    for spec in motion_specs(geometry) {
+    for spec in motion_and_chroma_only_specs(geometry) {
         let mut engine = build(&client, &spec).expect("build");
         let streamed = drive(&mut engine, &client, &clip, 0, true);
         let target = reseed_target(engine.as_ref(), clip.len());
@@ -492,7 +582,7 @@ fn a_reseed_never_reads_stale_luma_motion() {
     let geometry = geometry(ChromaLayout::Yuv420);
     let dims = plane_dims(3, true);
 
-    for spec in motion_specs(geometry) {
+    for spec in motion_and_chroma_only_specs(geometry) {
         let mut fresh = build(&client, &spec).expect("build");
         let target = reseed_target(fresh.as_ref(), clip.len());
         let expected = reseed_at(&mut fresh, &client, &clip, target);
@@ -564,16 +654,19 @@ fn greyscale_builds_no_ring() {
     let yuv = geometry(ChromaLayout::Yuv420);
     let [nl4d_gray, _] = specs(gray, true, false);
     let [nl4d_luma, _] = specs(yuv, true, false);
-    let [nl4d_chroma, _] = specs(yuv, false, true);
+    let [nl4d_chroma, nlmeans_chroma_without_motion] = specs(yuv, false, true);
     let [nl4d_both, nlmeans_both] = motion_specs(yuv);
     let [_, nlmeans_without_motion] = specs(yuv, true, true);
+    let nlmeans_chroma = without_luma(nlmeans_both);
 
     assert!(nl4d_gray.luma_motion_ring(&client).is_none());
     assert!(nl4d_luma.luma_motion_ring(&client).is_none());
-    assert!(nl4d_chroma.luma_motion_ring(&client).is_none());
     assert!(nlmeans_without_motion.luma_motion_ring(&client).is_none());
+    assert!(nlmeans_chroma_without_motion.luma_motion_ring(&client).is_none());
     assert!(nl4d_both.luma_motion_ring(&client).is_some());
     assert!(nlmeans_both.luma_motion_ring(&client).is_some());
+    assert!(nl4d_chroma.luma_motion_ring(&client).is_some());
+    assert!(nlmeans_chroma.luma_motion_ring(&client).is_some());
 }
 
 /// Checks a merged engine cleaning one plane group matches its pass engine there, and that the
@@ -626,9 +719,10 @@ fn an_uncleaned_plane_comes_out_unchanged() {
         assert_passes_through(&client, &spec, true);
     }
 
-    for spec in specs(geometry, false, true) {
-        assert_passes_through(&client, &spec, false);
-    }
+    // A chroma pass that compensates motion takes it from a luma guide, so only the one without
+    // motion matches its pass engine.
+    let [_, chroma_without_motion] = specs(geometry, false, true);
+    assert_passes_through(&client, &chroma_without_motion, false);
 }
 
 #[test]
@@ -638,18 +732,33 @@ fn timing_lists_each_pass_the_engine_runs() {
     let geometry = geometry(ChromaLayout::Yuv420);
     let [both, _] = specs(geometry, true, true);
     let [luma_only, _] = specs(geometry, true, false);
+    let [chroma_only, _] = specs(geometry, false, true);
 
     let mut engine = build(&client, &both).expect("build");
     engine.sample_device_time(1);
     drive(&mut engine, &client, &clip, 0, true);
     let timing = engine.timing();
     assert!(timing.luma.is_some());
-    assert!(timing.chroma.is_some());
+    let both_chroma = timing.chroma.expect("chroma timing");
 
     let mut engine = build(&client, &luma_only).expect("build");
     let timing = engine.timing();
     assert!(timing.luma.is_some());
     assert!(timing.chroma.is_none());
+
+    // The luma guide of a chroma only run cleans no plane, so its time goes to chroma.
+    let mut engine = build(&client, &chroma_only).expect("build");
+    engine.sample_device_time(1);
+    drive(&mut engine, &client, &clip, 0, true);
+    let timing = engine.timing();
+    assert!(timing.luma.is_none());
+
+    let guided_chroma = timing.chroma.expect("chroma timing");
+    assert_eq!(guided_chroma.device_samples, both_chroma.device_samples);
+    assert!(
+        guided_chroma.device_time > both_chroma.device_time,
+        "the guide's time is in chroma, got {guided_chroma:?} against {both_chroma:?}"
+    );
 }
 
 #[test]

@@ -47,7 +47,7 @@ fn run_stream(frames: &[PanFrame], seeded: bool) -> (Nl4dDenoiser, Vec<Vec<f32>>
     let mut fitter = ModelFitter::new(&client, WIDTH, HEIGHT, mode);
     let mut denoiser = Nl4dDenoiser::new(&client, params, WIDTH, HEIGHT).expect("construction failed");
     if seeded {
-        let motion = fitter.motion(1.0, 1.0);
+        let motion = fitter.motion();
         denoiser.set_shared_motion(motion);
     }
 

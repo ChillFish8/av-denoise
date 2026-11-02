@@ -17,6 +17,7 @@ use self::seeds::ModelSeeds;
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
 use super::mirror::MirroredBuffer;
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
+use super::prefilter::PrefilterMode;
 use crate::engine::align::StorageAlign;
 use crate::engine::timing::DeviceTimer;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
@@ -160,6 +161,8 @@ pub struct NlmDenoiser {
     ///
     /// With it on, a stream gets no leading copies.
     pub(super) shifted_edges: bool,
+    /// Whether each submit runs only the noise and motion stages and cleans nothing.
+    pub(super) guides_only: bool,
 }
 
 impl NlmDenoiser {
@@ -420,6 +423,7 @@ impl NlmDenoiser {
             confidence_dummy,
             device_timer,
             shifted_edges: false,
+            guides_only: false,
         };
 
         // The settings and the starting derived values read the front's own parameters.
@@ -430,6 +434,45 @@ impl NlmDenoiser {
 
     pub(crate) fn placeholder(&self) -> &Handle {
         &self.placeholder
+    }
+
+    /// Makes each submit run only its noise and motion stages, before the first push.
+    ///
+    /// The submit still hands back an output slot, which then holds no frame. It drops the buffers
+    /// only the denoise stages read, the f16 search ring, the motion-shifted rings and the outputs.
+    /// The NLM pilot shares the accumulators and weight scratch with the main pass, so they stay
+    /// under that prefilter.
+    pub(crate) fn set_guides_only(&mut self) {
+        self.guides_only = true;
+        self.search_buf = None;
+        self.compensated_input_buf = None;
+        self.compensated_reference_buf = None;
+
+        let placeholder = self.placeholder.clone();
+        self.outputs = [placeholder.clone(), placeholder.clone()];
+
+        let pilot = matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. });
+        if pilot {
+            return;
+        }
+
+        let scratch = [
+            &mut self.accum,
+            &mut self.weight_sum,
+            &mut self.max_weight,
+            &mut self.weight_buf,
+            &mut self.raw_fwd,
+            &mut self.raw_bwd,
+            &mut self.tmp_hsum,
+            &mut self.tmp_hsum_bwd,
+        ];
+        for handle in scratch {
+            *handle = placeholder.clone();
+        }
+    }
+
+    pub(crate) fn guides_only(&self) -> bool {
+        self.guides_only
     }
 
     /// Takes in one pushed frame.

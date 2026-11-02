@@ -622,6 +622,8 @@ impl NlmDenoiser {
     }
 
     /// Queues every denoise kernel for the current window, in device spans when sampled.
+    ///
+    /// A front that only guides stops after the noise estimate and the window's motion.
     pub(super) fn run_denoise_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
         let center_t = self.params.temporal_radius;
         let client = self.client.clone();
@@ -639,6 +641,10 @@ impl NlmDenoiser {
         // confidence scores read this centre's own derived values.
         if self.noise.is_measured() {
             self.update_noise_estimate(center_t)?;
+        }
+
+        if self.guides_only {
+            return self.run_motion_machinery(center_t);
         }
 
         // Both run before any NLM dispatch so the temporal kernels read aligned neighbours.
