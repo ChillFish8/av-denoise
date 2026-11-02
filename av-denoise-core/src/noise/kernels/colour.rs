@@ -334,8 +334,9 @@ pub fn noise_colour_means(
 /// channel when its mean residual passes the static gate, its mean luma sits between 20 and 240
 /// codes and its grain is above the channel's floor. Its grain is the residual's sigma times
 /// `grain_scale`, on the 8-bit scale. It then adds its count, log grain, mean colour and a
-/// histogram count to channel `c`'s cell of its colour. With `luma`, a neutral block also adds to
-/// the calibration record of its brightness, past every channel's cells.
+/// histogram count to channel `c`'s cell of its colour. Past every channel's cells, with `luma` a
+/// neutral block also adds to the calibration record of its brightness. Without it the block adds to
+/// channel `c`'s plane record.
 ///
 /// Every block that joins is counted, however heavy. The colour-relative outlier rule runs on the
 /// pooled cells, through [noise_colour_levels], so it judges each block against the whole window.
@@ -369,7 +370,7 @@ pub fn noise_colour_accumulate(
             COLOUR_CHROMA_GRAIN_FLOOR
         }
     );
-    let calibration_base = comptime!(channels * COLOUR_CELLS);
+    let extra_base = comptime!(channels * COLOUR_CELLS);
 
     let index = ABSOLUTE_POS_X;
 
@@ -407,10 +408,16 @@ pub fn noise_colour_accumulate(
                     let record_base = slot_base + record * COLOUR_CELL_WORDS;
                     add_block(cells, record_base, log_grain, mean_luma, mean_cb, mean_cr);
 
-                    if comptime!(luma) && neutral {
-                        let calibration = calibration_base + brightness;
-                        let calibration_word = slot_base + calibration * COLOUR_CELL_WORDS;
-                        add_block(cells, calibration_word, log_grain, mean_luma, mean_cb, mean_cr);
+                    if comptime!(luma) {
+                        if neutral {
+                            let calibration = extra_base + brightness;
+                            let calibration_word = slot_base + calibration * COLOUR_CELL_WORDS;
+                            add_block(cells, calibration_word, log_grain, mean_luma, mean_cb, mean_cr);
+                        }
+                    } else {
+                        let plane_record = comptime!(extra_base + channel);
+                        let plane_word = slot_base + plane_record * COLOUR_CELL_WORDS;
+                        add_block(cells, plane_word, log_grain, mean_luma, mean_cb, mean_cr);
                     }
                 }
             }

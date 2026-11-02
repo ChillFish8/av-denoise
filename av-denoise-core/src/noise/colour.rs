@@ -7,12 +7,18 @@ use super::history::{WindowBounds, history_capacity};
 use super::kernels::{
     noise_colour_accumulate,
     noise_colour_clear,
+    noise_colour_fit_base,
+    noise_colour_fit_ceilings,
+    noise_colour_fit_gains,
+    noise_colour_fit_kernel,
+    noise_colour_fit_table,
     noise_colour_levels,
     noise_colour_means,
     noise_colour_window,
 };
 use super::state::NoiseState;
 use super::temporal::temporal_stats_blocks;
+use super::{DERIVED_WORDS, NOISE_CURVE_BINS};
 use crate::engine::{ChromaLayout, DevicePlane, Geometry, SampleFormat};
 use crate::tune::gpu::{bind, zeroed_words};
 
@@ -90,6 +96,77 @@ pub(crate) const COLOUR_CHROMA_GRAIN_FLOOR: f32 = 0.03;
 pub(crate) const COLOUR_LOG_FIXED: f32 = 2048.0;
 /// The fixed-point scale of a frame's colour sums.
 pub(crate) const COLOUR_MEAN_FIXED: f32 = 16.0;
+
+/// The chroma magnitudes the table's saturation centres sit at, on the 8-bit scale.
+///
+/// The neutral centre reads at magnitude 3, the middle of its level, while its value is fitted at
+/// no colour. The open last level reads at 51.
+pub(crate) const COLOUR_SATURATION_CENTRES: [f32; 6] = [3.0, 9.0, 16.0, 25.0, 37.0, 51.0];
+/// The threads of one cube of the per-plane fit launches.
+pub(crate) const COLOUR_FIT_THREADS: u32 = 256;
+/// The threads of one cube of the wide-kernel launch.
+pub(crate) const COLOUR_FIT_KERNEL_THREADS: u32 = 256;
+/// The threads that share one query of the wide-kernel launch, each summing a share of the cells.
+pub(crate) const COLOUR_FIT_KERNEL_LANES: u32 = 8;
+/// The knots of the brightness base, evenly spaced over luma 0 to 255.
+pub(crate) const COLOUR_FIT_KNOTS: u32 = 17;
+/// The weight of the brightness base's second-difference penalty.
+pub(crate) const COLOUR_FIT_KNOT_PENALTY: f32 = 2.0;
+/// The ridge on the brightness base's scaled normal equations.
+///
+/// It keeps the fit defined when every populated cell sits at one brightness.
+pub(crate) const COLOUR_FIT_RIDGE: f32 = 1.0e-5;
+/// The fewest kept blocks a cell needs to join the fit.
+pub(crate) const COLOUR_FIT_MIN_BLOCKS: f32 = 8.0;
+/// The bandwidth of the wide-kernel base, in kernel units.
+pub(crate) const COLOUR_FIT_BANDWIDTH: f32 = 1.0;
+/// The luma codes of one kernel unit.
+pub(crate) const COLOUR_KERNEL_LUMA_STEP: f32 = 32.0;
+/// The chroma codes of one kernel unit.
+pub(crate) const COLOUR_KERNEL_CHROMA_STEP: f32 = 12.0;
+/// The kernel prior's weight, as a share of the plane's kept blocks.
+pub(crate) const COLOUR_FIT_PRIOR_SHARE: f32 = 0.002;
+/// The kept blocks at which a cell sits halfway between the base and its own level.
+pub(crate) const COLOUR_FIT_PULL: f32 = 15.0;
+/// The log grain gap the luma table ignores before a cell moves off the base.
+pub(crate) const COLOUR_FIT_LUMA_DEAD_ZONE: f32 = 0.05;
+/// The smallest chroma gain.
+pub(crate) const COLOUR_CHROMA_GAIN_MIN: f32 = 0.4;
+/// The largest chroma gain.
+pub(crate) const COLOUR_CHROMA_GAIN_MAX: f32 = 3.0;
+/// The neutral blocks at which the luma gains reach half their fitted log size.
+///
+/// A window with few neutral blocks has little to calibrate against, so its gains stay near 1.
+pub(crate) const COLOUR_GAIN_NEUTRAL_RAMP: f32 = 256.0;
+/// The kept blocks at which a plane's gains reach half their fitted log size.
+pub(crate) const COLOUR_GAIN_BLOCK_RAMP: f32 = 256.0;
+
+/// The fit record word of the cell's mean luma.
+pub(crate) const COLOUR_FIT_LUMA: u32 = 0;
+/// The fit record word of the cell's mean Cb, centred on 0.
+pub(crate) const COLOUR_FIT_CB: u32 = 1;
+/// The fit record word of the cell's mean Cr, centred on 0.
+pub(crate) const COLOUR_FIT_CR: u32 = 2;
+/// The fit record word of the cell's kept blocks when populated, else 0.
+pub(crate) const COLOUR_FIT_WEIGHT: u32 = 3;
+/// The fit record word of the cell's level less the brightness base.
+pub(crate) const COLOUR_FIT_RESIDUAL: u32 = 4;
+/// The words of one cell's fit record.
+pub(crate) const COLOUR_FIT_CELL_FIELDS: u32 = 5;
+/// The plane header word of the kernel prior, after the knots.
+pub(crate) const COLOUR_FIT_PLANE_PRIOR: u32 = COLOUR_FIT_KNOTS;
+/// The plane header word that is 1 when a cell is populated.
+pub(crate) const COLOUR_FIT_PLANE_POPULATED: u32 = COLOUR_FIT_PLANE_PRIOR + 1;
+/// The plane header word of the blocks every cell keeps.
+pub(crate) const COLOUR_FIT_PLANE_BLOCKS: u32 = COLOUR_FIT_PLANE_POPULATED + 1;
+/// The plane header word of the lowest mean luma of a populated cell.
+pub(crate) const COLOUR_FIT_PLANE_LUMA_LOW: u32 = COLOUR_FIT_PLANE_BLOCKS + 1;
+/// The plane header word of the highest mean luma of a populated cell.
+pub(crate) const COLOUR_FIT_PLANE_LUMA_HIGH: u32 = COLOUR_FIT_PLANE_LUMA_LOW + 1;
+/// The words of one plane's fit header.
+pub(crate) const COLOUR_FIT_PLANE_WORDS: u32 = COLOUR_FIT_PLANE_LUMA_HIGH + 1;
+/// The base queries of one plane, every cell's mean colour then every cell's centre.
+pub(crate) const COLOUR_FIT_QUERIES: u32 = 2 * COLOUR_CELLS;
 
 /// The frames the block means are held for.
 ///
@@ -296,10 +373,11 @@ pub(crate) struct CellFrame<'a> {
 /// the last noise window.
 ///
 /// Each plane holds [COLOUR_CELLS] cell records of [COLOUR_CELL_WORDS] words. The luma plane also
-/// holds [COLOUR_CALIBRATION_RECORDS] calibration records after its cells. Stream frame `frame`
-/// keeps its fixed-point sums in slot `frame % capacity`, and a frame read again replaces them. The
-/// window's sums are summed from the slots afresh for every window, so they depend only on the
-/// window's own frames.
+/// holds [COLOUR_CALIBRATION_RECORDS] calibration records after its cells. Chroma planes instead
+/// hold one plane record each after every plane's cells, which pools all of the plane's blocks.
+/// Stream frame `frame` keeps its fixed-point sums in slot `frame % capacity`, and a frame read
+/// again replaces them. The window's sums are summed from the slots afresh for every window, so
+/// they depend only on the window's own frames.
 pub(crate) struct ColourCells {
     planes: u32,
     luma: bool,
@@ -415,8 +493,8 @@ impl ColourCells {
 }
 
 fn record_count(planes: u32, luma: bool) -> u32 {
-    let calibration = if luma { COLOUR_CALIBRATION_RECORDS } else { 0 };
-    planes * COLOUR_CELLS + calibration
+    let extra = if luma { COLOUR_CALIBRATION_RECORDS } else { planes };
+    planes * COLOUR_CELLS + extra
 }
 
 /// Queues every colour cell's kept count and level from the window's sums `window`, leaving out
@@ -449,10 +527,160 @@ pub(crate) fn queue_colour_levels(
     }
 }
 
-/// A pass's block means and the cells it pools them into.
+/// The grain model of one pass's planes, fitted from a window's cells, and its log gain tables.
+///
+/// Each plane's table holds [COLOUR_CELLS] log gains, one at each cell's centre, in the cell layout.
+/// [colour_gain](crate::noise::kernels::colour_gain) reads it. Luma gains are relative to the
+/// pipeline's brightness curve and chroma gains to the plane's median grain.
+pub(crate) struct ColourFit {
+    planes: u32,
+    luma: bool,
+    /// A ceiling past every histogram bin for every cell.
+    open_ceilings: Handle,
+    /// The first fit's ceilings.
+    ceilings: Handle,
+    levels: Handle,
+    fit_cells: Handle,
+    fit_planes: Handle,
+    bases: Handle,
+    /// Each plane's log grain at every cell centre.
+    table: Handle,
+    /// Each plane's log gain at every cell centre.
+    gains: Handle,
+}
+
+impl ColourFit {
+    /// The fit of `planes` planes, which are luma with `luma` and chroma otherwise.
+    pub(crate) fn new(client: &Client, planes: u32, luma: bool) -> Self {
+        let cells = (planes * COLOUR_CELLS) as usize;
+        let open = vec![f32::MAX; cells];
+        let open_bytes = f32::as_bytes(&open);
+
+        Self {
+            planes,
+            luma,
+            open_ceilings: client.create_from_slice(open_bytes),
+            ceilings: zeroed_words(client, cells),
+            levels: zeroed_words(client, cells * COLOUR_LEVEL_FIELDS as usize),
+            fit_cells: zeroed_words(client, cells * COLOUR_FIT_CELL_FIELDS as usize),
+            fit_planes: zeroed_words(client, (planes * COLOUR_FIT_PLANE_WORDS) as usize),
+            bases: zeroed_words(client, (planes * COLOUR_FIT_QUERIES) as usize),
+            table: zeroed_words(client, cells),
+            gains: zeroed_words(client, cells),
+        }
+    }
+
+    /// Each plane's log gain table, plane after plane.
+    pub(crate) fn gains(&self) -> &Handle {
+        &self.gains
+    }
+
+    /// Each plane's log grain table, plane after plane.
+    #[cfg(test)]
+    pub(crate) fn table(&self) -> &Handle {
+        &self.table
+    }
+
+    /// Queues both fits of the window's sums `window` and the gain tables, in ten launches.
+    ///
+    /// The first fit keeps every block. The second leaves out each cell's blocks above the first
+    /// fit's model plus log 2. A luma fit reads the brightness curve `curve` and the derived values
+    /// `derived`, which say whether the curve is valid.
+    pub(crate) fn queue(&self, client: &Client, window: &Handle, curve: &Handle, derived: &Handle) {
+        let cells = self.planes * COLOUR_CELLS;
+        let window_len = (record_count(self.planes, self.luma) * COLOUR_CELL_WORDS) as usize;
+
+        queue_colour_levels(
+            client,
+            window,
+            &self.open_ceilings,
+            &self.levels,
+            cells,
+            self.luma,
+        );
+        self.queue_model(client, window, window_len);
+
+        unsafe {
+            noise_colour_fit_ceilings::launch_unchecked(
+                client,
+                CubeCount::new_1d(cells.div_ceil(COLOUR_BLOCK_THREADS)),
+                CubeDim::new_1d(COLOUR_BLOCK_THREADS),
+                bind(window, window_len),
+                bind(&self.table, cells as usize),
+                bind(&self.ceilings, cells as usize),
+                cells,
+            );
+        }
+
+        queue_colour_levels(client, window, &self.ceilings, &self.levels, cells, self.luma);
+        self.queue_model(client, window, window_len);
+
+        unsafe {
+            noise_colour_fit_gains::launch_unchecked(
+                client,
+                CubeCount::new_1d(self.planes),
+                CubeDim::new_1d(COLOUR_FIT_THREADS),
+                bind(window, window_len),
+                bind(&self.table, cells as usize),
+                bind(&self.fit_planes, (self.planes * COLOUR_FIT_PLANE_WORDS) as usize),
+                bind(curve, NOISE_CURVE_BINS),
+                bind(derived, DERIVED_WORDS as usize),
+                bind(&self.gains, cells as usize),
+                self.planes,
+                self.luma,
+            );
+        }
+    }
+
+    /// Queues one fit of the current levels into the log grain table, in three launches.
+    fn queue_model(&self, client: &Client, window: &Handle, window_len: usize) {
+        let cells = (self.planes * COLOUR_CELLS) as usize;
+        let levels_len = cells * COLOUR_LEVEL_FIELDS as usize;
+        let fit_cells_len = cells * COLOUR_FIT_CELL_FIELDS as usize;
+        let fit_planes_len = (self.planes * COLOUR_FIT_PLANE_WORDS) as usize;
+        let bases_len = (self.planes * COLOUR_FIT_QUERIES) as usize;
+        let query_threads = COLOUR_FIT_QUERIES * COLOUR_FIT_KERNEL_LANES;
+        let query_cubes = query_threads.div_ceil(COLOUR_FIT_KERNEL_THREADS);
+
+        unsafe {
+            noise_colour_fit_base::launch_unchecked(
+                client,
+                CubeCount::new_1d(self.planes),
+                CubeDim::new_1d(COLOUR_FIT_THREADS),
+                bind(window, window_len),
+                bind(&self.levels, levels_len),
+                bind(&self.fit_cells, fit_cells_len),
+                bind(&self.fit_planes, fit_planes_len),
+            );
+
+            noise_colour_fit_kernel::launch_unchecked(
+                client,
+                CubeCount::new_2d(query_cubes, self.planes),
+                CubeDim::new_1d(COLOUR_FIT_KERNEL_THREADS),
+                bind(&self.fit_cells, fit_cells_len),
+                bind(&self.fit_planes, fit_planes_len),
+                bind(&self.bases, bases_len),
+            );
+
+            noise_colour_fit_table::launch_unchecked(
+                client,
+                CubeCount::new_1d(self.planes),
+                CubeDim::new_1d(COLOUR_FIT_THREADS),
+                bind(&self.levels, levels_len),
+                bind(&self.fit_cells, fit_cells_len),
+                bind(&self.bases, bases_len),
+                bind(&self.table, cells),
+                self.luma,
+            );
+        }
+    }
+}
+
+/// A pass's block means, the cells it pools them into and the model fitted from them.
 pub(crate) struct ColourMeasure {
     source: ColourSource,
     cells: ColourCells,
+    fit: ColourFit,
 }
 
 impl NoiseState {
@@ -474,7 +702,8 @@ impl NoiseState {
         let luma = source.grid == ColourGrid::Luma;
         let capacity = history_capacity(self.shape.ring_radius);
         let cells = ColourCells::new(&self.client, self.shape.channels, luma, capacity);
-        let measure = ColourMeasure { source, cells };
+        let fit = ColourFit::new(&self.client, self.shape.channels, luma);
+        let measure = ColourMeasure { source, cells, fit };
 
         self.colour = Some(measure);
     }
@@ -512,13 +741,22 @@ impl NoiseState {
         Ok(())
     }
 
-    /// Queues the sums of the colour cells of the stream frames `bounds` names.
+    /// Queues the sums of the colour cells of the stream frames `bounds` names, and the grain model
+    /// fitted from them.
     ///
-    /// A state that pools no colour cells queues nothing.
+    /// The fit reads the curve and derived values the fold just wrote. A state that pools no colour
+    /// cells queues nothing.
     pub(super) fn queue_colour_window(&self, bounds: WindowBounds) {
-        if let Some(colour) = self.colour.as_ref() {
-            colour.cells.queue_window(&self.client, bounds);
-        }
+        let Some(colour) = self.colour.as_ref() else {
+            return;
+        };
+
+        colour.cells.queue_window(&self.client, bounds);
+
+        let window = colour.cells.window();
+        colour
+            .fit
+            .queue(&self.client, window, &self.curve_ratios, &self.derived);
     }
 
     /// The colour cells, `None` for a state that pools none.
@@ -526,5 +764,16 @@ impl NoiseState {
     pub(crate) fn colour_cells(&self) -> Option<&ColourCells> {
         let colour = self.colour.as_ref();
         colour.map(|colour| &colour.cells)
+    }
+
+    /// Each plane's log gain table from the last window, `None` for a state that pools no colour
+    /// cells.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the gain tables are fitted before any kernel reads them")
+    )]
+    pub(crate) fn colour_gains(&self) -> Option<&Handle> {
+        let colour = self.colour.as_ref();
+        colour.map(|colour| colour.fit.gains())
     }
 }

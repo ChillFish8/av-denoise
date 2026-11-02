@@ -8,10 +8,13 @@ use crate::noise::colour::{
     CellFrame,
     ColourBlocks,
     ColourCells,
+    ColourFit,
     ColourGrid,
     queue_colour_levels,
 };
 use crate::noise::{
+    DerivedValues,
+    NOISE_CURVE_BINS,
     NOISE_WINDOW_LEN,
     NOISE_WINDOW_RADIUS,
     WindowBounds,
@@ -34,6 +37,8 @@ pub enum ColourStage {
     Window,
     /// Every cell's level against a ceiling.
     Levels,
+    /// Both fits of the grain model and the gain tables.
+    Fit,
 }
 
 /// The colour cells of one pass over a 4:2:0 frame of 8-bit planes with hashed colour and grain.
@@ -49,6 +54,11 @@ pub struct ColourMeasurement {
     records_len: usize,
     ceilings: Handle,
     levels: Handle,
+    fit: ColourFit,
+    /// A brightness curve that rises with luma.
+    curve: Handle,
+    /// Derived values that mark the curve valid.
+    derived: Handle,
 }
 
 impl ColourMeasurement {
@@ -93,6 +103,19 @@ impl ColourMeasurement {
         let levels_bytes = cell_count * COLOUR_LEVEL_FIELDS as usize * size_of::<f32>();
         let levels = client.empty(levels_bytes);
 
+        let fit = ColourFit::new(client, channels, !chroma);
+        let ratios: [f32; NOISE_CURVE_BINS] =
+            std::array::from_fn(|bin| 0.8 + 0.4 * bin as f32 / (NOISE_CURVE_BINS - 1) as f32);
+        let ratio_bytes = f32::as_bytes(&ratios);
+        let curve = client.create_from_slice(ratio_bytes);
+        let derived_values = DerivedValues {
+            curve_valid: true,
+            ..DerivedValues::default()
+        };
+        let derived_words = derived_values.to_words();
+        let derived_bytes = f32::as_bytes(&derived_words);
+        let derived = client.create_from_slice(derived_bytes);
+
         let measurement = Self {
             client: client.clone(),
             planes,
@@ -105,6 +128,9 @@ impl ColourMeasurement {
             records_len,
             ceilings,
             levels,
+            fit,
+            curve,
+            derived,
         };
         measurement.queue_means();
         for frame in 0..NOISE_WINDOW_LEN {
@@ -122,7 +148,14 @@ impl ColourMeasurement {
             ColourStage::Pool => self.queue_pool_frame(0),
             ColourStage::Window => self.queue_window(),
             ColourStage::Levels => self.queue_levels(),
+            ColourStage::Fit => self.queue_fit(),
         }
+    }
+
+    fn queue_fit(&self) {
+        let window = self.cells.window();
+
+        self.fit.queue(&self.client, window, &self.curve, &self.derived);
     }
 
     fn queue_means(&self) {

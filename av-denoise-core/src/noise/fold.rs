@@ -155,8 +155,8 @@ impl NoiseState {
     /// Queues one fold of the recorded frames `bounds` names into the stream state, the derived
     /// values, the current curve and the offset tables, in one launch.
     ///
-    /// A state that pools colour cells also sums the same frames' cells, in one more launch. A
-    /// state that holds fixed values queues nothing.
+    /// A state that pools colour cells also sums the same frames' cells and fits the grain model
+    /// from them. A state that holds fixed values queues nothing.
     ///
     /// # Errors
     ///

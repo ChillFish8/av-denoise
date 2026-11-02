@@ -720,8 +720,8 @@ impl Benchmark for FoldBench {
 ///
 /// The planes drift smoothly through every colour, and every block of the stats is static with a
 /// hashed grain, so every block joins a cell. `prepare` measures frame 0's block means, pools it as
-/// every frame of a full noise window and sums that window, so the levels row reads populated
-/// cells.
+/// every frame of a full noise window and sums that window, so the levels and fit rows read
+/// populated cells.
 pub struct ColourBench {
     pub client: Client,
     pub stage: ColourStage,
@@ -756,16 +756,22 @@ impl Benchmark for ColourBench {
     }
 
     fn name(&self) -> String {
+        let plane = match (self.stage, self.chroma) {
+            (ColourStage::Means, _) => "yuv420",
+            (_, false) => "luma",
+            (_, true) => "chroma",
+        };
+
+        if self.stage == ColourStage::Fit {
+            return format!("noise_colour_fit/1080p_{plane}");
+        }
+
         let stage = match self.stage {
             ColourStage::Means => "means",
             ColourStage::Pool => "pool",
             ColourStage::Window => "window",
             ColourStage::Levels => "levels",
-        };
-        let plane = match (self.stage, self.chroma) {
-            (ColourStage::Means, _) => "yuv420",
-            (_, false) => "luma",
-            (_, true) => "chroma",
+            ColourStage::Fit => unreachable!("the fit row is named above"),
         };
 
         format!("noise_colour_cells/{stage}/1080p_{plane}")

@@ -198,6 +198,18 @@ fn frame_blocks(client: &Client, cells: &ColourCells, frame: u32) -> i32 {
         .sum()
 }
 
+/// Both passes' log gain tables, luma's one plane and chroma's two.
+fn both_gains(client: &Client, engine: &PlanarEngine) -> [Vec<f32>; 2] {
+    let [luma, chroma] = engine
+        .colour_gains_for_test()
+        .map(|gains| gains.expect("both passes fit gains"));
+    let cells = COLOUR_CELLS as usize;
+    let luma_gains = read_f32(client, luma, cells).expect("the luma gains read back");
+    let chroma_gains = read_f32(client, chroma, 2 * cells).expect("the chroma gains read back");
+
+    [luma_gains, chroma_gains]
+}
+
 fn window(client: &Client, cells: &ColourCells) -> Vec<f32> {
     read_f32(client, cells.window(), cells.words()).expect("the window reads back")
 }
@@ -305,7 +317,7 @@ fn drifting_frame(index: u32) -> Planes {
 }
 
 #[test]
-fn a_reseed_sees_the_streamed_window_bit_for_bit() {
+fn a_reseed_sees_the_streamed_window_and_gains_bit_for_bit() {
     let client = client();
     let mut engine = engine(&client);
     let span = engine.window_span();
@@ -318,6 +330,7 @@ fn a_reseed_sees_the_streamed_window_bit_for_bit() {
     }
 
     let streamed = both_cells(&engine).map(|cells| window(&client, cells));
+    let streamed_gains = both_gains(&client, &engine);
 
     engine.reset();
     for index in first..target {
@@ -329,6 +342,17 @@ fn a_reseed_sees_the_streamed_window_bit_for_bit() {
     }
 
     let reseeded = both_cells(&engine).map(|cells| window(&client, cells));
+    let reseeded_gains = both_gains(&client, &engine);
+
+    // The clip holds no neutral block in the window to calibrate luma against, so only chroma fits.
+    let fitted = streamed_gains[1].iter().any(|&log_gain| log_gain != 0.0);
+    assert!(fitted, "the chroma pass fits gains away from 1");
+
+    for pass in 0..2 {
+        let streamed_bits: Vec<u32> = streamed_gains[pass].iter().map(|value| value.to_bits()).collect();
+        let reseeded_bits: Vec<u32> = reseeded_gains[pass].iter().map(|value| value.to_bits()).collect();
+        assert_eq!(reseeded_bits, streamed_bits, "pass {pass}'s gains");
+    }
 
     for pass in 0..2 {
         let pooled: f32 = streamed[pass]

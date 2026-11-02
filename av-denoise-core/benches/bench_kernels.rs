@@ -306,14 +306,20 @@ fn run_all(backend: &str, client: Client) {
         });
     }
 
-    // The colour cells' block means over every plane, then each pass's pooling, window sum and
-    // cell levels.
+    // The colour cells' block means over every plane, then each pass's pooling, window sum, cell
+    // levels and grain model fit.
     run(ColourBench {
         client: client.clone(),
         stage: ColourStage::Means,
         chroma: false,
     });
-    for stage in [ColourStage::Pool, ColourStage::Window, ColourStage::Levels] {
+    let pass_stages = [
+        ColourStage::Pool,
+        ColourStage::Window,
+        ColourStage::Levels,
+        ColourStage::Fit,
+    ];
+    for stage in pass_stages {
         for chroma in [false, true] {
             run(ColourBench {
                 client: client.clone(),

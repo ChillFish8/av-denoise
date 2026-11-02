@@ -238,6 +238,15 @@ impl PlanarEngine {
         [luma, chroma].map(|pass| pass.and_then(|pass| pass.colour_cells_for_test()))
     }
 
+    /// The log gain tables of the luma pass and of the chroma pass.
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub(crate) fn colour_gains_for_test(&self) -> [Option<&Handle>; 2] {
+        let luma = self.luma.as_deref();
+        let chroma = self.chroma.as_deref();
+
+        [luma, chroma].map(|pass| pass.and_then(|pass| pass.colour_gains_for_test()))
+    }
+
     #[cfg(test)]
     pub(crate) fn models(&self) -> Option<&ModelRing> {
         let producer = self.producer.as_ref();

@@ -1,4 +1,5 @@
 mod colour;
+mod colour_fit;
 mod curve;
 mod derive;
 mod history;
@@ -13,6 +14,21 @@ pub use self::colour::{
     noise_colour_levels,
     noise_colour_means,
     noise_colour_window,
+};
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "the gain tables are fitted before any kernel reads them"
+    )
+)]
+pub(crate) use self::colour_fit::colour_gain;
+pub use self::colour_fit::{
+    noise_colour_fit_base,
+    noise_colour_fit_ceilings,
+    noise_colour_fit_gains,
+    noise_colour_fit_kernel,
+    noise_colour_fit_table,
 };
 pub use self::curve::noise_curve_bins;
 pub use self::history::noise_record;

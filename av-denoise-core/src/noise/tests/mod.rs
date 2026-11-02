@@ -1,4 +1,5 @@
 mod colour;
+mod colour_fit;
 mod correlation;
 mod curve;
 mod fold;

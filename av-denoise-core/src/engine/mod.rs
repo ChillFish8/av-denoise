@@ -141,6 +141,12 @@ pub(crate) trait FramePass: PassEngine {
     fn colour_cells_for_test(&self) -> Option<&ColourCells> {
         None
     }
+
+    /// The log gain tables the pass fits, `None` for a pass that pools no colour cells.
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    fn colour_gains_for_test(&self) -> Option<&Handle> {
+        None
+    }
 }
 
 /// Uploads a frame's planes when an [Engine] asks for them.

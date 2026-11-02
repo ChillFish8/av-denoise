@@ -393,4 +393,10 @@ impl FramePass for Nl4d {
         let noise = self.inner.front.measured_noise()?;
         noise.colour_cells()
     }
+
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    fn colour_gains_for_test(&self) -> Option<&Handle> {
+        let noise = self.inner.front.measured_noise()?;
+        noise.colour_gains()
+    }
 }
