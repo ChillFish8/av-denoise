@@ -1,6 +1,7 @@
 mod kernels;
 
 use av_denoise_core::bench_api::Device;
+use av_denoise_core::bench_api::noise_colour::ColourStage;
 use av_denoise_core::bench_api::noise_reading::ReadingStage;
 use av_denoise_core::bench_api::tune_sites::{
     AccumulateCandidate,
@@ -49,7 +50,15 @@ use kernels::mc_escalate::{
 use kernels::mc_fit_model::{FitKernel, FitModelBench};
 use kernels::mc_warp::WarpBench;
 use kernels::mv_truemotion::MvTruemotionBench;
-use kernels::noise_gpu::{FoldBench, FoldStage, ReadingBench, SelectBench, SelectShape, SelectStage};
+use kernels::noise_gpu::{
+    ColourBench,
+    FoldBench,
+    FoldStage,
+    ReadingBench,
+    SelectBench,
+    SelectShape,
+    SelectStage,
+};
 use kernels::noise_partial::NoisePartialBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
@@ -295,6 +304,23 @@ fn run_all(backend: &str, client: Client) {
             client: client.clone(),
             stage,
         });
+    }
+
+    // The colour cells' block means over every plane, then each pass's pooling, window sum and
+    // cell levels.
+    run(ColourBench {
+        client: client.clone(),
+        stage: ColourStage::Means,
+        chroma: false,
+    });
+    for stage in [ColourStage::Pool, ColourStage::Window, ColourStage::Levels] {
+        for chroma in [false, true] {
+            run(ColourBench {
+                client: client.clone(),
+                stage,
+                chroma,
+            });
+        }
     }
 
     // Pyramid build and block matching are luma-only since motion estimation ignores chroma. Warp

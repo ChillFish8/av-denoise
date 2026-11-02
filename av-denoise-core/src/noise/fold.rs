@@ -155,7 +155,8 @@ impl NoiseState {
     /// Queues one fold of the recorded frames `bounds` names into the stream state, the derived
     /// values, the current curve and the offset tables, in one launch.
     ///
-    /// A state that holds fixed values queues nothing.
+    /// A state that pools colour cells also sums the same frames' cells, in one more launch. A
+    /// state that holds fixed values queues nothing.
     ///
     /// # Errors
     ///
@@ -166,7 +167,10 @@ impl NoiseState {
         };
 
         self.check_recorded(bounds)?;
-        self.fold_history(&measurement.history, bounds)
+        self.fold_history(&measurement.history, bounds)?;
+        self.queue_colour_window(bounds);
+
+        Ok(())
     }
 
     /// Queues one fold of the history frames `bounds` names into the stream state, the derived

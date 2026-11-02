@@ -1,3 +1,4 @@
+mod colour;
 mod correlation;
 mod curve;
 mod fold;

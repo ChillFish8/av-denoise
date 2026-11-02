@@ -434,7 +434,8 @@ impl NlmDenoiser {
     ///
     /// With motion compensation the frame is read along the motion to the frame before it.
     /// Without, it is read against the frame before it as it stands. A stream's first frame has
-    /// nothing before it, so it keeps only its Immerkær values.
+    /// nothing before it, so it keeps only its Immerkær values. Each reading also pools into the
+    /// colour cells, on a front that measures them.
     fn read_lookahead_noise(&self, frame: u32) -> Result<(), anyhow::Error> {
         let input = &self.lookahead().input;
         let slot = lookahead_slot(frame);
@@ -443,6 +444,7 @@ impl NlmDenoiser {
         let (Some(motion_ctx), Some(previous)) = (self.mc_ctx.as_ref(), previous) else {
             self.noise.queue_stats(input, slot, previous)?;
             self.noise.queue_reading(slot)?;
+            self.noise.queue_colour_cells(slot, frame)?;
             self.noise.record_reading(slot, frame);
             return Ok(());
         };
@@ -594,6 +596,7 @@ impl NlmDenoiser {
         self.noise
             .queue_compensated_stats(&lookahead.input, slot, neighbour, motion)?;
         self.noise.queue_reading(slot)?;
+        self.noise.queue_colour_cells(slot, frame)?;
         self.noise.record_reading(slot, frame);
 
         Ok(())

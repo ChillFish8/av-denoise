@@ -9,6 +9,7 @@ use cubecl::server::Handle;
 #[cfg(test)]
 pub(crate) use self::tests::SlotStats;
 use super::NOISE_CHANNELS;
+use super::colour::ColourMeasure;
 use super::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS};
 use super::derived::DerivedValues;
 use super::fold::{FoldSettings, NoiseSettings, OffsetTables, STATE_WORDS, fold_words};
@@ -115,6 +116,9 @@ pub(crate) struct NoiseState {
     pub(super) fixed_values: DerivedValues,
     /// The measurement buffers, `None` for a state that holds fixed values.
     pub(super) measurement: Option<Measurement>,
+    /// The block means and colour cells each reading pools into, when the grain is measured per
+    /// colour.
+    pub(super) colour: Option<ColourMeasure>,
 }
 
 /// The buffers one ring of frames is measured and folded in.
@@ -214,6 +218,7 @@ impl NoiseState {
             offset_tables: tables,
             fixed_values,
             measurement: None,
+            colour: None,
         }
     }
 

@@ -21,6 +21,9 @@ use crate::error::Error;
 use crate::motion::ModelRing;
 use crate::motion::{LumaMotionRing, PairModelProducer};
 use crate::nl4d::grain::GrainChunk;
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+use crate::noise::colour::ColourCells;
+use crate::noise::colour::{ColourBlocks, ColourGrid};
 
 /// The warning a stream of gray frames logs once, as it starts.
 pub(crate) const GRAY_WARNING: &str = "the source has no colour planes, so denoising may be less effective";
@@ -113,6 +116,8 @@ pub(crate) struct PlanarEngine {
     /// Emptied only by [Engine::reset], since the luma pass restarts its stream before the chroma
     /// pass runs its last pass of the old one.
     luma_motion: Option<LumaMotionRing>,
+    /// The block means of each frame, measured from every plane before the passes see the frame.
+    colour: Option<ColourBlocks>,
     passthrough: Option<PassthroughRing>,
     /// Logged once at the start of each stream.
     warning: Option<&'static str>,
@@ -124,7 +129,12 @@ pub(crate) struct PlanarEngine {
 impl PlanarEngine {
     /// Builds the engine around its passes, which the spec has validated.
     ///
-    /// With `warns` set, a stream that needs a [stream_warning] logs it once, as it starts.
+    /// With `colour`, the pass that cleans luma and the chroma pass pool their grain per colour
+    /// cell. With `warns` set, a stream that needs a [stream_warning] logs it once, as it starts.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every argument is a part the spec built for the engine"
+    )]
     pub(crate) fn new(
         client: &Client,
         geometry: Geometry,
@@ -132,6 +142,7 @@ impl PlanarEngine {
         chroma: Option<Box<dyn FramePass>>,
         producer: Option<PairModelProducer>,
         luma_motion: Option<LumaMotionRing>,
+        colour: Option<ColourBlocks>,
         warns: bool,
     ) -> Self {
         let gray = geometry.chroma == ChromaLayout::Gray;
@@ -143,6 +154,7 @@ impl PlanarEngine {
             chroma,
             producer,
             luma_motion,
+            colour,
             passthrough: None,
             warning,
             stream_started: false,
@@ -155,7 +167,55 @@ impl PlanarEngine {
             engine.passthrough = Some(ring);
         }
 
+        engine.attach_colour();
+
         engine
+    }
+
+    /// Hands each cleaning pass the block means of its own grid.
+    fn attach_colour(&mut self) {
+        let Some(colour) = self.colour.clone() else {
+            return;
+        };
+
+        let cleans_luma = self.cleans_luma();
+        let luma = self.luma.as_deref_mut().filter(|_| cleans_luma);
+        if let Some(pass) = luma {
+            let source = colour.source(ColourGrid::Luma);
+            pass.measure_colour(source);
+        }
+
+        if let Some(pass) = self.chroma.as_deref_mut() {
+            let source = colour.source(ColourGrid::Chroma);
+            pass.measure_colour(source);
+        }
+    }
+
+    /// Measures stream frame `frame`'s block means from its `planes`, when the passes pool colour
+    /// cells.
+    fn measure_colour(&self, planes: &[DevicePlane<'_>], frame: u32) {
+        let Some(colour) = self.colour.as_ref() else {
+            return;
+        };
+
+        colour.queue(planes, frame);
+    }
+
+    /// Uploads every plane of stream frame `frame` from `staged` and measures its block means, when
+    /// the passes pool colour cells.
+    fn measure_staged_colour(&self, frame: u32, staged: &mut StagedFrame<'_>) -> Result<(), Error> {
+        if self.colour.is_none() {
+            return Ok(());
+        }
+
+        let mut handles = staged.handles(PlaneGroup::Luma)?.to_vec();
+        let chroma = staged.handles(PlaneGroup::Chroma)?;
+        handles.extend_from_slice(chroma);
+
+        let planes = self.geometry.device_planes(0, &handles);
+        self.measure_colour(&planes, frame);
+
+        Ok(())
     }
 
     /// A ring for the uncleaned plane group, one slot longer than the cleaned pass holds frames.
@@ -167,6 +227,15 @@ impl PlanarEngine {
         let bytes = self.geometry.input.plane_bytes(pixels);
 
         PassthroughRing::new(client, slots, planes, bytes)
+    }
+
+    /// The colour cells of the luma pass and of the chroma pass.
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub(crate) fn colour_cells_for_test(&self) -> [Option<&ColourCells>; 2] {
+        let luma = self.luma.as_deref();
+        let chroma = self.chroma.as_deref();
+
+        [luma, chroma].map(|pass| pass.and_then(|pass| pass.colour_cells_for_test()))
     }
 
     #[cfg(test)]
@@ -343,6 +412,7 @@ impl Engine for PlanarEngine {
 
         let frame = self.lead().next_frame();
         self.fit_pair_model(&planes[0], frame)?;
+        self.measure_colour(planes, frame);
 
         let ready = self.forward_planes(planes, |pass, pass_planes| pass.push(pass_planes))?;
         self.store_uncleaned(frame, planes);
@@ -362,6 +432,8 @@ impl Engine for PlanarEngine {
             let planes = geometry.device_planes(0, handles);
             self.fit_pair_model(&planes[0], frame)?;
         }
+
+        self.measure_staged_colour(frame, &mut staged)?;
 
         let ready = self.forward(|pass, group| {
             let first = group.indices(geometry.chroma).start;
@@ -385,6 +457,7 @@ impl Engine for PlanarEngine {
 
         let frame = self.lead().next_frame();
         self.fit_pair_model(&planes[0], frame)?;
+        self.measure_colour(planes, frame);
 
         self.forward_planes(planes, |pass, pass_planes| pass.push_context(pass_planes))?;
         self.store_uncleaned(frame, planes);
@@ -437,6 +510,10 @@ impl Engine for PlanarEngine {
 
         if let Some(ring) = self.luma_motion.as_ref() {
             ring.clear();
+        }
+
+        if let Some(colour) = self.colour.as_ref() {
+            colour.clear();
         }
 
         self.stream_started = false;

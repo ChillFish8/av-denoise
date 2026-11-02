@@ -1,3 +1,4 @@
+mod colour;
 mod curve;
 mod derive;
 mod history;
@@ -6,6 +7,13 @@ mod select;
 mod stats;
 mod window;
 
+pub use self::colour::{
+    noise_colour_accumulate,
+    noise_colour_clear,
+    noise_colour_levels,
+    noise_colour_means,
+    noise_colour_window,
+};
 pub use self::curve::noise_curve_bins;
 pub use self::history::noise_record;
 pub use self::sample::{noise_block_accept, noise_block_derive, noise_sample_finish};

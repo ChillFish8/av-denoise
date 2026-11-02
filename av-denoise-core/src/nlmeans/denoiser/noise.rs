@@ -15,6 +15,7 @@ use crate::noise::NoiseCurve;
 use crate::noise::NoiseSnapshot;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::noise::NoiseState;
+use crate::noise::colour::ColourSource;
 use crate::noise::{
     DerivedCoefficients,
     DerivedValues,
@@ -267,6 +268,13 @@ impl NlmDenoiser {
 
         let values = self.fixed_derived_values();
         self.noise.set_fixed(values);
+    }
+
+    /// Pools the look-ahead's grain into colour cells with the block means `source` holds.
+    ///
+    /// A front that does not measure the noise pools nothing.
+    pub(crate) fn measure_colour(&mut self, source: ColourSource) {
+        self.noise.measure_colour(source);
     }
 
     /// The derived values buffer the kernels bind, the noise state's own.

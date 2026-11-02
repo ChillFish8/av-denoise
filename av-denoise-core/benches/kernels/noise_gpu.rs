@@ -1,6 +1,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use av_denoise_core::bench_api::noise_colour::{ColourMeasurement, ColourStage};
 use av_denoise_core::bench_api::noise_kernels::{noise_select_histogram, noise_select_resolve};
 use av_denoise_core::bench_api::noise_reading::{NoiseReading, ReadingOptions, ReadingStage};
 use av_denoise_core::bench_api::noise_select::{
@@ -712,5 +713,69 @@ impl Benchmark for FoldBench {
 
     fn shapes(&self) -> Vec<Vec<usize>> {
         vec![vec![WIDTH as usize, HEIGHT as usize, 1]]
+    }
+}
+
+/// Times one stage of the colour cell measurement on a 1080p 4:2:0 frame.
+///
+/// The planes drift smoothly through every colour, and every block of the stats is static with a
+/// hashed grain, so every block joins a cell. `prepare` measures frame 0's block means, pools it as
+/// every frame of a full noise window and sums that window, so the levels row reads populated
+/// cells.
+pub struct ColourBench {
+    pub client: Client,
+    pub stage: ColourStage,
+    /// Whether the pass is the chroma pass rather than the luma pass.
+    pub chroma: bool,
+}
+
+impl Benchmark for ColourBench {
+    type Input = Arc<ColourMeasurement>;
+    type Output = ();
+
+    fn prepare(&self) -> Self::Input {
+        let measurement = ColourMeasurement::new(&self.client, WIDTH, HEIGHT, self.chroma);
+        self.sync();
+
+        Arc::new(measurement)
+    }
+
+    fn profile_full(&self, args: Self::Input) -> Result<ProfileDuration, String> {
+        let profiled = self
+            .client
+            .profile(|| args.queue_stage(self.stage), "noise_colour_cells");
+        let (_, duration) = profiled.map_err(|error| format!("profile failed: {error:?}"))?;
+
+        Ok(duration)
+    }
+
+    fn execute(&self, args: Self::Input) -> Result<(), String> {
+        args.queue_stage(self.stage);
+
+        Ok(())
+    }
+
+    fn name(&self) -> String {
+        let stage = match self.stage {
+            ColourStage::Means => "means",
+            ColourStage::Pool => "pool",
+            ColourStage::Window => "window",
+            ColourStage::Levels => "levels",
+        };
+        let plane = match (self.stage, self.chroma) {
+            (ColourStage::Means, _) => "yuv420",
+            (_, false) => "luma",
+            (_, true) => "chroma",
+        };
+
+        format!("noise_colour_cells/{stage}/1080p_{plane}")
+    }
+
+    fn sync(&self) {
+        block_sync(&self.client);
+    }
+
+    fn shapes(&self) -> Vec<Vec<usize>> {
+        vec![vec![WIDTH as usize, HEIGHT as usize, 3]]
     }
 }

@@ -24,6 +24,9 @@ pub(crate) use self::spec::PassSpec;
 pub use self::timing::EngineTiming;
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+use crate::noise::colour::ColourCells;
+use crate::noise::colour::ColourSource;
 
 /// Largest 1D grid a dispatch may ask for, set by the WebGPU and Vulkan limits.
 pub(crate) const MAX_GRID_1D: u32 = 65535;
@@ -126,6 +129,18 @@ pub(crate) trait FramePass: PassEngine {
 
     /// Whether the pass only shares its motion, so its emits write nothing out.
     fn guides_only(&self) -> bool;
+
+    /// Pools the pass's grain into colour cells with the block means `source` holds, before the
+    /// first push.
+    ///
+    /// A pass that measures no grain per colour ignores it.
+    fn measure_colour(&mut self, _source: ColourSource) {}
+
+    /// The colour cells the pass pools, `None` for a pass that pools none.
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    fn colour_cells_for_test(&self) -> Option<&ColourCells> {
+        None
+    }
 }
 
 /// Uploads a frame's planes when an [Engine] asks for them.
@@ -151,7 +166,8 @@ pub trait Engine: Send {
     /// [Engine::push] with the frame's planes taken from `source` one plane group at a time.
     ///
     /// The luma pass is recorded before the chroma planes are asked for, so the device can start on
-    /// luma while they upload.
+    /// luma while they upload. Passes that pool colour cells need every plane first, so their
+    /// frames ask for chroma before the luma pass.
     fn push_from(&mut self, source: &mut dyn PlaneSource) -> Result<usize, Error>;
 
     /// Ingests one frame as context only, producing no output from this call.

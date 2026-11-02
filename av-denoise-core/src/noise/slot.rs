@@ -431,7 +431,7 @@ impl NoiseState {
     }
 
     /// The records of `slot` with their length in words.
-    fn records_view(&self, slot: u32) -> Option<(Handle, usize)> {
+    pub(super) fn records_view(&self, slot: u32) -> Option<(Handle, usize)> {
         let measurement = self.measurement();
         let shape = self.shape;
         let stats_buf = measurement.stats.as_ref()?;

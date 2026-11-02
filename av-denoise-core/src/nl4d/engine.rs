@@ -24,6 +24,9 @@ use crate::nlmeans::ChannelMode;
 use crate::nlmeans::denoiser::{check_u32_indexable, lookahead_depth_for};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::noise::NoiseSnapshot;
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+use crate::noise::colour::ColourCells;
+use crate::noise::colour::ColourSource;
 use crate::tune::{EngineKernels, KernelSelector};
 
 /// The frames an engine at `temporal_radius` holds with a noise look-ahead `lookahead` deep.
@@ -217,6 +220,16 @@ impl Nl4d {
         held_frames(options.temporal_radius, lookahead)
     }
 
+    /// Whether an engine built from `options` pools its grain into colour cells.
+    ///
+    /// That needs the noise measured, from residuals against a neighbour frame.
+    pub fn measures_colour_for(options: &Nl4dOptions, channels: ChannelMode) -> bool {
+        let front_params = nlm_params(options, channels);
+        let lookahead = lookahead_depth_for(&front_params);
+
+        lookahead > 0 && options.temporal_radius >= 1
+    }
+
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn noise_snapshot_for_test(&self) -> Option<NoiseSnapshot> {
         self.inner.noise_snapshot()
@@ -369,5 +382,15 @@ impl FramePass for Nl4d {
 
     fn guides_only(&self) -> bool {
         self.inner.guides_only()
+    }
+
+    fn measure_colour(&mut self, source: ColourSource) {
+        self.inner.front.measure_colour(source);
+    }
+
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    fn colour_cells_for_test(&self) -> Option<&ColourCells> {
+        let noise = self.inner.front.measured_noise()?;
+        noise.colour_cells()
     }
 }

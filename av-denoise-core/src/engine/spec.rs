@@ -20,6 +20,7 @@ use crate::motion::{
 use crate::nl4d::{Nl4d, Nl4dOptions};
 use crate::nlmeans::denoiser::check_u32_indexable;
 use crate::nlmeans::{ChannelMode, Nlmeans, NlmeansAlgorithm, resolve_params};
+use crate::noise::colour::ColourBlocks;
 use crate::tune::EngineKernels;
 
 /// Model ring slots beyond the frames a pass holds and its temporal window.
@@ -82,6 +83,14 @@ impl PassSpec {
 
         let active = mode.is_active() && radius > 0;
         active.then_some((mode, radius))
+    }
+
+    /// Whether the pass pools its grain into colour cells, which only nl4d does.
+    fn measures_colour(&self) -> bool {
+        match self {
+            PassSpec::Nlmeans { .. } => false,
+            PassSpec::Nl4d { options, geometry } => Nl4d::measures_colour_for(options, geometry.channels),
+        }
     }
 
     /// Builds the engine on `client`, picking each launch site's candidate from `kernels`.
@@ -355,6 +364,20 @@ impl EngineSpec {
         Some(ring)
     }
 
+    /// The block means the passes pool their grain per colour with.
+    ///
+    /// They exist only for frames with colour planes and a pass that pools colour cells.
+    pub(crate) fn colour_blocks(&self, client: &Client) -> Option<ColourBlocks> {
+        let passes = self.pass_specs();
+        let pools = passes.iter().any(PassSpec::measures_colour);
+        if !pools {
+            return None;
+        }
+
+        let geometry = self.geometry();
+        ColourBlocks::new(client, geometry)
+    }
+
     /// Builds the engine on `client`, picking each pass's launch site candidates from `kernels`.
     ///
     /// A stream of gray frames logs a warning once, as it starts.
@@ -386,6 +409,12 @@ impl EngineSpec {
         let models = engine.models().cloned();
 
         Ok((Box::new(engine), models))
+    }
+
+    /// [Self::build] as the merged engine itself, with every launch site's baseline.
+    #[cfg(test)]
+    pub(crate) fn build_planar_for_test(&self, client: &Client) -> Result<PlanarEngine, Error> {
+        self.build_planar_engine(client, |_| EngineKernels::default(), false)
     }
 
     /// The producer of the frame pair camera models, when any pass compensates motion.
@@ -475,6 +504,7 @@ impl EngineSpec {
             })
             .transpose()?;
 
+        let colour = self.colour_blocks(client);
         let engine = PlanarEngine::new(
             client,
             geometry,
@@ -482,6 +512,7 @@ impl EngineSpec {
             chroma_pass,
             producer,
             luma_motion_ring,
+            colour,
             warns,
         );
 

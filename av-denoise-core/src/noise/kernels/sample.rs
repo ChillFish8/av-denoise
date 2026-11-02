@@ -79,7 +79,7 @@ const LAST_CURVE_BIN: u32 = CURVE_TAGS - 1;
 ///
 /// The sigma halves the variance, since a residual of two frames carries the noise of both.
 #[cube]
-fn residual_sigma(sum_d: f32, sum_d2: f32, pixels: f32) -> (f32, f32, f32) {
+pub(crate) fn residual_sigma(sum_d: f32, sum_d2: f32, pixels: f32) -> (f32, f32, f32) {
     let mean = sum_d / pixels;
     let mean_square = sum_d2 / pixels;
     let variance = f32::max(mean_square - mean * mean, 0.0f32);

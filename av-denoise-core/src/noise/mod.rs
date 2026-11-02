@@ -1,3 +1,4 @@
+pub(crate) mod colour;
 mod correlation;
 mod curve;
 mod derived;
@@ -41,7 +42,7 @@ pub(crate) use self::derived::{
     NoiseConsumer,
 };
 pub(crate) use self::fold::{FoldSettings, NoiseSettings};
-pub(crate) use self::history::{NOISE_WINDOW_LEN, NOISE_WINDOW_RADIUS, WindowBounds};
+pub(crate) use self::history::{NOISE_WINDOW_LEN, NOISE_WINDOW_RADIUS, WindowBounds, history_capacity};
 pub(crate) use self::reading::{TAG_QUARTER, TAG_RHO};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::snapshot::NoiseSnapshot;
