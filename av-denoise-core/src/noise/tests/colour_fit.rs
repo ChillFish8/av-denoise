@@ -977,6 +977,8 @@ fn the_fit_recovers_a_planted_colour_field() {
     let block_share = blocks / (blocks + f64::from(COLOUR_GAIN_BLOCK_RAMP));
     let neutral_share = neutral / (neutral + f64::from(COLOUR_GAIN_NEUTRAL_RAMP));
     let ramp = block_share * neutral_share;
+    // The dead zone holds every coloured cell that much short of its planted level.
+    let tolerance = 0.07 + f64::from(COLOUR_FIT_LUMA_DEAD_ZONE);
 
     for cell in cells {
         let centre = host_centre(cell);
@@ -989,7 +991,7 @@ fn the_fit_recovers_a_planted_colour_field() {
         let gain = f64::from(gains[cell]).exp();
         let gap = (gain.ln() - expected.ln()).abs();
         assert!(
-            gap <= 0.12,
+            gap <= tolerance,
             "cell {cell} at {centre:?} has gain {gain}, planted {expected}"
         );
     }

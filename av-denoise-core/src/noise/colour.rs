@@ -129,7 +129,7 @@ pub(crate) const COLOUR_FIT_PRIOR_SHARE: f32 = 0.002;
 /// The kept blocks at which a cell sits halfway between the base and its own level.
 pub(crate) const COLOUR_FIT_PULL: f32 = 15.0;
 /// The log grain gap the luma table ignores before a cell moves off the base.
-pub(crate) const COLOUR_FIT_LUMA_DEAD_ZONE: f32 = 0.05;
+pub(crate) const COLOUR_FIT_LUMA_DEAD_ZONE: f32 = 0.1;
 /// The smallest chroma gain.
 pub(crate) const COLOUR_CHROMA_GAIN_MIN: f32 = 0.4;
 /// The largest chroma gain.
