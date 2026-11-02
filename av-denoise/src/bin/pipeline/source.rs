@@ -2,18 +2,21 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::Path;
 
-use av_decoders::{Decoder, DecoderImpl, VideoDetails};
+use av_decoders::{Decoder, DecoderImpl, Rational32, VideoDetails};
 use av_denoise::{ChromaSiting, Depth, FrameLayout, Subsampling};
 use ffms2_sys::{FFMS_ColorRanges, FFMS_ErrorInfo, FFMS_GetFrame, FFMS_GetVideoProperties, FFMS_VideoSource};
 
 use super::convert::subsampling_from_av_decoders;
+use super::frame_rate::{check_constant_rate, variable_rate_error};
+use super::probe::nominal_frame_rate;
 use crate::cli::InputSource;
-use crate::frame_index;
+use crate::frame_index::{self, IndexEntry};
 use crate::y4m_format::{siting_from_ffms2, siting_from_y4m, subsampling_from_y4m, y4m_vendor_extensions};
 
 /// What the rest of a run needs to know about its input.
 #[derive(Clone)]
 pub struct SourceInfo {
+    /// The decoder's description, with the frame rate a file declares in place of ffms2's estimate.
     pub details: VideoDetails,
     pub layout: FrameLayout,
     /// Carried through to the output header when the input declared one.
@@ -43,12 +46,16 @@ pub fn open_source(input: &InputSource) -> Result<OpenedSource, anyhow::Error> {
 
 pub fn open_file(path: &Path) -> Result<OpenedSource, anyhow::Error> {
     let mut decoder = Decoder::from_file(path)?;
-    let details = *decoder.get_video_details();
+    let mut details = *decoder.get_video_details();
+    details.frame_rate = file_frame_rate(path, details.frame_rate);
+
     let mut layout = layout_from_details(&details)?;
 
     // Only inspects the metadata ffms2 already built, so it costs nothing.
-    let phantom = frame_index::read_index(&mut decoder)
-        .map(|index| frame_index::phantom_indices(&index))
+    let index = frame_index::read_index(&mut decoder);
+    let phantom = index
+        .as_deref()
+        .map(frame_index::phantom_indices)
         .unwrap_or_default();
 
     if !phantom.is_empty() {
@@ -57,6 +64,8 @@ pub fn open_file(path: &Path) -> Result<OpenedSource, anyhow::Error> {
             "the decoder reports frames that carry no picture of their own, dropping them",
         );
     }
+
+    check_file_timing(&mut decoder, index.as_deref(), &phantom, details.frame_rate)?;
 
     let estimated_frames = details
         .total_frames
@@ -89,6 +98,49 @@ pub fn open_file(path: &Path) -> Result<OpenedSource, anyhow::Error> {
         phantom,
         info,
     })
+}
+
+/// The frame rate the file at `path` declares, or the rate ffms2 `measured` when none can be read.
+///
+/// ffms2 averages its rate over every packet, so it drifts on files with phantom packets,
+/// timestamp gaps or few frames.
+pub fn file_frame_rate(path: &Path, measured: Rational32) -> Rational32 {
+    let Some(nominal) = nominal_frame_rate(path) else {
+        tracing::debug!(
+            numerator = *measured.numer(),
+            denominator = *measured.denom(),
+            "no nominal frame rate could be read, keeping the rate ffms2 measured",
+        );
+        return measured;
+    };
+
+    nominal
+}
+
+/// Rejects a file whose kept frames do not run at the constant `declared` rate.
+///
+/// The check is skipped when ffms2 cannot describe the file's timestamps.
+fn check_file_timing(
+    decoder: &mut Decoder,
+    index: Option<&[IndexEntry]>,
+    phantom: &BTreeSet<usize>,
+    declared: Rational32,
+) -> Result<(), anyhow::Error> {
+    let tick_seconds = frame_index::read_tick_seconds(decoder);
+    let Some((index, tick_seconds)) = index.zip(tick_seconds) else {
+        tracing::debug!("the frame timestamps could not be read, so the frame rate is not checked");
+        return Ok(());
+    };
+
+    let mut kept: Vec<i64> = index
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| !phantom.contains(position))
+        .map(|(_, entry)| entry.pts)
+        .collect();
+    kept.sort_unstable();
+
+    check_constant_rate(&kept, tick_seconds, declared).map_err(variable_rate_error)
 }
 
 fn log_forwarded_colour(

@@ -1,6 +1,8 @@
 use av_denoise::ChromaSiting;
 use indicatif::ProgressBar;
 
+#[cfg(feature = "vulkan")]
+use super::open_data_clip;
 use super::{tiny_layout, tiny_planes, y4m_reader};
 use crate::pipeline::coordinator::{OutputMsg, emit_frames, run_coordinator};
 #[cfg(feature = "vulkan")]
@@ -142,4 +144,16 @@ fn the_coordinator_writes_the_source_siting_into_the_header() {
     let header_line = written_header(info);
 
     assert!(header_line.contains("C420mpeg2"), "got {header_line}");
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn the_apothecary_header_carries_the_declared_frame_rate() {
+    let Some(opened) = open_data_clip("apothecary-clip.mkv") else {
+        return;
+    };
+
+    let header_line = written_header(opened.info);
+
+    assert!(header_line.contains(" F24000:1001 "), "got {header_line}");
 }

@@ -2,6 +2,7 @@ mod convert;
 mod coordinator;
 mod decode;
 mod dispatch;
+mod frame_rate;
 mod grain_table;
 mod report;
 mod run;

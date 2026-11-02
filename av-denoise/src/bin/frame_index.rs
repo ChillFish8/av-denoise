@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use av_decoders::Decoder;
-use ffms2_sys::{FFMS_GetFrameInfo, FFMS_GetNumFrames, FFMS_GetTrackFromVideo};
+use ffms2_sys::{FFMS_GetFrameInfo, FFMS_GetNumFrames, FFMS_GetTimeBase, FFMS_GetTrackFromVideo};
 
 /// One entry of the ffms2 video index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,40 @@ pub fn read_index(decoder: &mut Decoder) -> Option<Vec<IndexEntry>> {
     }
 
     Some(index)
+}
+
+/// The seconds one unit of [IndexEntry::pts] lasts in the video track behind `decoder`.
+///
+/// Returns `None` when `decoder` is not backed by ffms2 or the track reports no usable time base.
+pub fn read_tick_seconds(decoder: &mut Decoder) -> Option<f64> {
+    let source = decoder.get_ffms2_impl()?.video_source;
+
+    // SAFETY: a live `Ffms2Decoder` holds a non-null video source, and the track belongs to that
+    // source, so it stays valid for as long as the decoder does.
+    let track = unsafe { FFMS_GetTrackFromVideo(source) };
+
+    if track.is_null() {
+        return None;
+    }
+
+    // SAFETY: `track` is non-null, and the time base it returns belongs to the track.
+    let time_base_ptr = unsafe { FFMS_GetTimeBase(track) };
+
+    if time_base_ptr.is_null() {
+        return None;
+    }
+
+    // SAFETY: checked non-null just above.
+    let time_base = unsafe { &*time_base_ptr };
+
+    if time_base.Num <= 0 || time_base.Den <= 0 {
+        return None;
+    }
+
+    // ffms2 scales a timestamp by `Num / Den` into milliseconds.
+    let milliseconds = time_base.Num as f64 / time_base.Den as f64;
+
+    Some(milliseconds / 1000.0)
 }
 
 /// Returns the index positions that carry no picture of their own.

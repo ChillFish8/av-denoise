@@ -187,6 +187,7 @@ jobs:
 
       # ffms2-sys reads the headers and archive from FFMS_INCLUDE_DIR and FFMS_LIB_DIR,
       # and the build script reads the rest of the chain through pkg-config.
+      # ffmpeg-sys-the-third reads the same FFmpeg from FFMPEG_DIR.
       - name: Export the static library paths
         shell: bash
         env:
@@ -199,10 +200,12 @@ jobs:
             echo "PKG_CONFIG=${prefix}\\tools\\pkgconf\\pkgconf.exe" >> "${GITHUB_ENV}"
             echo "FFMS_INCLUDE_DIR=${prefix}\\include" >> "${GITHUB_ENV}"
             echo "FFMS_LIB_DIR=${prefix}\\lib" >> "${GITHUB_ENV}"
+            echo "FFMPEG_DIR=${prefix}" >> "${GITHUB_ENV}"
             echo "PKG_CONFIG_PATH=${prefix}\\lib\\pkgconfig" >> "${GITHUB_ENV}"
           else
             echo "FFMS_INCLUDE_DIR=${prefix}/include" >> "${GITHUB_ENV}"
             echo "FFMS_LIB_DIR=${prefix}/lib" >> "${GITHUB_ENV}"
+            echo "FFMPEG_DIR=${prefix}" >> "${GITHUB_ENV}"
             echo "PKG_CONFIG_PATH=${prefix}/lib/pkgconfig" >> "${GITHUB_ENV}"
           fi
 

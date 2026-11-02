@@ -1,8 +1,19 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use av_decoders::Rational32;
 use av_denoise::{ChromaSiting, Depth, Subsampling};
 
-use super::{open_data_clip, y4m_reader};
+use super::{data_clip, open_data_clip, y4m_reader};
 use crate::pipeline::convert::SourcePixel;
-use crate::pipeline::source::{color_range_extension, open_y4m, pixel_aspect_from_sar};
+use crate::pipeline::probe::nominal_frame_rate;
+use crate::pipeline::source::{
+    color_range_extension,
+    file_frame_rate,
+    open_file,
+    open_y4m,
+    pixel_aspect_from_sar,
+};
 
 fn y4m_bytes(colorspace: y4m::Colorspace, extension: Option<&str>, frames: usize) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -190,4 +201,167 @@ fn a_centre_sited_file_source_reports_centre() {
     };
 
     assert_eq!(opened.info.layout.chroma_siting, ChromaSiting::Center);
+}
+
+#[test]
+fn a_file_source_takes_the_frame_rate_its_container_declares() {
+    let clips = [
+        "apothecary-clip.mkv",
+        "food-problem-clip2-raw.mkv",
+        "patema-problem-clip3-raw.mkv",
+    ];
+    let ntsc_film = Rational32::new(24000, 1001);
+
+    for clip in clips {
+        let Some(opened) = open_data_clip(clip) else {
+            continue;
+        };
+
+        assert_eq!(opened.info.details.frame_rate, ntsc_film, "{clip}");
+    }
+}
+
+#[test]
+fn an_unreadable_path_has_no_nominal_frame_rate() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let missing = directory.path().join("missing.mkv");
+
+    assert_eq!(nominal_frame_rate(&missing), None);
+}
+
+/// A short silent mono WAV file, which holds an audio track and no video.
+fn silent_wav() -> Vec<u8> {
+    let samples = 16u32;
+    let data_bytes = samples * 2;
+    let riff_bytes = 36 + data_bytes;
+    let mut bytes = Vec::new();
+
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&riff_bytes.to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    // PCM, one channel, 8 kHz, 16000 bytes a second, 2 byte frames, 16 bits.
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&8000u32.to_le_bytes());
+    bytes.extend_from_slice(&16000u32.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+
+    let length = bytes.len() + data_bytes as usize;
+    bytes.resize(length, 0);
+
+    bytes
+}
+
+#[test]
+fn a_file_with_no_video_track_has_no_nominal_frame_rate() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let audio_only = directory.path().join("silence.wav");
+    let wav = silent_wav();
+    std::fs::write(&audio_only, wav).expect("the WAV file writes");
+
+    assert_eq!(nominal_frame_rate(&audio_only), None);
+}
+
+#[test]
+fn a_failed_probe_keeps_the_measured_frame_rate() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let missing = directory.path().join("missing.mkv");
+    let measured = Rational32::new(10849, 453);
+
+    assert_eq!(file_frame_rate(&missing, measured), measured);
+}
+
+/// Builds a clip with ffmpeg that runs 300 frames at 29.97 fps, then 100 at 23.976 fps.
+///
+/// Its container declares 30 fps while it averages about 28.24 fps. The millisecond time bases keep
+/// ffmpeg from snapping the 23.976 fps frames onto a 30 fps grid with frames dropped.
+fn variable_rate_clip(directory: &Path) -> Option<PathBuf> {
+    let path = directory.join("variable-rate.mkv");
+    let timestamps = "settb=1/1000,setpts='if(lt(N,300),N/29.97,300/29.97+(N-300)/23.976)/TB'";
+    let status = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x64:rate=30",
+        ])
+        .args(["-frames:v", "400", "-vf", timestamps, "-fps_mode", "passthrough"])
+        .args(["-enc_time_base", "1/1000", "-pix_fmt", "yuv420p", "-c:v", "ffv1"])
+        .arg(&path)
+        .status();
+
+    let built = matches!(status, Ok(status) if status.success());
+    if !built {
+        eprintln!("skipping, ffmpeg could not build the variable frame rate clip");
+        return None;
+    }
+
+    Some(path)
+}
+
+#[test]
+fn a_variable_rate_file_is_rejected() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let Some(path) = variable_rate_clip(directory.path()) else {
+        return;
+    };
+
+    let declared = nominal_frame_rate(&path);
+    let result = open_file(&path);
+    let Err(error) = result else {
+        panic!("a variable frame rate file must be rejected");
+    };
+    let message = error.to_string();
+
+    assert_eq!(declared, Some(Rational32::new(30, 1)));
+    assert!(message.contains("variable frame rate"), "got {message}");
+    assert!(message.contains("averages 28.2"), "got {message}");
+    assert!(message.contains("declared 30.000 fps"), "got {message}");
+    assert!(message.contains("-fps_mode cfr -r 30/1"), "got {message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn constant_rate_clips_pass_the_frame_rate_check() {
+    let clips = [
+        "apothecary-clip.mkv",
+        "food-problem-clip2-raw.mkv",
+        "colour_grain_2026_11/door_source.mkv",
+        "colour_grain_2026_11/redwall_source.mkv",
+        "colour_grain_2026_11/brick_source.mkv",
+    ];
+
+    // Each clip is opened through a link, so ffms2 writes its index here rather than beside the clip.
+    let directory = tempfile::tempdir().expect("a temporary directory");
+
+    for clip in clips {
+        let Some(source) = data_clip(clip) else {
+            continue;
+        };
+
+        let link_name = clip.replace('/', "_");
+        let link = directory.path().join(link_name);
+        std::os::unix::fs::symlink(&source, &link).expect("the link is created");
+
+        let result = open_file(&link);
+        if let Err(error) = result {
+            panic!("{clip} was rejected: {error}");
+        }
+    }
+}
+
+#[test]
+fn a_pipe_keeps_its_header_frame_rate() {
+    let bytes = y4m_bytes(y4m::Colorspace::C420, None, 1);
+    let source = y4m_reader(bytes);
+    let opened = open_y4m(source).expect("a 4:2:0 pipe opens");
+
+    assert_eq!(opened.info.details.frame_rate, Rational32::new(25, 1));
 }

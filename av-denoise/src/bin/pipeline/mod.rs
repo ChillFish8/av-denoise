@@ -1,7 +1,9 @@
 mod convert;
 mod coordinator;
 mod decode;
+mod frame_rate;
 mod grain_table;
+mod probe;
 pub mod report;
 mod scenes;
 mod source;
