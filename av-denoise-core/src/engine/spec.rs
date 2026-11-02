@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use super::PassEngine;
 use super::align::StorageAlign;
 use super::planar::PlanarEngine;
@@ -94,7 +94,7 @@ impl PassSpec {
     }
 
     /// Builds the engine on `client`, picking each launch site's candidate from `kernels`.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn build(
         &self,
         client: &Client,
@@ -414,7 +414,7 @@ impl EngineSpec {
     }
 
     /// [Self::build] as the merged engine itself, with every launch site's baseline.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn build_planar_for_test(&self, client: &Client) -> Result<PlanarEngine, Error> {
         self.build_planar_engine(client, |_| EngineKernels::default(), false)
     }

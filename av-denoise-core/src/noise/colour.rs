@@ -442,7 +442,7 @@ impl ColourCells {
     }
 
     /// The fixed-point sums of every ring slot, slot after slot.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn frames(&self) -> &Handle {
         &self.frames
     }
@@ -787,7 +787,7 @@ impl NoiseState {
 
     /// Each plane's log gain table from the last window, `None` for a state that pools no colour
     /// cells.
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn colour_gains(&self) -> Option<&Handle> {
         let colour = self.colour.as_ref();
         colour.map(|colour| colour.fit.gains())

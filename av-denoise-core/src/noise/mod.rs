@@ -23,7 +23,7 @@ pub(crate) mod tests;
 pub(crate) use self::correlation::{build_spatial_offset_lut, correlation_factor, spatial_offset_factor};
 pub(crate) use self::correlation::{spatial_offset_index, spatial_offset_lut_len};
 pub use self::curve::NOISE_CURVE_BINS;
-#[cfg(test)]
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::curve::NoiseCurve;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::curve::build_noise_curve;

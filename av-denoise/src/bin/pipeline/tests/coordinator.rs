@@ -2,12 +2,13 @@ use av_denoise::ChromaSiting;
 use indicatif::ProgressBar;
 
 #[cfg(feature = "vulkan")]
-use super::open_data_clip;
-use super::{tiny_layout, tiny_planes, y4m_reader};
-use crate::pipeline::coordinator::{OutputMsg, emit_frames, run_coordinator};
+use super::{open_data_clip, y4m_reader};
+use super::{tiny_layout, tiny_planes};
 #[cfg(feature = "vulkan")]
-use crate::pipeline::source::SourceInfo;
-use crate::pipeline::source::open_y4m;
+use crate::pipeline::coordinator::run_coordinator;
+use crate::pipeline::coordinator::{OutputMsg, emit_frames};
+#[cfg(feature = "vulkan")]
+use crate::pipeline::source::{SourceInfo, open_y4m};
 use crate::pipeline::stage::frame_permit_channel;
 use crate::y4m_format::subsampling_to_y4m;
 
