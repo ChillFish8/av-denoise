@@ -33,7 +33,7 @@ use super::*;
 #[cfg(feature = "vulkan")]
 mod reseed {
     use super::*;
-    use crate::{HqParams, Nl4dOptions, NlmeansHqOptions, NlmeansOptions};
+    use crate::{EdgePadding, HqParams, Nl4dOptions, NlmeansHqOptions, NlmeansOptions};
 
     pub(super) fn layout() -> FrameLayout {
         FrameLayout {
@@ -424,7 +424,20 @@ mod reseed {
     }
 
     /// The window `span` needs for frame `target`, clamped at both clip ends like `window_of`.
+    ///
+    /// A shifted span never repeats a clip's end frames, so its window must lie strictly inside the
+    /// clip. Use [reseed_shifted] for a target nearer the ends.
     pub(super) fn window_of_span(frames: &[Planes], target: usize, span: WindowSpan) -> Vec<Planes> {
+        if span.edges == EdgePadding::Shifted {
+            let touches_start = target <= span.behind;
+            let touches_end = target + span.ahead >= frames.len() - 1;
+            assert!(
+                !touches_start && !touches_end,
+                "a shifted window for frame {target} of {} reaches a clip end, use reseed_shifted",
+                frames.len()
+            );
+        }
+
         (0..span.frame_count())
             .map(|i| {
                 let index = (target + i).saturating_sub(span.behind).min(frames.len() - 1);

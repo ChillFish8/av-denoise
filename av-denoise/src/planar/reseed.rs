@@ -27,7 +27,8 @@ impl PlanarDenoiser {
     /// For the NLM algorithms, callers clamp the window's indices at a
     /// clip's ends, matching how their streams repeat the first and last
     /// frames. For nl4d, a window whose first or last frame is a clip end
-    /// goes through [Self::reseed_window] instead.
+    /// goes through [Self::reseed_window] instead. Its stream never repeats
+    /// a frame, so a clamped window gives different output.
     ///
     /// # Why nl4d's window is wider
     ///

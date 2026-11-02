@@ -104,12 +104,13 @@ fn pan_plane(
     samples
 }
 
-/// A grainy clip of `content` panned `travel(index)` luma pixels left at frame `index`.
-fn pan_clip(content: Content, travel: impl Fn(usize) -> f32) -> Vec<Planes> {
+/// A grainy clip of `frame_count` frames of `content`, panned `travel(index)` luma pixels left at
+/// frame `index`.
+fn pan_clip(content: Content, frame_count: usize, travel: impl Fn(usize) -> f32) -> Vec<Planes> {
     let chroma_size = pan_layout().chroma_dims();
     let luma_size = (WIDTH, HEIGHT);
 
-    (0..FRAMES)
+    (0..frame_count)
         .map(|index| {
             let offset = travel(index);
             Planes {
@@ -132,20 +133,28 @@ fn ramp_travel(index: usize) -> f32 {
 /// The clips every test runs, steady fast pans the camera model decides, a slow periodic pan and a
 /// pan ramping past the model's reach.
 pub(super) fn clips() -> [(&'static str, Vec<Planes>); 4] {
+    clips_of(FRAMES)
+}
+
+/// The [clips] at `frame_count` frames each.
+fn clips_of(frame_count: usize) -> [(&'static str, Vec<Planes>); 4] {
     [
         (
             "value noise fast pan",
-            pan_clip(Content::ValueNoise, |index| PAN * index as f32),
+            pan_clip(Content::ValueNoise, frame_count, |index| PAN * index as f32),
         ),
         (
             "sine fast pan",
-            pan_clip(Content::Sine, |index| PAN * index as f32),
+            pan_clip(Content::Sine, frame_count, |index| PAN * index as f32),
         ),
         (
             "sine slow pan",
-            pan_clip(Content::Sine, |index| 1.5 * index as f32),
+            pan_clip(Content::Sine, frame_count, |index| 1.5 * index as f32),
         ),
-        ("value noise ramp", pan_clip(Content::ValueNoise, ramp_travel)),
+        (
+            "value noise ramp",
+            pan_clip(Content::ValueNoise, frame_count, ramp_travel),
+        ),
     ]
 }
 
@@ -190,6 +199,39 @@ fn nl4d_reseed_window_matches_streaming_on_a_fast_pan() {
                 let index = target + offset;
                 let label = format!("{name} k={target} frame {index}");
                 assert_same_frame(planes, &streamed[index], &label);
+            }
+        }
+    }
+}
+
+/// Each clip is long enough that every window lies strictly inside it, even at radius 4.
+#[test]
+fn nl4d_reseed_matches_streaming_on_a_pan() {
+    for radius in [2, 3, 4] {
+        let options = PlaneOptions {
+            algorithm: Algorithm::Nl4d(Nl4dOptions::default()),
+            ..test_plane_options(radius)
+        };
+        let probe = PlanarDenoiser::create(&options, pan_layout()).unwrap();
+        let span = probe.window_span();
+        let clip_len = span.frame_count() + 4;
+        let first_target = span.behind + 1;
+        let last_target = clip_len - 2 - span.ahead;
+        assert!(first_target <= last_target, "r={radius} has no mid-clip target");
+
+        for (name, frames) in clips_of(clip_len) {
+            let mut denoiser = PlanarDenoiser::create(&options, pan_layout()).unwrap();
+            let streamed = stream(&mut denoiser, &frames);
+            assert_eq!(streamed.len(), clip_len, "{name}");
+
+            let mid_clip = &streamed[first_target..=last_target];
+            for (offset, expected) in mid_clip.iter().enumerate() {
+                let target = first_target + offset;
+                let window = window_of_span(&frames, target, span);
+                let got = denoiser.reseed(&window).unwrap();
+
+                let label = format!("r={radius} {name} k={target}");
+                assert_same_frame(&got, expected, &label);
             }
         }
     }
