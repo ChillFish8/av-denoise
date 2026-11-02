@@ -12,6 +12,7 @@ use tracing::{Event, Level, Metadata, Subscriber};
 use crate::engine::planar::{GRAY_WARNING, stream_warning};
 use crate::engine::{
     ChromaLayout,
+    ChromaSiting,
     DevicePlane,
     EdgePadding,
     Engine,
@@ -54,6 +55,7 @@ fn geometry(chroma: ChromaLayout) -> Geometry {
         chroma,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 
@@ -459,6 +461,29 @@ fn luma_output_is_unchanged_with_the_ring() {
         for (index, frame) in merged.iter().enumerate() {
             assert_eq!(frame[0], luma_expected[index][0], "{spec:?} frame {index} luma");
         }
+    }
+}
+
+#[test]
+fn the_chroma_siting_leaves_the_output_unchanged() {
+    let client = client();
+    let clip = clip();
+    let unknown = geometry(ChromaLayout::Yuv420);
+    let left = Geometry {
+        chroma_siting: ChromaSiting::Left,
+        ..unknown
+    };
+
+    let unknown_specs = specs(unknown, true, true);
+    let left_specs = specs(left, true, true);
+    for (unknown_spec, left_spec) in unknown_specs.iter().zip(&left_specs) {
+        let mut unknown_engine = build(&client, unknown_spec).expect("build");
+        let unknown_output = drive(&mut unknown_engine, &client, &clip, 0, true);
+
+        let mut left_engine = build(&client, left_spec).expect("build");
+        let left_output = drive(&mut left_engine, &client, &clip, 0, true);
+
+        assert_eq!(left_output, unknown_output, "{left_spec:?}");
     }
 }
 

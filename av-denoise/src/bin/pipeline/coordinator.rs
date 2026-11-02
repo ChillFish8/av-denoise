@@ -38,10 +38,11 @@ pub fn run_coordinator<W: std::io::Write>(
 ) -> Result<(), anyhow::Error> {
     let framerate = info.details.frame_rate;
     let ratio = y4m::Ratio::new(*framerate.numer() as usize, *framerate.denom() as usize);
-    let colorspace = subsampling_to_y4m(info.layout.subsampling, info.layout.depth, info.chroma_siting);
+    let layout = info.layout;
+    let colorspace = subsampling_to_y4m(layout.subsampling, layout.depth, layout.chroma_siting);
 
-    let mut builder = y4m::encode(info.layout.width as usize, info.layout.height as usize, ratio)
-        .with_colorspace(colorspace);
+    let mut builder =
+        y4m::encode(layout.width as usize, layout.height as usize, ratio).with_colorspace(colorspace);
 
     if let Some(pixel_aspect) = info.pixel_aspect {
         builder = builder.with_pixel_aspect(pixel_aspect);

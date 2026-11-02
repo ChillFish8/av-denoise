@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use av_denoise_core::tune::{TuningConfig, TuningFrame, tune_frames};
-use av_denoise_core::{ChromaLayout, DenoisingMode, EngineSpec, GrainChunk, WindowSpan};
+use av_denoise_core::{ChromaLayout, ChromaSiting, DenoisingMode, EngineSpec, GrainChunk, WindowSpan};
 use cubecl::prelude::Client;
 
 pub use self::reseed::ReseedWindow;
@@ -50,6 +50,8 @@ pub struct FrameLayout {
     pub height: u32,
     pub subsampling: Subsampling,
     pub depth: Depth,
+    /// Where the chroma samples sit. It is carried for callers and never changes the output.
+    pub chroma_siting: ChromaSiting,
 }
 
 impl FrameLayout {
@@ -190,6 +192,7 @@ impl PlaneOptions {
             .maybe_luma_lambda_ht(self.luma_lambda_ht)
             .maybe_chroma_lambda_ht(self.chroma_lambda_ht)
             .depth(layout.depth)
+            .chroma_siting(layout.chroma_siting)
             .tuning(self.tuning)
             .deterministic(self.deterministic)
             .build()

@@ -1,5 +1,6 @@
 use av_denoise::{
     ChannelIntent,
+    ChromaSiting,
     DenoisingMode,
     Depth,
     MotionCompensationMode,
@@ -94,6 +95,7 @@ fn accepts_the_three_supported_subsamplings_at_eight_bit() {
 
         assert_eq!(layout.subsampling, expected);
         assert_eq!(layout.depth, Depth::Eight);
+        assert_eq!(layout.chroma_siting, ChromaSiting::Unknown);
     }
 }
 

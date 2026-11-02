@@ -1,4 +1,4 @@
-use crate::engine::{ChromaLayout, Geometry, SampleFormat};
+use crate::engine::{ChromaLayout, ChromaSiting, Geometry, SampleFormat};
 
 #[test]
 fn chroma_dims_round_up_for_each_layout() {
@@ -23,6 +23,7 @@ fn geometry(chroma: ChromaLayout) -> Geometry {
         chroma,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

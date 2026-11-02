@@ -2,6 +2,7 @@ use av_denoise::accelerate::{Accelerator, get_default_accelerators};
 use av_denoise::{
     Algorithm,
     ChannelIntent,
+    ChromaSiting,
     DenoisingMode,
     Depth,
     Device,
@@ -85,6 +86,7 @@ pub fn layout_from_format(format: RawFormat, width: u32, height: u32) -> Result<
         height,
         subsampling,
         depth,
+        chroma_siting: ChromaSiting::Unknown,
     })
 }
 

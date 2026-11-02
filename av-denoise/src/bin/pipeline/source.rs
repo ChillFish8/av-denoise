@@ -3,13 +3,13 @@ use std::io::Read;
 use std::path::Path;
 
 use av_decoders::{Decoder, DecoderImpl, VideoDetails};
-use av_denoise::{Depth, FrameLayout, Subsampling};
+use av_denoise::{ChromaSiting, Depth, FrameLayout, Subsampling};
 use ffms2_sys::{FFMS_ColorRanges, FFMS_ErrorInfo, FFMS_GetFrame, FFMS_GetVideoProperties, FFMS_VideoSource};
 
 use super::convert::subsampling_from_av_decoders;
 use crate::cli::InputSource;
 use crate::frame_index;
-use crate::y4m_format::{ChromaSiting, subsampling_from_y4m, y4m_vendor_extensions};
+use crate::y4m_format::{siting_from_ffms2, siting_from_y4m, subsampling_from_y4m, y4m_vendor_extensions};
 
 /// What the rest of a run needs to know about its input.
 #[derive(Clone)]
@@ -19,7 +19,6 @@ pub struct SourceInfo {
     /// Carried through to the output header when the input declared one.
     pub pixel_aspect: Option<y4m::Ratio>,
     pub vendor_extensions: Vec<y4m::VendorExtensionString>,
-    pub chroma_siting: ChromaSiting,
     /// Frames the run should emit, when the input knows its own length.
     pub estimated_frames: Option<usize>,
 }
@@ -45,7 +44,7 @@ pub fn open_source(input: &InputSource) -> Result<OpenedSource, anyhow::Error> {
 pub fn open_file(path: &Path) -> Result<OpenedSource, anyhow::Error> {
     let mut decoder = Decoder::from_file(path)?;
     let details = *decoder.get_video_details();
-    let layout = layout_from_details(&details)?;
+    let mut layout = layout_from_details(&details)?;
 
     // Only inspects the metadata ffms2 already built, so it costs nothing.
     let phantom = frame_index::read_index(&mut decoder)
@@ -65,6 +64,7 @@ pub fn open_file(path: &Path) -> Result<OpenedSource, anyhow::Error> {
 
     let colour = read_file_colour(&mut decoder);
     let vendor_extensions: Vec<y4m::VendorExtensionString> = colour.range.into_iter().collect();
+    layout.chroma_siting = colour.chroma_siting;
 
     // Only 8-bit 4:2:0 output carries a siting, so nothing else is logged as forwarded.
     let carries_siting = layout.subsampling == Subsampling::Yuv420 && layout.depth == Depth::Eight;
@@ -81,7 +81,6 @@ pub fn open_file(path: &Path) -> Result<OpenedSource, anyhow::Error> {
         layout,
         pixel_aspect: colour.pixel_aspect,
         vendor_extensions,
-        chroma_siting: colour.chroma_siting,
         estimated_frames,
     };
 
@@ -203,7 +202,7 @@ fn first_frame_siting(video_source: *mut FFMS_VideoSource) -> ChromaSiting {
     // SAFETY: checked non-null just above, and ffms2 keeps the frame alive until the next call.
     let location = unsafe { (*frame_ptr).ChromaLocation };
 
-    ChromaSiting::from_ffms2(location)
+    siting_from_ffms2(location)
 }
 
 /// Opens a y4m stream.
@@ -218,19 +217,19 @@ pub fn open_y4m(reader: Box<dyn Read>) -> Result<OpenedSource, anyhow::Error> {
     let pixel_aspect = y4m_decoder.get_pixel_aspect();
     let raw_params = y4m_decoder.get_raw_params();
     let vendor_extensions = y4m_vendor_extensions(raw_params);
-    let chroma_siting = ChromaSiting::from_y4m(colorspace);
+    let chroma_siting = siting_from_y4m(colorspace);
 
     let decoder_impl = DecoderImpl::Y4m(y4m_decoder);
     let decoder = Decoder::from_decoder_impl(decoder_impl)?;
     let details = *decoder.get_video_details();
-    let layout = layout_from_details(&details)?;
+    let mut layout = layout_from_details(&details)?;
+    layout.chroma_siting = chroma_siting;
 
     let info = SourceInfo {
         details,
         layout,
         pixel_aspect: Some(pixel_aspect),
         vendor_extensions,
-        chroma_siting,
         estimated_frames: None,
     };
 
@@ -250,5 +249,6 @@ fn layout_from_details(details: &VideoDetails) -> Result<FrameLayout, anyhow::Er
         height: details.height as u32,
         subsampling,
         depth,
+        chroma_siting: ChromaSiting::Unknown,
     })
 }

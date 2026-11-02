@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use crate::engine::{ChromaLayout, DevicePlane, EngineSpec, Geometry, SampleFormat};
+use crate::engine::{ChromaLayout, ChromaSiting, DevicePlane, EngineSpec, Geometry, SampleFormat};
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::engine_set::EngineSet;
 use crate::tune::setup::KernelSetup;
@@ -22,6 +22,7 @@ fn gray_geometry(width: u32, height: u32) -> Geometry {
         chroma: ChromaLayout::Gray,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

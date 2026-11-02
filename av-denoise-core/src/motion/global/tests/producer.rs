@@ -1,7 +1,16 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::engine::{ChromaLayout, DevicePlane, Engine, EngineSpec, Geometry, PassSpec, SampleFormat};
+use crate::engine::{
+    ChromaLayout,
+    ChromaSiting,
+    DevicePlane,
+    Engine,
+    EngineSpec,
+    Geometry,
+    PassSpec,
+    SampleFormat,
+};
 use crate::motion::MotionCompensationMode;
 use crate::motion::global::{MODEL_WORDS, ModelRing, PairModelProducer};
 use crate::nl4d::Nl4dOptions;
@@ -655,6 +664,7 @@ fn f32_geometry(width: u32, height: u32) -> Geometry {
         chroma: ChromaLayout::Yuv420,
         input: SampleFormat::F32,
         output: SampleFormat::F32,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

@@ -6,6 +6,7 @@ fn layout(depth: Depth) -> FrameLayout {
         height: 4,
         subsampling: Subsampling::Yuv420,
         depth,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

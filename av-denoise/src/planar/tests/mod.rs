@@ -41,6 +41,7 @@ mod reseed {
             height: 64,
             subsampling: Subsampling::Yuv420,
             depth: Depth::Eight,
+            chroma_siting: ChromaSiting::Unknown,
         }
     }
 
@@ -996,6 +997,7 @@ mod reseed {
             height: 120,
             subsampling: Subsampling::Yuv420,
             depth: Depth::Eight,
+            chroma_siting: ChromaSiting::Unknown,
         };
         let options = nlmeans_hq_pinned_plane_options(2);
         let frames = ramp_clip(&harness_layout, 14);

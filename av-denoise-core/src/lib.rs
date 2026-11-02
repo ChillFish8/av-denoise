@@ -24,6 +24,7 @@ pub mod tune;
 
 pub use self::engine::{
     ChromaLayout,
+    ChromaSiting,
     DevicePlane,
     EdgePadding,
     Engine,

@@ -1,6 +1,7 @@
 use av_denoise::{
     Algorithm,
     ChannelIntent,
+    ChromaSiting,
     DenoisingMode,
     Depth,
     FrameLayout,
@@ -52,6 +53,7 @@ fn sized_layout(width: u32, height: u32, subsampling: Subsampling, depth: Depth)
         height,
         subsampling,
         depth,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

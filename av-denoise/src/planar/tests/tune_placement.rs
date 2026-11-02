@@ -12,7 +12,7 @@ use crate::planar::{
     ReseedWindow,
     Subsampling,
 };
-use crate::{Algorithm, Depth, TuningMode};
+use crate::{Algorithm, ChromaSiting, Depth, TuningMode};
 
 fn options() -> PlaneOptions {
     PlaneOptions {
@@ -36,6 +36,7 @@ fn layout() -> FrameLayout {
         height: 48,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

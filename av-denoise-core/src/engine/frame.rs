@@ -51,6 +51,20 @@ impl ChromaLayout {
     }
 }
 
+/// Where the chroma samples of a 4:2:0 frame sit relative to its luma samples.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ChromaSiting {
+    /// Level with the left luma column, halfway between two rows.
+    Left,
+    /// Halfway between two luma columns and two luma rows.
+    Center,
+    /// Level with the top left luma sample.
+    TopLeft,
+    /// The source did not say.
+    #[default]
+    Unknown,
+}
+
 /// The frame an engine is built for.
 ///
 /// `width` and `height` are the luma plane's dimensions. Each chroma plane's size follows from
@@ -62,6 +76,8 @@ pub struct Geometry {
     pub chroma: ChromaLayout,
     pub input: SampleFormat,
     pub output: SampleFormat,
+    /// Where the chroma samples sit. It is carried for callers and never changes the output.
+    pub chroma_siting: ChromaSiting,
 }
 
 impl Geometry {

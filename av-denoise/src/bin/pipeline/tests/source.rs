@@ -1,15 +1,8 @@
-use av_denoise::{Depth, Subsampling};
+use av_denoise::{ChromaSiting, Depth, Subsampling};
 
-use super::y4m_reader;
+use super::{open_data_clip, y4m_reader};
 use crate::pipeline::convert::SourcePixel;
-use crate::pipeline::source::{
-    OpenedSource,
-    color_range_extension,
-    open_file,
-    open_y4m,
-    pixel_aspect_from_sar,
-};
-use crate::y4m_format::ChromaSiting;
+use crate::pipeline::source::{color_range_extension, open_y4m, pixel_aspect_from_sar};
 
 fn y4m_bytes(colorspace: y4m::Colorspace, extension: Option<&str>, frames: usize) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -175,27 +168,10 @@ fn piped_y4m_siting_round_trips() {
         let opened = open_y4m(source).expect("a 4:2:0 pipe opens");
 
         assert_eq!(
-            opened.info.chroma_siting, expected,
+            opened.info.layout.chroma_siting, expected,
             "wrong siting for {colorspace:?}"
         );
     }
-}
-
-/// Opens a clip under `data/`, or skips the test when the clip is not checked out.
-fn open_data_clip(name: &str) -> Option<OpenedSource> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("data")
-        .join(name);
-
-    if !path.exists() {
-        eprintln!("skipping, {} is not available", path.display());
-        return None;
-    }
-
-    let opened = open_file(&path).expect("the clip opens");
-
-    Some(opened)
 }
 
 #[test]
@@ -204,7 +180,7 @@ fn a_left_sited_file_source_reports_left() {
         return;
     };
 
-    assert_eq!(opened.info.chroma_siting, ChromaSiting::Left);
+    assert_eq!(opened.info.layout.chroma_siting, ChromaSiting::Left);
 }
 
 #[test]
@@ -213,5 +189,5 @@ fn a_centre_sited_file_source_reports_centre() {
         return;
     };
 
-    assert_eq!(opened.info.chroma_siting, ChromaSiting::Center);
+    assert_eq!(opened.info.layout.chroma_siting, ChromaSiting::Center);
 }

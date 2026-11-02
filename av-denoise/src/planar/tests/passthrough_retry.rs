@@ -37,6 +37,7 @@ fn queue_full_retry_does_not_repeat_the_passthrough_plane() {
         height: 16,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let options = chroma_only_options();
     let mut denoiser = PlanarDenoiser::create(&options, layout).expect("denoiser construction failed");

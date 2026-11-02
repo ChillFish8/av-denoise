@@ -2,7 +2,7 @@ use av_denoise_core::DenoisingMode;
 
 use crate::planar::{ChannelIntent, FrameLayout, PlanarDenoiser, PlaneOptions, Subsampling, plane_spec};
 use crate::tune::TuningMode;
-use crate::{Algorithm, Depth};
+use crate::{Algorithm, ChromaSiting, Depth};
 
 #[test]
 fn the_planar_host_runs_the_spec_its_options_predict() {
@@ -24,6 +24,7 @@ fn the_planar_host_runs_the_spec_its_options_predict() {
         height: 48,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     };
 
     let planar = PlanarDenoiser::create(&options, layout).expect("the denoiser builds");

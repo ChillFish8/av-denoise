@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::engine::{ChromaLayout, DevicePlane, Geometry, SampleFormat};
+use crate::engine::{ChromaLayout, ChromaSiting, DevicePlane, Geometry, SampleFormat};
 use crate::noise::colour::{
     COLOUR_CELLS,
     COLOUR_LEVEL_FIELDS,
@@ -85,6 +85,7 @@ impl ColourMeasurement {
             chroma: ChromaLayout::Yuv420,
             input: SampleFormat::U8,
             output: SampleFormat::U8,
+            chroma_siting: ChromaSiting::Unknown,
         };
         let (chroma_width, chroma_height) = geometry.plane_dims(1);
         let luma_plane = hashed_plane(width, height, 1);

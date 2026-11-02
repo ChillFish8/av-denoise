@@ -1,7 +1,16 @@
 use cubecl::prelude::*;
 
 use crate::bench_api::HostIo;
-use crate::engine::{ChromaLayout, DevicePlane, Engine, EngineSpec, Geometry, PassSpec, SampleFormat};
+use crate::engine::{
+    ChromaLayout,
+    ChromaSiting,
+    DevicePlane,
+    Engine,
+    EngineSpec,
+    Geometry,
+    PassSpec,
+    SampleFormat,
+};
 use crate::motion::{MotionCompensationMode, MotionEstimation};
 use crate::nl4d::Nl4dOptions;
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
@@ -218,6 +227,7 @@ fn gray_geometry() -> Geometry {
         chroma: ChromaLayout::Gray,
         input: SampleFormat::F32,
         output: SampleFormat::F32,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

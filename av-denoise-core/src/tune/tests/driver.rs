@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::engine::{ChromaLayout, EngineSpec, Geometry, SampleFormat};
+use crate::engine::{ChromaLayout, ChromaSiting, EngineSpec, Geometry, SampleFormat};
 use crate::nl4d::Nl4dOptions;
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::driver::pass::{FrameCycle, tune_keys};
@@ -55,6 +55,7 @@ fn geometry(width: u32, height: u32, chroma: ChromaLayout) -> Geometry {
         chroma,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

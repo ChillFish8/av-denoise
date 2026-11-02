@@ -12,6 +12,7 @@ the next push. At the end of a stream, `Engine::finish` returns the tail count.
 ```rust,no_run
 use av_denoise_core::{
     ChromaLayout,
+    ChromaSiting,
     DevicePlane,
     Engine,
     EngineSpec,
@@ -34,6 +35,7 @@ let geometry = Geometry {
     chroma: ChromaLayout::Gray,
     input: SampleFormat::U16 { depth: 10 },
     output: SampleFormat::U16 { depth: 10 },
+    chroma_siting: ChromaSiting::Unknown,
 };
 let spec = EngineSpec::Nl4d {
     luma: Some(Nl4dOptions::default()),

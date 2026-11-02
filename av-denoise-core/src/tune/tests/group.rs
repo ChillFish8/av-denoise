@@ -3,7 +3,7 @@ use std::path::Path;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::engine::{ChromaLayout, DevicePlane, Engine, EngineSpec, Geometry, SampleFormat};
+use crate::engine::{ChromaLayout, ChromaSiting, DevicePlane, Engine, EngineSpec, Geometry, SampleFormat};
 use crate::error::Error;
 use crate::nl4d::Nl4dOptions;
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
@@ -37,6 +37,7 @@ fn geometry() -> Geometry {
         chroma: ChromaLayout::Gray,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

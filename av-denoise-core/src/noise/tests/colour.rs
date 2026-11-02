@@ -5,7 +5,7 @@ use cubecl::server::Handle;
 
 use super::records::{BlockSpec, frame_records, hashed_unit};
 use crate::engine::align::StorageAlign;
-use crate::engine::{ChromaLayout, DevicePlane, EngineSpec, Geometry, SampleFormat};
+use crate::engine::{ChromaLayout, ChromaSiting, DevicePlane, EngineSpec, Geometry, SampleFormat};
 use crate::nl4d::Nl4dOptions;
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansHqOptions, NlmeansOptions};
 use crate::noise::colour::{
@@ -573,6 +573,7 @@ fn high_bit_depth_maps_to_the_same_cells() {
         chroma: ChromaLayout::Yuv420,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let (chroma_width, chroma_height) = base.plane_dims(1);
     let codes = colour_planes(width, height, chroma_width, chroma_height);
@@ -760,6 +761,7 @@ fn pool_frame(
         chroma: ChromaLayout::Yuv444,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let luma = f32::from(codes[0]);
     let ring = noisy_ring(client, shape.width, shape.height, luma, seed);
@@ -792,6 +794,7 @@ fn a_frame_read_again_replaces_its_cells() {
         chroma: ChromaLayout::Yuv444,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let first_read = [120, 128, 128];
     let second_read = [70, 160, 100];
@@ -821,6 +824,7 @@ fn a_stream_reset_windows_only_the_new_stream() {
         chroma: ChromaLayout::Yuv444,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let scene_a = [120, 128, 128];
     let scene_b = [70, 160, 100];
@@ -864,6 +868,7 @@ fn a_frame_without_held_means_is_an_error() {
         chroma: ChromaLayout::Yuv444,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let blocks = ColourBlocks::new(&client, geometry, 0).expect("a colour frame has block means");
     let state = colour_state(&client, &blocks, geometry.width, geometry.height);
@@ -904,6 +909,7 @@ fn greyscale_builds_no_colour_cells() {
         chroma,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let gray = EngineSpec::Nl4d {
         luma: Some(options),

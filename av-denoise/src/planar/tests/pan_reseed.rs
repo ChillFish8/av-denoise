@@ -23,6 +23,7 @@ pub(super) fn pan_layout() -> FrameLayout {
         height: HEIGHT,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 
@@ -361,6 +362,7 @@ fn nl4d_mid_clip_reseed_matches_streaming_on_the_parity_clip() {
         height: 128,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let options = PlaneOptions {
         algorithm: Algorithm::Nl4d(Nl4dOptions::default()),

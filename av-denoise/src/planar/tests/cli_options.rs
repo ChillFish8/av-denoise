@@ -8,6 +8,7 @@ fn layout() -> FrameLayout {
         height: 16,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 
@@ -153,6 +154,27 @@ fn the_spec_follows_the_layouts_chroma_planes() {
         let spec = plane_spec(&plane_options, frame_layout);
 
         assert_eq!(spec.geometry().chroma, chroma);
+    }
+}
+
+#[test]
+fn the_spec_carries_the_layouts_chroma_siting() {
+    let plane_options = base_options(DenoisingMode::Spacial, Algorithm::default(), None, None);
+    let sitings = [
+        ChromaSiting::Left,
+        ChromaSiting::Center,
+        ChromaSiting::TopLeft,
+        ChromaSiting::Unknown,
+    ];
+
+    for siting in sitings {
+        let frame_layout = FrameLayout {
+            chroma_siting: siting,
+            ..layout()
+        };
+        let spec = plane_spec(&plane_options, frame_layout);
+
+        assert_eq!(spec.geometry().chroma_siting, siting);
     }
 }
 

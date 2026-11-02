@@ -2,7 +2,16 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::engine::planar::PlanarEngine;
-use crate::engine::{ChromaLayout, DevicePlane, Engine, EngineSpec, Geometry, PlaneSource, SampleFormat};
+use crate::engine::{
+    ChromaLayout,
+    ChromaSiting,
+    DevicePlane,
+    Engine,
+    EngineSpec,
+    Geometry,
+    PlaneSource,
+    SampleFormat,
+};
 use crate::nl4d::Nl4dOptions;
 use crate::noise::colour::{
     COLOUR_CELL_COUNT,
@@ -60,6 +69,7 @@ fn engine(client: &Client) -> PlanarEngine {
         chroma: ChromaLayout::Yuv420,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let spec = EngineSpec::Nl4d {
         luma: Some(options),

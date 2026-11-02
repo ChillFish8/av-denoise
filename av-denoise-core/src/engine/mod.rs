@@ -15,7 +15,7 @@ use std::ops::Range;
 
 use cubecl::server::Handle;
 
-pub use self::frame::{ChromaLayout, Geometry};
+pub use self::frame::{ChromaLayout, ChromaSiting, Geometry};
 pub(crate) use self::io::{EgressSource, IngestTarget, copy_words_into, egress, ingest};
 pub(crate) use self::plane::PassGeometry;
 pub use self::plane::{DevicePlane, SampleFormat};

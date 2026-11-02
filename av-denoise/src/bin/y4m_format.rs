@@ -1,40 +1,29 @@
-use av_denoise::{Depth, Subsampling};
+use av_denoise::{ChromaSiting, Depth, Subsampling};
 use ffms2_sys::FFMS_ChromaLocations;
 
-/// Where the chroma samples of a 4:2:0 source sit relative to its luma samples.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum ChromaSiting {
-    Left,
-    Center,
-    TopLeft,
-    Unknown,
+/// Maps an ffms2 chroma location onto a siting.
+///
+/// Locations that have no y4m tag, such as top or bottom, are [ChromaSiting::Unknown].
+pub fn siting_from_ffms2(location: i32) -> ChromaSiting {
+    let left = FFMS_ChromaLocations::FFMS_LOC_LEFT as i32;
+    let center = FFMS_ChromaLocations::FFMS_LOC_CENTER as i32;
+    let top_left = FFMS_ChromaLocations::FFMS_LOC_TOPLEFT as i32;
+
+    match location {
+        value if value == left => ChromaSiting::Left,
+        value if value == center => ChromaSiting::Center,
+        value if value == top_left => ChromaSiting::TopLeft,
+        _ => ChromaSiting::Unknown,
+    }
 }
 
-impl ChromaSiting {
-    /// Maps an ffms2 chroma location onto a siting.
-    ///
-    /// Locations that have no y4m tag, such as top or bottom, are [ChromaSiting::Unknown].
-    pub fn from_ffms2(location: i32) -> Self {
-        let left = FFMS_ChromaLocations::FFMS_LOC_LEFT as i32;
-        let center = FFMS_ChromaLocations::FFMS_LOC_CENTER as i32;
-        let top_left = FFMS_ChromaLocations::FFMS_LOC_TOPLEFT as i32;
-
-        match location {
-            value if value == left => Self::Left,
-            value if value == center => Self::Center,
-            value if value == top_left => Self::TopLeft,
-            _ => Self::Unknown,
-        }
-    }
-
-    /// Reads the siting a 4:2:0 y4m colourspace tag declares.
-    pub fn from_y4m(colorspace: y4m::Colorspace) -> Self {
-        match colorspace {
-            y4m::Colorspace::C420mpeg2 => Self::Left,
-            y4m::Colorspace::C420jpeg => Self::Center,
-            y4m::Colorspace::C420paldv => Self::TopLeft,
-            _ => Self::Unknown,
-        }
+/// Reads the siting a 4:2:0 y4m colourspace tag declares.
+pub fn siting_from_y4m(colorspace: y4m::Colorspace) -> ChromaSiting {
+    match colorspace {
+        y4m::Colorspace::C420mpeg2 => ChromaSiting::Left,
+        y4m::Colorspace::C420jpeg => ChromaSiting::Center,
+        y4m::Colorspace::C420paldv => ChromaSiting::TopLeft,
+        _ => ChromaSiting::Unknown,
     }
 }
 
@@ -213,17 +202,17 @@ mod colorspace_tests {
         for siting in sitings {
             let colorspace = subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, siting);
 
-            assert_eq!(ChromaSiting::from_y4m(colorspace), siting);
+            assert_eq!(siting_from_y4m(colorspace), siting);
         }
     }
 
     #[test]
     fn ffms2_locations_map_to_sitings() {
-        assert_eq!(ChromaSiting::from_ffms2(1), ChromaSiting::Left);
-        assert_eq!(ChromaSiting::from_ffms2(2), ChromaSiting::Center);
-        assert_eq!(ChromaSiting::from_ffms2(3), ChromaSiting::TopLeft);
-        assert_eq!(ChromaSiting::from_ffms2(0), ChromaSiting::Unknown);
-        assert_eq!(ChromaSiting::from_ffms2(4), ChromaSiting::Unknown);
-        assert_eq!(ChromaSiting::from_ffms2(6), ChromaSiting::Unknown);
+        assert_eq!(siting_from_ffms2(1), ChromaSiting::Left);
+        assert_eq!(siting_from_ffms2(2), ChromaSiting::Center);
+        assert_eq!(siting_from_ffms2(3), ChromaSiting::TopLeft);
+        assert_eq!(siting_from_ffms2(0), ChromaSiting::Unknown);
+        assert_eq!(siting_from_ffms2(4), ChromaSiting::Unknown);
+        assert_eq!(siting_from_ffms2(6), ChromaSiting::Unknown);
     }
 }

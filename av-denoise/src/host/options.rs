@@ -1,5 +1,6 @@
 use av_denoise_core::{
     ChromaLayout,
+    ChromaSiting,
     DenoisingMode,
     EngineSpec,
     Geometry,
@@ -84,6 +85,9 @@ pub struct DenoiserOptions {
     /// The bit depth of the wire bytes going in and coming out.
     #[builder(default = Depth::Eight)]
     pub depth: Depth,
+    /// Where the chroma samples sit. It is carried on the engine geometry and never changes the output.
+    #[builder(default)]
+    pub chroma_siting: ChromaSiting,
     /// Whether the engines use tuned kernels.
     ///
     /// [TuningMode::Cached] and [TuningMode::Auto] both build from stored results.
@@ -115,6 +119,7 @@ impl DenoiserOptions {
             chroma: self.chroma,
             input: format,
             output: format,
+            chroma_siting: self.chroma_siting,
         };
         let cleans_luma = self.intent.cleans_luma();
         let cleans_chroma = self.intent.cleans_chroma();

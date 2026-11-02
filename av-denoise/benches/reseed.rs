@@ -4,6 +4,7 @@ use av_denoise::accelerate::Accelerator;
 use av_denoise::{
     Algorithm,
     ChannelIntent,
+    ChromaSiting,
     DenoisingMode,
     Depth,
     Device,
@@ -46,6 +47,7 @@ fn layout() -> FrameLayout {
         height: HEIGHT,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

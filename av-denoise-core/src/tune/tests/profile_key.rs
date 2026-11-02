@@ -4,6 +4,7 @@ use crate::tune::profile_key::spec_profile_keys;
 use crate::tune::{TUNE_EXTRA_FRAMES, profile_key, tuning_frame_count};
 use crate::{
     ChromaLayout,
+    ChromaSiting,
     DenoisingMode,
     EngineSpec,
     Geometry,
@@ -60,6 +61,7 @@ fn frame_geometry(chroma: ChromaLayout) -> Geometry {
         chroma,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

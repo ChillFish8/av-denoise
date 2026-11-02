@@ -15,6 +15,7 @@ use av_denoise::tune::{
 use av_denoise::{
     Algorithm,
     ChannelIntent,
+    ChromaSiting,
     DenoisingMode,
     Depth,
     FrameLayout,
@@ -40,6 +41,7 @@ fn layout() -> FrameLayout {
         height: HEIGHT,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

@@ -14,6 +14,7 @@ pub mod warmup;
 
 pub use av_denoise_core::{
     ChromaLayout,
+    ChromaSiting,
     DEFAULT_PILOT_STRENGTH_SCALE,
     DenoisingMode,
     DevicePlane,
