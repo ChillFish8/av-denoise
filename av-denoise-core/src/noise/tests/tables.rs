@@ -2,18 +2,15 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::fold_reference::{COEFFICIENTS, CONSUMER, relative_gap};
-use crate::collab::geometry::strength_map_dims;
+use super::records::valid_channels;
 use crate::engine::align::StorageAlign;
-use crate::noise::NOISE_BLOCK_1D;
 use crate::noise::correlation::{build_spatial_offset_lut, spatial_offset_index};
-use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
 use crate::noise::derived::{DerivedCoefficients, DerivedValues};
 use crate::noise::fold::{FoldSettings, NoiseSettings};
 use crate::noise::history::WindowBounds;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::spatial::RESULTS_PER_SLOT;
-use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
-use crate::noise::strength_map::StrengthMapParams;
+use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings};
 use crate::noise::temporal::TemporalNoiseSample;
 use crate::tune::gpu::sync;
 use crate::tune::tests::runtime::test_client;
@@ -24,17 +21,12 @@ const FRAMES: u32 = 3;
 const MAX_RELATIVE: f32 = 1.0e-5;
 const RADII: [u32; 2] = [2, 8];
 const RHOS: [f32; 3] = [0.0, 0.3, 0.65];
-const LUMA_PARAMS: StrengthMapParams = StrengthMapParams {
-    flat_boost: 1.5,
-    shadow_soften: 0.65,
-};
 /// The derived values a test state starts from, whose host-built tables are nonzero off the
 /// centre.
 const STARTING_VALUES: DerivedValues = DerivedValues {
     sigma: [0.0; 2],
     weight_scale: 0.0,
     curve_valid: false,
-    map_mode: 0,
     sad_noise_floor: 0.0,
     confidence_sad_noise_floor: 0.0,
     h2_inv_norm: 0.0,
@@ -56,12 +48,8 @@ fn shape(client: &Client, width: u32, height: u32) -> NoiseShape {
     }
 }
 
-fn settings(radius: u32, coefficients: DerivedCoefficients, map: StrengthMapKind) -> NoiseSettings {
-    let reading = ReadingSettings {
-        luma_fields: true,
-        map,
-        ..ReadingSettings::default()
-    };
+fn settings(radius: u32, coefficients: DerivedCoefficients) -> NoiseSettings {
+    let reading = ReadingSettings { luma_fields: true };
     let fold = FoldSettings {
         sigma_scale: 1.0,
         consumer: CONSUMER,
@@ -72,25 +60,22 @@ fn settings(radius: u32, coefficients: DerivedCoefficients, map: StrengthMapKind
     NoiseSettings { reading, fold }
 }
 
-/// A reading with a sample of correlation `rho` and, when asked, a flat curve.
-fn sampled_reading(rho: f32, curved: bool) -> ReadingRecord {
+/// A reading with a sample of correlation `rho` and no curve.
+fn sampled_reading(rho: f32) -> ReadingRecord {
     let sample = TemporalNoiseSample {
+        valid: valid_channels(1),
         sigma: [3.0 / 255.0, 0.0],
         sigma_low: [2.5 / 255.0, 0.0],
         rho,
         static_fraction: 0.5,
     };
-    let curve = curved.then_some(NoiseCurve {
-        ratios: [1.0; NOISE_CURVE_BINS],
-        sigma_quarter_median: 2.0 / 255.0,
-    });
 
     ReadingRecord {
         immerkaer_low: [1.0 / 255.0, 0.0],
         sample: Some(sample),
         accepted: 40,
-        curve,
-        populated_bins: if curved { 6 } else { 0 },
+        curve: None,
+        populated_bins: 0,
     }
 }
 
@@ -101,29 +86,11 @@ fn ring_state(
     shape: NoiseShape,
     settings: NoiseSettings,
     rhos: [f32; FRAMES as usize],
-    slot_maps: &[Vec<f32>],
 ) -> NoiseState {
-    let curved = !slot_maps.is_empty();
-    let readings: Vec<ReadingRecord> = rhos.iter().map(|&rho| sampled_reading(rho, curved)).collect();
+    let readings: Vec<ReadingRecord> = rhos.iter().map(|&rho| sampled_reading(rho)).collect();
     let sums = vec![[0.0f32; RESULTS_PER_SLOT]; FRAMES as usize];
     let mut state = NoiseState::new(client, shape, settings, STARTING_VALUES);
-    state.set_readings_for_test(&readings, &sums, slot_maps);
-
-    state
-}
-
-/// A state whose every slot holds a sample of correlation `rho`, after one fold of slot 0.
-fn folded_state(
-    client: &Client,
-    shape: NoiseShape,
-    settings: NoiseSettings,
-    rho: f32,
-    slot_maps: &[Vec<f32>],
-) -> NoiseState {
-    let rhos = [rho; FRAMES as usize];
-    let state = ring_state(client, shape, settings, rhos, slot_maps);
-
-    fold_frames(&state, 1);
+    state.set_readings_for_test(&readings, &sums);
 
     state
 }
@@ -210,10 +177,10 @@ fn the_spatial_table_matches_the_host_table() {
 
     for radius in RADII {
         for rho in RHOS {
-            let table_settings = settings(radius, COEFFICIENTS, StrengthMapKind::Off);
+            let table_settings = settings(radius, COEFFICIENTS);
             let second_rho = 0.5 * rho + 0.2;
             let rhos = [rho, second_rho, second_rho];
-            let state = ring_state(&client, shape, table_settings, rhos, &[]);
+            let state = ring_state(&client, shape, table_settings, rhos);
 
             fold_frames(&state, 1);
             let first = state.snapshot().expect("the snapshot reads back");
@@ -250,9 +217,9 @@ fn the_pilot_table_is_flat_with_a_zero_centre() {
     };
 
     for radius in RADII {
-        let table_settings = settings(radius, pilot_coefficients, StrengthMapKind::Off);
+        let table_settings = settings(radius, pilot_coefficients);
         let rhos = [0.65; FRAMES as usize];
-        let state = ring_state(&client, shape, table_settings, rhos, &[]);
+        let state = ring_state(&client, shape, table_settings, rhos);
         check_nonzero_start(&client, &state, radius);
 
         fold_frames(&state, 1);
@@ -285,9 +252,9 @@ fn a_zero_offset_gives_a_zero_table() {
     };
 
     for radius in RADII {
-        let table_settings = settings(radius, unfloored, StrengthMapKind::Off);
+        let table_settings = settings(radius, unfloored);
         let rhos = [0.3; FRAMES as usize];
-        let state = ring_state(&client, shape, table_settings, rhos, &[]);
+        let state = ring_state(&client, shape, table_settings, rhos);
         check_nonzero_start(&client, &state, radius);
 
         fold_frames(&state, 1);
@@ -300,48 +267,6 @@ fn a_zero_offset_gives_a_zero_table() {
         assert_eq!(spatial_bits, zero_bits, "the spatial table at radius {radius}");
         assert_eq!(pilot_bits, zero_bits, "the pilot table at radius {radius}");
     }
-
-    sync(&client).expect("the device syncs");
-}
-
-/// A slot map of `quarters` multipliers that name the slot and the quarter.
-fn slot_map(slot: u32, quarters: u32) -> Vec<f32> {
-    (0..quarters)
-        .map(|quarter| 1.0 + 0.01 * slot as f32 + 1.0e-4 * quarter as f32)
-        .collect()
-}
-
-#[test]
-fn a_fold_with_a_map_writes_the_tables_and_the_map() {
-    const WIDTH_4K: u32 = 3840;
-    const HEIGHT_4K: u32 = 2160;
-    const RADIUS: u32 = 8;
-    let client = test_client();
-    let shape = shape(&client, WIDTH_4K, HEIGHT_4K);
-    let (cols, rows) = strength_map_dims(WIDTH_4K, HEIGHT_4K);
-    let quarters = cols * rows;
-    let map_cubes = quarters.div_ceil(NOISE_BLOCK_1D);
-    assert!(map_cubes > 1, "the map spans {map_cubes} cubes");
-
-    let slot_maps: Vec<Vec<f32>> = (0..FRAMES).map(|slot| slot_map(slot, quarters)).collect();
-    let map = StrengthMapKind::Luma(LUMA_PARAMS);
-    let table_settings = settings(RADIUS, COEFFICIENTS, map);
-    let state = folded_state(&client, shape, table_settings, 0.3, &slot_maps);
-    let snapshot = state.snapshot().expect("the snapshot reads back");
-
-    let current_map = state.read_current_map();
-    let map_bits = bits(&current_map);
-    let frame_map_bits = bits(&slot_maps[0]);
-    assert_eq!(map_bits, frame_map_bits, "the current map");
-
-    let gap = check_spatial_table(&client, &state, RADIUS, snapshot.derived);
-    println!("largest spatial table gap with a map {gap:e}");
-
-    let pilot = read_table(&client, state.pilot_offsets());
-    let expected_pilot = build_spatial_offset_lut(RADIUS, 0.0, snapshot.derived.input_noise_offset);
-    let pilot_bits = bits(&pilot);
-    let expected_pilot_bits = bits(&expected_pilot);
-    assert_eq!(pilot_bits, expected_pilot_bits, "the pilot table");
 
     sync(&client).expect("the device syncs");
 }

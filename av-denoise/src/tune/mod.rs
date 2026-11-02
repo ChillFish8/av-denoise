@@ -38,7 +38,7 @@ pub use self::store::default_store_dir;
 use crate::backend::selected_client;
 pub use crate::backend::selected_device;
 use crate::cache::kernel_cache_hook;
-use crate::planar::{FrameLayout, PlanarDenoiser, PlaneOptions, Planes, plane_specs};
+use crate::planar::{FrameLayout, PlanarDenoiser, PlaneOptions, Planes, plane_spec};
 
 /// The tuning config for `options`, with the default budget.
 ///
@@ -107,6 +107,7 @@ pub fn is_tuned(options: &PlaneOptions, layout: FrameLayout) -> bool {
         return true;
     };
 
-    let specs = plane_specs(options, layout);
+    let spec = plane_spec(options, layout);
+    let specs = [spec];
     av_denoise_core::tune::is_tuned(&device, &client, &specs, &config)
 }

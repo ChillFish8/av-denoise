@@ -16,7 +16,7 @@ use super::helpers::{
     textured_base,
 };
 use crate::bench_api::HostIo;
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     collab_normalise,
@@ -33,7 +33,7 @@ use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::noisy_field_over;
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, NlmParams};
 use crate::noise::tests::{CollabNoise, collab_noise_buffer};
-use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS};
 
 #[test]
 fn denoises_a_static_noisy_clip() {
@@ -319,7 +319,7 @@ fn flush_emits_exactly_the_pushed_frame_count() {
     );
 }
 
-/// Every output of a fresh luma denoiser with the noise map and psy over `frames`.
+/// Every output of a fresh luma denoiser with the noise map over `frames`.
 fn ramp_outputs(frames: &[Vec<f32>]) -> Vec<Vec<f32>> {
     let client = make_client();
     let params = ramp_params(ChannelMode::Luma, true, 1.0);
@@ -402,7 +402,6 @@ fn run_spatial_only(
         sigma: &sigma_values,
         weight_scale: weight_norm,
         curve_valid: false,
-        map_mode: STRENGTH_MAP_OFF,
     };
     let noise_buf = collab_noise_buffer(client, noise_values);
 
@@ -415,11 +414,6 @@ fn run_spatial_only(
     let curve_bytes = f32::as_bytes(&zeroed_curve);
     let zero_curve = client.create_from_slice(curve_bytes);
 
-    let (map_cols, map_rows) = strength_map_dims(width, height);
-    let map_len = (map_cols * map_rows) as usize;
-    let unit_map = vec![1.0f32; map_len];
-    let unit_map_bytes = f32::as_bytes(&unit_map);
-    let unit_map_buf = client.create_from_slice(unit_map_bytes);
     let accum = client.empty(frame_len * size_of::<i32>());
     let wsum = client.empty(pixels * size_of::<i32>());
     let output = client.empty(frame_len * size_of::<f32>());
@@ -465,8 +459,9 @@ fn run_spatial_only(
             BufferArg::from_raw_parts(conf_dummy, 1),
             BufferArg::from_raw_parts(neighbour_slots_dummy, 1),
             BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
-            BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-            BufferArg::from_raw_parts(unit_map_buf, map_len),
+            BufferArg::from_raw_parts(zero_curve.clone(), NOISE_CURVE_BINS),
+            BufferArg::from_raw_parts(zero_curve.clone(), 1),
+            BufferArg::from_raw_parts(zero_curve, 1),
             BufferArg::from_raw_parts(dct_profile_buf, 8),
             BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             BufferArg::from_raw_parts(accum.clone(), frame_len),
@@ -476,6 +471,8 @@ fn run_spatial_only(
             c_min,
             lambda_ht,
             ACCUM_SCALE,
+            0.0f32,
+            0u32,
             false,
             0u32,
             grid_frame_count,
@@ -492,8 +489,6 @@ fn run_spatial_only(
             k_max,
             spatial_radius,
             refs_x,
-            map_cols,
-            map_rows,
             0.0f32,
             false,
             variant,
@@ -658,7 +653,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
             sigma: &sigma,
             weight_scale: weight_norm,
             curve_valid: false,
-            map_mode: STRENGTH_MAP_OFF,
         };
         let noise_buf = collab_noise_buffer(&client, noise_values);
 
@@ -671,11 +665,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
         let curve_bytes = f32::as_bytes(&zeroed_curve);
         let zero_curve = client.create_from_slice(curve_bytes);
 
-        let (map_cols, map_rows) = strength_map_dims(width, height);
-        let map_len = (map_cols * map_rows) as usize;
-        let unit_map = vec![1.0f32; map_len];
-        let unit_map_bytes = f32::as_bytes(&unit_map);
-        let unit_map_buf = client.create_from_slice(unit_map_bytes);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, radius);
 
         let group_weight = client.empty(refs * size_of::<f32>());
@@ -718,8 +707,9 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 BufferArg::from_raw_parts(view.confidence.clone(), conf_len.max(1)),
                 BufferArg::from_raw_parts(neighbour_slots_buf, view.neighbour_slots.len().max(1)),
                 BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
-                BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-                BufferArg::from_raw_parts(unit_map_buf, map_len),
+                BufferArg::from_raw_parts(zero_curve.clone(), NOISE_CURVE_BINS),
+                BufferArg::from_raw_parts(zero_curve.clone(), 1),
+                BufferArg::from_raw_parts(zero_curve, 1),
                 BufferArg::from_raw_parts(profile_buf, 8),
                 BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
                 BufferArg::from_raw_parts(accum.clone(), pixels * total_frames as usize),
@@ -729,6 +719,8 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 C_MIN,
                 LAMBDA_HT,
                 accum_scale,
+                0.0f32,
+                0u32,
                 false,
                 radius,
                 grid_frame_count,
@@ -745,8 +737,6 @@ fn cross_frame_aggregation_beats_centre_only_at_the_same_lambda() {
                 k_max,
                 SPATIAL_RADIUS,
                 refs_x,
-                map_cols,
-                map_rows,
                 0.0f32,
                 false,
                 variant,
@@ -852,7 +842,7 @@ fn motion_snapshot_reports_the_field_the_pass_used() {
 /// With `field_lambda` on, the snapshot shows the flat block pulled to its neighbours' vector.
 /// With it off, the snapshot shows the estimator's field.
 #[test]
-fn field_regularisation_reaches_the_snapshot() {
+fn the_truemotion_stage_reaches_the_snapshot() {
     let client = make_client();
     let (width, height) = (128u32, 96u32);
     let radius = 1u32;
@@ -909,7 +899,7 @@ fn field_regularisation_reaches_the_snapshot() {
     );
     assert_eq!(on.vectors[forward_neighbour][flat_block], [3, 0]);
 
-    // A textured block is unchanged by the pass.
+    // A textured block is unchanged by the truemotion stage.
     let textured_block = (2 * off.blocks_x + 2) as usize;
     assert_eq!(off.vectors[forward_neighbour][textured_block], [3, 0]);
     assert_eq!(on.vectors[forward_neighbour][textured_block], [3, 0]);
@@ -919,7 +909,7 @@ fn field_regularisation_reaches_the_snapshot() {
 /// synthesise a single plane.
 ///
 /// The other tests here pin `field_lambda` to 0.0 so their recorded values stay stable, while the
-/// shipped default of 1.0 runs the field-regularisation pass.
+/// shipped default of 1.0 runs the truemotion stage with its penalty on.
 fn shipped_default_params() -> Nl4dParams {
     let defaults = Nl4dParams::default();
     let nlm = NlmParams {
@@ -937,13 +927,13 @@ fn shipped_default_params() -> Nl4dParams {
 
 /// Runs the shipped defaults over a clean static clip, then a noisy one.
 ///
-/// A static clip's true motion is zero everywhere, so the regularised field must read exactly zero
+/// A static clip's true motion is zero everywhere, so the tracked field must read exactly zero
 /// at an interior block. A dispatch that read the wrong pyramid slot, neighbour or stride would
 /// pull in a mismatched vector. The clean clip has no noise, because the estimator's noise-driven
 /// wobble would mask that small displacement. The noisy clip must then gain at least 6 dB, since a
 /// corrupt field would feed grouping the wrong candidates.
 #[test]
-fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
+fn shipped_defaults_denoise_a_static_clip_and_track_its_field_as_zero() {
     let client = make_client();
     let (width, height) = (96u32, 96u32);
     let base = textured_base(width, height);
@@ -967,9 +957,9 @@ fn shipped_defaults_denoise_a_static_clip_and_regularise_its_field_to_zero() {
         assert_eq!(
             snapshot.vectors[neighbour][interior_block],
             [0, 0],
-            "neighbour k={k}: a static, noiseless clip's regularised field must read exactly \
+            "neighbour k={k}: a static, noiseless clip's tracked field must read exactly \
              zero at an interior block; a nonzero vector here is what a wrong pyramid slot, \
-             neighbour index, or stride in the smoothing dispatch looks like"
+             neighbour index, or stride in the truemotion stage looks like"
         );
     }
 

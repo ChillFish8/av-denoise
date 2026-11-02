@@ -7,16 +7,16 @@ use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, shapes_with_channel
 
 /// Matches `noise::TEMPORAL_NOISE_BLOCK`.
 const TEMPORAL_BLOCK: u32 = 16;
-/// The motion grid step of the compensated row.
+/// The motion grid step of the compensated rows.
 const MOTION_STEP: u32 = 8;
-/// The whole-pixel vector every motion block of the compensated row holds.
+/// The whole-pixel vector every motion block of the compensated rows holds.
 const MOTION_VECTOR: [i32; 2] = [3, -2];
 
 /// The temporal-residual noise-stats kernel over two 1080p ring slots.
 ///
 /// It diffs the slots and reduces every `16 × 16` block into its stats record. `luma_fields` and
 /// `compensated` pick which of the kernel's compiled variants this row times. Rows with
-/// `luma_fields` run on luma frames and the rest on chroma frames. The compensated row follows a
+/// `luma_fields` run on luma frames and the rest on chroma frames. The compensated rows follow a
 /// uniform [MOTION_VECTOR] field on a [MOTION_STEP] grid.
 pub struct TemporalNoiseStatsBench {
     pub client: Client,
@@ -44,10 +44,7 @@ fn mv_len() -> usize {
     (blocks_x * blocks_y * 2) as usize
 }
 
-/// The stats buffer length, one `noise::temporal_stats_record_len` record per block.
-///
-/// A record is a sum and a sum of squares per channel, the lag-1, texture and moved lanes,
-/// and four quarter records of nine fields each.
+/// The stats buffer length, with room for one `noise::temporal_stats_record_len` record per block.
 fn stats_len(channels: u32) -> usize {
     let (blocks_x, blocks_y) = blocks();
     (blocks_x * blocks_y * (2 * channels + 39)) as usize

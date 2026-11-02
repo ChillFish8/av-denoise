@@ -207,6 +207,7 @@ fn nl4d_motion_search_becomes_an_active_mvtools_mode() {
         blksize: 32,
         overlap: 16,
         search_radius: 6,
+        max_search_escalation: 6,
         pyramid_levels: 1,
         estimation: MotionEstimation::Direct,
     };
@@ -222,6 +223,7 @@ fn nl4d_motion_search_becomes_an_active_mvtools_mode() {
             blksize: 32,
             overlap: 16,
             search_radius: 6,
+            max_search_escalation: 6,
             pyramid_levels: 1,
             estimation: MotionEstimation::Direct,
         }

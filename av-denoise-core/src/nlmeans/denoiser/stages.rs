@@ -1,6 +1,7 @@
 use anyhow::Context;
 
 use super::NlmDenoiser;
+use super::seeds::PairSeeds;
 use crate::engine::timing::timed;
 use crate::motion::{self, MotionEstimation, run_pyramid_build};
 use crate::nlmeans::prefilter::{PrefilterCtx, PrefilterMode, run_prefilter};
@@ -59,8 +60,12 @@ impl NlmDenoiser {
     }
 
     /// Builds the motion pyramids for `slot` on the input ring and, when present, the reference ring.
+    ///
+    /// A front that refines luma motion builds only the level its refine reads.
     pub(super) fn build_pyramids_for_slot(&self, slot: u32) -> Result<(), anyhow::Error> {
-        let Some(motion_ctx) = self.mc_ctx.as_ref() else {
+        let search_ctx = self.mc_ctx.as_ref();
+        let window_ctx = self.refine_ctx.as_ref().or(search_ctx);
+        let Some(motion_ctx) = window_ctx else {
             return Ok(());
         };
 
@@ -140,25 +145,17 @@ impl NlmDenoiser {
 
     /// Measures motion both ways between the slot just written and the one before it.
     ///
-    /// The result goes into the pair ring. A stream's first frame has no older partner and is
-    /// skipped, so composition reads the priming duplicate's zeroed pair instead.
+    /// Each direction also searches around the pair's camera model prediction. The result goes
+    /// into the pair ring. A stream's first frame has no older partner and is skipped, so
+    /// composition reads the priming duplicate's zeroed pair instead.
     fn run_pair_analyse_for_slot(&self, newer_slot: u32) -> Result<(), anyhow::Error> {
         if self.ring_head == 0 {
             return Ok(());
         }
 
-        let Some(motion_ctx) = self.mc_ctx.as_ref() else {
+        let (Some(motion_ctx), Some(pair_ring)) = (self.mc_ctx.as_ref(), self.pair_ring_buf.as_ref()) else {
             return Ok(());
         };
-
-        if !self.is_chained() {
-            return Ok(());
-        }
-
-        let pair_ring = self
-            .pair_ring_buf
-            .as_ref()
-            .expect("pair_ring allocated when Chained is active");
 
         // Match against the cleaner of the two pyramids.
         let pyramid = self.pyramid_reference.as_ref().unwrap_or_else(|| {
@@ -170,7 +167,14 @@ impl NlmDenoiser {
         let total_frames = self.params.total_frames();
         let older_slot = (newer_slot + total_frames - 1) % total_frames;
         let pair_slot = self.pair_slot(0);
-        let noise = self.derived_handle();
+        let older_frame = self.slot_frame(older_slot);
+        let newer_frame = self.slot_frame(newer_slot);
+        let seeds = self.compose_pair_seeds(older_frame, newer_frame, true);
+        let predictions = seeds.as_ref().and_then(PairSeeds::both_ways);
+        let noise = match seeds.as_ref() {
+            Some(seeds) => seeds.noise.clone(),
+            None => self.derived_handle(),
+        };
 
         motion::run_pair_analyse(
             &self.client,
@@ -186,24 +190,20 @@ impl NlmDenoiser {
             pair_ring,
             &self.confidence_dummy,
             &noise,
+            predictions,
+            self.escalation_buf.as_ref(),
+            self.truemotion_targets(false),
+            self.search_thsad(motion_ctx),
         )
         .context("pair analyse dispatch failed")
     }
 
     /// Zeroes the pair-ring slot of a duplicated frame.
     pub(super) fn zero_pair_slot_for_duplicate(&self) {
-        let Some(motion_ctx) = self.mc_ctx.as_ref() else {
+        let (Some(motion_ctx), Some(pair_ring)) = (self.mc_ctx.as_ref(), self.pair_ring_buf.as_ref()) else {
             return;
         };
 
-        if !self.is_chained() {
-            return;
-        }
-
-        let pair_ring = self
-            .pair_ring_buf
-            .as_ref()
-            .expect("pair_ring allocated when Chained is active");
         let pair_slot = self.pair_slot(0);
         motion::zero_pair_slot(&self.client, motion_ctx, pair_ring, pair_slot);
     }

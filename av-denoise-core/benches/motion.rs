@@ -9,10 +9,26 @@ mod kernels;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use av_denoise_core::bench_api::tune_sites::RegulariseCandidate;
-use av_denoise_core::bench_api::{Device, HostIo, NlmDenoiser, NlmParams, start_read, wait_read};
+use av_denoise_core::bench_api::motion::{DEFAULT_MAX_SEARCH_ESCALATION, PairModelProducer};
+use av_denoise_core::bench_api::tune_sites::TruemotionCandidate;
+use av_denoise_core::bench_api::{
+    ChannelMode,
+    Device,
+    HostIo,
+    NlmDenoiser,
+    NlmParams,
+    start_read,
+    wait_read,
+};
 use av_denoise_core::tune::SiteCandidate;
-use av_denoise_core::{ChannelMode, MotionCompensationMode, MotionEstimation, PrefilterMode, testing};
+use av_denoise_core::{
+    DevicePlane,
+    MotionCompensationMode,
+    MotionEstimation,
+    PrefilterMode,
+    SampleFormat,
+    testing,
+};
 use clap::Parser;
 use cubecl::prelude::*;
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
@@ -20,7 +36,7 @@ use kernels::mc_block_match_fine::BlockMatchFineBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
 use kernels::mc_warp::WarpBench;
-use kernels::mv_regularise::MvRegulariseBench;
+use kernels::mv_truemotion::MvTruemotionBench;
 use kernels::{BENCH_NEIGHBOURS, CHANNELS, make_synthetic_frame, print_header, run};
 
 const WIDTH: u32 = 1920;
@@ -30,6 +46,12 @@ const WARMUP_PIPELINE: usize = 2;
 const ITERS_PIPELINE: usize = 200;
 
 const TEMPORAL_RADIUS: u32 = 1;
+
+/// The producer bench's model ring depth.
+const PRODUCER_RING_DEPTH: u32 = 8;
+
+/// The pan between the producer bench's two frames, in pixels.
+const PRODUCER_PAN: usize = 6;
 
 struct BenchResult {
     name: String,
@@ -115,6 +137,7 @@ fn mc_default() -> MotionCompensationMode {
         blksize: 16,
         overlap: 8,
         search_radius: 4,
+        max_search_escalation: DEFAULT_MAX_SEARCH_ESCALATION,
         pyramid_levels: 2,
         estimation: MotionEstimation::Direct,
     }
@@ -126,6 +149,7 @@ fn mc_chained_default() -> MotionCompensationMode {
         blksize: 16,
         overlap: 8,
         search_radius: 4,
+        max_search_escalation: DEFAULT_MAX_SEARCH_ESCALATION,
         pyramid_levels: 2,
         estimation: MotionEstimation::chained_default(),
     }
@@ -215,6 +239,60 @@ fn bench_pipelined(
     result
 }
 
+/// `frame` moved right by [PRODUCER_PAN] pixels, repeating the left edge.
+fn panned(frame: &[f32]) -> Vec<f32> {
+    let width = WIDTH as usize;
+    let mut moved = Vec::with_capacity(frame.len());
+    for row in frame.chunks(width) {
+        for x in 0..width {
+            let source = x.saturating_sub(PRODUCER_PAN);
+            moved.push(row[source]);
+        }
+    }
+
+    moved
+}
+
+/// The camera model fit's cost per frame, the pyramid build, both matches and both fits.
+///
+/// Two frames a pan apart are pushed in turn, so every push fits a moving pair with a prior.
+fn bench_pair_model_producer(client: &Client, backend: &str) -> BenchResult {
+    let mode = mc_default();
+    let built = PairModelProducer::new(
+        client,
+        WIDTH,
+        HEIGHT,
+        &mode,
+        SampleFormat::F32,
+        PRODUCER_RING_DEPTH,
+    );
+    let mut producer = built.expect("a searching mode builds a producer");
+
+    let still = make_synthetic_frame(WIDTH, HEIGHT, 1);
+    let moved = panned(&still);
+    let still_bytes = f32::as_bytes(&still);
+    let moved_bytes = f32::as_bytes(&moved);
+    let handles = [
+        client.create_from_slice(still_bytes),
+        client.create_from_slice(moved_bytes),
+    ];
+    let mut frame = 0u32;
+
+    run_pipeline_bench(
+        "pair_model_producer_1080p",
+        backend,
+        client,
+        WARMUP_PIPELINE,
+        ITERS_PIPELINE,
+        || {
+            let handle = &handles[frame as usize % handles.len()];
+            let plane = DevicePlane::new(handle, WIDTH, HEIGHT);
+            producer.push(&plane, frame).unwrap();
+            frame += 1;
+        },
+    )
+}
+
 fn run_kernels(backend: &str, client: &Client) {
     println!();
     println!("--- {backend}: MC kernels ---");
@@ -225,14 +303,18 @@ fn run_kernels(backend: &str, client: &Client) {
     });
 
     for &neighbours in BENCH_NEIGHBOURS {
-        run(BlockMatchCoarseBench {
-            client: client.clone(),
-            neighbours,
-        });
-        run(BlockMatchFineBench {
-            client: client.clone(),
-            neighbours,
-        });
+        for model_candidate in [false, true] {
+            run(BlockMatchCoarseBench {
+                client: client.clone(),
+                neighbours,
+                model_candidate,
+            });
+            run(BlockMatchFineBench {
+                client: client.clone(),
+                neighbours,
+                model_candidate,
+            });
+        }
         run(McConfidenceBench {
             client: client.clone(),
             neighbours,
@@ -240,8 +322,8 @@ fn run_kernels(backend: &str, client: &Client) {
     }
 
     for &neighbours in BENCH_NEIGHBOURS {
-        for &candidate in RegulariseCandidate::ALL {
-            run(MvRegulariseBench {
+        for &candidate in TruemotionCandidate::ALL {
+            run(MvTruemotionBench {
                 client: client.clone(),
                 candidate,
                 neighbours,
@@ -315,8 +397,18 @@ fn run_mc_estimation_comparison(backend: &str, client: &Client) {
     println!();
 }
 
+/// The per-frame cost of fitting the frame pair camera models.
+fn run_producer(backend: &str, client: &Client) {
+    println!();
+    println!("--- {backend}: pair model producer ---");
+
+    let result = bench_pair_model_producer(client, backend);
+    result.print();
+}
+
 fn run_all(backend: &str, client: &Client) {
     run_kernels(backend, client);
+    run_producer(backend, client);
     run_pipelines(backend, client);
     run_mc_estimation_comparison(backend, client);
 }

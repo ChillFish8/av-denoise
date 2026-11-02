@@ -1,0 +1,575 @@
+use std::fmt::Debug;
+use std::ops::Range;
+
+use cubecl::prelude::*;
+use cubecl::server::Handle;
+
+use super::passthrough::PassthroughRing;
+use super::{
+    ChromaLayout,
+    DevicePlane,
+    Engine,
+    EngineTiming,
+    FramePass,
+    Geometry,
+    PassTimings,
+    PlaneSource,
+    WindowSpan,
+};
+use crate::error::Error;
+#[cfg(test)]
+use crate::motion::ModelRing;
+use crate::motion::{LumaMotionRing, PairModelProducer};
+use crate::nl4d::grain::GrainChunk;
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+use crate::noise::colour::ColourCells;
+use crate::noise::colour::{ColourBlocks, ColourGrid};
+
+/// The warning a stream of gray frames logs once, as it starts.
+pub(crate) const GRAY_WARNING: &str = "the source has no colour planes, so denoising may be less effective";
+
+/// The warning a stream of `geometry` frames logs as it starts, if any.
+pub(crate) fn stream_warning(geometry: &Geometry) -> Option<&'static str> {
+    let gray = geometry.chroma == ChromaLayout::Gray;
+    gray.then_some(GRAY_WARNING)
+}
+
+/// The luma plane or the chroma planes of a frame.
+#[derive(Debug, Clone, Copy)]
+enum PlaneGroup {
+    Luma,
+    Chroma,
+}
+
+impl PlaneGroup {
+    /// The indices of the group's planes in a frame of `layout`, empty for chroma on gray.
+    fn indices(self, layout: ChromaLayout) -> Range<usize> {
+        match self {
+            PlaneGroup::Luma => 0..1,
+            PlaneGroup::Chroma => 1..layout.plane_count(),
+        }
+    }
+}
+
+/// A frame's planes uploaded from a [PlaneSource] one group at a time, as the passes ask for them.
+struct StagedFrame<'s> {
+    source: &'s mut dyn PlaneSource,
+    geometry: Geometry,
+    luma: Option<Vec<Handle>>,
+    chroma: Option<Vec<Handle>>,
+}
+
+impl<'s> StagedFrame<'s> {
+    fn new(source: &'s mut dyn PlaneSource, geometry: Geometry) -> Self {
+        Self {
+            source,
+            geometry,
+            luma: None,
+            chroma: None,
+        }
+    }
+
+    /// The handles of `group`, uploaded on first use and checked against the geometry.
+    fn handles(&mut self, group: PlaneGroup) -> Result<&[Handle], Error> {
+        let indices = group.indices(self.geometry.chroma);
+        let slot = match group {
+            PlaneGroup::Luma => &mut self.luma,
+            PlaneGroup::Chroma => &mut self.chroma,
+        };
+
+        if slot.is_none() {
+            let uploaded = self.source.upload(indices.clone());
+            if uploaded.len() != indices.len() {
+                let message = format!("expected {} planes, got {}", indices.len(), uploaded.len());
+                return Err(Error::PlaneMismatch(message));
+            }
+
+            let planes = self.geometry.device_planes(indices.start, &uploaded);
+            let input = self.geometry.input;
+            self.geometry.check_plane_sizes(&planes, indices.start, input)?;
+
+            *slot = Some(uploaded);
+        }
+
+        let handles = slot.as_deref().expect("the group was just uploaded");
+        Ok(handles)
+    }
+}
+
+/// One engine over every plane of a frame, running a luma pass, a chroma pass, or both.
+///
+/// A plane group without a pass is held in a [PassthroughRing] under the stream frame it came in
+/// with, and written out when the cleaned pass emits that same frame. With a
+/// [PairModelProducer], every frame's luma plane is fitted into a camera model before the passes
+/// see the frame. With a [LumaMotionRing], the chroma pass refines the luma pass's motion instead
+/// of searching its own.
+///
+/// A chroma only run whose chroma pass compensates motion runs a luma pass that only guides it.
+/// That pass moves in lockstep with the chroma pass and writes nothing out, so luma passes through
+/// the ring and the guide's device time counts as chroma's.
+pub(crate) struct PlanarEngine {
+    geometry: Geometry,
+    /// The pass that cleans luma, or the guide pass of a chroma only run.
+    luma: Option<Box<dyn FramePass>>,
+    chroma: Option<Box<dyn FramePass>>,
+    producer: Option<PairModelProducer>,
+    /// Emptied only by [Engine::reset], since the luma pass restarts its stream before the chroma
+    /// pass runs its last pass of the old one.
+    luma_motion: Option<LumaMotionRing>,
+    /// The block means of each frame, measured from every plane before the passes see the frame.
+    colour: Option<ColourBlocks>,
+    passthrough: Option<PassthroughRing>,
+    /// Logged once at the start of each stream.
+    warning: Option<&'static str>,
+    /// Whether the current stream has taken a frame yet.
+    stream_started: bool,
+    poisoned: bool,
+}
+
+impl PlanarEngine {
+    /// Builds the engine around its passes, which the spec has validated.
+    ///
+    /// With `colour`, the pass that cleans luma and the chroma pass pool their grain per colour
+    /// cell. With `warns` set, a stream that needs a [stream_warning] logs it once, as it starts.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every argument is a part the spec built for the engine"
+    )]
+    pub(crate) fn new(
+        client: &Client,
+        geometry: Geometry,
+        luma: Option<Box<dyn FramePass>>,
+        chroma: Option<Box<dyn FramePass>>,
+        producer: Option<PairModelProducer>,
+        luma_motion: Option<LumaMotionRing>,
+        colour: Option<ColourBlocks>,
+        warns: bool,
+    ) -> Self {
+        let gray = geometry.chroma == ChromaLayout::Gray;
+        let warning = if warns { stream_warning(&geometry) } else { None };
+
+        let mut engine = Self {
+            geometry,
+            luma,
+            chroma,
+            producer,
+            luma_motion,
+            colour,
+            passthrough: None,
+            warning,
+            stream_started: false,
+            poisoned: false,
+        };
+
+        let passes_through = !gray && engine.cleans_luma() != engine.chroma.is_some();
+        if passes_through {
+            let ring = engine.passthrough_ring(client);
+            engine.passthrough = Some(ring);
+        }
+
+        engine.attach_colour();
+
+        engine
+    }
+
+    /// Hands each cleaning pass the block means of its own grid.
+    fn attach_colour(&mut self) {
+        let Some(colour) = self.colour.clone() else {
+            return;
+        };
+
+        let cleans_luma = self.cleans_luma();
+        let luma = self.luma.as_deref_mut().filter(|_| cleans_luma);
+        if let Some(pass) = luma {
+            let source = colour.source(ColourGrid::Luma);
+            pass.measure_colour(source);
+        }
+
+        if let Some(pass) = self.chroma.as_deref_mut() {
+            let source = colour.source(ColourGrid::Chroma);
+            pass.measure_colour(source);
+        }
+    }
+
+    /// Measures stream frame `frame`'s block means from its `planes`, when the passes pool colour
+    /// cells.
+    fn measure_colour(&self, planes: &[DevicePlane<'_>], frame: u32) {
+        let Some(colour) = self.colour.as_ref() else {
+            return;
+        };
+
+        colour.queue(planes, frame);
+    }
+
+    /// Uploads every plane of stream frame `frame` from `staged` and measures its block means, when
+    /// the passes pool colour cells.
+    fn measure_staged_colour(&self, frame: u32, staged: &mut StagedFrame<'_>) -> Result<(), Error> {
+        if self.colour.is_none() {
+            return Ok(());
+        }
+
+        let mut handles = staged.handles(PlaneGroup::Luma)?.to_vec();
+        let chroma = staged.handles(PlaneGroup::Chroma)?;
+        handles.extend_from_slice(chroma);
+
+        let planes = self.geometry.device_planes(0, &handles);
+        self.measure_colour(&planes, frame);
+
+        Ok(())
+    }
+
+    /// A ring for the uncleaned plane group, one slot longer than the cleaned pass holds frames.
+    fn passthrough_ring(&self, client: &Client) -> PassthroughRing {
+        let slots = self.lead().max_held_frames() + 1;
+        let (index, planes) = if self.cleans_luma() { (1, 2) } else { (0, 1) };
+        let (width, height) = self.geometry.plane_dims(index);
+        let pixels = u64::from(width) * u64::from(height);
+        let bytes = self.geometry.input.plane_bytes(pixels);
+
+        PassthroughRing::new(client, slots, planes, bytes)
+    }
+
+    /// The colour cells of the luma pass and of the chroma pass.
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub(crate) fn colour_cells_for_test(&self) -> [Option<&ColourCells>; 2] {
+        let luma = self.luma.as_deref();
+        let chroma = self.chroma.as_deref();
+
+        [luma, chroma].map(|pass| pass.and_then(|pass| pass.colour_cells_for_test()))
+    }
+
+    /// The log gain tables of the luma pass and of the chroma pass.
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub(crate) fn colour_gains_for_test(&self) -> [Option<&Handle>; 2] {
+        let luma = self.luma.as_deref();
+        let chroma = self.chroma.as_deref();
+
+        [luma, chroma].map(|pass| pass.and_then(|pass| pass.colour_gains_for_test()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn models(&self) -> Option<&ModelRing> {
+        let producer = self.producer.as_ref();
+        producer.map(|producer| producer.ring())
+    }
+
+    /// Fits stream frame `frame`'s camera model from its luma plane, when the engine fits models.
+    ///
+    /// A failure poisons the engine, since the ring may hold a partly written model.
+    fn fit_pair_model(&mut self, luma: &DevicePlane<'_>, frame: u32) -> Result<(), Error> {
+        let Some(producer) = self.producer.as_mut() else {
+            return Ok(());
+        };
+
+        let pushed = producer.push(luma, frame);
+        if let Err(error) = pushed {
+            self.poisoned = true;
+            return Err(Error::Gpu(error));
+        }
+
+        Ok(())
+    }
+
+    /// The first present pass, luma before chroma.
+    fn lead(&self) -> &dyn FramePass {
+        let luma = self.luma.as_deref();
+        let chroma = self.chroma.as_deref();
+        let pass = luma.or(chroma);
+        pass.expect("a validated spec has at least one pass")
+    }
+
+    /// Whether a luma pass cleans luma, rather than only guiding the chroma pass's motion.
+    fn cleans_luma(&self) -> bool {
+        let luma = self.luma.as_deref();
+        luma.is_some_and(|pass| !pass.guides_only())
+    }
+
+    /// The plane group no pass cleans.
+    fn uncleaned_group(&self) -> PlaneGroup {
+        if self.cleans_luma() {
+            PlaneGroup::Chroma
+        } else {
+            PlaneGroup::Luma
+        }
+    }
+
+    /// The planes of the group no pass cleans.
+    fn uncleaned<'p, 'a>(&self, planes: &'p [DevicePlane<'a>]) -> &'p [DevicePlane<'a>] {
+        let group = self.uncleaned_group();
+        let indices = group.indices(self.geometry.chroma);
+        &planes[indices]
+    }
+
+    /// Logs the stream's warning when this frame starts a new stream.
+    fn start_stream(&mut self) {
+        if self.stream_started {
+            return;
+        }
+
+        self.stream_started = true;
+        if let Some(warning) = self.warning {
+            tracing::warn!("{warning}");
+        }
+    }
+
+    fn check_usable(&self) -> Result<(), Error> {
+        if self.poisoned {
+            return Err(Error::NeedsReset);
+        }
+
+        Ok(())
+    }
+
+    /// Runs `call` on each pass in luma, chroma order, naming the plane group the pass cleans.
+    ///
+    /// The passes move in lockstep, so they must agree on the result. A failure after one pass
+    /// already moved, or a disagreement, poisons the engine.
+    fn forward<T, F>(&mut self, mut call: F) -> Result<T, Error>
+    where
+        T: PartialEq + Debug,
+        F: FnMut(&mut dyn FramePass, PlaneGroup) -> Result<T, Error>,
+    {
+        let passes = [
+            (self.luma.as_deref_mut(), PlaneGroup::Luma),
+            (self.chroma.as_deref_mut(), PlaneGroup::Chroma),
+        ];
+
+        let mut agreed: Option<T> = None;
+        let mut failure = None;
+        for (pass, group) in passes {
+            let Some(pass) = pass else {
+                continue;
+            };
+
+            let value = match call(pass, group) {
+                Ok(value) => value,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                },
+            };
+
+            match agreed.as_ref() {
+                Some(first) if *first != value => {
+                    let message = format!("the luma pass returned {first:?} but the chroma pass {value:?}");
+                    let error = anyhow::anyhow!(message);
+                    failure = Some(Error::Gpu(error));
+                    break;
+                },
+                _ => agreed = Some(value),
+            }
+        }
+
+        if let Some(error) = failure {
+            let partial = agreed.is_some();
+            if partial {
+                self.poisoned = true;
+            }
+
+            return Err(error);
+        }
+
+        let value = agreed.expect("a validated spec has at least one pass");
+        Ok(value)
+    }
+
+    /// Runs `call` on each pass with its own slice of `planes`.
+    fn forward_planes<T, F>(&mut self, planes: &[DevicePlane<'_>], mut call: F) -> Result<T, Error>
+    where
+        T: PartialEq + Debug,
+        F: FnMut(&mut dyn FramePass, &[DevicePlane<'_>]) -> Result<T, Error>,
+    {
+        let layout = self.geometry.chroma;
+
+        self.forward(|pass, group| {
+            let indices = group.indices(layout);
+            call(pass, &planes[indices])
+        })
+    }
+
+    /// Copies the uncleaned planes of stream frame `frame` into the ring.
+    fn store_uncleaned(&self, frame: u32, planes: &[DevicePlane<'_>]) {
+        let Some(ring) = self.passthrough.as_ref() else {
+            return;
+        };
+
+        let uncleaned = self.uncleaned(planes);
+        ring.store(frame, uncleaned);
+    }
+
+    /// Uploads the uncleaned group of stream frame `frame` from `staged` and copies it into the ring.
+    fn store_staged(&self, frame: u32, staged: &mut StagedFrame<'_>) -> Result<(), Error> {
+        let Some(ring) = self.passthrough.as_ref() else {
+            return Ok(());
+        };
+
+        let group = self.uncleaned_group();
+        let first = group.indices(self.geometry.chroma).start;
+        let handles = staged.handles(group)?;
+        let planes = self.geometry.device_planes(first, handles);
+        ring.store(frame, &planes);
+
+        Ok(())
+    }
+}
+
+impl Engine for PlanarEngine {
+    fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error> {
+        self.check_usable()?;
+        self.geometry.check_planes(planes, self.geometry.input)?;
+        self.start_stream();
+
+        let frame = self.lead().next_frame();
+        self.fit_pair_model(&planes[0], frame)?;
+        self.measure_colour(planes, frame);
+
+        let ready = self.forward_planes(planes, |pass, pass_planes| pass.push(pass_planes))?;
+        self.store_uncleaned(frame, planes);
+
+        Ok(ready)
+    }
+
+    fn push_from(&mut self, source: &mut dyn PlaneSource) -> Result<usize, Error> {
+        self.check_usable()?;
+        self.start_stream();
+
+        let frame = self.lead().next_frame();
+        let geometry = self.geometry;
+        let mut staged = StagedFrame::new(source, geometry);
+        if self.producer.is_some() {
+            let handles = staged.handles(PlaneGroup::Luma)?;
+            let planes = geometry.device_planes(0, handles);
+            self.fit_pair_model(&planes[0], frame)?;
+        }
+
+        self.measure_staged_colour(frame, &mut staged)?;
+
+        let ready = self.forward(|pass, group| {
+            let first = group.indices(geometry.chroma).start;
+            let handles = staged.handles(group)?;
+            let planes = geometry.device_planes(first, handles);
+            pass.push(&planes)
+        })?;
+
+        if let Err(error) = self.store_staged(frame, &mut staged) {
+            self.poisoned = true;
+            return Err(error);
+        }
+
+        Ok(ready)
+    }
+
+    fn push_context(&mut self, planes: &[DevicePlane<'_>]) -> Result<(), Error> {
+        self.check_usable()?;
+        self.geometry.check_planes(planes, self.geometry.input)?;
+        self.start_stream();
+
+        let frame = self.lead().next_frame();
+        self.fit_pair_model(&planes[0], frame)?;
+        self.measure_colour(planes, frame);
+
+        self.forward_planes(planes, |pass, pass_planes| pass.push_context(pass_planes))?;
+        self.store_uncleaned(frame, planes);
+
+        Ok(())
+    }
+
+    fn emit_into(&mut self, planes: &[DevicePlane<'_>]) -> Result<(), Error> {
+        self.check_usable()?;
+        self.geometry.check_planes(planes, self.geometry.output)?;
+
+        self.forward_planes(planes, |pass, pass_planes| pass.emit_into(pass_planes))?;
+
+        let Some(ring) = self.passthrough.as_ref() else {
+            return Ok(());
+        };
+
+        let lead = self.lead();
+        let frame = lead.emitted_frame();
+        let frame = frame.expect("a pass names the frame of every emit");
+        let newest = lead.next_frame();
+        let behind = newest.saturating_sub(frame) as usize;
+        debug_assert!(
+            behind <= ring.slots(),
+            "frame {frame} left the ring before its emit"
+        );
+
+        let uncleaned = self.uncleaned(planes);
+        ring.load(frame, uncleaned);
+
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<usize, Error> {
+        self.check_usable()?;
+        self.stream_started = false;
+
+        self.forward(|pass, _| pass.finish())
+    }
+
+    fn reset(&mut self) {
+        let passes = [self.luma.as_deref_mut(), self.chroma.as_deref_mut()];
+        for pass in passes.into_iter().flatten() {
+            pass.reset();
+        }
+
+        if let Some(producer) = self.producer.as_mut() {
+            producer.reset();
+        }
+
+        if let Some(ring) = self.luma_motion.as_ref() {
+            ring.clear();
+        }
+
+        if let Some(colour) = self.colour.as_ref() {
+            colour.clear();
+        }
+
+        self.stream_started = false;
+        self.poisoned = false;
+    }
+
+    fn window_span(&self) -> WindowSpan {
+        self.lead().window_span()
+    }
+
+    fn max_held_frames(&self) -> usize {
+        self.lead().max_held_frames()
+    }
+
+    fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, Error> {
+        self.check_usable()?;
+
+        let luma = self.luma.as_deref_mut();
+        let Some(luma) = luma.filter(|pass| !pass.guides_only()) else {
+            return Ok(Vec::new());
+        };
+
+        luma.drain_grain_chunks()
+    }
+
+    fn timing(&mut self) -> PassTimings {
+        let cleans_luma = self.cleans_luma();
+        let luma = self.luma.as_deref_mut().map(|pass| pass.timing());
+        let chroma = self.chroma.as_deref_mut().map(|pass| pass.timing());
+
+        let guide = luma.filter(|_| !cleans_luma);
+        let Some(guide) = guide else {
+            return PassTimings { luma, chroma };
+        };
+
+        let chroma = chroma.map(|timing| EngineTiming {
+            device_time: timing.device_time + guide.device_time,
+            ..timing
+        });
+
+        PassTimings { luma: None, chroma }
+    }
+
+    fn sample_device_time(&mut self, every: u32) {
+        let passes = [self.luma.as_deref_mut(), self.chroma.as_deref_mut()];
+        for pass in passes.into_iter().flatten() {
+            pass.sample_device_time(every);
+        }
+    }
+}

@@ -3,6 +3,7 @@ mod motion;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
+pub(super) use self::motion::MAPPED_REFINE_RADIUS;
 pub(crate) use self::motion::mc_sad_noise_floor_sigma;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(super) use self::motion::{BILATERAL_RESIDUAL_FRACTION, NLM_SPATIAL_RESIDUAL_FRACTION};
@@ -621,21 +622,29 @@ impl NlmDenoiser {
     }
 
     /// Queues every denoise kernel for the current window, in device spans when sampled.
+    ///
+    /// A front that only guides stops after the noise estimate and the window's motion.
     pub(super) fn run_denoise_kernels(&mut self, output_slot: usize) -> Result<(), anyhow::Error> {
         let center_t = self.params.temporal_radius;
         let client = self.client.clone();
 
-        // Only the motion and confidence launches read the table, and the upload comes before
+        // Only the motion and confidence launches read the tables, and the uploads come before
         // their first dispatch because an upload ends a device span's timed pass.
         if self.mc_ctx.is_some() || self.confidence_ctx.is_some() {
             let neighbour_slots = self.window_neighbour_slots(center_t);
             self.update_neighbour_slots(&neighbour_slots);
         }
 
+        self.update_window_seeds(center_t);
+
         // The look-ahead has read every frame the window reaches, so the fold runs first and both
         // confidence scores read this centre's own derived values.
         if self.noise.is_measured() {
             self.update_noise_estimate(center_t)?;
+        }
+
+        if self.guides_only {
+            return self.run_motion_machinery(center_t);
         }
 
         // Both run before any NLM dispatch so the temporal kernels read aligned neighbours.

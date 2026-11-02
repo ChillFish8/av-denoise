@@ -92,6 +92,13 @@ def nl4d_renders_and_preserves_clip_properties():
 
 
 @test
+def nl4d_keeps_the_source_chroma_location():
+    src = core.std.SetFrameProps(synthetic_clip(), _ChromaLocation=2)
+    out = core.avd.NL4D(src)
+    assert out.get_frame(4).props["_ChromaLocation"] == 2
+
+
+@test
 def synthetic_clip_content_is_independent_of_request_order():
     forward = synthetic_clip()
     shuffled = synthetic_clip()

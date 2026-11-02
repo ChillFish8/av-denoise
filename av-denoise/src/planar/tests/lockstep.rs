@@ -1,10 +1,10 @@
 use super::*;
 use crate::{Algorithm, DenoisingMode};
 
-/// Runs `luma` and `chroma` as two real `HostDenoiser`s in spatial mode.
+/// Cleans luma and chroma in spatial mode.
 ///
 /// Spatial mode passes a uniform-valued plane through unchanged, so each plane can carry its own
-/// marker value and the two halves drifting apart shows up.
+/// marker value and the two plane groups drifting apart shows up.
 fn luma_chroma_options() -> PlaneOptions {
     PlaneOptions {
         accelerators: vec![crate::testing::test_accelerator()],
@@ -44,6 +44,7 @@ fn distinct_u_and_v_planes_come_back_in_order() {
         height: 16,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let options = luma_chroma_options();
     let mut denoiser = PlanarDenoiser::create(&options, layout).expect("denoiser construction failed");
@@ -76,6 +77,7 @@ fn queue_full_retries_never_desync_luma_and_chroma() {
         height: 16,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let options = luma_chroma_options();
     let mut denoiser = PlanarDenoiser::create(&options, layout).expect("denoiser construction failed");
@@ -137,6 +139,7 @@ fn a_wrong_length_u_plane_is_rejected_without_advancing_either_half() {
         height: 16,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let options = luma_chroma_options();
     let mut denoiser = PlanarDenoiser::create(&options, layout).expect("denoiser construction failed");

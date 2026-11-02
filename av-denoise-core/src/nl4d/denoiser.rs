@@ -4,18 +4,19 @@ use cubecl::server::Handle;
 use super::grain::{GrainChunk, GrainExport, GrainGeometry};
 use super::params::Nl4dParams;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
-use crate::collab::geometry::{ref_count, strength_map_dims};
+use crate::collab::geometry::ref_count;
 use crate::collab::kernels::aggregate::{collab_normalise, cross_frame_accum_scale, kaiser_window};
 use crate::collab::kernels::fused::MEMBER_WORDS;
 use crate::collab::kernels::transforms::{RECIPROCAL_FLOOR, dct_noise_profile};
 use crate::collab::{MAX_K, PATCH_SIZE, needs_warp_uniform_search, supports_f16_search};
 use crate::engine::timing::{DeviceTimed, DeviceTimer, timed};
 use crate::engine::{DevicePlane, EngineTiming, SampleFormat};
+use crate::motion::SharedMotion;
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, PrefilterMode, RingView};
+use crate::noise::NoiseConsumer;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::noise::NoiseSnapshot;
-use crate::noise::{NoiseConsumer, StrengthMapKind, StrengthMapParams};
 use crate::tune::{KernelSelector, PipelineProfile, check_plane_size};
 
 /// Which accumulator regions a pass zeroes before scattering.
@@ -67,6 +68,9 @@ pub struct Nl4dDenoiser {
     pub(super) refine: u32,
     pub(super) spatial_radius: u32,
     pub(super) lambda_ht: f32,
+    /// Whether the thresholds scale by the colour gains the front fits, which the luma noise map
+    /// turns on for luma and chroma always takes.
+    pub(super) colour_gains: bool,
     pub(super) c_min: f32,
     pub(super) k_max: u32,
     /// Whether candidate distances read the f16 search ring.
@@ -108,27 +112,29 @@ pub struct Nl4dDenoiser {
     stream_start: StreamStart,
     /// The field buffers the last pass handed the fused kernel.
     pub(super) last_fields: Option<LastFields>,
-    pub(super) field_lambda: f32,
-    /// The regularised motion field, allocated only when `field_lambda > 0.0`.
-    pub(super) reg_mv: Option<Handle>,
-    pub(super) reg_conf: Option<Handle>,
-    pub(super) map_cols: u32,
-    pub(super) map_rows: u32,
     /// Present only when grain export is on.
     grain: Option<GrainExport>,
+    /// Whether the passes run only the front's motion and noise machinery and scatter nothing.
+    pub(super) guides_only: bool,
 }
 
 /// The element count of every geometry-sized buffer [Nl4dDenoiser::new] allocates beyond its frame rings.
 ///
 /// The front end is sized at the grouping radius, as `new` sets it. `accum` holds as many elements
-/// as the frame ring, `wsum`, `outputs` and `group_weight` hold fewer, and `reg_mv` and `reg_conf`
-/// match the front end's motion field and confidence. The grain's saved vectors span one more frame
-/// than the motion field, so they are counted here.
-pub(crate) fn buffer_sizes(client: &Client, params: &Nl4dParams, width: u32, height: u32) -> Vec<BufferSize> {
+/// as the frame ring, and `wsum`, `outputs` and `group_weight` hold fewer. The grain's saved vectors
+/// span one more frame than the motion field, so they are counted here. With `reads_luma_motion`,
+/// the front end is sized as one that refines luma motion.
+pub(crate) fn buffer_sizes(
+    client: &Client,
+    params: &Nl4dParams,
+    width: u32,
+    height: u32,
+    reads_luma_motion: bool,
+) -> Vec<BufferSize> {
     let mut nlm_params = params.nlm.clone();
     nlm_params.temporal_radius = params.temporal_radius;
 
-    let front = front_buffer_sizes(client, &nlm_params, width, height);
+    let front = front_buffer_sizes(client, &nlm_params, width, height, reads_luma_motion);
     let mut buffers = front.buffers;
 
     let exports_grain = params.grain_export && nlm_params.channels != ChannelMode::Chroma;
@@ -151,7 +157,7 @@ impl Nl4dDenoiser {
     /// Builds the denoiser, rejecting invalid `params` and frames smaller than one patch.
     pub fn new(client: &Client, params: Nl4dParams, width: u32, height: u32) -> Result<Self, String> {
         let kernels = KernelSelector::baseline(client);
-        Self::with_kernels(client, params, width, height, kernels)
+        Self::with_kernels(client, params, width, height, kernels, false)
     }
 
     /// [Nl4dDenoiser::new] with each launch site's candidate picked through `kernels`.
@@ -160,12 +166,17 @@ impl Nl4dDenoiser {
     /// the f16 search keep the f16 search ring off. The
     /// [SplitSearch](crate::tune::PipelineProfile::SplitSearch) profile runs the collab search and
     /// filter as two launches. A device with planes narrower than 8 lanes is an error.
+    ///
+    /// With `guides_only`, every pass runs only the front's motion and noise machinery. The passes
+    /// still count towards the regions they complete, so the denoiser keeps its emit order. It then
+    /// allocates no filter buffers, f16 search ring, grain export or luma noise map.
     pub fn with_kernels(
         client: &Client,
         mut params: Nl4dParams,
         width: u32,
         height: u32,
         kernels: KernelSelector,
+        guides_only: bool,
     ) -> Result<Self, String> {
         params.validate()?;
 
@@ -189,38 +200,18 @@ impl Nl4dDenoiser {
         let nlm_params = params.nlm.clone();
         let front_kernels = kernels.clone();
         let mut front = NlmDenoiser::with_kernels(client, nlm_params, width, height, front_kernels);
+        if guides_only {
+            front.set_guides_only();
+        }
 
+        // Only the filter reads the luma noise map, so a guide skips it.
         let channels = params.nlm.channels;
-        let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma;
-        let psy = params.psy.filter(|_| params.noise_map);
-        let luma_psy = psy.filter(|_| channels != ChannelMode::Chroma);
-        let chroma_psy = psy.filter(|_| channels == ChannelMode::Chroma);
-
-        let luma_map = luma_psy
-            .map(|psy| StrengthMapParams {
-                flat_boost: psy.flat_boost,
-                shadow_soften: psy.shadow_soften,
-            })
-            .filter(|map| !map.is_identity());
-        let chroma_map_boost = chroma_psy
-            .map(|psy| psy.chroma_flat_boost)
-            .filter(|&boost| boost != 1.0);
-        front.set_luma_noise_fields(apply_noise_map || chroma_map_boost.is_some());
-
-        let texture_cut = luma_psy.map(|psy| psy.flat_texture_cut).filter(|&cut| cut < 1.0);
-        front.set_flat_texture_cut(texture_cut);
-
-        let line_ring = luma_psy.map(|psy| psy.line_ring);
-        front.set_line_ring(line_ring);
-
-        let strength_map = match (luma_map, chroma_map_boost) {
-            (Some(map), _) => StrengthMapKind::Luma(map),
-            (None, Some(flat_boost)) => StrengthMapKind::Chroma { flat_boost },
-            (None, None) => StrengthMapKind::Off,
-        };
-        front.set_strength_map(strength_map);
+        let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma && !guides_only;
+        front.set_luma_noise_fields(apply_noise_map);
+        let colour_gains = apply_noise_map || channels == ChannelMode::Chroma;
 
         front.set_shifted_edges(true);
+        front.set_field_lambda(params.field_lambda);
 
         // Only the NLM pilot reads an offset table on this front.
         let pilot_prefilter = matches!(params.nlm.prefilter, PrefilterMode::NlmSpatial { .. });
@@ -229,7 +220,7 @@ impl Nl4dDenoiser {
         let profile_allows_f16 = kernels.profile() != PipelineProfile::F32Search;
         let legality = *kernels.legality();
         let device_supports_f16 = supports_f16_search(client);
-        let f16_search = device_supports_f16 && profile_allows_f16 && legality.f16_search;
+        let f16_search = device_supports_f16 && profile_allows_f16 && legality.f16_search && !guides_only;
         if f16_search {
             front.enable_search_ring();
         }
@@ -243,11 +234,15 @@ impl Nl4dDenoiser {
         let pixels = (width * height) as usize;
         let frame_len = pixels * channel_count as usize;
 
-        let group_weight = client.empty(refs * size_of::<f32>());
+        // A guide never runs the filter, so its filter buffers are 4-byte placeholders.
+        let filter_bytes = |bytes: usize| if guides_only { 4 } else { bytes };
+
+        let group_weight_bytes = filter_bytes(refs * size_of::<f32>());
+        let group_weight = client.empty(group_weight_bytes);
 
         // The search writes every live reference's words before the filter reads them, so the
         // member buffer needs no clearing.
-        let split_search = kernels.profile() == PipelineProfile::SplitSearch;
+        let split_search = kernels.profile() == PipelineProfile::SplitSearch && !guides_only;
         let members = split_search.then(|| {
             let member_bytes = refs * MEMBER_WORDS as usize * size_of::<u32>();
             client.empty(member_bytes)
@@ -271,33 +266,17 @@ impl Nl4dDenoiser {
         let kaiser_bytes = f32::as_bytes(&kaiser_taps);
         let kaiser_buf = client.create_from_slice(kaiser_bytes);
 
-        let (map_cols, map_rows) = strength_map_dims(width, height);
-
         // `client.empty` memory is not zeroed, so a stream's first pass zeroes the whole ring.
         let ring_frames = 1 + 2 * params.temporal_radius;
         let (accum_len, wsum_len) = accumulator_lens(pixels, channel_count, ring_frames);
-        let accum = client.empty(accum_len * size_of::<i32>());
-        let wsum = client.empty(wsum_len * size_of::<i32>());
-        let outputs = [
-            client.empty(frame_len * size_of::<f32>()),
-            client.empty(frame_len * size_of::<f32>()),
-        ];
+        let accum_bytes = filter_bytes(accum_len * size_of::<i32>());
+        let wsum_bytes = filter_bytes(wsum_len * size_of::<i32>());
+        let output_bytes = filter_bytes(frame_len * size_of::<f32>());
+        let accum = client.empty(accum_bytes);
+        let wsum = client.empty(wsum_bytes);
+        let outputs = [client.empty(output_bytes), client.empty(output_bytes)];
 
-        // `motion_ctx()` panics without motion compensation, which `validate` already requires.
-        let (reg_mv, reg_conf) = if params.field_lambda > 0.0 {
-            let motion_ctx = front.motion_ctx();
-            let neighbours = 2 * params.temporal_radius as u64;
-            let mv_bytes = neighbours * motion_ctx.mv_field_bytes_per_neighbour();
-            let conf_bytes = neighbours * motion_ctx.confidence_bytes_per_neighbour();
-            let reg_mv = client.empty(mv_bytes as usize);
-            let reg_conf = client.empty(conf_bytes as usize);
-
-            (Some(reg_mv), Some(reg_conf))
-        } else {
-            (None, None)
-        };
-
-        let exports_grain = params.grain_export && channels != ChannelMode::Chroma;
+        let exports_grain = params.grain_export && channels != ChannelMode::Chroma && !guides_only;
         let grain = if exports_grain {
             let motion_ctx = front.motion_ctx();
             let geometry = GrainGeometry {
@@ -327,6 +306,7 @@ impl Nl4dDenoiser {
             refine: params.refine,
             spatial_radius: params.spatial_radius,
             lambda_ht: params.lambda_ht,
+            colour_gains,
             c_min: params.c_min,
             k_max,
             f16_search,
@@ -347,12 +327,8 @@ impl Nl4dDenoiser {
             passes_run: 0,
             stream_start: StreamStart::SceneStart,
             last_fields: None,
-            field_lambda: params.field_lambda,
-            reg_mv,
-            reg_conf,
-            map_cols,
-            map_rows,
             grain,
+            guides_only,
         })
     }
 
@@ -456,6 +432,15 @@ impl Nl4dDenoiser {
         if self.passes_run == 0 {
             self.stream_start = StreamStart::Continuation;
         }
+    }
+
+    /// Starts every motion search from the camera models in `motion`, before the first push.
+    pub(crate) fn set_shared_motion(&mut self, motion: SharedMotion) {
+        self.front.set_shared_motion(motion);
+    }
+
+    pub(crate) fn guides_only(&self) -> bool {
+        self.guides_only
     }
 
     /// Runs the front end's motion and noise machinery for a pass centred on logical position `centre`.

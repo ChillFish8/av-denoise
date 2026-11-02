@@ -43,13 +43,15 @@ jobs:
           components: clippy
 
       # nasm builds av-scenechange's assembly and clang backs ffms2-sys's bindgen.
-      # vapoursynth-sys ships pregenerated bindings and loads VapourSynth through
-      # libloading, so av-denoise-vs needs nothing installed.
+      # ffmpeg-sys-the-third finds libavformat, libavcodec and libavutil through
+      # pkg-config. vapoursynth-sys ships pregenerated bindings and loads VapourSynth
+      # through libloading, so av-denoise-vs needs nothing installed.
       - name: Install build dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends nasm clang libclang-dev libffms2-dev
+          sudo apt-get install -y --no-install-recommends nasm clang libclang-dev pkg-config \
+            libffms2-dev libavformat-dev libavcodec-dev libavutil-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2

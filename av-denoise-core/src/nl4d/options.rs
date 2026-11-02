@@ -1,9 +1,8 @@
 use super::Nl4dParams;
-use super::psy::PsyParams;
 use crate::error::Error;
 use crate::nlmeans::{ChannelMode, HqParams, MotionSearch, NlmParams};
 
-/// Settings for [Nl4d](crate::Nl4d).
+/// Settings for the nl4d denoiser.
 ///
 /// The HQ front end runs only for its frame ring, motion field and noise estimate, so no NLM
 /// weighting knobs appear here. Motion tracking is always on, because the grouping kernel reads
@@ -30,8 +29,8 @@ pub struct Nl4dOptions {
     pub spatial_radius: u32,
     /// Hard-threshold multiplier on the propagated coefficient sigma.
     ///
-    /// Higher removes more noise and more fine detail. `None` resolves per plane through
-    /// [nl4d_default_lambda_ht].
+    /// Higher removes more noise and more fine detail. `None` resolves per plane to the plane's own
+    /// default.
     pub lambda_ht: Option<f32>,
     /// A multiplier on the resolved `lambda_ht`, in `0.1..=10.0`. Defaults to 1.0.
     ///
@@ -53,8 +52,6 @@ pub struct Nl4dOptions {
     pub field_lambda: f32,
     /// See [Nl4dParams::noise_map](crate::nl4d::Nl4dParams::noise_map).
     pub noise_map: bool,
-    /// See [Nl4dParams::psy](crate::nl4d::Nl4dParams::psy).
-    pub psy: Option<PsyParams>,
     /// See [Nl4dParams::pooled_threshold](crate::nl4d::Nl4dParams::pooled_threshold).
     pub pooled_threshold: bool,
     /// Whether the denoiser measures the source's film grain for an AV1 grain table.
@@ -84,7 +81,6 @@ impl Default for Nl4dOptions {
             kaiser_beta: defaults.kaiser_beta,
             field_lambda: defaults.field_lambda,
             noise_map: defaults.noise_map,
-            psy: defaults.psy,
             pooled_threshold: defaults.pooled_threshold,
             grain_export: defaults.grain_export,
             temporal_radius: 2,
@@ -99,7 +95,7 @@ impl Default for Nl4dOptions {
 ///
 /// The values were picked by eye on real film grain, accepting some lost detail for less remaining
 /// noise on heavy grain. Encoders lose more detail to leftover grain than the denoiser does.
-pub fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
+pub(crate) fn nl4d_default_lambda_ht(channels: ChannelMode) -> f32 {
     match channels {
         ChannelMode::Luma => 4.158,
         ChannelMode::Chroma => 3.234,
@@ -180,7 +176,6 @@ pub(crate) fn resolve_params(options: &Nl4dOptions, channels: ChannelMode) -> Re
         kaiser_beta: options.kaiser_beta,
         field_lambda: options.field_lambda,
         noise_map: options.noise_map,
-        psy: options.psy,
         pooled_threshold: options.pooled_threshold,
         grain_export: options.grain_export,
     })

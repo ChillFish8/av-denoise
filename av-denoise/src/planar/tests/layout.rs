@@ -6,6 +6,7 @@ fn layout(depth: Depth) -> FrameLayout {
         height: 4,
         subsampling: Subsampling::Yuv420,
         depth,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 
@@ -33,13 +34,4 @@ fn neutral_chroma_fill_is_correct_at_each_depth() {
     let twelve = layout(Depth::Twelve).neutral_chroma_plane();
     assert_eq!(twelve.len(), 8);
     assert_eq!(&twelve[0..2], &[0x00, 0x08]);
-}
-
-#[test]
-fn black_luma_fill_is_zero_at_the_right_length() {
-    let eight = layout(Depth::Eight).black_luma_plane();
-    let ten = layout(Depth::Ten).black_luma_plane();
-
-    assert_eq!(eight, vec![0u8; 16]);
-    assert_eq!(ten, vec![0u8; 32]);
 }

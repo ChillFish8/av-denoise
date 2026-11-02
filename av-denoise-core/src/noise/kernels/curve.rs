@@ -3,7 +3,7 @@ use cubecl::prelude::*;
 use super::sample::{median_from_pair, static_quarter_sigma};
 use super::select::{order_key, resolve_queries, select_result};
 use crate::noise::curve::{CLIP_HIGH, CLIP_LOW, FLAT_FACTOR, FLAT_FLOOR, NOISE_CURVE_BINS};
-use crate::noise::reading::{SAMPLE_QUERIES, SAMPLE_TAGS};
+use crate::noise::reading::{sample_query_count, sample_tags};
 use crate::noise::select::{SELECT_CUBE_THREADS, SELECT_SLOT_WORDS, UNTAGGED};
 use crate::noise::state::BLOCK_ACCEPTED;
 use crate::noise::temporal::{
@@ -56,10 +56,12 @@ pub fn noise_curve_bins(
     let quarters = comptime!(blocks * TEMPORAL_QUARTERS);
     let record_len = comptime!(temporal_stats_record_len(channels));
     let quarters_base = comptime!(2 * channels + TEMPORAL_QUARTER_BASE);
+    let sample_tag_count = comptime!(sample_tags(channels));
+    let sample_queries = comptime!(sample_query_count(channels));
 
     let thread = UNIT_POS_X;
     let mut wanted = Shared::<[u32]>::new_slice(SIGMA_MEDIAN_QUERIES as usize);
-    let mut out = Shared::<[u32]>::new_slice(comptime!(SAMPLE_QUERIES * SELECT_SLOT_WORDS) as usize);
+    let mut out = Shared::<[u32]>::new_slice(comptime!(sample_queries * SELECT_SLOT_WORDS) as usize);
 
     if thread < SIGMA_MEDIAN_QUERIES {
         wanted[thread as usize] = thread;
@@ -77,8 +79,8 @@ pub fn noise_curve_bins(
         SIGMA_MEDIAN_QUERIES,
         2u32,
         &mut out,
-        SAMPLE_TAGS,
-        SAMPLE_QUERIES,
+        sample_tag_count,
+        sample_queries,
         SELECT_CUBE_THREADS,
     );
 

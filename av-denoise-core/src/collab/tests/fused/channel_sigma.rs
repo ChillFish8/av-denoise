@@ -21,7 +21,7 @@ fn with_sigmas(setup: &Setup, sigmas: Vec<f32>) -> Setup {
         mv_field: setup.mv_field.clone(),
         confidence: setup.confidence.clone(),
         neighbour_slots: setup.neighbour_slots.clone(),
-        strength_map: setup.strength_map.clone(),
+        colour: setup.colour.clone(),
         ..*setup
     }
 }

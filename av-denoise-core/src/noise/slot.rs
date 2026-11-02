@@ -3,14 +3,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NOISE_BLOCK_1D;
-use super::kernels::{
-    noise_block_accept,
-    noise_block_derive,
-    noise_classify,
-    noise_curve_bins,
-    noise_sample_finish,
-    noise_strength_map,
-};
+use super::kernels::{noise_block_accept, noise_block_derive, noise_curve_bins, noise_sample_finish};
 use super::reading::READING_WORDS;
 use super::select::{
     SELECT_CUBE_THREADS,
@@ -26,16 +19,7 @@ use super::spatial::{
     partials_len,
     run_noise_estimate,
 };
-use super::state::{
-    BLOCK_FIELDS,
-    NoiseState,
-    QUARTER_TENSOR_WORDS,
-    StrengthMapKind,
-    block_count,
-    cube_count,
-    quarter_count,
-    quarter_grid,
-};
+use super::state::{BLOCK_FIELDS, NoiseState, block_count, cube_count};
 use super::temporal::{
     StatsMotion,
     TemporalStatsCtx,
@@ -44,7 +28,6 @@ use super::temporal::{
     temporal_stats_slot_view,
     zero_temporal_stats_slot,
 };
-use crate::collab::geometry::strength_map_dims;
 use crate::tune::gpu::bind;
 
 impl NoiseState {
@@ -172,9 +155,8 @@ impl NoiseState {
     ///
     /// With temporal stats that is block derive, the immerkaer batch, block accept, the sample batch
     /// and the finish, 9 launches. The luma quarter fields add curve bins and the curve batch before
-    /// the finish, 13 launches, and a strength map adds the classes and the map after it, 15
-    /// launches. Without temporal stats it is block derive, the immerkaer batch and the finish, 5
-    /// launches. A state that holds fixed values queues nothing.
+    /// the finish, 13 launches. Without temporal stats it is block derive, the immerkaer batch and
+    /// the finish, 5 launches. A state that holds fixed values queues nothing.
     pub(crate) fn queue_reading(&self, slot: u32) -> Result<u32, anyhow::Error> {
         let stages = [
             self.queue_block_derive(slot),
@@ -184,8 +166,6 @@ impl NoiseState {
             self.queue_curve_bins(slot),
             self.queue_curve_batch(),
             self.queue_sample_finish(slot),
-            self.queue_classify(slot),
-            self.queue_strength_map(slot),
         ];
 
         Ok(stages.iter().sum())
@@ -422,102 +402,10 @@ impl NoiseState {
                 measurement.min_accepted,
                 immerkaer.tag_count(),
                 immerkaer.query_count(),
+                shape.channels,
                 shape.temporal,
                 measurement.curve.is_some(),
                 threads,
-            );
-        }
-
-        1
-    }
-
-    /// Queues the class of every map quarter of `slot`, with a curve batch and a strength map.
-    ///
-    /// A state that holds fixed values queues nothing.
-    pub(crate) fn queue_classify(&self, slot: u32) -> u32 {
-        let Some(measurement) = self.measurement.as_ref() else {
-            return 0;
-        };
-
-        let (Some(scratch), Some(_)) = (measurement.classes.as_ref(), measurement.curve.as_ref()) else {
-            return 0;
-        };
-
-        let shape = self.shape;
-        let grid = quarter_grid(shape);
-        let quarters = quarter_count(shape) as usize;
-        let tensor_words = quarters * QUARTER_TENSOR_WORDS as usize;
-        let (records, records_len) = self.records_view(slot).expect("a curve implies temporal stats");
-        let readings_len = (shape.frames * READING_WORDS) as usize;
-
-        unsafe {
-            noise_classify::launch_unchecked(
-                &self.client,
-                CubeCount::new_1d(grid),
-                CubeDim::new_1d(NOISE_BLOCK_1D),
-                BufferArg::from_raw_parts(records, records_len),
-                bind(&measurement.readings, readings_len),
-                bind(&scratch.classes, quarters),
-                bind(&scratch.lumas, quarters),
-                bind(&scratch.tensors, tensor_words),
-                slot,
-                shape.width,
-                shape.height,
-                shape.channels,
-            );
-        }
-
-        1
-    }
-
-    /// Queues the strength map of `slot` from its quarter classes, with a curve batch and a
-    /// strength map.
-    ///
-    /// A state that holds fixed values queues nothing.
-    pub(crate) fn queue_strength_map(&self, slot: u32) -> u32 {
-        let Some(measurement) = self.measurement.as_ref() else {
-            return 0;
-        };
-
-        let (Some(scratch), Some(_)) = (measurement.classes.as_ref(), measurement.curve.as_ref()) else {
-            return 0;
-        };
-
-        let (luma_map, flat_boost, shadow_soften) = match self.settings.reading.map {
-            StrengthMapKind::Luma(params) => (true, params.flat_boost, params.shadow_soften),
-            StrengthMapKind::Chroma { flat_boost } => (false, flat_boost, 1.0),
-            StrengthMapKind::Off => return 0,
-        };
-
-        let shape = self.shape;
-        let quarter = self.settings.reading.quarter;
-        let (cols, rows) = strength_map_dims(shape.width, shape.height);
-        let grid = quarter_grid(shape);
-        let quarters = quarter_count(shape) as usize;
-        let tensor_words = quarters * QUARTER_TENSOR_WORDS as usize;
-        let maps_len = quarters * shape.frames as usize;
-        let readings_len = (shape.frames * READING_WORDS) as usize;
-        let texture_cut = quarter.texture_cut.unwrap_or(1.0);
-        let ring_radius = quarter.line_ring.unwrap_or(0) as u32;
-
-        unsafe {
-            noise_strength_map::launch_unchecked(
-                &self.client,
-                CubeCount::new_1d(grid),
-                CubeDim::new_1d(NOISE_BLOCK_1D),
-                bind(&measurement.readings, readings_len),
-                bind(&scratch.classes, quarters),
-                bind(&scratch.lumas, quarters),
-                bind(&scratch.tensors, tensor_words),
-                bind(&scratch.slot_maps, maps_len),
-                slot,
-                flat_boost,
-                shadow_soften,
-                texture_cut,
-                luma_map,
-                ring_radius,
-                cols,
-                rows,
             );
         }
 
@@ -543,7 +431,7 @@ impl NoiseState {
     }
 
     /// The records of `slot` with their length in words.
-    fn records_view(&self, slot: u32) -> Option<(Handle, usize)> {
+    pub(super) fn records_view(&self, slot: u32) -> Option<(Handle, usize)> {
         let measurement = self.measurement();
         let shape = self.shape;
         let stats_buf = measurement.stats.as_ref()?;

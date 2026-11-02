@@ -8,15 +8,15 @@ use super::temporal::TemporalNoiseSample;
 
 /// The per-channel lower quartile of the Immerkær cube sigmas, one word per channel.
 pub(crate) const READING_IMMERKAER_LOW: u32 = 0;
-/// 1.0 when the slot has a temporal sample, else 0.0.
-pub(crate) const READING_SAMPLE_VALID: u32 = READING_IMMERKAER_LOW + NOISE_CHANNELS;
+/// 1.0 when the slot has a temporal sample of a channel, else 0.0, one word per channel.
+pub(crate) const READING_SAMPLE_VALID_BASE: u32 = READING_IMMERKAER_LOW + NOISE_CHANNELS;
 /// The sample's per-channel median sigma, one word per channel.
-pub(crate) const READING_SIGMA: u32 = READING_SAMPLE_VALID + 1;
+pub(crate) const READING_SIGMA: u32 = READING_SAMPLE_VALID_BASE + NOISE_CHANNELS;
 /// The sample's per-channel lower-quartile sigma, one word per channel.
 pub(crate) const READING_SIGMA_LOW: u32 = READING_SIGMA + NOISE_CHANNELS;
-/// The sample's median lag-1 correlation.
+/// The sample's median lag-1 correlation, 0.0 without a sample of channel 0.
 pub(crate) const READING_RHO: u32 = READING_SIGMA_LOW + NOISE_CHANNELS;
-/// The sample's fraction of accepted blocks.
+/// The sample's fraction of accepted blocks, 0.0 without a sample of channel 0.
 pub(crate) const READING_STATIC_FRACTION: u32 = READING_RHO + 1;
 /// How many blocks were accepted as static noise.
 pub(crate) const READING_ACCEPTED: u32 = READING_STATIC_FRACTION + 1;
@@ -33,7 +33,8 @@ pub(crate) const READING_WORDS: u32 = READING_RATIOS + NOISE_CURVE_BINS as u32;
 
 /// One slot's reading as a readback sees it.
 ///
-/// Flags read as 0.0 or 1.0 and counts as exact `f32` values.
+/// Flags read as 0.0 or 1.0 and counts as exact `f32` values. The sample is present when any
+/// channel has one.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReadingRecord {
@@ -51,8 +52,11 @@ impl ReadingRecord {
         assert_eq!(word_count, READING_WORDS as usize, "one reading's words");
 
         let immerkaer_low = channel_words(words, READING_IMMERKAER_LOW);
-        let sample_valid = words[READING_SAMPLE_VALID as usize] != 0.0;
-        let sample = sample_valid.then(|| TemporalNoiseSample {
+        let valid_words = channel_words(words, READING_SAMPLE_VALID_BASE);
+        let valid = valid_words.map(|word| word != 0.0);
+        let sampled = valid.contains(&true);
+        let sample = sampled.then(|| TemporalNoiseSample {
+            valid,
             sigma: channel_words(words, READING_SIGMA),
             sigma_low: channel_words(words, READING_SIGMA_LOW),
             rho: words[READING_RHO as usize],
@@ -88,7 +92,8 @@ impl ReadingRecord {
         set_channel_words(&mut words, READING_IMMERKAER_LOW, self.immerkaer_low);
 
         if let Some(sample) = self.sample {
-            words[READING_SAMPLE_VALID as usize] = 1.0;
+            let valid = sample.valid.map(|valid| if valid { 1.0 } else { 0.0 });
+            set_channel_words(&mut words, READING_SAMPLE_VALID_BASE, valid);
             set_channel_words(&mut words, READING_SIGMA, sample.sigma);
             set_channel_words(&mut words, READING_SIGMA_LOW, sample.sigma_low);
             words[READING_RHO as usize] = sample.rho;
@@ -152,53 +157,98 @@ pub(crate) const IMMERKAER_CHANNEL_QUERIES: u32 = IMMERKAER_CHANNEL_RULES.len() 
 /// The sample batch's queries per channel.
 pub(crate) const SAMPLE_CHANNEL_QUERIES: u32 = SAMPLE_CHANNEL_RULES.len() as u32;
 
-/// The immerkaer batch tag of a candidate block above the measurable-noise gate.
-pub(crate) const TAG_REFERENCE: u32 = NOISE_CHANNELS;
-/// The immerkaer batch tag of a candidate block at or below the measurable-noise gate.
-pub(crate) const TAG_EXCLUDED: u32 = TAG_REFERENCE + 1;
-/// The immerkaer batch tag of a moved candidate block's texture, above the measurable-noise gate.
-pub(crate) const TAG_MOVED_TEXTURE: u32 = TAG_EXCLUDED + 1;
-/// The immerkaer batch's tags with temporal stats, one per channel and the three block sets.
-pub(crate) const IMMERKAER_TAGS: u32 = TAG_MOVED_TEXTURE + 1;
+/// The immerkaer batch tags each channel's block sets take, its reference set then its excluded set.
+pub(crate) const BLOCK_SET_TAGS: u32 = 2;
+/// The immerkaer batch tag of channel 0's candidate blocks above the measurable-noise gate.
+///
+/// Channel `c`'s tag is `BLOCK_SET_TAGS * c` past it.
+pub(crate) const TAG_REFERENCE_BASE: u32 = NOISE_CHANNELS;
+/// The immerkaer batch tag of channel 0's candidate blocks at or below the measurable-noise gate.
+///
+/// Channel `c`'s tag is `BLOCK_SET_TAGS * c` past it.
+pub(crate) const TAG_EXCLUDED_BASE: u32 = TAG_REFERENCE_BASE + 1;
 /// The immerkaer batch's tags without temporal stats, one per channel.
 pub(crate) const IMMERKAER_SPATIAL_TAGS: u32 = NOISE_CHANNELS;
-/// The query of the reference set's lower quartile floor, followed by its ceiling, its first and
+/// The immerkaer batch's queries each channel's block sets take, the reference rules then the
+/// excluded set's first.
+pub(crate) const BLOCK_SET_QUERIES: u32 = REFERENCE_RULES.len() as u32 + 1;
+/// The query of channel 0's reference lower quartile floor, followed by its ceiling, its first and
 /// its last element.
-pub(crate) const IMMERKAER_QUERY_REFERENCE: u32 = NOISE_CHANNELS * IMMERKAER_CHANNEL_QUERIES;
-/// The query whose count says how many candidates the reference set left out.
-pub(crate) const IMMERKAER_QUERY_EXCLUDED: u32 = IMMERKAER_QUERY_REFERENCE + REFERENCE_RULES.len() as u32;
-/// The query of the moved blocks' texture threshold.
-pub(crate) const IMMERKAER_QUERY_TEXTURE: u32 = IMMERKAER_QUERY_EXCLUDED + 1;
+///
+/// Channel `c`'s queries start `BLOCK_SET_QUERIES * c` past it.
+pub(crate) const IMMERKAER_QUERY_REFERENCE_BASE: u32 = NOISE_CHANNELS * IMMERKAER_CHANNEL_QUERIES;
+/// The query whose count says how many of channel 0's candidates its reference set left out.
+///
+/// Channel `c`'s query is `BLOCK_SET_QUERIES * c` past it.
+pub(crate) const IMMERKAER_QUERY_EXCLUDED_BASE: u32 =
+    IMMERKAER_QUERY_REFERENCE_BASE + REFERENCE_RULES.len() as u32;
+
+/// The immerkaer batch tag of a moved candidate block's channel-0 texture, after each channel's
+/// block sets.
+///
+/// Channel `c`'s tag is `c` past it.
+pub(crate) const fn tag_moved_texture(channels: u32) -> u32 {
+    TAG_REFERENCE_BASE + BLOCK_SET_TAGS * channels
+}
+
+/// The immerkaer batch's tags with temporal stats, one per channel, each channel's block sets and
+/// each channel's moved texture set.
+pub(crate) const fn immerkaer_tags(channels: u32) -> u32 {
+    tag_moved_texture(channels) + channels
+}
+
+/// The query of channel 0's moved texture threshold, after each channel's block set queries.
+///
+/// Channel `c`'s query is `c` past it.
+pub(crate) const fn immerkaer_query_texture(channels: u32) -> u32 {
+    IMMERKAER_QUERY_REFERENCE_BASE + BLOCK_SET_QUERIES * channels
+}
+
 /// The immerkaer batch's queries with temporal stats.
-pub(crate) const IMMERKAER_QUERIES: u32 = IMMERKAER_QUERY_TEXTURE + 1;
+pub(crate) const fn immerkaer_query_count(channels: u32) -> u32 {
+    immerkaer_query_texture(channels) + channels
+}
 
 /// The sample batch tag of an accepted block's clamped correlation.
 pub(crate) const TAG_RHO: u32 = NOISE_CHANNELS;
 /// The sample batch tag of a static quarter's sigma.
 pub(crate) const TAG_QUARTER: u32 = TAG_RHO + 1;
-/// The sample batch tag every accepted block joins, so its count is the accepted count.
+/// The sample batch tag every block channel 0 accepts joins, so its count is the accepted count.
+///
+/// Channel `c`'s tag is `c` past it.
 pub(crate) const TAG_ACCEPTED: u32 = TAG_QUARTER + 1;
-/// The sample batch's tags, one per channel, the correlation, the quarters and the accepted blocks.
-pub(crate) const SAMPLE_TAGS: u32 = TAG_ACCEPTED + 1;
 /// The query of the correlation's lower median, followed by its upper median.
 pub(crate) const SAMPLE_QUERY_RHO: u32 = NOISE_CHANNELS * SAMPLE_CHANNEL_QUERIES;
 /// The query of the static quarters' lower median, followed by its upper median.
 pub(crate) const SAMPLE_QUERY_QUARTER: u32 = SAMPLE_QUERY_RHO + MEDIAN_RULES.len() as u32;
-/// The query whose count says how many blocks were accepted.
+/// The query whose count says how many blocks channel 0 accepted.
+///
+/// Channel `c`'s query is `c` past it.
 pub(crate) const SAMPLE_QUERY_ACCEPTED: u32 = SAMPLE_QUERY_QUARTER + MEDIAN_RULES.len() as u32;
+
+/// The sample batch's tags, one per channel, the correlation, the quarters and each channel's
+/// accepted blocks.
+pub(crate) const fn sample_tags(channels: u32) -> u32 {
+    TAG_ACCEPTED + channels
+}
+
 /// The sample batch's queries.
-pub(crate) const SAMPLE_QUERIES: u32 = SAMPLE_QUERY_ACCEPTED + 1;
+pub(crate) const fn sample_query_count(channels: u32) -> u32 {
+    SAMPLE_QUERY_ACCEPTED + channels
+}
 
 /// The curve batch's tags, one per luma bin.
 pub(crate) const CURVE_TAGS: u32 = NOISE_CURVE_BINS as u32;
 /// The curve batch's queries, a median pair per bin.
 pub(crate) const CURVE_QUERIES: u32 = 2 * CURVE_TAGS;
 
-/// The immerkaer batch's queries, a quartile pair per channel and, with temporal stats, the
-/// reference set's quartile pair, first and last element, the excluded set's first, then the moved
-/// texture set's 40th percentile.
-pub(crate) fn immerkaer_queries(temporal: bool) -> Vec<SelectQuery> {
-    let mut queries = Vec::with_capacity(IMMERKAER_QUERIES as usize);
+/// The immerkaer batch's queries, a quartile pair per channel and, with temporal stats, each active
+/// channel's block set queries, then each active channel's moved texture set's 40th percentile.
+///
+/// A channel's block set queries are its reference set's quartile pair, first and last element,
+/// then its excluded set's first.
+pub(crate) fn immerkaer_queries(temporal: bool, channels: u32) -> Vec<SelectQuery> {
+    let mut queries = Vec::with_capacity(immerkaer_query_count(channels) as usize);
 
     for tag in 0..NOISE_CHANNELS {
         for rule in IMMERKAER_CHANNEL_RULES {
@@ -210,29 +260,34 @@ pub(crate) fn immerkaer_queries(temporal: bool) -> Vec<SelectQuery> {
         return queries;
     }
 
-    for rule in REFERENCE_RULES {
+    for channel in 0..channels {
+        let reference = TAG_REFERENCE_BASE + BLOCK_SET_TAGS * channel;
+        let excluded = TAG_EXCLUDED_BASE + BLOCK_SET_TAGS * channel;
+
+        for rule in REFERENCE_RULES {
+            queries.push(SelectQuery { tag: reference, rule });
+        }
+
         queries.push(SelectQuery {
-            tag: TAG_REFERENCE,
-            rule,
+            tag: excluded,
+            rule: RankRule::First,
         });
     }
 
-    queries.push(SelectQuery {
-        tag: TAG_EXCLUDED,
-        rule: RankRule::First,
-    });
-    queries.push(SelectQuery {
-        tag: TAG_MOVED_TEXTURE,
-        rule: RankRule::TextureShare,
-    });
+    for channel in 0..channels {
+        queries.push(SelectQuery {
+            tag: tag_moved_texture(channels) + channel,
+            rule: RankRule::TextureShare,
+        });
+    }
 
     queries
 }
 
 /// The sample batch's queries, a median pair and a quartile pair per channel, the median pairs of
-/// the correlation and the quarters, then the accepted set's first.
-pub(crate) fn sample_queries() -> Vec<SelectQuery> {
-    let mut queries = Vec::with_capacity(SAMPLE_QUERIES as usize);
+/// the correlation and the quarters, then each active channel's accepted set's first.
+pub(crate) fn sample_queries(channels: u32) -> Vec<SelectQuery> {
+    let mut queries = Vec::with_capacity(sample_query_count(channels) as usize);
 
     for tag in 0..NOISE_CHANNELS {
         for rule in SAMPLE_CHANNEL_RULES {
@@ -246,10 +301,12 @@ pub(crate) fn sample_queries() -> Vec<SelectQuery> {
         }
     }
 
-    queries.push(SelectQuery {
-        tag: TAG_ACCEPTED,
-        rule: RankRule::First,
-    });
+    for channel in 0..channels {
+        queries.push(SelectQuery {
+            tag: TAG_ACCEPTED + channel,
+            rule: RankRule::First,
+        });
+    }
 
     queries
 }

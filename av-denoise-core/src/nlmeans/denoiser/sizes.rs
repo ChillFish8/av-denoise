@@ -4,6 +4,7 @@ use super::LOOKAHEAD_FRAMES;
 use super::noise::measured_noise_shape;
 pub(crate) use crate::engine::BufferSize;
 use crate::engine::align::StorageAlign;
+use crate::motion::kernels::STATE_SECTIONS;
 use crate::motion::{self, MotionCtx, MotionEstimation};
 use crate::nlmeans::params::NlmParams;
 use crate::noise::{
@@ -59,12 +60,19 @@ fn pyramid_ring(width: u32, height: u32, levels: u32, align: StorageAlign, slots
 /// other than the frame rings.
 ///
 /// It also counts the noise buffers only the reading setters allocate, which are far smaller than
-/// the frame ring.
+/// the frame ring. With `reads_luma_motion`, the motion buffers are those a front that refines luma
+/// motion keeps.
 ///
 /// Each count repeats its allocation's formula in checked `u64`. The geometry must have passed
-/// [Geometry::check_ring_fits](crate::engine::Geometry::check_ring_fits) for the frame ring, which
+/// [PassGeometry::check_ring_fits](crate::engine::PassGeometry::check_ring_fits) for the frame ring, which
 /// keeps the pixel count within `u32` so the shared size helpers called here cannot overflow.
-pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32, height: u32) -> FrontSizes {
+pub(crate) fn front_buffer_sizes(
+    client: &Client,
+    params: &NlmParams,
+    width: u32,
+    height: u32,
+    reads_luma_motion: bool,
+) -> FrontSizes {
     let align = StorageAlign::from_client(client);
     let channels = params.channels.count();
     let total_frames = u64::from(params.total_frames());
@@ -112,17 +120,39 @@ pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32
 
     let motion_blocks = mc_ctx.as_ref().and_then(block_count);
 
+    let searches = !reads_luma_motion;
+
     if let Some(motion_ctx) = mc_ctx.as_ref() {
+        // A front that refines luma motion keeps only the full-resolution level of its pyramids.
+        let levels = if searches { motion_ctx.pyramid_levels } else { 1 };
+
         let field_len = times(motion_blocks, 2);
         let field_bytes = padded_slot_bytes(field_len, align);
         let field = slot_ring(field_bytes, neighbours);
         buffers.push(("motion field", field));
 
-        let pyramid = pyramid_ring(width, height, motion_ctx.pyramid_levels, align, total_frames);
+        if searches {
+            buffers.push(("truemotion seeds", field));
+            buffers.push(("truemotion field", field));
+
+            let flag_bytes = padded_slot_bytes(motion_blocks, align);
+            let flags = slot_ring(flag_bytes, 2 * neighbours);
+            buffers.push(("truemotion changes", flags));
+        }
+
+        let pyramid = pyramid_ring(width, height, levels, align, total_frames);
         buffers.push(("motion pyramid ring", pyramid));
 
+        if searches && motion_ctx.schedule.escalates() {
+            let conf_bytes = padded_slot_bytes(motion_blocks, align);
+            let conf_stride = conf_bytes.map(|bytes| bytes / ELEMENT_BYTES);
+            let sections = u64::from(STATE_SECTIONS);
+            let section_values = times(conf_stride, sections * neighbours);
+            let state = section_values.and_then(|values| values.checked_add(1));
+            buffers.push(("motion escalation state", state));
+        }
+
         if noise_shape.is_some() {
-            let levels = motion_ctx.pyramid_levels;
             let lookahead_pyramid = pyramid_ring(width, height, levels, align, lookahead_frames);
             buffers.push(("look-ahead pyramid ring", lookahead_pyramid));
 
@@ -136,7 +166,7 @@ pub(crate) fn front_buffer_sizes(client: &Client, params: &NlmParams, width: u32
         .motion_compensation
         .resolved_estimation(params.temporal_radius);
     let is_chained = matches!(estimation, Some(MotionEstimation::Chained { .. }));
-    if is_chained && mc_ctx.is_some() {
+    if searches && is_chained && mc_ctx.is_some() {
         let direction_len = times(motion_blocks, 2);
         let direction_bytes = padded_slot_bytes(direction_len, align);
         let slot_bytes = times(direction_bytes, 2);

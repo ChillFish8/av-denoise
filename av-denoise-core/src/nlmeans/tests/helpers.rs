@@ -15,7 +15,6 @@ use crate::nlmeans::{
 use crate::noise::tests::read_temporal_stats_slot;
 use crate::noise::{
     NOISE_CHANNELS,
-    QuarterSettings,
     TemporalStatsCtx,
     run_temporal_noise_stats,
     temporal_noise_reading,
@@ -374,8 +373,7 @@ pub(crate) fn raw_reading_sigma(
         align,
     )
     .expect("the records read back");
-    let settings = QuarterSettings::default();
-    let reading = temporal_noise_reading(&records, channels, width, height, false, settings);
+    let reading = temporal_noise_reading(&records, channels, width, height, false);
 
     reading.sample.map(|sample| sample.sigma)
 }

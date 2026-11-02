@@ -2,8 +2,9 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
-use super::analyse::{MatchTargets, run_analyse};
+use super::analyse::{Escalation, MatchTargets, run_analyse};
 use super::kernels::mc_pair_zero;
+use super::truemotion::TruemotionTargets;
 use crate::engine::{BLOCK_1D, MAX_GRID_1D};
 use crate::noise::DERIVED_SAD_FLOOR;
 
@@ -24,7 +25,11 @@ pub(crate) fn pair_byte_offset(motion_ctx: &MotionCtx, pair_slot: u32, direction
 /// `older_slot` and `newer_slot` are physical input-ring slots, and `slot_tables` holds one
 /// single-slot table per ring slot. Nothing reads confidence at the pair level, so both directions
 /// turn it off and target `confidence_dummy`, and `noise` is bound only to fill the kernel's
-/// derived noise values.
+/// derived noise values. With `predictions`, each direction also searches around its camera model
+/// prediction, older to newer first. With `escalation`, blocks that fail search again as
+/// [run_analyse] describes, judged with `thsad`, and the two directions share the state one after
+/// the other. With `truemotion`, each direction ends with the truemotion stage, which shares its
+/// buffers the same way and keeps the unscaled penalty.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -43,7 +48,25 @@ pub(crate) fn run_pair_analyse(
     pair_ring: &Handle,
     confidence_dummy: &Handle,
     noise: &Handle,
+    predictions: Option<[&Handle; 2]>,
+    escalation: Option<&Handle>,
+    truemotion: Option<TruemotionTargets<'_>>,
+    thsad: f32,
 ) -> Result<(), anyhow::Error> {
+    // The pair searches score against zeroed or stale noise, so they measure their own floor.
+    let escalation = escalation.map(|state| Escalation {
+        state,
+        reads_floor: false,
+    });
+    let truemotion = truemotion.map(|stage| TruemotionTargets {
+        reads_floor: false,
+        ..stage
+    });
+    let (older_to_newer_predictions, newer_to_older_predictions) = match predictions {
+        Some([older_to_newer, newer_to_older]) => (Some(older_to_newer), Some(newer_to_older)),
+        None => (None, None),
+    };
+
     let direction_len = motion_ctx.pair_direction_len() as usize;
 
     let older_to_newer_offset = pair_byte_offset(motion_ctx, pair_slot, 0);
@@ -59,6 +82,10 @@ pub(crate) fn run_pair_analyse(
         confidence: confidence_dummy,
         conf_len: 1,
         write_confidence: false,
+        predictions: older_to_newer_predictions,
+        sad: None,
+        escalation,
+        truemotion,
     };
     run_analyse(
         client,
@@ -68,7 +95,7 @@ pub(crate) fn run_pair_analyse(
         &older_to_newer_targets,
         noise,
         DERIVED_SAD_FLOOR,
-        1.0,
+        thsad,
     )?;
 
     let newer_to_older_offset = pair_byte_offset(motion_ctx, pair_slot, 1);
@@ -84,6 +111,10 @@ pub(crate) fn run_pair_analyse(
         confidence: confidence_dummy,
         conf_len: 1,
         write_confidence: false,
+        predictions: newer_to_older_predictions,
+        sad: None,
+        escalation,
+        truemotion,
     };
     run_analyse(
         client,
@@ -93,7 +124,7 @@ pub(crate) fn run_pair_analyse(
         &newer_to_older_targets,
         noise,
         DERIVED_SAD_FLOOR,
-        1.0,
+        thsad,
     )?;
 
     Ok(())
@@ -160,6 +191,7 @@ mod tests {
             blksize: 4,
             overlap: 0,
             search_radius: 1,
+            max_search_escalation: 1,
             pyramid_levels: 1,
             estimation: MotionEstimation::Direct,
         };

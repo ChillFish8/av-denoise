@@ -5,7 +5,7 @@ use cubecl::server::Handle;
 
 use super::helpers::noisy_frames;
 use crate::bench_api::HostIo;
-use crate::engine::{DevicePlane, EdgePadding, Engine, Geometry, SampleFormat};
+use crate::engine::{DevicePlane, EdgePadding, PassEngine, PassGeometry, SampleFormat};
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
 use crate::nl4d::{Nl4d, Nl4dDenoiser, Nl4dOptions, resolve_params};
@@ -18,8 +18,8 @@ const HEIGHT: u32 = 48;
 /// Enough frames for a radius 1 engine to report a frame ready through the noise look-ahead.
 const READY_FRAMES: usize = 4 + LOOKAHEAD_FRAMES as usize;
 
-fn geometry(channels: ChannelMode) -> Geometry {
-    Geometry {
+fn geometry(channels: ChannelMode) -> PassGeometry {
+    PassGeometry {
         width: WIDTH,
         height: HEIGHT,
         channels,
@@ -179,7 +179,7 @@ fn run_engine(options: Nl4dOptions, channels: ChannelMode, frames: &[Vec<f32>], 
     finish_and_emit(&mut engine, &client, channel_count, &mut outputs);
 
     // Drained through the trait object, the way the host layer reaches it.
-    let dyn_engine: &mut dyn Engine = &mut engine;
+    let dyn_engine: &mut dyn PassEngine = &mut engine;
     let grain = dyn_engine.drain_grain_chunks().expect("grain");
 
     Run {
@@ -572,14 +572,14 @@ fn u8_input_matches_f32_input_from_the_ingest_kernel() {
         })
         .collect();
 
-    let u8_geometry = Geometry {
+    let u8_geometry = PassGeometry {
         input: SampleFormat::U8,
         output: SampleFormat::U8,
         width: WIDTH,
         height: HEIGHT,
         channels: ChannelMode::Luma,
     };
-    let f32_geometry = Geometry {
+    let f32_geometry = PassGeometry {
         input: SampleFormat::F32,
         ..u8_geometry
     };
@@ -706,7 +706,7 @@ fn a_seeked_frame_reads_close_to_sequential() {
 #[test]
 fn frames_smaller_than_a_patch_are_invalid_geometry() {
     let client = make_client();
-    let geometry = Geometry {
+    let geometry = PassGeometry {
         width: 4,
         height: HEIGHT,
         ..geometry(ChannelMode::Luma)
@@ -720,7 +720,7 @@ fn frames_smaller_than_a_patch_are_invalid_geometry() {
 #[test]
 fn a_plane_past_u32_pixels_is_invalid_geometry() {
     let client = make_client();
-    let oversized = Geometry {
+    let oversized = PassGeometry {
         width: 65_536,
         height: 65_536,
         ..geometry(ChannelMode::Luma)
@@ -735,7 +735,7 @@ fn a_plane_past_u32_pixels_is_invalid_geometry() {
 #[test]
 fn a_ring_past_u32_elements_is_invalid_geometry() {
     let client = make_client();
-    let oversized = Geometry {
+    let oversized = PassGeometry {
         width: 32_768,
         height: 16_384,
         ..geometry(ChannelMode::Chroma)
@@ -753,7 +753,7 @@ fn a_ring_past_u32_elements_is_invalid_geometry() {
 #[test]
 fn a_motion_pyramid_past_u32_elements_is_invalid_geometry() {
     let client = make_client();
-    let oversized = Geometry {
+    let oversized = PassGeometry {
         width: 32_768,
         height: 24_576,
         ..geometry(ChannelMode::Luma)
@@ -775,7 +775,7 @@ fn hd_and_4k_geometries_construct() {
     let client = make_client();
 
     for (width, height) in [(1920, 1080), (3840, 2160)] {
-        let sized = Geometry {
+        let sized = PassGeometry {
             width,
             height,
             ..geometry(ChannelMode::Luma)

@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::kernels::{egress_f32, egress_words, ingest_f32, ingest_words};
+use super::kernels::{copy_words, egress_f32, egress_words, ingest_f32, ingest_words};
 use super::{BLOCK_1D, DevicePlane, MAX_GRID_1D, SampleFormat};
 
 /// Where an ingest writes, as a slot of an interleaved ring.
@@ -151,5 +151,22 @@ pub(crate) fn egress(
                 );
             }
         },
+    }
+}
+
+/// Copies the first `words` 4-byte words of `source` into `destination` on the device.
+pub(crate) fn copy_words_into(client: &Client, source: &Handle, destination: &Handle, words: usize) {
+    let (count, total_threads) = grid(words as u32);
+
+    unsafe {
+        copy_words::launch_unchecked(
+            client,
+            count,
+            CubeDim::new_1d(BLOCK_1D),
+            BufferArg::from_raw_parts(source.clone(), words),
+            BufferArg::from_raw_parts(destination.clone(), words),
+            words as u32,
+            total_threads,
+        );
     }
 }

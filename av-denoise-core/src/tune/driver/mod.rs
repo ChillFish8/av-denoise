@@ -15,7 +15,7 @@ use super::frame::{TuningFrame, check_frames};
 use super::identity::describe;
 use super::ledger::{TuneLedger, TunePhase};
 use super::lock::{TuneLock, TuneLockOutcome};
-use super::profile_key::profile_key;
+use super::profile_key::spec_profile_keys;
 use super::search::SearchMode;
 use super::setup::{KernelSetup, device_priority};
 use super::store::{reload, resolve};
@@ -109,7 +109,7 @@ impl TuneReport {
 ///
 /// The pass builds its own engines and drops them afterwards. [TuningMode::Off] tunes nothing, and
 /// any other mode tunes. A frame that does not match `specs` skips the pass, with the mismatch as the
-/// reason.
+/// reason. Each pass of an engine is tuned at its own plane size, and keeps its own stored profile.
 pub fn tune_frames(
     device: &cubecl::Device,
     client: &Client,
@@ -165,8 +165,8 @@ pub fn is_tuned(
     is_tuned_on(&identity, specs, config)
 }
 
-/// Whether the store holds a complete result on the device `identity` names for every engine `specs`
-/// describe.
+/// Whether the store holds a complete result on the device `identity` names for every engine of
+/// `specs`.
 ///
 /// Answers `true` when tuning is not [TuningMode::Auto].
 pub(crate) fn is_tuned_on(identity: &DeviceIdentity, specs: &[EngineSpec], config: &TuningConfig) -> bool {
@@ -174,7 +174,7 @@ pub(crate) fn is_tuned_on(identity: &DeviceIdentity, specs: &[EngineSpec], confi
         return true;
     }
 
-    let profile_keys: Vec<String> = specs.iter().map(profile_key).collect();
+    let profile_keys = spec_profile_keys(specs);
     let stored = resolve(config.store.as_deref(), identity);
 
     stored.is_complete(&profile_keys)

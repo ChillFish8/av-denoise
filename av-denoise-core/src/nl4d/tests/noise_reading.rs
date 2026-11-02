@@ -3,6 +3,7 @@ use crate::bench_api::HostIo;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::{interleave_planes, panning_frames, raw_reading_sigma};
+use crate::nlmeans::tests::models::ModelFitter;
 use crate::nlmeans::{ChannelMode, MotionCompensationMode, MotionEstimation, NlmParams};
 use crate::noise::{BLOCK_MOVED_LANE, NOISE_CHANNELS, temporal_stats_record_len};
 
@@ -15,6 +16,8 @@ const PAN_FRAMES: usize = 12 + LOOKAHEAD;
 const LOOKAHEAD: usize = LOOKAHEAD_FRAMES as usize;
 const PAN_SIGMA: f32 = 2.0 / 255.0;
 const PAN_SEED: u32 = 7;
+/// Past the 12 px an unseeded search reaches at the default block search.
+const FAST_PAN_SHIFT: u32 = 30;
 
 fn reading_params(channels: ChannelMode, motion_compensation: MotionCompensationMode) -> Nl4dParams {
     let defaults = Nl4dParams::default();
@@ -32,6 +35,7 @@ fn mvtools(blksize: u32, overlap: u32) -> MotionCompensationMode {
         blksize,
         overlap,
         search_radius: 4,
+        max_search_escalation: 4,
         pyramid_levels: 2,
         estimation: MotionEstimation::Auto,
     }
@@ -96,7 +100,7 @@ fn frame_sigma(denoiser: &Nl4dDenoiser, frame: usize) -> Option<[f32; NOISE_CHAN
         .front_for_test()
         .measured_noise()
         .expect("the noise is measured");
-    let (reading, _, _) = noise.read_history_frame(frame as u32);
+    let (reading, _) = noise.read_history_frame(frame as u32);
 
     reading.sample.map(|sample| sample.sigma)
 }
@@ -152,6 +156,54 @@ fn assert_tracks_pan_sigma(params: Nl4dParams, label: &str) {
     assert!(
         rel_err <= 0.10,
         "{label}: folded sigma {sigma} vs true {PAN_SIGMA} (rel err {rel_err:.3})"
+    );
+}
+
+/// The folded sigma after a stream fed with its camera models fitted alongside, when `seeded`.
+fn seeded_pan_sigma(params: Nl4dParams, frames: &[Vec<f32>], seeded: bool) -> f32 {
+    let client = make_client();
+    let mode = params.nlm.motion_compensation;
+    let mut fitter = ModelFitter::new(&client, PAN_WIDTH, PAN_HEIGHT, mode);
+    let mut denoiser =
+        Nl4dDenoiser::new(&client, params, PAN_WIDTH, PAN_HEIGHT).expect("construction failed");
+    if seeded {
+        let motion = fitter.motion();
+        denoiser.set_shared_motion(motion);
+    }
+
+    for frame in frames {
+        fitter.fit(frame);
+        denoiser.push_frame(frame);
+        denoiser.denoise().expect("denoise failed");
+    }
+
+    folded_temporal_sigma(&denoiser)
+}
+
+#[test]
+fn the_pan_noise_reading_stays_near_truth() {
+    let frames = panning_frames(
+        PAN_WIDTH,
+        PAN_HEIGHT,
+        FAST_PAN_SHIFT,
+        PAN_FRAMES,
+        PAN_SIGMA,
+        PAN_SEED,
+    );
+    let params = reading_params(ChannelMode::Luma, mvtools(16, 8));
+
+    let unseeded = seeded_pan_sigma(params.clone(), &frames, false);
+    let unseeded_err = (unseeded - PAN_SIGMA).abs() / PAN_SIGMA;
+    assert!(
+        unseeded_err > 0.10,
+        "test premise: an unseeded search over-reads the pan, got {unseeded} vs {PAN_SIGMA}"
+    );
+
+    let sigma = seeded_pan_sigma(params, &frames, true);
+    let rel_err = (sigma - PAN_SIGMA).abs() / PAN_SIGMA;
+    assert!(
+        rel_err <= 0.10,
+        "folded sigma {sigma} vs true {PAN_SIGMA} (rel err {rel_err:.3})"
     );
 }
 
@@ -282,6 +334,51 @@ fn chroma_denoiser_pan_reading_does_not_rise() {
     });
 
     assert!(compared > 0, "no pass had both a reading and a raw reference");
+}
+
+#[test]
+fn chroma_only_mode_reads_cb_and_cr_independently() {
+    let width = PAN_WIDTH / 2;
+    let height = PAN_HEIGHT / 2;
+    let flat_cb = vec![0.5f32; (width * height) as usize];
+    let cr_planes = panning_frames(width, height, PAN_SHIFT, PAN_FRAMES, PAN_SIGMA, 23);
+    let frames: Vec<Vec<f32>> = cr_planes
+        .iter()
+        .map(|cr_plane| interleave_planes(&[&flat_cb, cr_plane]))
+        .collect();
+    let params = reading_params(ChannelMode::Chroma, mvtools(16, 8));
+    let last = frames.len() - 1;
+
+    let mut cr_samples = 0;
+    let mut folded = None;
+    run_pushes(params, width, height, &frames, |frame, denoiser| {
+        let noise = denoiser
+            .front_for_test()
+            .measured_noise()
+            .expect("the noise is measured");
+        let (reading, _) = noise.read_history_frame(frame as u32);
+
+        if let Some(sample) = reading.sample {
+            assert!(!sample.valid[0], "frame {frame}: the flat Cb plane has a sample");
+            assert!(sample.valid[1], "frame {frame}: a sample without Cr");
+            assert!(sample.sigma[1] > 0.0, "frame {frame}: Cr reads no noise");
+            cr_samples += 1;
+        }
+
+        if frame == last {
+            folded = denoiser.front_for_test().noise_snapshot();
+        }
+    });
+
+    let snapshot = folded.expect("the last push folds");
+    let temporal = snapshot.temporal_only.expect("Cr holds the temporal chain");
+    let low_unboosted = snapshot.low_unboosted.expect("the low chain is written");
+    let sigma = snapshot.derived.sigma;
+
+    assert!(cr_samples > 0, "no frame read Cr on its own");
+    assert_eq!(temporal[0], low_unboosted[0], "Cb's temporal value falls back");
+    assert_eq!(sigma[0], low_unboosted[0], "Cb's sigma falls back");
+    assert!(sigma[1].is_finite() && sigma[1] > 0.0, "Cr folds to {}", sigma[1]);
 }
 
 #[test]

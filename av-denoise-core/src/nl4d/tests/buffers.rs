@@ -11,7 +11,6 @@ use super::helpers::{
     static_clip_params,
 };
 use crate::bench_api::HostIo;
-use crate::collab::geometry::strength_map_dims;
 use crate::collab::kernels::aggregate::weight_scale;
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::motion::sad_noise_floor;
@@ -21,14 +20,7 @@ use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::{ChannelMode, HqParams, NlmDenoiser, mc_sad_noise_floor_sigma};
 use crate::noise::tests::fold_reference::{SnapshotGap, relative_gap};
 use crate::noise::tests::frames::MAX_RELATIVE;
-use crate::noise::{
-    DerivedValues,
-    NOISE_CURVE_BINS,
-    NoiseSnapshot,
-    STRENGTH_MAP_ALL,
-    STRENGTH_MAP_LUMA,
-    STRENGTH_MAP_OFF,
-};
+use crate::noise::{DerivedValues, NOISE_CURVE_BINS, NoiseSnapshot};
 
 const SIZE: u32 = 64;
 /// Ten frames run as centres while the stream is pushed, after the noise look-ahead fills.
@@ -72,21 +64,20 @@ fn gpu_snapshot(denoiser: &Nl4dDenoiser) -> NoiseSnapshot {
         .expect("every front has a noise snapshot")
 }
 
-/// The derived values the fold's formulas give for the chains, curve and classes of `snapshot`.
+/// The derived values the fold's formulas give for the chains and curve of `snapshot`.
 fn derived_from_chains(front: &NlmDenoiser, snapshot: &NoiseSnapshot) -> DerivedValues {
     let (_, _, channel_mode) = front.frame_shape();
     let channels = channel_mode.count() as usize;
     let settings = front.noise_settings_for_test();
     let coefficients = settings.fold.coefficients;
     let consumer = settings.fold.consumer;
-    let map = settings.reading.map;
 
-    coefficients.derive_host(snapshot, channels, consumer, map)
+    coefficients.derive_host(snapshot, channels, consumer)
 }
 
-/// Runs the ramp clip and checks the derived curve flag and map mode against `expected` and against
-/// the rules the fold applies to the GPU chains.
-fn assert_curve_flag_and_map_mode(channels: ChannelMode, noise_map: bool, expected: (bool, u32)) {
+/// Runs the ramp clip and checks the derived curve flag against `expected` and against the rules
+/// the fold applies to the GPU chains.
+fn assert_curve_flag(channels: ChannelMode, noise_map: bool, expected: bool) {
     let frames = ramp_clip(channels.count());
     let params = ramp_params(channels, noise_map, 1.0);
     let denoiser = run_frames(params, RAMP_WIDTH, RAMP_HEIGHT, &frames);
@@ -95,8 +86,8 @@ fn assert_curve_flag_and_map_mode(channels: ChannelMode, noise_map: bool, expect
     let front = denoiser.front_for_test();
     let rules = derived_from_chains(front, &snapshot);
 
-    let actual = (derived.curve_valid, derived.map_mode);
-    let fold_rules = (rules.curve_valid, rules.map_mode);
+    let actual = derived.curve_valid;
+    let fold_rules = rules.curve_valid;
     assert_eq!(actual, expected);
     assert_eq!(actual, fold_rules);
 }
@@ -107,23 +98,16 @@ fn read_words<T: CubeElement>(mirror: &MirroredBuffer) -> Vec<T> {
 }
 
 #[test]
-fn a_pinned_sigma_binds_a_zero_curve_and_a_unit_map() {
+fn a_pinned_sigma_binds_a_zero_curve() {
     let params = static_clip_params(1);
     let denoiser = run_stream(params, STREAM_FRAMES);
     let front = denoiser.front_for_test();
 
     let curve_handle = front.noise_curve_handle();
-    let map_handle = front.strength_map_handle();
     let curve: Vec<f32> = read_handle(curve_handle);
-    let map: Vec<f32> = read_handle(map_handle);
-
-    let (map_cols, map_rows) = strength_map_dims(SIZE, SIZE);
-    let map_len = (map_cols * map_rows) as usize;
     let zero_curve = vec![0.0f32; NOISE_CURVE_BINS];
-    let unit_map = vec![1.0f32; map_len];
 
     assert_eq!(curve, zero_curve);
-    assert_eq!(map, unit_map);
 }
 
 #[test]
@@ -240,18 +224,18 @@ fn the_curve_buffer_holds_the_gpu_curve() {
 }
 
 #[test]
-fn a_luma_front_with_the_noise_map_and_psy_applies_the_curve_and_the_luma_map() {
-    assert_curve_flag_and_map_mode(ChannelMode::Luma, true, (true, STRENGTH_MAP_LUMA));
+fn a_luma_front_with_the_noise_map_applies_the_curve() {
+    assert_curve_flag(ChannelMode::Luma, true, true);
 }
 
 #[test]
-fn a_luma_front_without_the_noise_map_applies_neither_the_curve_nor_a_map() {
-    assert_curve_flag_and_map_mode(ChannelMode::Luma, false, (false, STRENGTH_MAP_OFF));
+fn a_luma_front_without_the_noise_map_skips_the_curve() {
+    assert_curve_flag(ChannelMode::Luma, false, false);
 }
 
 #[test]
-fn a_chroma_front_with_the_flat_boost_maps_every_channel_without_a_curve() {
-    assert_curve_flag_and_map_mode(ChannelMode::Chroma, true, (false, STRENGTH_MAP_ALL));
+fn a_chroma_front_skips_the_curve() {
+    assert_curve_flag(ChannelMode::Chroma, true, false);
 }
 
 #[test]

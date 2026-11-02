@@ -1,13 +1,20 @@
+use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::make_client;
+use super::models::ModelFitter;
+use crate::engine::align::StorageAlign;
+use crate::motion::{LumaMotionRing, MotionCtx, RingRole, SharedMotion, Subsampling};
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::*;
-use crate::noise::{StrengthMapKind, StrengthMapParams};
 
 // Odd dimensions leave ragged block grids and unaligned slots, so every padding rule is exercised.
 const WIDTH: u32 = 101;
 const HEIGHT: u32 = 67;
+const FOUR_TWO_ZERO: Subsampling = Subsampling {
+    shift_x: 1,
+    shift_y: 1,
+};
 
 fn allocated_elements(handle: Option<&Handle>) -> Option<u64> {
     handle.map(|handle| handle.size_in_used() / 4)
@@ -24,16 +31,24 @@ fn computed(buffers: &[BufferSize], name: &str) -> Option<u64> {
 
 fn assert_sizes_match_allocations(params: NlmParams) {
     let client = make_client();
-    let sizes = front_buffer_sizes(&client, &params, WIDTH, HEIGHT);
-    let mut denoiser = NlmDenoiser::new(&client, params, WIDTH, HEIGHT);
+    assert_front_sizes_match(&client, params, None);
+}
 
-    // The sizes count the curve batch and the class scratch, which only these settings allocate.
-    let map = StrengthMapParams {
-        flat_boost: 1.5,
-        shadow_soften: 0.65,
-    };
+fn assert_front_sizes_match(client: &Client, params: NlmParams, motion: Option<SharedMotion>) {
+    let reads_luma_motion = motion.as_ref().is_some_and(SharedMotion::reads_luma_motion);
+    let sizes = front_buffer_sizes(client, &params, WIDTH, HEIGHT, reads_luma_motion);
+    let mut denoiser = NlmDenoiser::new(client, params, WIDTH, HEIGHT);
+    if let Some(motion) = motion {
+        denoiser.set_shared_motion(motion);
+    }
+
+    // The sizes count the curve batch, which only these settings allocate.
     denoiser.set_luma_noise_fields(true);
-    denoiser.set_strength_map(StrengthMapKind::Luma(map));
+
+    let truemotion = denoiser.truemotion_bufs.as_ref();
+    let truemotion_seeds = truemotion.map(|[seeds, _, _]| seeds);
+    let truemotion_field = truemotion.map(|[_, field, _]| field);
+    let truemotion_changes = truemotion.map(|[_, _, changes]| changes);
 
     let noise = denoiser.measured_noise();
     let partials = noise.map(|noise| noise.partials());
@@ -44,8 +59,12 @@ fn assert_sizes_match_allocations(params: NlmParams) {
         ("noise partials ring", partials),
         ("temporal stats ring", stats),
         ("motion field", denoiser.mv_field_buf.as_ref()),
+        ("truemotion seeds", truemotion_seeds),
+        ("truemotion field", truemotion_field),
+        ("truemotion changes", truemotion_changes),
         ("motion pyramid ring", denoiser.pyramid_input.as_ref()),
         ("motion pair ring", denoiser.pair_ring_buf.as_ref()),
+        ("motion escalation state", denoiser.escalation_buf.as_ref()),
         ("confidence", denoiser.confidence_buf.as_ref()),
         ("confidence pyramid ring", denoiser.confidence_pyramid.as_ref()),
         (
@@ -89,12 +108,37 @@ fn chained_motion_sizes_match_the_allocations() {
         blksize: 16,
         overlap: 8,
         search_radius: 4,
+        max_search_escalation: 8,
         pyramid_levels: 3,
         estimation: MotionEstimation::chained_default(),
     };
     let params = hq_params(3, motion);
 
     assert_sizes_match_allocations(params);
+}
+
+#[test]
+fn luma_motion_reader_sizes_match_the_allocations() {
+    let client = make_client();
+    let motion = MotionCompensationMode::Mvtools {
+        blksize: 16,
+        overlap: 8,
+        search_radius: 4,
+        max_search_escalation: 8,
+        pyramid_levels: 3,
+        estimation: MotionEstimation::chained_default(),
+    };
+    let params = hq_params(3, motion);
+    let align = StorageAlign::from_client(&client);
+    let motion_ctx = MotionCtx::new(motion, WIDTH, HEIGHT, align).expect("a searching mode");
+    let ring = LumaMotionRing::new(&client, &motion_ctx, params.temporal_radius, FOUR_TWO_ZERO);
+    let fitter = ModelFitter::new(&client, WIDTH, HEIGHT, motion);
+    let shared = SharedMotion {
+        luma_motion: Some(RingRole::Reader(ring)),
+        ..fitter.motion()
+    };
+
+    assert_front_sizes_match(&client, params, Some(shared));
 }
 
 #[test]

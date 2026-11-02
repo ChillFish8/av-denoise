@@ -15,6 +15,7 @@ use crate::noise::temporal::{
     temporal_stats_buf_bytes,
     temporal_stats_record_len,
     temporal_stats_slot_view,
+    texture_lane,
 };
 use crate::tune::tests::fixtures::{hashed_ring, hashed_unit, noisy_field_over, upload};
 use crate::tune::tests::runtime::test_client;
@@ -448,6 +449,67 @@ fn texture_lane_reads_mean_cell_energy() {
                     relative_error <= 1e-5,
                     "block ({block_x}, {block_y}): texture {texture}, expected {expected}"
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn each_channel_texture_lane_reads_its_own_cell_energy() {
+    // Channel 0 ramps across and channel 1 ramps down, so each channel's texture has its own value.
+    let (width, height) = (56u32, 32u32);
+    let across_slope = 3.0f32 / 1024.0;
+    let down_slope = 5.0f32 / 1024.0;
+    let mut new = Vec::with_capacity((2 * width * height) as usize);
+    for index in 0..width * height {
+        let across = (index % width) as f32 * across_slope;
+        let down = (index / width) as f32 * down_slope;
+        new.push(across);
+        new.push(down);
+    }
+
+    let frames = StatsFrames {
+        width,
+        height,
+        channels: 2,
+        previous: vec![0.5; new.len()],
+        new,
+    };
+    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
+    // A full block holds 12 pairs along each ramp out of 24. The ragged block holds 4 horizontal
+    // and 6 vertical pairs out of 10.
+    let across_step = 4.0 * across_slope;
+    let down_step = 4.0 * down_slope;
+    let full_expected = [
+        12.0 * across_step * across_step / 24.0,
+        12.0 * down_step * down_step / 24.0,
+    ];
+    let ragged_expected = [
+        4.0 * across_step * across_step / 10.0,
+        6.0 * down_step * down_step / 10.0,
+    ];
+    let still = MotionGrid::from_fn(width, height, TEMPORAL_NOISE_BLOCK, |_, _| [0, 0]);
+
+    for motion in [None, Some(&still)] {
+        let records = run_stats(&frames, motion, false);
+
+        for block_y in 0..blocks_y {
+            for block_x in 0..blocks_x {
+                let record = frames.record(&records, block_x, block_y);
+                let ragged = block_x + 1 == blocks_x;
+                let expected = if ragged { ragged_expected } else { full_expected };
+
+                for channel in 0..2u32 {
+                    let lane = texture_lane(2, channel) as usize;
+                    let texture = record[lane];
+                    let wanted = expected[channel as usize];
+                    let relative_error = (texture - wanted).abs() / wanted;
+                    let what = format!("block ({block_x}, {block_y}) channel {channel}");
+                    assert!(
+                        relative_error <= 1e-5,
+                        "{what}: texture {texture}, expected {wanted}"
+                    );
+                }
             }
         }
     }

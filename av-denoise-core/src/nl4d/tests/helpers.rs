@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use crate::motion::neighbour_idx_for_k;
-use crate::nl4d::{Nl4dParams, PsyParams};
+use crate::nl4d::Nl4dParams;
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::helpers::{noisy_field_over, seeded_unit_gaussian};
 use crate::nlmeans::{
@@ -38,6 +38,7 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         blksize: 16,
         overlap: 8,
         search_radius: 4,
+        max_search_escalation: 4,
         pyramid_levels: 2,
         estimation: MotionEstimation::Auto,
     };
@@ -66,15 +67,6 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         field_lambda: 0.0,
         // No effect here, since sigma is pinned.
         noise_map: true,
-        // A boost of 1.5 with the cut and ring off, the flat map the pipeline tests' expectations
-        // were recorded against.
-        psy: Some(PsyParams {
-            flat_boost: 1.5,
-            chroma_flat_boost: 1.5,
-            shadow_soften: 0.65,
-            flat_texture_cut: 1.0,
-            line_ring: 0,
-        }),
         // Off, so the pipeline tests keep the per-coefficient kernel their expectations were
         // recorded against.
         pooled_threshold: false,
@@ -377,10 +369,6 @@ pub(super) fn ramp_params(channels: ChannelMode, noise_map: bool, sigma_scale: f
     Nl4dParams {
         nlm,
         noise_map,
-        psy: Some(PsyParams {
-            line_ring: 0,
-            ..PsyParams::default()
-        }),
         ..defaults
     }
 }

@@ -1,6 +1,10 @@
 mod block_match;
 mod blocked_equivalence;
+mod chroma_map;
+mod escalate;
+mod luma_ring;
 mod merged;
+mod model_candidate;
 mod paths;
 mod reference;
 
@@ -46,4 +50,19 @@ pub(crate) fn pair_pyramid(client: &Client, centre: &[f32], neighbour: &[f32]) -
     let neighbour_slots = client.create_from_slice(table_bytes);
 
     (pyramid, neighbour_slots)
+}
+
+/// Uploads `predictions`, or a one-value placeholder without them, and says whether they exist.
+pub(crate) fn prediction_buffer(client: &Client, predictions: Option<&[f32]>) -> (Handle, usize, bool) {
+    match predictions {
+        Some(words) => {
+            let bytes = f32::as_bytes(words);
+            let handle = client.create_from_slice(bytes);
+            (handle, words.len(), true)
+        },
+        None => {
+            let handle = client.empty(size_of::<f32>());
+            (handle, 1, false)
+        },
+    }
 }

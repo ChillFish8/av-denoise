@@ -2,6 +2,7 @@ mod lookahead;
 mod machinery;
 mod noise;
 mod ring;
+mod seeds;
 mod sizes;
 mod stages;
 
@@ -12,13 +13,15 @@ use self::lookahead::LookAhead;
 pub(crate) use self::lookahead::{LOOKAHEAD_FRAMES, lookahead_depth_for};
 pub(crate) use self::machinery::RingView;
 use self::noise::{measures_noise, noise_shape};
+use self::seeds::ModelSeeds;
 pub(crate) use self::sizes::{BufferSize, check_u32_indexable, front_buffer_sizes};
 use super::mirror::MirroredBuffer;
 use super::params::{NlmParams, SEPARABLE_THRESHOLD, validate_dimensions};
+use super::prefilter::PrefilterMode;
 use crate::engine::align::StorageAlign;
 use crate::engine::timing::DeviceTimer;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
-use crate::motion::{self, MotionCtx, MotionEstimation};
+use crate::motion::{self, MotionCtx, MotionEstimation, RingRole};
 use crate::noise::{DerivedValues, NoiseState};
 use crate::tune::KernelSelector;
 
@@ -100,6 +103,8 @@ pub struct NlmDenoiser {
     pub(super) noise: NoiseState,
 
     pub(super) mc_ctx: Option<MotionCtx>,
+    /// The camera model predictions the motion searches start from, when the models are fitted.
+    pub(super) seeds: Option<ModelSeeds>,
     /// The motion-shifted input ring the temporal kernels read neighbours from.
     pub(super) compensated_input_buf: Option<Handle>,
     /// The motion-shifted reference ring.
@@ -110,12 +115,30 @@ pub struct NlmDenoiser {
     pub(super) mv_field_buf: Option<Handle>,
     /// Adjacent-frame motion fields for chained estimation, by slot, then direction, then block.
     ///
-    /// Direction 0 runs from the older frame to the newer one.
+    /// Direction 0 runs from the older frame to the newer one. It is present only when the front
+    /// searches its own window motion with `Chained` estimation.
     pub(super) pair_ring_buf: Option<Handle>,
+    /// What the motion searches record for blocks that fail their first window, present when
+    /// the search escalates.
+    ///
+    /// The look-ahead, pair and window searches run one after another, so they share it.
+    pub(super) escalation_buf: Option<Handle>,
+    /// The truemotion stage's seeds and field between passes, each shaped like `mv_field_buf`, then
+    /// its change flags, two confidence layouts of `u32`.
+    ///
+    /// The look-ahead, pair and window searches run one after another, so they share them.
+    pub(super) truemotion_bufs: Option<[Handle; 3]>,
     /// The luma pyramid, indexed by level, then frame, then pixel.
     pub(super) pyramid_input: Option<Handle>,
     /// The luma pyramid built from the reference ring.
     pub(super) pyramid_reference: Option<Handle>,
+    /// How this front shares its motion with the other pass, when it does.
+    pub(super) luma_motion: Option<RingRole>,
+    /// The single-level search a chroma front refines the luma pass's vectors with.
+    ///
+    /// It is present only when the front reads the luma motion ring, and its pyramids then hold
+    /// one level.
+    pub(super) refine_ctx: Option<MotionCtx>,
 
     /// Block geometry for the confidence pass that runs without motion compensation.
     pub(super) confidence_ctx: Option<MotionCtx>,
@@ -138,6 +161,8 @@ pub struct NlmDenoiser {
     ///
     /// With it on, a stream gets no leading copies.
     pub(super) shifted_edges: bool,
+    /// Whether each submit runs only the noise and motion stages and cleans nothing.
+    pub(super) guides_only: bool,
 }
 
 impl NlmDenoiser {
@@ -261,6 +286,25 @@ impl NlmDenoiser {
             (None, None, None, None, None)
         };
 
+        let truemotion_bufs = mc_ctx.as_ref().map(|motion_ctx| {
+            let neighbours = (2 * params.temporal_radius) as u64;
+            let field_bytes = neighbours * motion_ctx.mv_field_bytes_per_neighbour();
+            let changes_bytes = 2 * neighbours * motion_ctx.confidence_bytes_per_neighbour();
+            let seeds = client.empty(field_bytes as usize);
+            let field = client.empty(field_bytes as usize);
+            let changes = client.empty(changes_bytes as usize);
+            [seeds, field, changes]
+        });
+
+        let escalating_ctx = mc_ctx
+            .as_ref()
+            .filter(|motion_ctx| motion_ctx.schedule.escalates());
+        let escalation_buf = escalating_ctx.map(|motion_ctx| {
+            let neighbours = 2 * params.temporal_radius;
+            let state_len = motion::escalation_state_len(motion_ctx, neighbours);
+            client.empty(state_len * size_of::<f32>())
+        });
+
         let estimation = params
             .motion_compensation
             .resolved_estimation(params.temporal_radius);
@@ -361,12 +405,17 @@ impl NlmDenoiser {
             ring_slot_tables,
             noise: fixed_noise,
             mc_ctx,
+            seeds: None,
             compensated_input_buf,
             compensated_reference_buf,
             mv_field_buf,
             pair_ring_buf,
+            escalation_buf,
+            truemotion_bufs,
             pyramid_input,
             pyramid_reference,
+            luma_motion: None,
+            refine_ctx: None,
             confidence_ctx,
             confidence_buf,
             confidence_pyramid,
@@ -374,6 +423,7 @@ impl NlmDenoiser {
             confidence_dummy,
             device_timer,
             shifted_edges: false,
+            guides_only: false,
         };
 
         // The settings and the starting derived values read the front's own parameters.
@@ -384,6 +434,45 @@ impl NlmDenoiser {
 
     pub(crate) fn placeholder(&self) -> &Handle {
         &self.placeholder
+    }
+
+    /// Makes each submit run only its noise and motion stages, before the first push.
+    ///
+    /// The submit still hands back an output slot, which then holds no frame. It drops the buffers
+    /// only the denoise stages read, the f16 search ring, the motion-shifted rings and the outputs.
+    /// The NLM pilot shares the accumulators and weight scratch with the main pass, so they stay
+    /// under that prefilter.
+    pub(crate) fn set_guides_only(&mut self) {
+        self.guides_only = true;
+        self.search_buf = None;
+        self.compensated_input_buf = None;
+        self.compensated_reference_buf = None;
+
+        let placeholder = self.placeholder.clone();
+        self.outputs = [placeholder.clone(), placeholder.clone()];
+
+        let pilot = matches!(self.params.prefilter, PrefilterMode::NlmSpatial { .. });
+        if pilot {
+            return;
+        }
+
+        let scratch = [
+            &mut self.accum,
+            &mut self.weight_sum,
+            &mut self.max_weight,
+            &mut self.weight_buf,
+            &mut self.raw_fwd,
+            &mut self.raw_bwd,
+            &mut self.tmp_hsum,
+            &mut self.tmp_hsum_bwd,
+        ];
+        for handle in scratch {
+            *handle = placeholder.clone();
+        }
+    }
+
+    pub(crate) fn guides_only(&self) -> bool {
+        self.guides_only
     }
 
     /// Takes in one pushed frame.

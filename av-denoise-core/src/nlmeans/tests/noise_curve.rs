@@ -10,10 +10,6 @@ use crate::noise::{
     QUARTER_LUMA_SUM,
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
-    QUARTER_TENSOR_XX,
-    QUARTER_TENSOR_XY,
-    QUARTER_TENSOR_YY,
-    QuarterSettings,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     UNMEASURED_FLATNESS,
@@ -33,9 +29,6 @@ pub(super) struct SyntheticQuarter {
     pub(super) flatness: f32,
     pub(super) luma_min: f32,
     pub(super) luma_max: f32,
-    pub(super) tensor_xx: f32,
-    pub(super) tensor_yy: f32,
-    pub(super) tensor_xy: f32,
 }
 
 /// A static, flat, unclipped quarter at `luma` with `sigma`.
@@ -47,9 +40,6 @@ pub(super) fn quarter_at(luma: f32, sigma: f32) -> SyntheticQuarter {
         flatness: 0.0,
         luma_min: luma - 0.02,
         luma_max: luma + 0.02,
-        tensor_xx: 0.0,
-        tensor_yy: 0.0,
-        tensor_xy: 0.0,
     }
 }
 
@@ -82,9 +72,6 @@ pub(super) fn write_quarter(
     record[base + QUARTER_FLATNESS as usize] = quarter.flatness;
     record[base + QUARTER_LUMA_MIN as usize] = quarter.luma_min;
     record[base + QUARTER_LUMA_MAX as usize] = quarter.luma_max;
-    record[base + QUARTER_TENSOR_XX as usize] = quarter.tensor_xx;
-    record[base + QUARTER_TENSOR_YY as usize] = quarter.tensor_yy;
-    record[base + QUARTER_TENSOR_XY as usize] = quarter.tensor_xy;
 }
 
 /// Records for a single row of full 16x16 luma-only blocks.
@@ -161,14 +148,7 @@ fn reading_sample_equals_the_scalar_aggregation() {
     let (width, height) = frame_dims(good_quarters.len() + 8);
 
     let sample_scalar = aggregate_temporal_noise_stats(&records, channels, width, height);
-    let reading = temporal_noise_reading(
-        &records,
-        channels,
-        width,
-        height,
-        true,
-        QuarterSettings::default(),
-    );
+    let reading = temporal_noise_reading(&records, channels, width, height, true);
 
     assert!(sample_scalar.is_some());
     assert_eq!(reading.sample, sample_scalar);

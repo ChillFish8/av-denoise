@@ -1,6 +1,6 @@
-use av_denoise_core::{ChannelMode, DenoisingMode, NlmTuning, NlmeansOptions};
+use av_denoise_core::{ChromaLayout, DenoisingMode, NlmTuning, NlmeansOptions};
 
-use crate::host::{Algorithm, DenoiserOptions, HostDenoiser, Pending};
+use crate::host::{Algorithm, ChannelIntent, DenoiserOptions, HostDenoiser, Pending};
 
 /// A spatial luma denoiser with small radii, since wide kernels cost codegen stack.
 fn spatial_luma(size: u32) -> HostDenoiser {
@@ -15,7 +15,8 @@ fn spatial_luma(size: u32) -> HostDenoiser {
     };
     let algorithm = Algorithm::Nlmeans(nlmeans_options);
     let options = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
+        .intent(ChannelIntent::Luma)
+        .chroma(ChromaLayout::Gray)
         .mode(DenoisingMode::Spacial)
         .algorithm(algorithm)
         .build();

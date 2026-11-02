@@ -11,17 +11,22 @@ use crate::engine::{
     DevicePlane,
     EdgePadding,
     EgressSource,
-    Engine,
     EngineTiming,
-    Geometry,
+    FramePass,
+    PassEngine,
+    PassGeometry,
     WindowSpan,
     egress,
 };
 use crate::error::Error;
+use crate::motion::SharedMotion;
 use crate::nlmeans::ChannelMode;
 use crate::nlmeans::denoiser::{check_u32_indexable, lookahead_depth_for};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::noise::NoiseSnapshot;
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+use crate::noise::colour::ColourCells;
+use crate::noise::colour::ColourSource;
 use crate::tune::{EngineKernels, KernelSelector};
 
 /// The frames an engine at `temporal_radius` holds with a noise look-ahead `lookahead` deep.
@@ -30,10 +35,10 @@ fn held_frames(temporal_radius: u32, lookahead: usize) -> usize {
 }
 
 /// Four-dimensional collaborative denoising over GPU planes.
-pub struct Nl4d {
+pub(crate) struct Nl4d {
     inner: Nl4dDenoiser,
     client: Client,
-    geometry: Geometry,
+    geometry: PassGeometry,
     temporal_radius: u32,
     /// Regions finished but not yet emitted, oldest first.
     pending: VecDeque<CompletedRegion>,
@@ -43,22 +48,31 @@ pub struct Nl4d {
     pushes: usize,
     /// Whether the current stream has had a real push, after which context frames are refused.
     pushed: bool,
+    /// The stream frame of the last emit.
+    emitted: Option<u32>,
     poisoned: bool,
 }
 
 impl Nl4d {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
-    pub fn new(client: &Client, options: Nl4dOptions, geometry: Geometry) -> Result<Self, Error> {
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub fn new(client: &Client, options: Nl4dOptions, geometry: PassGeometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
-        Self::with_kernels(client, options, geometry, kernels)
+        Self::with_kernels(client, options, geometry, kernels, None, false)
     }
 
-    /// [Nl4d::new] with each launch site's candidate picked from `kernels`.
+    /// Builds the engine with each launch site's candidate picked from `kernels`.
+    ///
+    /// Its motion searches start from the camera models in `motion` when given. With `guides_only`,
+    /// it runs only its motion and noise reading and its emits write nothing. Returns
+    /// [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
     pub fn with_kernels(
         client: &Client,
         options: Nl4dOptions,
-        geometry: Geometry,
+        geometry: PassGeometry,
         kernels: EngineKernels,
+        motion: Option<SharedMotion>,
+        guides_only: bool,
     ) -> Result<Self, Error> {
         if geometry.width < PATCH_SIZE || geometry.height < PATCH_SIZE {
             let message = format!(
@@ -84,13 +98,30 @@ impl Nl4d {
         let ring_slots = 1 + 2 * u64::from(params.temporal_radius);
         geometry.check_ring_fits(ring_slots)?;
 
-        let sizes = buffer_sizes(client, &params, geometry.width, geometry.height);
+        let reads_luma_motion = motion.as_ref().is_some_and(SharedMotion::reads_luma_motion);
+        let sizes = buffer_sizes(
+            client,
+            &params,
+            geometry.width,
+            geometry.height,
+            reads_luma_motion,
+        );
         let indexable = check_u32_indexable(&sizes);
         indexable.map_err(Error::InvalidGeometry)?;
 
         let selector = KernelSelector::new(client, kernels);
-        let inner = Nl4dDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
-        let inner = inner.map_err(Error::InvalidOptions)?;
+        let inner = Nl4dDenoiser::with_kernels(
+            client,
+            params,
+            geometry.width,
+            geometry.height,
+            selector,
+            guides_only,
+        );
+        let mut inner = inner.map_err(Error::InvalidOptions)?;
+        if let Some(motion) = motion {
+            inner.set_shared_motion(motion);
+        }
 
         Ok(Self {
             inner,
@@ -101,6 +132,7 @@ impl Nl4d {
             tail_remaining: 0,
             pushes: 0,
             pushed: false,
+            emitted: None,
             poisoned: false,
         })
     }
@@ -188,6 +220,18 @@ impl Nl4d {
         held_frames(options.temporal_radius, lookahead)
     }
 
+    /// Whether an engine built from `options` pools its grain into colour cells.
+    ///
+    /// That needs the noise measured, from residuals against a neighbour frame, and a gain to
+    /// apply. Luma takes colour gains only with the noise map, chroma always.
+    pub fn measures_colour_for(options: &Nl4dOptions, channels: ChannelMode) -> bool {
+        let front_params = nlm_params(options, channels);
+        let lookahead = lookahead_depth_for(&front_params);
+        let gains_apply = options.noise_map || channels == ChannelMode::Chroma;
+
+        lookahead > 0 && options.temporal_radius >= 1 && gains_apply
+    }
+
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn noise_snapshot_for_test(&self) -> Option<NoiseSnapshot> {
         self.inner.noise_snapshot()
@@ -201,7 +245,7 @@ impl Nl4d {
     }
 }
 
-impl Engine for Nl4d {
+impl PassEngine for Nl4d {
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error> {
         self.check_usable()?;
         self.check_nothing_pending()?;
@@ -254,8 +298,13 @@ impl Engine for Nl4d {
             return Err(Error::NothingToEmit);
         };
 
-        let frame = self.inner.read_region(region);
-        self.write_out(&frame, planes);
+        let emitted = self.inner.front.slot_frame(region.slot);
+        self.emitted = Some(emitted);
+
+        if !self.inner.guides_only() {
+            let frame = self.inner.read_region(region);
+            self.write_out(&frame, planes);
+        }
 
         if self.tail_remaining > 0 {
             self.tail_remaining -= 1;
@@ -287,6 +336,7 @@ impl Engine for Nl4d {
 
     fn reset(&mut self) {
         self.pending.clear();
+        self.emitted = None;
         self.poisoned = false;
         self.restart_stream();
     }
@@ -320,5 +370,39 @@ impl Engine for Nl4d {
 
     fn sample_device_time(&mut self, every: u32) {
         self.inner.sample_device_time(every);
+    }
+}
+
+impl FramePass for Nl4d {
+    fn next_frame(&self) -> u32 {
+        self.inner.front.stream_frames()
+    }
+
+    fn emitted_frame(&self) -> Option<u32> {
+        self.emitted
+    }
+
+    fn guides_only(&self) -> bool {
+        self.inner.guides_only()
+    }
+
+    fn measure_colour(&mut self, source: ColourSource) {
+        if !self.inner.colour_gains {
+            return;
+        }
+
+        self.inner.front.measure_colour(source);
+    }
+
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    fn colour_cells_for_test(&self) -> Option<&ColourCells> {
+        let noise = self.inner.front.measured_noise()?;
+        noise.colour_cells()
+    }
+
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    fn colour_gains_for_test(&self) -> Option<&Handle> {
+        let noise = self.inner.front.measured_noise()?;
+        noise.colour_gains()
     }
 }

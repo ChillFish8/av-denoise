@@ -1,12 +1,12 @@
 pub(crate) mod batched;
 pub(crate) mod centre;
+mod colour;
 pub(crate) mod distance;
 pub(crate) mod grid;
 pub(crate) mod pooled;
 pub(crate) mod shape;
 pub(crate) mod sliding;
 mod split;
-pub(crate) mod strength_map;
 pub(crate) mod tile;
 pub(crate) mod trajectory;
 pub(crate) mod variant;
@@ -14,11 +14,11 @@ pub(crate) mod variant;
 use cubecl::prelude::*;
 
 use self::centre::centre_search;
+use self::colour::{PatchColour, patch_colour, threshold_gains};
 use self::grid::{grid_fwd, grid_inv, grid_variance};
 use self::pooled::pooled_threshold;
 use self::shape::{SearchCursor, SearchShape};
 pub use self::split::{MEMBER_WORDS, collab_filter, collab_search};
-use self::strength_map::strength_map_scale;
 use self::tile::load_centre_tile;
 use self::trajectory::trajectory_search;
 pub use self::variant::{
@@ -46,21 +46,16 @@ use super::transforms::{
 use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE, STEP};
 use crate::engine::kernels::read_line;
 use crate::nlmeans::kernels::helpers::channel_scale;
-use crate::noise::{
-    DERIVED_CURVE_VALID,
-    DERIVED_MAP_MODE,
-    DERIVED_SIGMA,
-    DERIVED_WEIGHT_SCALE,
-    NOISE_CURVE_BINS,
-    STRENGTH_MAP_ALL,
-    STRENGTH_MAP_LUMA,
-};
+use crate::noise::{DERIVED_CURVE_VALID, DERIVED_SIGMA, DERIVED_WEIGHT_SCALE, NOISE_CURVE_BINS};
 
 /// The smallest factor the noise curve may scale the luma threshold by.
 const NOISE_CURVE_SCALE_MIN: f32 = 0.33;
 
 /// The largest factor the noise curve may scale the luma threshold by.
 const NOISE_CURVE_SCALE_MAX: f32 = 3.0;
+
+/// The largest factor the noise curve and the colour gain together may scale the luma threshold by.
+const COLOUR_CURVE_SCALE_MAX: f32 = 6.0;
 
 /// The bits of a group word that hold the member count.
 pub const GROUP_SIZE_MASK: u32 = 0xFF;
@@ -122,12 +117,15 @@ const _: () = assert!(
 /// always survives, because a group's mean brightness is signal. Both transforms then invert.
 ///
 /// Channel 0's threshold is scaled by the noise curve at the reference's mean luma, interpolated
-/// between bin centres and clamped to 0.33..=3, while the group weight keeps the plain sigma. The
-/// strength map multiplier is the mean of the four 8x8 quarters the reference overlaps.
-/// [STRENGTH_MAP_LUMA] scales channel 0's curve ratio before the clamp. [STRENGTH_MAP_ALL] scales
-/// the chroma thresholds, and channel 0's too when there is no curve. [STRENGTH_MAP_OFF] leaves
-/// every threshold alone. With `pooled` set, `pooled_threshold` keeps a coefficient on the mean
-/// energy of itself and its four frequency neighbours, against `channel_lambda * pool_ratio`.
+/// between bin centres and clamped to 0.33..=3, while the group weight keeps the plain sigma. With
+/// `pooled` set, `pooled_threshold` keeps a coefficient on the mean energy of itself and its four
+/// frequency neighbours, against `channel_lambda * pool_ratio`.
+///
+/// With `colour_on` set, each threshold also scales by the colour gain at the reference's mean
+/// colour. `colour_gains` holds one log gain table per channel and `colour_means` the block means
+/// of the centre frame, on the 8-bit scale `colour_scale` maps a sample onto. A luma gain multiplies
+/// the curve's ratio, or the flat sigma without a valid curve, and the product clamps to 0.33..=6.
+/// A chroma gain multiplies its own channel's threshold.
 ///
 /// `group_weight` gets `1 / sum(v_j)` over the kept coefficients, the inverse-variance weight, so
 /// a group that keeps more coefficients is trusted more. It comes from channel 0 only, because
@@ -138,16 +136,14 @@ const _: () = assert!(
 /// `centre_slot` is the slot the pass is centred on. `neighbour_slots` maps a packed neighbour
 /// index to its slot. `accum` and `wsum` hold one region per slot, so a neighbour-frame member
 /// scatters into its own frame's region. `accum_scale` is the fixed-point scale of that scatter.
-/// `noise` is the derived noise buffer, which gives the sigma of each channel, the weight scale,
-/// the curve flag and the strength map mode. `noise_curve` holds `NOISE_CURVE_BINS` ratios and is
-/// read only when the curve flag is set.
-/// `strength_map` holds `map_cols * map_rows` row-major multipliers laid out by
-/// [strength_map_dims](crate::collab::geometry::strength_map_dims). `kaiser` holds
+/// `noise` is the derived noise buffer, which gives the sigma of each channel, the weight scale
+/// and the curve flag. `noise_curve` holds `NOISE_CURVE_BINS` ratios and is read only when the
+/// curve flag is set. `kaiser` holds
 /// [kaiser_window](crate::collab::kernels::aggregate::kaiser_window)'s taps. `dct_profile` holds
 /// [dct_noise_profile](crate::collab::kernels::transforms::dct_noise_profile)'s values, and
-/// coefficient `(u, v)`'s variance scales by `dct_profile[u] * dct_profile[v]`. `grid_frames` is
-/// the frames per volume from [grid_frames](crate::collab::grid_frames), and 1 compiles the grid
-/// out.
+/// coefficient `(u, v)`'s variance scales by `dct_profile[u] * dct_profile[v]`.
+/// `grid_frames` is the frames per volume from [grid_frames](crate::collab::grid_frames), and 1
+/// compiles the grid out.
 ///
 /// `variant` picks how the searches run, and every variant gives the same output.
 /// [Walk::Uniform](crate::collab::kernels::fused::Walk::Uniform) walks both searches over fixed
@@ -180,7 +176,8 @@ pub fn collab_fused<S: Float, N: Size>(
     neighbour_slots: &[u32],
     noise: &[f32],
     noise_curve: &[f32],
-    strength_map: &[f32],
+    colour_gains: &[f32],
+    colour_means: &[f32],
     dct_profile: &[f32],
     kaiser: &[f32],
     accum: &mut [Atomic<i32>],
@@ -190,6 +187,8 @@ pub fn collab_fused<S: Float, N: Size>(
     c_min: f32,
     lambda_ht: f32,
     accum_scale: f32,
+    colour_scale: f32,
+    colour_on: u32,
     #[comptime] f16_search: bool,
     #[comptime] radius: u32,
     #[comptime] grid_frames: u32,
@@ -206,8 +205,6 @@ pub fn collab_fused<S: Float, N: Size>(
     #[comptime] k_max: u32,
     #[comptime] spatial_radius: u32,
     #[comptime] refs_x: u32,
-    #[comptime] map_cols: u32,
-    #[comptime] map_rows: u32,
     pool_ratio: f32,
     #[comptime] pooled: bool,
     #[comptime] variant: CollabVariant,
@@ -313,14 +310,17 @@ pub fn collab_fused<S: Float, N: Size>(
     let ref_idx = CUBE_POS_Y * refs_x + ref_x_clamped;
     let k_use = group_word & GROUP_SIZE_MASK;
     let use_grid = (group_word & GROUP_USES_GRID) != 0u32;
-    let column_luma = column_luma_of(current.as_slice(), channels);
+    let column_first = column_sum_of(current.as_slice(), 0u32, channels);
+    let column_second = column_sum_of(current.as_slice(), 1u32, channels);
+    let colour = patch_colour(ref_x, ref_y, colour_scale, colour_on, width);
 
     filter_group(
         ring_scalar,
         neighbour_slots,
         noise,
         noise_curve,
-        strength_map,
+        colour_gains,
+        colour_means,
         dct_profile,
         kaiser,
         accum,
@@ -330,9 +330,9 @@ pub fn collab_fused<S: Float, N: Size>(
         member_pos.as_slice(),
         k_use,
         use_grid,
-        column_luma,
-        ref_x,
-        ref_y,
+        column_first,
+        column_second,
+        &colour,
         ref_idx,
         live,
         centre_slot,
@@ -345,8 +345,6 @@ pub fn collab_fused<S: Float, N: Size>(
         width,
         height,
         channels,
-        map_cols,
-        map_rows,
         pooled,
     );
 }
@@ -381,17 +379,20 @@ pub(crate) fn load_reference_column<N: Size>(
     column
 }
 
-/// The sum of channel 0 down a column loaded by [load_reference_column].
+/// The sum of channel `channel` down a column loaded by [load_reference_column], 0 for a channel
+/// the column does not hold.
 #[cube]
-pub(crate) fn column_luma_of(column: &[f32], #[comptime] channels: u32) -> f32 {
-    let mut column_luma = 0.0f32;
+pub(crate) fn column_sum_of(column: &[f32], #[comptime] channel: u32, #[comptime] channels: u32) -> f32 {
+    let mut column_sum = 0.0f32;
 
-    #[unroll]
-    for r in 0..PATCH_SIZE {
-        column_luma += column[(r * channels) as usize];
+    if comptime!(channel < channels) {
+        #[unroll]
+        for r in 0..PATCH_SIZE {
+            column_sum += column[(r * channels + channel) as usize];
+        }
     }
 
-    column_luma
+    column_sum
 }
 
 /// Finds the group of the reference at the cursor and writes its members to `member_pos`.
@@ -553,8 +554,9 @@ pub(crate) fn search_group<S: Float, N: Size>(
 
 /// Filters the group in `member_pos` and scatters every member back into its own frame.
 ///
-/// `column_luma` is lane `sub`'s sum of channel 0 down the reference column, and the group sums
-/// it into the patch luma the noise curve reads. `live` gates every write.
+/// `column_first` and `column_second` are lane `sub`'s sums of channels 0 and 1 down the reference
+/// column. The group sums them into the patch means the noise curve and the colour gains read.
+/// `live` gates every write.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -565,7 +567,8 @@ pub(crate) fn filter_group(
     neighbour_slots: &[u32],
     noise: &[f32],
     noise_curve: &[f32],
-    strength_map: &[f32],
+    colour_gains: &[f32],
+    colour_means: &[f32],
     dct_profile: &[f32],
     kaiser: &[f32],
     accum: &mut [Atomic<i32>],
@@ -575,9 +578,9 @@ pub(crate) fn filter_group(
     member_pos: &[u32],
     k_use: u32,
     use_grid: bool,
-    column_luma: f32,
-    ref_x: u32,
-    ref_y: u32,
+    column_first: f32,
+    column_second: f32,
+    colour: &PatchColour,
     ref_idx: u32,
     live: bool,
     centre_slot: u32,
@@ -590,8 +593,6 @@ pub(crate) fn filter_group(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
-    #[comptime] map_cols: u32,
-    #[comptime] map_rows: u32,
     #[comptime] pooled: bool,
 ) {
     let mut member_slot = Array::<u32>::new(MAX_K as usize);
@@ -611,8 +612,13 @@ pub(crate) fn filter_group(
     // read once.
     let prof_sub = dct_profile[sub as usize];
 
-    // Every lane reaches the luma reduction, so the group stays converged.
-    let patch_luma = plane_ssd_reduce8(column_luma) / comptime!(PATCH_AREA as f32);
+    // Every lane reaches the reductions, so the group stays converged.
+    let patch_luma = plane_ssd_reduce8(column_first) / comptime!(PATCH_AREA as f32);
+    let mut patch_second = 0.0f32;
+    if comptime!(channels > 1) {
+        patch_second = plane_ssd_reduce8(column_second) / comptime!(PATCH_AREA as f32);
+    }
+
     let bins = comptime!(NOISE_CURVE_BINS as f32);
     let unclamped_pos = patch_luma * bins - 0.5f32;
     let curve_pos = f32::clamp(unclamped_pos, 0.0f32, bins - 1.0f32);
@@ -623,14 +629,35 @@ pub(crate) fn filter_group(
     let ratio = lower_ratio + (upper_ratio - lower_ratio) * fraction;
 
     let curve_valid = noise[DERIVED_CURVE_VALID as usize] != 0.0f32;
-    let map_mode = u32::cast_from(noise[DERIVED_MAP_MODE as usize]);
     let weight_scale = noise[DERIVED_WEIGHT_SCALE as usize];
 
-    let map_scale = strength_map_scale(strength_map, ref_x, ref_y, map_cols, map_rows);
-    let mapped_ratio = select(map_mode == STRENGTH_MAP_LUMA, ratio * map_scale, ratio);
-    let curve_scale = f32::clamp(mapped_ratio, NOISE_CURVE_SCALE_MIN, NOISE_CURVE_SCALE_MAX);
-    let other_lambda = select(map_mode == STRENGTH_MAP_ALL, lambda_ht * map_scale, lambda_ht);
-    let luma_lambda = select(curve_valid, lambda_ht * curve_scale, other_lambda);
+    let (first_gain, second_gain) = threshold_gains(
+        colour_gains,
+        colour_means,
+        colour,
+        patch_luma,
+        patch_second,
+        channels,
+    );
+
+    // A luma gain joins the curve's scale, and a chroma gain scales its channel's threshold. Every
+    // gain is exactly 1 with the colour gains off, which leaves each threshold as it was.
+    let mut curve_gain = 1.0f32;
+    let mut first_channel_gain = first_gain;
+    let mut scale_max = NOISE_CURVE_SCALE_MAX.runtime();
+    if comptime!(channels == 1) {
+        curve_gain = first_gain;
+        first_channel_gain = 1.0f32;
+        scale_max = select(colour.on != 0u32, COLOUR_CURVE_SCALE_MAX, NOISE_CURVE_SCALE_MAX);
+    }
+
+    let curve_ratio = ratio * curve_gain;
+    let curve_scale = f32::clamp(curve_ratio, NOISE_CURVE_SCALE_MIN, scale_max);
+    let flat_scale = f32::clamp(curve_gain, NOISE_CURVE_SCALE_MIN, scale_max);
+    let luma_scale = select(curve_valid, curve_scale, flat_scale);
+    let luma_lambda = lambda_ht * luma_scale;
+    let first_lambda = luma_lambda * first_channel_gain;
+    let second_lambda = lambda_ht * second_gain;
 
     // Computed from channel 0 and reused by every later channel's scatter.
     let mut scaled_weight = 0.0f32;
@@ -703,7 +730,7 @@ pub(crate) fn filter_group(
             stack_haar_fwd(stack.as_mut_slice(), k_use);
         }
 
-        let channel_lambda = select(c == 0u32, luma_lambda, other_lambda);
+        let channel_lambda = select(c == 0u32, first_lambda, second_lambda);
         let mut retained_v = 0.0f32;
         if comptime!(pooled) {
             let threshold = channel_lambda * pool_ratio;

@@ -105,6 +105,21 @@ pub(crate) fn run_pyramid_build(
         motion_ctx.align,
     );
 
+    run_pyramid_downscale(client, motion_ctx, width, height, frame_count, slot, pyramid);
+
+    Ok(())
+}
+
+/// Builds every level past level 0 for `slot`, each the one before averaged 2x2 at half size.
+pub(crate) fn run_pyramid_downscale(
+    client: &Client,
+    motion_ctx: &MotionCtx,
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    slot: u32,
+    pyramid: &Handle,
+) {
     for level in 1..motion_ctx.pyramid_levels {
         downscale_level(
             client,
@@ -117,8 +132,6 @@ pub(crate) fn run_pyramid_build(
             motion_ctx.align,
         );
     }
-
-    Ok(())
 }
 
 #[expect(

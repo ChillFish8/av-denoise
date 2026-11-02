@@ -1,13 +1,15 @@
 #[cfg(test)]
 mod tests;
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 #[cfg(test)]
 pub(crate) use self::tests::SlotStats;
+use super::NOISE_CHANNELS;
+use super::colour::ColourMeasure;
 use super::curve::{MIN_QUARTERS_PER_BIN, NOISE_CURVE_BINS};
 use super::derived::DerivedValues;
 use super::fold::{FoldSettings, NoiseSettings, OffsetTables, STATE_WORDS, fold_words};
@@ -15,24 +17,21 @@ use super::history::{ReadingHistory, history_capacity};
 use super::reading::{
     CURVE_TAGS,
     IMMERKAER_SPATIAL_TAGS,
-    IMMERKAER_TAGS,
     READING_WORDS,
-    SAMPLE_TAGS,
     curve_queries,
     immerkaer_queries,
+    immerkaer_tags,
     sample_queries,
+    sample_tags,
 };
 use super::select::{SelectBatch, histogram_len};
 use super::spatial::{IMMERKAER_LANES, RESULTS_PER_SLOT, noise_partials_slot_stride_bytes, partials_len};
-use super::strength_map::{QuarterSettings, StrengthMapParams};
 use super::temporal::{
     TEMPORAL_QUARTERS,
     min_static_blocks,
     temporal_stats_blocks,
     temporal_stats_buf_bytes,
 };
-use super::{NOISE_BLOCK_1D, NOISE_CHANNELS};
-use crate::collab::geometry::strength_map_dims;
 use crate::engine::BufferSize;
 use crate::engine::align::StorageAlign;
 
@@ -50,17 +49,6 @@ pub(crate) struct NoiseShape {
     /// Whether temporal statistics are measured, which needs a temporal radius of at least 1.
     pub temporal: bool,
     pub align: StorageAlign,
-}
-
-/// Which strength map a reading builds.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub(crate) enum StrengthMapKind {
-    #[default]
-    Off,
-    Luma(StrengthMapParams),
-    Chroma {
-        flat_boost: f32,
-    },
 }
 
 /// The block value of channel 0's mean residual, after one sigma per channel.
@@ -82,32 +70,34 @@ pub(crate) const SAMPLE_RUN_RHO: u32 = NOISE_CHANNELS;
 /// The quarters fill [TEMPORAL_QUARTERS](crate::noise::temporal::TEMPORAL_QUARTERS) runs, with each
 /// block's quarters side by side.
 pub(crate) const SAMPLE_RUN_QUARTERS: u32 = SAMPLE_RUN_RHO + 1;
-/// The sample batch's run of accepted flag lanes.
+/// The sample batch's run of channel 0's accepted flag lanes.
+///
+/// Channel `c`'s run is `c` past it.
 pub(crate) const SAMPLE_RUN_ACCEPTED: u32 = SAMPLE_RUN_QUARTERS + TEMPORAL_QUARTERS;
-/// The sample batch's lanes per block.
-pub(crate) const SAMPLE_LANES_PER_BLOCK: u32 = SAMPLE_RUN_ACCEPTED + 1;
 /// The curve batch's lanes per block, one per static quarter.
 pub(crate) const CURVE_LANES_PER_BLOCK: u32 = TEMPORAL_QUARTERS;
-/// The block flag of a block whose mean residual passes the static gate.
+/// The block flag of a block whose channel 0 mean residual passes the static gate.
 pub(crate) const BLOCK_CANDIDATE: u32 = 1;
-/// The block flag of a block accepted as static noise.
+/// The block flag of a block channel 0 accepts as static noise.
 pub(crate) const BLOCK_ACCEPTED: u32 = 2;
-/// The class flag of a map quarter that holds pixels.
-pub(crate) const CLASS_PRESENT: u32 = 1;
-/// The class flag of a flat map quarter, before the texture veto.
-pub(crate) const CLASS_FLAT: u32 = 2;
-/// The class flag of a full map quarter that holds a strong line.
-pub(crate) const CLASS_LINE: u32 = 4;
-/// The `f32` words of one map quarter's structure tensor, `xx`, `yy` then `xy`.
-pub(crate) const QUARTER_TENSOR_WORDS: u32 = 3;
+/// The bits each channel's block flags take.
+const BLOCK_CHANNEL_FLAG_BITS: u32 = 2;
+
+/// Channel `channel`'s copy of a channel 0 block flag.
+pub(crate) const fn channel_flag(flag: u32, channel: u32) -> u32 {
+    flag << (BLOCK_CHANNEL_FLAG_BITS * channel)
+}
+
+/// The sample batch's lanes per block.
+pub(crate) const fn sample_lanes_per_block(channels: u32) -> u32 {
+    SAMPLE_RUN_ACCEPTED + channels
+}
 
 /// What one slot's reading measures.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct ReadingSettings {
-    /// Whether the stats carry the luma quarter fields the curve and the classes read.
+    /// Whether the stats carry the luma quarter fields the curve reads.
     pub luma_fields: bool,
-    pub quarter: QuarterSettings,
-    pub map: StrengthMapKind,
 }
 
 /// The noise values every consumer reads and, when the noise is measured, the buffers one ring of
@@ -120,14 +110,15 @@ pub(crate) struct NoiseState {
     pub(super) derived: Handle,
     /// The current curve's ratios when the consumer applies it, else zeros.
     pub(super) curve_ratios: Handle,
-    /// The current threshold multiplier per map quarter, created as ones.
-    pub(super) current_map: Handle,
     /// The NLM offset tables, when the fold settings ask for them.
     pub(super) offset_tables: Option<OffsetTables>,
     /// The fixed derived values last uploaded, which host-built offset tables follow.
     pub(super) fixed_values: DerivedValues,
     /// The measurement buffers, `None` for a state that holds fixed values.
     pub(super) measurement: Option<Measurement>,
+    /// The block means and colour cells each reading pools into, when the grain is measured per
+    /// colour.
+    pub(super) colour: Option<ColourMeasure>,
 }
 
 /// The buffers one ring of frames is measured and folded in.
@@ -140,22 +131,20 @@ pub(super) struct Measurement {
     pub(super) stats: Option<Handle>,
     /// One reading of [READING_WORDS](crate::noise::reading::READING_WORDS) values per slot.
     pub(super) readings: Handle,
-    /// Each Immerkær cube's sigmas and, with temporal stats, each candidate block's channel-0 sigma
-    /// and texture.
+    /// Each Immerkær cube's sigmas and, with temporal stats, each candidate block's per-channel
+    /// sigmas and texture.
     pub(super) immerkaer_batch: SelectBatch,
     /// The per-block scratch and the sample batch, when temporal stats are measured.
     pub(super) sample: Option<SampleScratch>,
     /// Each flat, unclipped static quarter's sigma tagged with its luma bin, when temporal stats
     /// and the luma quarter fields are measured.
     pub(super) curve: Option<SelectBatch>,
-    /// The quarter classes and the per-slot strength maps, when a strength map is built.
-    pub(super) classes: Option<ClassScratch>,
     /// The fewest accepted blocks a sample needs to reach the static fraction.
     pub(super) min_accepted: u32,
     /// The [FOLD_WORDS](crate::noise::fold::FOLD_WORDS) settings the fold reads.
     pub(super) fold_settings: Handle,
-    /// The [STATE_WORDS](crate::noise::fold::STATE_WORDS) chains, rho, curve and classes flag the
-    /// last fold wrote.
+    /// The [STATE_WORDS](crate::noise::fold::STATE_WORDS) chains, rho and curve the last fold
+    /// wrote.
     pub(super) fold_state: Handle,
     /// The readings of the latest stream frames, which every fold reads its window from.
     pub(super) history: ReadingHistory,
@@ -169,20 +158,9 @@ pub(super) struct SampleScratch {
     pub(super) block_values: Handle,
     /// One flag word per block.
     pub(super) block_flags: Handle,
-    /// Each accepted block's sigmas, correlation, static quarter sigmas and accepted flag.
+    /// Each block's kept sigma and accepted flag per channel, plus its correlation and static
+    /// quarter sigmas.
     pub(super) batch: SelectBatch,
-}
-
-/// The buffers one slot's strength map is built in, one entry per map quarter.
-pub(super) struct ClassScratch {
-    /// One word of `CLASS_*` flags per quarter.
-    pub(super) classes: Handle,
-    /// Each quarter's mean luma.
-    pub(super) lumas: Handle,
-    /// [QUARTER_TENSOR_WORDS](crate::noise::state::QUARTER_TENSOR_WORDS) values per quarter.
-    pub(super) tensors: Handle,
-    /// One threshold multiplier per quarter for every slot, created as ones.
-    pub(super) slot_maps: Handle,
 }
 
 impl NoiseState {
@@ -201,7 +179,7 @@ impl NoiseState {
         state
     }
 
-    /// A state that measures nothing and holds `derived`, a curve of zeros and a map of ones.
+    /// A state that measures nothing and holds `derived` and a curve of zeros.
     ///
     /// With `offset_tables` it also holds the offset tables of that search radius, built from
     /// `derived` at a rho of 0. Every queue is a no-op, and a snapshot holds `derived` with no
@@ -231,20 +209,16 @@ impl NoiseState {
         let curve_bytes = f32::as_bytes(&curve_zeros);
         let curve_ratios = client.create_from_slice(curve_bytes);
 
-        let map_ones = vec![1.0f32; quarter_count(shape) as usize];
-        let map_bytes = f32::as_bytes(&map_ones);
-        let current_map = client.create_from_slice(map_bytes);
-
         Self {
             client: client.clone(),
             shape,
             settings,
             derived,
             curve_ratios,
-            current_map,
             offset_tables: tables,
             fixed_values,
             measurement: None,
+            colour: None,
         }
     }
 
@@ -299,8 +273,7 @@ impl NoiseState {
     /// Replaces the settings before the first queued slot.
     ///
     /// A new offset table radius rebuilds the tables from the last fixed derived values. A measured
-    /// state allocates or drops the curve batch and the class scratch to match, and rewrites the
-    /// fold settings.
+    /// state allocates or drops the curve batch to match, and rewrites the fold settings.
     pub(crate) fn set_settings(&mut self, settings: NoiseSettings) {
         let radius = settings.fold.offset_tables;
         let table_radius = self.offset_tables.as_ref().map(|tables| tables.radius);
@@ -331,24 +304,6 @@ impl NoiseState {
             measurement.curve = None;
         }
 
-        let has_classes = measurement.classes.is_some();
-        let wants_classes = reading.map != StrengthMapKind::Off;
-
-        if wants_classes && !has_classes {
-            measurement.classes = class_scratch(&client, shape, reading);
-        }
-
-        if !wants_classes {
-            measurement.classes = None;
-        }
-
-        let map_len = map_quarters(shape, reading);
-        if measurement.history.map_len() != map_len {
-            let temporal_radius = shape.ring_radius;
-            measurement.history = ReadingHistory::new(&client, temporal_radius, map_len);
-            measurement.recorded.store(0, Ordering::Relaxed);
-        }
-
         measurement.fold_settings = fold_settings_buffer(&client, shape, settings);
     }
 
@@ -362,11 +317,6 @@ impl NoiseState {
         &self.curve_ratios
     }
 
-    /// The current threshold multiplier per map quarter.
-    pub(crate) fn strength_map(&self) -> &Handle {
-        &self.current_map
-    }
-
     /// The main pass's noise-floor table, one entry per search candidate, `None` without tables.
     pub(crate) fn spatial_offsets(&self) -> Option<&Handle> {
         self.offset_tables.as_ref().map(|tables| &tables.spatial)
@@ -375,14 +325,6 @@ impl NoiseState {
     /// The NLM pilot's noise-floor table, one entry per search candidate, `None` without tables.
     pub(crate) fn pilot_offsets(&self) -> Option<&Handle> {
         self.offset_tables.as_ref().map(|tables| &tables.pilot)
-    }
-
-    /// Every slot's strength map, `None` without a strength map.
-    pub(super) fn slot_maps(&self) -> Option<&Handle> {
-        self.measurement()
-            .classes
-            .as_ref()
-            .map(|scratch| &scratch.slot_maps)
     }
 
     /// The partials ring, offset to the start of `slot`.
@@ -427,7 +369,6 @@ fn measurement_buffers(client: &Client, shape: NoiseShape, settings: NoiseSettin
     let immerkaer_batch = immerkaer_batch(client, shape);
     let sample = shape.temporal.then(|| sample_scratch(client, shape));
     let curve = curve_batch(client, shape, reading);
-    let classes = class_scratch(client, shape, reading);
     let blocks = block_count(shape);
     let min_accepted = min_static_blocks(blocks);
 
@@ -438,8 +379,7 @@ fn measurement_buffers(client: &Client, shape: NoiseShape, settings: NoiseSettin
     let fold_state = client.create_from_slice(state_bytes);
 
     let temporal_radius = shape.ring_radius;
-    let map_len = map_quarters(shape, reading);
-    let history = ReadingHistory::new(client, temporal_radius, map_len);
+    let history = ReadingHistory::new(client, temporal_radius);
 
     Measurement {
         partials,
@@ -449,7 +389,6 @@ fn measurement_buffers(client: &Client, shape: NoiseShape, settings: NoiseSettin
         immerkaer_batch,
         sample,
         curve,
-        classes,
         min_accepted,
         fold_settings,
         fold_state,
@@ -476,39 +415,22 @@ pub(super) fn block_count(shape: NoiseShape) -> u32 {
     blocks_x * blocks_y
 }
 
-/// The map quarters each history slot keeps, 0 when `settings` builds no strength map.
-fn map_quarters(shape: NoiseShape, settings: ReadingSettings) -> u32 {
-    if settings.map == StrengthMapKind::Off {
-        return 0;
-    }
-
-    quarter_count(shape)
-}
-
-/// Map quarters in one frame of `shape`.
-pub(super) fn quarter_count(shape: NoiseShape) -> u32 {
-    let (cols, rows) = strength_map_dims(shape.width, shape.height);
-    cols * rows
-}
-
-/// The cubes of a launch with one thread per map quarter.
-pub(super) fn quarter_grid(shape: NoiseShape) -> u32 {
-    let quarters = quarter_count(shape);
-    quarters.div_ceil(NOISE_BLOCK_1D)
-}
-
 /// The immerkaer batch's lanes, one per cube for each channel plus, with temporal stats, two per
-/// block.
+/// block for each active channel, its sigma and its texture.
 fn immerkaer_lanes(shape: NoiseShape) -> u32 {
     let cubes = cube_count(shape);
-    let block_lanes = if shape.temporal { 2 * block_count(shape) } else { 0 };
+    let block_lanes = if shape.temporal {
+        2 * shape.channels * block_count(shape)
+    } else {
+        0
+    };
 
     NOISE_CHANNELS * cubes + block_lanes
 }
 
 fn immerkaer_tag_count(shape: NoiseShape) -> u32 {
     if shape.temporal {
-        IMMERKAER_TAGS
+        immerkaer_tags(shape.channels)
     } else {
         IMMERKAER_SPATIAL_TAGS
     }
@@ -518,7 +440,7 @@ fn immerkaer_batch(client: &Client, shape: NoiseShape) -> SelectBatch {
     let len = immerkaer_lanes(shape);
     let tag_count = immerkaer_tag_count(shape);
     let min_counts = vec![0u32; tag_count as usize];
-    let queries = immerkaer_queries(shape.temporal);
+    let queries = immerkaer_queries(shape.temporal, shape.channels);
 
     SelectBatch::new(client, len, &min_counts, &queries)
 }
@@ -551,26 +473,18 @@ const CURVE_BATCH: BatchNames = BatchNames {
 const READINGS: &str = "noise readings";
 const BLOCK_VALUES: &str = "noise block values";
 const BLOCK_FLAGS: &str = "noise block flags";
-const QUARTER_CLASSES: &str = "noise quarter classes";
-const QUARTER_LUMAS: &str = "noise quarter lumas";
-const QUARTER_TENSORS: &str = "noise quarter tensors";
-const SLOT_MAPS: &str = "noise slot maps";
-const CURRENT_MAP: &str = "noise current map";
 const STREAM_STATE: &str = "noise stream state";
 const HISTORY_RECORDS: &str = "noise history records";
 const HISTORY_RESULTS: &str = "noise history results";
-const HISTORY_MAPS: &str = "noise history maps";
 
-/// The element count of every reading, map and stream buffer a noise state for `shape` holds.
+/// The element count of every reading and stream buffer a noise state for `shape` holds.
 ///
-/// The curve batch is counted whenever temporal stats are measured and the class scratch always,
-/// which is the most any settings allocate.
+/// The curve batch is counted whenever temporal stats are measured, which is the most any settings
+/// allocate.
 pub(crate) fn reading_buffer_sizes(shape: NoiseShape) -> Vec<BufferSize> {
     let frames = u64::from(shape.frames);
     let block_total = block_count(shape);
     let blocks = u64::from(block_total);
-    let quarter_total = quarter_count(shape);
-    let quarters = u64::from(quarter_total);
     let mut buffers = Vec::new();
 
     let readings = frames.checked_mul(u64::from(READING_WORDS));
@@ -579,7 +493,7 @@ pub(crate) fn reading_buffer_sizes(shape: NoiseShape) -> Vec<BufferSize> {
     let immerkaer_lane_count = immerkaer_lanes(shape);
     let immerkaer_len = u64::from(immerkaer_lane_count);
     let immerkaer_tags = immerkaer_tag_count(shape);
-    let immerkaer_queries = immerkaer_queries(shape.temporal).len() as u32;
+    let immerkaer_queries = immerkaer_queries(shape.temporal, shape.channels).len() as u32;
     push_batch_sizes(
         &mut buffers,
         &IMMERKAER_BATCH,
@@ -593,13 +507,15 @@ pub(crate) fn reading_buffer_sizes(shape: NoiseShape) -> Vec<BufferSize> {
         buffers.push((BLOCK_VALUES, values));
         buffers.push((BLOCK_FLAGS, Some(blocks)));
 
-        let sample_len = blocks.checked_mul(u64::from(SAMPLE_LANES_PER_BLOCK));
-        let sample_queries = sample_queries().len() as u32;
+        let sample_lanes = sample_lanes_per_block(shape.channels);
+        let sample_len = blocks.checked_mul(u64::from(sample_lanes));
+        let sample_tags = sample_tags(shape.channels);
+        let sample_queries = sample_queries(shape.channels).len() as u32;
         push_batch_sizes(
             &mut buffers,
             &SAMPLE_BATCH,
             sample_len,
-            SAMPLE_TAGS,
+            sample_tags,
             sample_queries,
         );
 
@@ -608,13 +524,6 @@ pub(crate) fn reading_buffer_sizes(shape: NoiseShape) -> Vec<BufferSize> {
         push_batch_sizes(&mut buffers, &CURVE_BATCH, curve_len, CURVE_TAGS, curve_queries);
     }
 
-    let tensors = quarters.checked_mul(u64::from(QUARTER_TENSOR_WORDS));
-    let slot_maps = quarters.checked_mul(frames);
-    buffers.push((QUARTER_CLASSES, Some(quarters)));
-    buffers.push((QUARTER_LUMAS, Some(quarters)));
-    buffers.push((QUARTER_TENSORS, tensors));
-    buffers.push((SLOT_MAPS, slot_maps));
-    buffers.push((CURRENT_MAP, Some(quarters)));
     let state_words = u64::from(STATE_WORDS);
     buffers.push((STREAM_STATE, Some(state_words)));
 
@@ -622,10 +531,8 @@ pub(crate) fn reading_buffer_sizes(shape: NoiseShape) -> Vec<BufferSize> {
     let history_slots = u64::from(history_capacity(radius));
     let history_records = history_slots.checked_mul(u64::from(READING_WORDS));
     let history_results = history_slots.checked_mul(RESULTS_PER_SLOT as u64);
-    let history_maps = quarters.checked_mul(history_slots);
     buffers.push((HISTORY_RECORDS, history_records));
     buffers.push((HISTORY_RESULTS, history_results));
-    buffers.push((HISTORY_MAPS, history_maps));
 
     buffers
 }
@@ -645,14 +552,16 @@ fn push_batch_sizes(
     buffers.push((names.histogram, Some(histogram_words)));
 }
 
-/// The block scratch and the sample batch of [SAMPLE_LANES_PER_BLOCK] lanes per block.
+/// The block scratch and the sample batch of [sample_lanes_per_block] lanes per block.
 fn sample_scratch(client: &Client, shape: NoiseShape) -> SampleScratch {
     let blocks = block_count(shape);
     let values_bytes = (blocks * BLOCK_FIELDS) as usize * size_of::<f32>();
     let flags_bytes = blocks as usize * size_of::<u32>();
-    let min_counts = vec![0u32; SAMPLE_TAGS as usize];
-    let queries = sample_queries();
-    let len = SAMPLE_LANES_PER_BLOCK * blocks;
+    let tag_count = sample_tags(shape.channels);
+    let min_counts = vec![0u32; tag_count as usize];
+    let queries = sample_queries(shape.channels);
+    let lanes = sample_lanes_per_block(shape.channels);
+    let len = lanes * blocks;
     let batch = SelectBatch::new(client, len, &min_counts, &queries);
 
     SampleScratch {
@@ -677,26 +586,4 @@ fn curve_batch(client: &Client, shape: NoiseShape, settings: ReadingSettings) ->
     let batch = SelectBatch::new(client, len, &min_counts, &queries);
 
     Some(batch)
-}
-
-/// The class scratch and the slot maps of ones, when `settings` builds a strength map.
-fn class_scratch(client: &Client, shape: NoiseShape, settings: ReadingSettings) -> Option<ClassScratch> {
-    if settings.map == StrengthMapKind::Off {
-        return None;
-    }
-
-    let quarters = quarter_count(shape) as usize;
-    let word = size_of::<f32>();
-    let tensor_words = quarters * QUARTER_TENSOR_WORDS as usize;
-    let map_ones = vec![1.0f32; quarters * shape.frames as usize];
-    let map_bytes = f32::as_bytes(&map_ones);
-
-    let scratch = ClassScratch {
-        classes: client.empty(quarters * word),
-        lumas: client.empty(quarters * word),
-        tensors: client.empty(tensor_words * word),
-        slot_maps: client.create_from_slice(map_bytes),
-    };
-
-    Some(scratch)
 }

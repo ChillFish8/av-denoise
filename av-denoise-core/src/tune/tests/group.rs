@@ -3,10 +3,10 @@ use std::path::Path;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::engine::{DevicePlane, Engine, EngineSpec, Geometry, SampleFormat};
+use crate::engine::{ChromaLayout, ChromaSiting, DevicePlane, Engine, EngineSpec, Geometry, SampleFormat};
 use crate::error::Error;
 use crate::nl4d::Nl4dOptions;
-use crate::nlmeans::{ChannelMode, DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
+use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::{
     BudgetRequest,
     SearchMode,
@@ -34,9 +34,10 @@ fn geometry() -> Geometry {
     Geometry {
         width: WIDTH,
         height: HEIGHT,
-        channels: ChannelMode::Luma,
+        chroma: ChromaLayout::Gray,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 
@@ -47,7 +48,8 @@ fn nlmeans_spec(mode: DenoisingMode) -> EngineSpec {
     };
 
     EngineSpec::Nlmeans {
-        algorithm: NlmeansAlgorithm::Fast(options),
+        luma: Some(NlmeansAlgorithm::Fast(options)),
+        chroma: None,
         geometry: geometry(),
     }
 }
@@ -68,7 +70,8 @@ fn nl4d() -> Vec<EngineSpec> {
         ..Nl4dOptions::default()
     };
     let spec = EngineSpec::Nl4d {
-        options,
+        luma: Some(options),
+        chroma: None,
         geometry: geometry(),
     };
 
@@ -111,8 +114,8 @@ fn upload_frame(client: &Client, specs: &[EngineSpec], frame: u32) -> FrameHandl
     specs
         .iter()
         .map(|spec| {
-            let channels = spec.geometry().channels.count();
-            (0..channels).map(|_| client.create_from_slice(&bytes)).collect()
+            let planes = spec.geometry().chroma.plane_count();
+            (0..planes).map(|_| client.create_from_slice(&bytes)).collect()
         })
         .collect()
 }
@@ -149,14 +152,14 @@ fn push_context(group: &mut TunedGroup, frame: &[Vec<Handle>]) -> Result<(), Err
 }
 
 fn output_handles(client: &Client, specs: &[EngineSpec]) -> FrameHandles {
-    let geometry = geometry();
-    let bytes = geometry.output.plane_bytes(geometry.pixels()) as usize;
+    let pixels = u64::from(WIDTH * HEIGHT);
+    let bytes = geometry().output.plane_bytes(pixels) as usize;
 
     specs
         .iter()
         .map(|spec| {
-            let channels = spec.geometry().channels.count();
-            (0..channels).map(|_| client.empty(bytes)).collect()
+            let planes = spec.geometry().chroma.plane_count();
+            (0..planes).map(|_| client.empty(bytes)).collect()
         })
         .collect()
 }
@@ -576,4 +579,124 @@ fn a_second_group_reuses_the_first_groups_result() {
 
     assert_eq!(ready, 1);
     assert!(second.tune_report().is_none());
+}
+
+/// The plane sizes of a 64x48 4:2:0 frame.
+const YUV_DIMS: [(u32, u32); 3] = [(WIDTH, HEIGHT), (WIDTH / 2, HEIGHT / 2), (WIDTH / 2, HEIGHT / 2)];
+
+fn yuv_spec() -> EngineSpec {
+    let options = NlmeansOptions {
+        mode: DenoisingMode::Temporal { radius: 1 },
+        ..NlmeansOptions::default()
+    };
+    let algorithm = NlmeansAlgorithm::Fast(options);
+    let geometry = Geometry {
+        chroma: ChromaLayout::Yuv420,
+        ..geometry()
+    };
+
+    EngineSpec::Nlmeans {
+        luma: Some(algorithm),
+        chroma: Some(algorithm),
+        geometry,
+    }
+}
+
+fn upload_yuv_frame(client: &Client, frame: u32) -> Vec<Handle> {
+    let bytes = plane_bytes(frame);
+
+    YUV_DIMS
+        .iter()
+        .map(|(width, height)| {
+            let pixels = (width * height) as usize;
+            client.create_from_slice(&bytes[..pixels])
+        })
+        .collect()
+}
+
+fn yuv_planes(handles: &[Handle]) -> Vec<DevicePlane<'_>> {
+    handles
+        .iter()
+        .zip(YUV_DIMS)
+        .map(|(handle, (width, height))| DevicePlane::new(handle, width, height))
+        .collect()
+}
+
+fn yuv_output_handles(client: &Client) -> Vec<Handle> {
+    YUV_DIMS
+        .iter()
+        .map(|(width, height)| {
+            let pixels = u64::from(width * height);
+            let bytes = SampleFormat::U8.plane_bytes(pixels) as usize;
+            client.empty(bytes)
+        })
+        .collect()
+}
+
+/// Emits `count` frames through `emit` into fresh 4:2:0 planes and reads each back.
+fn emit_yuv(
+    client: &Client,
+    count: usize,
+    mut emit: impl FnMut(&[DevicePlane<'_>]) -> Result<(), Error>,
+) -> Vec<FrameBytes> {
+    let mut emitted = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let handles = yuv_output_handles(client);
+        let planes = yuv_planes(&handles);
+        emit(&planes).expect("the frame emits");
+
+        let frame = vec![handles];
+        let read = read_frame(client, &frame);
+        emitted.push(read);
+    }
+
+    emitted
+}
+
+#[test]
+fn a_tuned_yuv_group_matches_a_baseline_engine_on_every_plane() {
+    let store = tempfile::tempdir().unwrap();
+    let config = deterministic_config(store.path());
+    let off = TuningConfig {
+        mode: TuningMode::Off,
+        ..TuningConfig::default()
+    };
+    let device = crate::testing::test_device();
+    let client = device.client();
+    let spec = yuv_spec();
+    let specs = vec![spec];
+    let frame_count = tuning_frame_count(&specs) + 2;
+    let clip: Vec<Vec<Handle>> = (0..frame_count as u32)
+        .map(|frame| upload_yuv_frame(&client, frame))
+        .collect();
+    let mut group = TunedGroup::new(&device, &client, specs, config).expect("the group builds");
+    let mut baseline = build_engine(&device, &client, spec, &off).expect("the baseline builds");
+    let mut group_output = Vec::new();
+    let mut baseline_output = Vec::new();
+
+    for frame in &clip {
+        let planes = yuv_planes(frame);
+        let ready = group.push(&[&planes]).expect("the group push succeeds");
+        let emitted = emit_yuv(&client, ready, |planes| group.emit_into(&[planes]));
+        group_output.extend(emitted);
+
+        let ready = baseline.push(&planes).expect("the baseline push succeeds");
+        let emitted = emit_yuv(&client, ready, |planes| baseline.emit_into(planes));
+        baseline_output.extend(emitted);
+    }
+
+    let tail = group.finish().expect("the group finishes");
+    let emitted = emit_yuv(&client, tail, |planes| group.emit_into(&[planes]));
+    group_output.extend(emitted);
+
+    let tail = baseline.finish().expect("the baseline finishes");
+    let emitted = emit_yuv(&client, tail, |planes| baseline.emit_into(planes));
+    baseline_output.extend(emitted);
+
+    let report = group.tune_report().expect("the group tuned");
+    assert_eq!(report.outcome, TuneOutcome::Tuned, "{report:?}");
+    assert_eq!(baseline_output.len(), frame_count);
+    assert_eq!(baseline_output[0].len(), 3);
+    assert_frames_match(&group_output, &baseline_output);
 }

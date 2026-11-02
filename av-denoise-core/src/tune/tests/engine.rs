@@ -3,11 +3,12 @@ use cubecl::server::Handle;
 
 use super::fixtures::{hashed_unit, upload};
 use super::runtime::test_client;
-use crate::engine::{DevicePlane, Engine, Geometry, SampleFormat};
-use crate::nlmeans::{ChannelMode, DenoisingMode, NlmTuning, NlmeansAlgorithm, NlmeansOptions};
+use crate::Nl4dOptions;
+use crate::engine::{DevicePlane, PassEngine, PassGeometry, SampleFormat};
+use crate::nl4d::Nl4d;
+use crate::nlmeans::{ChannelMode, DenoisingMode, NlmTuning, Nlmeans, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::gpu::read_f32;
 use crate::tune::{EngineKernels, KernelPlan};
-use crate::{Nl4d, Nl4dOptions, Nlmeans};
 
 /// `count` frames of a smooth ramp plus per-frame hashed noise, one `Vec` per plane.
 pub(crate) fn noisy_frames(width: u32, height: u32, planes: usize, count: usize) -> Vec<Vec<Vec<f32>>> {
@@ -34,7 +35,7 @@ pub(crate) fn noisy_frames(width: u32, height: u32, planes: usize, count: usize)
 
 fn emit_frame(
     client: &Client,
-    engine: &mut dyn Engine,
+    engine: &mut dyn PassEngine,
     width: u32,
     height: u32,
     planes: usize,
@@ -61,7 +62,7 @@ fn emit_frame(
 /// Pushes `frames` through `engine` as f32 planes and returns every frame it emits, planes flattened.
 pub(crate) fn run_engine(
     client: &Client,
-    engine: &mut dyn Engine,
+    engine: &mut dyn PassEngine,
     width: u32,
     height: u32,
     frames: &[Vec<Vec<f32>>],
@@ -92,8 +93,8 @@ pub(crate) fn run_engine(
     Ok(outputs)
 }
 
-fn f32_geometry(width: u32, height: u32, channels: ChannelMode) -> Geometry {
-    Geometry {
+fn f32_geometry(width: u32, height: u32, channels: ChannelMode) -> PassGeometry {
+    PassGeometry {
         width,
         height,
         channels,
@@ -117,7 +118,8 @@ pub(crate) fn nlmeans_outputs(
         plan,
         ..EngineKernels::default()
     };
-    let mut engine = Nlmeans::with_kernels(&client, algorithm, geometry, kernels).expect("the engine builds");
+    let mut engine =
+        Nlmeans::with_kernels(&client, algorithm, geometry, kernels, None, false).expect("the engine builds");
 
     run_engine(&client, &mut engine, width, height, frames).expect("the frames denoise")
 }
@@ -150,7 +152,8 @@ pub(crate) fn nl4d_outputs_with(
 ) -> Vec<Vec<f32>> {
     let client = test_client();
     let geometry = f32_geometry(width, height, channels);
-    let mut engine = Nl4d::with_kernels(&client, options, geometry, kernels).expect("the engine builds");
+    let mut engine =
+        Nl4d::with_kernels(&client, options, geometry, kernels, None, false).expect("the engine builds");
 
     run_engine(&client, &mut engine, width, height, frames).expect("the frames denoise")
 }

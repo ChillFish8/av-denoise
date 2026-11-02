@@ -1,4 +1,7 @@
 mod chroma_dims;
+// Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
+mod chroma_guide;
 mod cli_options;
 mod layout;
 // Gated on `vulkan` because `luma_chroma_options` names the `Vulkan` accelerator variant.
@@ -10,6 +13,9 @@ mod passthrough_retry;
 // Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
 #[cfg(feature = "vulkan")]
 mod measured_reseed;
+// Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
+#[cfg(feature = "vulkan")]
+mod pan_reseed;
 // Gated on `vulkan` because the planar denoiser it builds names the `Vulkan` accelerator variant.
 #[cfg(feature = "vulkan")]
 mod profile_keys;
@@ -27,7 +33,7 @@ use super::*;
 #[cfg(feature = "vulkan")]
 mod reseed {
     use super::*;
-    use crate::HqParams;
+    use crate::{EdgePadding, HqParams, Nl4dOptions, NlmeansHqOptions, NlmeansOptions};
 
     pub(super) fn layout() -> FrameLayout {
         FrameLayout {
@@ -35,6 +41,7 @@ mod reseed {
             height: 64,
             subsampling: Subsampling::Yuv420,
             depth: Depth::Eight,
+            chroma_siting: ChromaSiting::Unknown,
         }
     }
 
@@ -182,14 +189,13 @@ mod reseed {
     }
 
     #[test]
-    fn reseed_recovers_a_half_poisoned_by_an_earlier_failure() {
+    fn reseed_recovers_a_host_poisoned_by_an_earlier_failure() {
         let frame_layout = layout();
         let options = test_plane_options(2);
         let frames = ramp_clip(&frame_layout, 12);
 
         let mut denoiser = PlanarDenoiser::create(&options, frame_layout).unwrap();
-        denoiser.luma.as_mut().unwrap().poison_for_test();
-        denoiser.chroma.as_mut().unwrap().poison_for_test();
+        denoiser.host_mut().unwrap().poison_for_test();
 
         let window = window_of(&frames, 6, 2);
         let got = denoiser.reseed(&window).unwrap();
@@ -333,11 +339,9 @@ mod reseed {
         assert_eq!(got.v, expected.v);
     }
 
-    /// `ChannelIntent::Luma` sends chroma through the passthrough queue, and a reseed queues one
-    /// entry per window frame.
+    /// `ChannelIntent::Luma` passes chroma through, and a reseed primes every window frame.
     ///
-    /// The entry paired with the denoised centre must be the centre frame's own chroma, not a
-    /// neighbour's.
+    /// The chroma paired with the denoised centre must be the centre frame's own, not a neighbour's.
     #[test]
     fn reseed_pairs_the_passthrough_plane_with_the_centre_frame() {
         let frame_layout = layout();
@@ -376,10 +380,9 @@ mod reseed {
         );
     }
 
-    /// A single reseed only checks the first passthrough entry `recv` pops.
+    /// A single reseed only checks the plane paired with the target.
     ///
-    /// An extra or missing entry that still leaves the right one at the front only misaligns the
-    /// plane paired with the next frame, once streaming resumes.
+    /// A pairing that drifts by a frame only shows on the next frame, once streaming resumes.
     #[test]
     fn reseed_then_streaming_keeps_the_passthrough_plane_aligned_on_the_next_frame() {
         let frame_layout = layout();
@@ -421,7 +424,20 @@ mod reseed {
     }
 
     /// The window `span` needs for frame `target`, clamped at both clip ends like `window_of`.
+    ///
+    /// A shifted span never repeats a clip's end frames, so its window must lie strictly inside the
+    /// clip. Use [reseed_shifted] for a target nearer the ends.
     pub(super) fn window_of_span(frames: &[Planes], target: usize, span: WindowSpan) -> Vec<Planes> {
+        if span.edges == EdgePadding::Shifted {
+            let touches_start = target <= span.behind;
+            let touches_end = target + span.ahead >= frames.len() - 1;
+            assert!(
+                !touches_start && !touches_end,
+                "a shifted window for frame {target} of {} reaches a clip end, use reseed_shifted",
+                frames.len()
+            );
+        }
+
         (0..span.frame_count())
             .map(|i| {
                 let index = (target + i).saturating_sub(span.behind).min(frames.len() - 1);
@@ -645,10 +661,9 @@ mod reseed {
         }
     }
 
-    /// nl4d drains after every emission during a reseed, not only the last, and each drain pops one
-    /// passthrough entry.
+    /// nl4d emits several frames during a reseed, not only the last.
     ///
-    /// The walk must still land on the target's own entry rather than an earlier, discarded one.
+    /// The target must still come out with its own chroma rather than an earlier frame's.
     #[test]
     fn nl4d_reseed_pairs_the_passthrough_plane_with_the_centre_frame() {
         let frame_layout = layout();
@@ -689,10 +704,10 @@ mod reseed {
         );
     }
 
-    /// A single-shot pairing test only checks the first entry `recv` pops after the drop.
+    /// A single-shot pairing test only checks the plane paired with the target.
     ///
-    /// An extra or missing entry that still leaves the right one at the front only misaligns the
-    /// plane paired with the frame after the target, once streaming resumes.
+    /// A pairing that drifts by a frame only shows on the frame after the target, once streaming
+    /// resumes.
     #[test]
     fn nl4d_reseed_then_streaming_keeps_the_passthrough_plane_aligned_on_the_next_frame() {
         let frame_layout = layout();
@@ -995,6 +1010,7 @@ mod reseed {
             height: 120,
             subsampling: Subsampling::Yuv420,
             depth: Depth::Eight,
+            chroma_siting: ChromaSiting::Unknown,
         };
         let options = nlmeans_hq_pinned_plane_options(2);
         let frames = ramp_clip(&harness_layout, 14);

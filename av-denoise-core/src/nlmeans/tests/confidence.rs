@@ -65,6 +65,11 @@ fn run_fine_confidence(
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, sad_noise_floor);
         let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
+        let sad_placeholder = client.empty(size_of::<f32>());
+        let predictions_placeholder = client.empty(size_of::<f32>());
+        let sad_arg = BufferArg::from_raw_parts(sad_placeholder, 1);
+        let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, 1);
+
         mc_block_match_fine::launch_unchecked(
             &client,
             grid,
@@ -73,8 +78,12 @@ fn run_fine_confidence(
             neighbour_slots_arg,
             mv_field_arg,
             confidence_arg,
+            sad_arg,
+            predictions_arg,
             0u32,
             true,
+            false,
+            false,
             noise_arg,
             DERIVED_SAD_FLOOR,
             thsad,
@@ -291,6 +300,7 @@ fn run_analyse_fills_confidence_buffer() {
         blksize: 8,
         overlap: 4,
         search_radius: 2,
+        max_search_escalation: 2,
         pyramid_levels: 1,
         estimation: MotionEstimation::Direct,
     };
@@ -328,6 +338,10 @@ fn run_analyse_fills_confidence_buffer() {
         confidence: &confidence,
         conf_len: blocks,
         write_confidence: true,
+        predictions: None,
+        sad: None,
+        escalation: None,
+        truemotion: None,
     };
     run_analyse(
         &client,
@@ -402,6 +416,10 @@ fn run_confidence_fills_confidence_buffer() {
         confidence: &confidence,
         conf_len: blocks,
         write_confidence: true,
+        predictions: None,
+        sad: None,
+        escalation: None,
+        truemotion: None,
     };
     run_confidence(
         &client,
@@ -515,6 +533,7 @@ fn confidence_buf_filled_with_motion_compensation() {
             blksize: 8,
             overlap: 4,
             search_radius: 2,
+            max_search_escalation: 2,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
@@ -584,6 +603,7 @@ fn confidence_buf_absent_with_motion_compensation_and_no_hq() {
             blksize: 8,
             overlap: 4,
             search_radius: 2,
+            max_search_escalation: 2,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
@@ -626,6 +646,7 @@ fn confidence_buf_absent_with_motion_compensation_when_temporal_confidence_disab
             blksize: 8,
             overlap: 4,
             search_radius: 2,
+            max_search_escalation: 2,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },

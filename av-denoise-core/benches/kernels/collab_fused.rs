@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use av_denoise_core::bench_api::collab::geometry::{ref_count, refs_along, strength_map_dims};
+use av_denoise_core::bench_api::collab::geometry::{ref_count, refs_along};
 use av_denoise_core::bench_api::collab::kernels::aggregate::{
     cross_frame_accum_scale,
     kaiser_window,
@@ -8,6 +8,7 @@ use av_denoise_core::bench_api::collab::kernels::aggregate::{
 };
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::bench_api::collab::{grid_frames, needs_warp_uniform_search};
+use av_denoise_core::bench_api::noise_colour::{colour_gain_words, colour_mean_words};
 use av_denoise_core::bench_api::tune_sites::{
     CollabInputs,
     CollabOutputs,
@@ -16,13 +17,7 @@ use av_denoise_core::bench_api::tune_sites::{
     CollabValues,
     CollabVariant,
 };
-use av_denoise_core::bench_api::{
-    DerivedValues,
-    NOISE_CHANNELS,
-    NOISE_CURVE_BINS,
-    STRENGTH_MAP_LUMA,
-    STRENGTH_MAP_OFF,
-};
+use av_denoise_core::bench_api::{DerivedValues, NOISE_CHANNELS, NOISE_CURVE_BINS};
 use av_denoise_core::tune::{DeviceLimits, SiteCandidate, VariantSite, fit_candidates};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
@@ -69,8 +64,8 @@ pub struct CollabFusedBench {
     pub split_mv: bool,
     /// Launches with a stepped noise curve and the curve flag set.
     pub noise_curve: bool,
-    /// Launches with a varied strength map in [STRENGTH_MAP_LUMA] mode.
-    pub strength_map: bool,
+    /// Launches with the colour gains on, over hashed gain tables and block means.
+    pub colour: bool,
     /// Launches with the pooled threshold on.
     pub pooled: bool,
     pub candidate: CollabVariant,
@@ -94,7 +89,7 @@ pub fn fitted_variants(client: &Client, channels: u32, channel_name: &'static st
         channel_name,
         split_mv: false,
         noise_curve: false,
-        strength_map: false,
+        colour: false,
         pooled: false,
         candidate: CollabVariant::BASELINE,
     };
@@ -114,6 +109,21 @@ fn stepped_curve() -> [f32; NOISE_CURVE_BINS] {
     let mut curve = [2.0f32; NOISE_CURVE_BINS];
     curve[NOISE_CURVE_BINS / 2..].fill(0.5);
     curve
+}
+
+/// `count` hashed values spread between `-spread` and `spread`.
+fn hashed_values(count: usize, spread: f32) -> Vec<f32> {
+    (0..count as u32)
+        .map(|index| {
+            let mut hash = index.wrapping_mul(0x9E37_79B9);
+            hash ^= hash >> 15;
+            hash = hash.wrapping_mul(0x2C1B_3C6D);
+            hash ^= hash >> 12;
+            let unit = (hash >> 8) as f32 / (1u32 << 24) as f32;
+
+            spread * (2.0 * unit - 1.0)
+        })
+        .collect()
 }
 
 /// How far apart two neighbouring blocks' vectors sit in the split field, in pixels.
@@ -142,8 +152,10 @@ pub struct CollabFusedInput {
     pub ring_len: usize,
     /// The noise curve, all zeros unless the arm runs one.
     pub noise_curve: Handle,
-    pub strength_map: Handle,
-    pub map_len: usize,
+    /// One hashed log gain table per channel.
+    pub colour_gains: Handle,
+    /// Hashed block means over the frame.
+    pub colour_means: Handle,
 }
 
 impl CollabFusedBench {
@@ -160,7 +172,6 @@ impl CollabFusedBench {
         let neighbour_mv_stride = mv_stride(blocks_x, blocks_y, align);
         let neighbour_conf_stride = conf_stride(blocks_x, blocks_y, align);
 
-        let (map_cols, map_rows) = strength_map_dims(WIDTH, HEIGHT);
         let accum_scale = cross_frame_accum_scale(SPATIAL_RADIUS, RADIUS);
         let frames_per_volume = grid_frames(RADIUS);
 
@@ -177,8 +188,10 @@ impl CollabFusedBench {
             neighbour_slots_len: NEIGHBOUR_SLOTS.len(),
             noise: args.noise.clone(),
             noise_curve: args.noise_curve.clone(),
-            strength_map: args.strength_map.clone(),
-            map_len: args.map_len,
+            colour_gains: args.colour_gains.clone(),
+            colour_gains_len: colour_gain_words(self.channels),
+            colour_means: args.colour_means.clone(),
+            colour_means_len: colour_mean_words(WIDTH, HEIGHT),
             dct_profile: args.dct_profile.clone(),
             kaiser: args.kaiser.clone(),
         };
@@ -188,6 +201,8 @@ impl CollabFusedBench {
             lambda_ht: LAMBDA_HT,
             accum_scale,
             pool_ratio: POOL_RATIO,
+            colour_scale: 255.0,
+            colour_on: self.colour,
         };
         let uniform_walk_only = needs_warp_uniform_search(&self.client);
         let shape = CollabShape {
@@ -208,8 +223,6 @@ impl CollabFusedBench {
             spatial_radius: SPATIAL_RADIUS,
             refs_x,
             refs_y,
-            map_cols,
-            map_rows,
             pooled: self.pooled,
             uniform_walk_only,
         };
@@ -274,12 +287,6 @@ impl Benchmark for CollabFusedBench {
         let neighbour_slots = self.client.create_from_slice(slots_bytes);
 
         let profile_host = dct_noise_profile(0.0);
-        let map_mode = if self.strength_map {
-            STRENGTH_MAP_LUMA
-        } else {
-            STRENGTH_MAP_OFF
-        };
-
         let mut sigma = [0.0f32; NOISE_CHANNELS as usize];
         sigma[..self.channels as usize].fill(SIGMA);
         let group_weight_scale = weight_scale(SIGMA, &profile_host);
@@ -287,7 +294,6 @@ impl Benchmark for CollabFusedBench {
             sigma,
             weight_scale: group_weight_scale,
             curve_valid: self.noise_curve,
-            map_mode,
             ..DerivedValues::default()
         };
         let noise_words = derived.to_words();
@@ -315,17 +321,12 @@ impl Benchmark for CollabFusedBench {
         let curve_bytes = f32::as_bytes(&curve_host);
         let noise_curve = self.client.create_from_slice(curve_bytes);
 
-        let (map_cols, map_rows) = strength_map_dims(WIDTH, HEIGHT);
-        let map_len = (map_cols * map_rows) as usize;
-        let map_host: Vec<f32> = if self.strength_map {
-            (0..map_len)
-                .map(|index| if index % 3 == 0 { 1.5 } else { 0.65 })
-                .collect()
-        } else {
-            vec![1.0f32; map_len]
-        };
-        let map_bytes = f32::as_bytes(&map_host);
-        let strength_map = self.client.create_from_slice(map_bytes);
+        let gains_host = hashed_values(colour_gain_words(self.channels), 0.5);
+        let gains_bytes = f32::as_bytes(&gains_host);
+        let colour_gains = self.client.create_from_slice(gains_bytes);
+        let means_host = hashed_values(colour_mean_words(WIDTH, HEIGHT), 100.0);
+        let means_bytes = f32::as_bytes(&means_host);
+        let colour_means = self.client.create_from_slice(means_bytes);
 
         CollabFusedInput {
             ring,
@@ -340,8 +341,8 @@ impl Benchmark for CollabFusedBench {
             group_weight,
             ring_len: ring_data.len(),
             noise_curve,
-            strength_map,
-            map_len,
+            colour_gains,
+            colour_means,
         }
     }
 
@@ -357,11 +358,11 @@ impl Benchmark for CollabFusedBench {
     fn name(&self) -> String {
         let field = if self.split_mv { "_split_mv" } else { "" };
         let curve = if self.noise_curve { "_noise_curve" } else { "" };
-        let map = if self.strength_map { "_strength_map" } else { "" };
+        let colour = if self.colour { "_colour" } else { "" };
         let pool = if self.pooled { "_pooled" } else { "" };
 
         format!(
-            "{}/{}/1080p_{}{field}{curve}{map}{pool}",
+            "{}/{}/1080p_{}{field}{curve}{colour}{pool}",
             CollabVariant::SITE,
             self.candidate.name(),
             self.channel_name,

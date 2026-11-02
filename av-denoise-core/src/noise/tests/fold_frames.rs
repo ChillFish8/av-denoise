@@ -6,9 +6,8 @@ use super::frames::{
     RADIUS,
     ReadingHarness,
     TEXTURE,
-    chroma_map,
-    flat_boost,
-    luma_map,
+    chroma_settings,
+    luma_settings,
     synthetic_stream,
 };
 use super::y4m::read_y4m;
@@ -57,9 +56,8 @@ impl FoldHarness {
 
     /// Pushes `frame`, records it and folds, returning the fold, if any.
     fn push(&mut self, frame: &[f32]) -> Option<(WindowBounds, FoldStep)> {
-        let boost = flat_boost(self.settings.reading.map);
         let (gpu, host) = self.readings.push(frame);
-        let agreement = Agreement::measure(&gpu, &host, boost);
+        let agreement = Agreement::measure(&gpu, &host);
         let push = self.readings.pushed - 1;
         let slot = push % (2 * RADIUS + 1);
 
@@ -85,11 +83,7 @@ impl FoldHarness {
             curve,
             populated_bins: 0,
         };
-        let record = HostRecord {
-            reading,
-            immerkaer,
-            map: host.map,
-        };
+        let record = HostRecord { reading, immerkaer };
 
         self.readings.state.record_reading(slot, push);
         self.records.push(record);
@@ -144,7 +138,7 @@ struct FoldSummary {
 /// Folds `frames` through a harness and checks every fold against the host window.
 ///
 /// A fold whose window holds only frames with matching decisions holds the same chains, rho,
-/// flags and map mode as the host, every value within 1e-5 relative, and the same curve.
+/// and flags as the host, every value within 1e-5 relative, and the same curve.
 fn check_fold_stream<'a>(
     plane: Plane,
     settings: NoiseSettings,
@@ -174,12 +168,11 @@ fn check_fold_stream<'a>(
         let state_gap = gap.state;
         let derived_gap = gap.derived;
         let curve_gap = curve_gap(&step.gpu, &step.host);
-        let classes_match = step.gpu.classes_present == step.host.classes_present;
         let window = (bounds.first(), bounds.last());
 
         assert!(
             gap.structure_matches,
-            "{what}: fold {fold} over {window:?} holds other chains, flags or map modes"
+            "{what}: fold {fold} over {window:?} holds other chains or flags"
         );
         assert!(
             state_gap <= MAX_RELATIVE,
@@ -192,10 +185,6 @@ fn check_fold_stream<'a>(
         assert!(
             curve_gap <= MAX_RELATIVE,
             "{what}: fold {fold} over {window:?} curve is {curve_gap:e} apart"
-        );
-        assert!(
-            classes_match,
-            "{what}: fold {fold} over {window:?} classes presence"
         );
 
         summary.largest_state_gap = summary.largest_state_gap.max(state_gap);
@@ -222,7 +211,7 @@ fn synthetic_folds_track_the_host_window() {
     let plane = Plane::luma(256, 256);
     let frames = synthetic_stream(plane, 11);
     let frame_slices = frames.iter().map(Vec::as_slice);
-    let settings = fold_settings(luma_map());
+    let settings = fold_settings(luma_settings());
     let summary = check_fold_stream(plane, settings, frame_slices, None, "synthetic luma");
 
     let folds = summary.folds;
@@ -242,7 +231,7 @@ fn a_one_sided_flip_only_reaches_the_windows_that_hold_it() {
     let plane = Plane::luma(256, 256);
     let frames = synthetic_stream(plane, 11);
     let frame_slices = frames.iter().map(Vec::as_slice);
-    let settings = fold_settings(luma_map());
+    let settings = fold_settings(luma_settings());
     let summary = check_fold_stream(plane, settings, frame_slices, Some(FLIPPED_PUSH), "forced flip");
 
     // Every fold from a full ring centres on `push - RADIUS` and reads up to `push`.
@@ -268,8 +257,8 @@ fn texture_folds_track_the_host_window() {
     let (chroma_width, chroma_height) = clip.chroma_dims();
     let chroma = Plane::chroma(chroma_width, chroma_height);
     let cases = [
-        (luma, luma_map(), "texture luma"),
-        (chroma, chroma_map(), "texture chroma"),
+        (luma, luma_settings(), "texture luma"),
+        (chroma, chroma_settings(), "texture chroma"),
     ];
 
     for (plane, reading, what) in cases {

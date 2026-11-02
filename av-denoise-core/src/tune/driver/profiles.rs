@@ -112,10 +112,7 @@ fn differs_from_baseline(profile: PipelineProfile, device: &DeviceProfile) -> bo
 
 /// The alternative profiles for `set`, which has some when any of its engines is nl4d.
 fn alternative_profiles(set: &EngineSet) -> Vec<PipelineProfile> {
-    let is_nl4d = set
-        .specs()
-        .iter()
-        .any(|spec| matches!(spec, EngineSpec::Nl4d { .. }));
+    let is_nl4d = set.specs().iter().any(EngineSpec::is_nl4d);
     let device = set.device();
     let table = device_priority(device);
 

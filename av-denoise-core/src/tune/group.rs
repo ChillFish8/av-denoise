@@ -6,12 +6,12 @@ use cubecl::server::Handle;
 use super::config::{TuningConfig, TuningMode};
 use super::device::{DeviceLimits, DeviceProfile};
 use super::driver::{TuneOutcome, TuneReport, TuneRequest, is_tuned_on, tune_frames};
-use super::frame::{TuningFrame, check_engine_count, copy_words_into};
+use super::frame::{TuningFrame, check_engine_count};
 use super::identity::describe;
 use super::profile_key::{profile_key, tuning_frame_count};
 use super::search::SearchMode;
 use super::setup::{KernelSetup, engine_kernels};
-use crate::engine::{DevicePlane, Engine, EngineSpec, EngineTiming, Geometry, WindowSpan};
+use crate::engine::{DevicePlane, Engine, EngineSpec, PassTimings, WindowSpan, copy_words_into};
 use crate::error::Error;
 use crate::nl4d::grain::GrainChunk;
 
@@ -33,8 +33,8 @@ enum State {
 /// [tuning_frame_count](crate::tune::tuning_frame_count) frames, tunes on them, then replays them
 /// through engines built from the new result. Otherwise it builds those engines straight away.
 ///
-/// Every call takes one list of planes per engine, in the order of the specs, and follows the
-/// [Engine](crate::Engine) contract. A failed tune is logged and the stream carries on with the
+/// Every call takes one list of every frame plane per engine, in the order of the specs, and follows
+/// the [Engine](crate::Engine) contract. A failed tune is logged and the stream carries on with the
 /// stored results.
 pub struct TunedGroup {
     device: cubecl::Device,
@@ -223,10 +223,10 @@ impl TunedGroup {
             .collect()
     }
 
-    /// Device time spent so far, one entry per engine.
-    pub fn timing(&mut self) -> Vec<EngineTiming> {
+    /// Device time each pass has spent so far, one entry per engine.
+    pub fn timing(&mut self) -> Vec<PassTimings> {
         if self.is_buffering() {
-            return vec![EngineTiming::default(); self.specs.len()];
+            return vec![PassTimings::default(); self.specs.len()];
         }
 
         self.engines.iter_mut().map(|engine| engine.timing()).collect()
@@ -287,9 +287,10 @@ impl TunedGroup {
         let mut engines = Vec::with_capacity(self.specs.len());
 
         for spec in &self.specs {
-            let key = profile_key(spec);
-            let kernels = engine_kernels(&setup, &config, &key, &self.profile);
-            let mut engine = spec.build(&self.client, kernels)?;
+            let mut engine = spec.build(&self.client, |pass| {
+                let key = profile_key(pass);
+                engine_kernels(&setup, &config, &key, &self.profile)
+            })?;
 
             if let Some(every) = self.sample_every {
                 engine.sample_device_time(every);
@@ -384,7 +385,7 @@ impl TunedGroup {
             .specs
             .iter()
             .enumerate()
-            .map(|(index, spec)| frame.planes_for(index, spec.geometry()))
+            .map(|(index, spec)| frame.planes_for(index, spec))
             .collect();
         let planes: Vec<&[DevicePlane<'_>]> = lists.iter().map(Vec::as_slice).collect();
 
@@ -402,11 +403,8 @@ impl TunedGroup {
 
         for (spec, engine) in self.specs.iter().zip(&mut self.engines) {
             let geometry = spec.geometry();
-            let handles = output_planes(&self.client, geometry);
-            let planes: Vec<DevicePlane<'_>> = handles
-                .iter()
-                .map(|handle| DevicePlane::new(handle, geometry.width, geometry.height))
-                .collect();
+            let handles = geometry.empty_planes(&self.client, geometry.output);
+            let planes = geometry.device_planes(0, &handles);
 
             engine.emit_into(&planes)?;
             owned.extend(handles);
@@ -480,26 +478,19 @@ fn in_step(counts: &[usize]) -> Result<usize, Error> {
     Err(Error::InvalidOptions(message))
 }
 
-/// New handles for one emitted frame of an engine with `geometry`, whole words each.
-fn output_planes(client: &Client, geometry: Geometry) -> Vec<Handle> {
-    let bytes = geometry.output.plane_bytes(geometry.pixels()) as usize;
-    let count = geometry.channels.count() as usize;
-
-    (0..count).map(|_| client.empty(bytes)).collect()
-}
-
 /// Copies a replayed frame, every engine's planes back to back, into the caller's `planes`.
 fn copy_frame(client: &Client, specs: &[EngineSpec], frame: &[Handle], planes: &[&[DevicePlane<'_>]]) {
     let mut sources = frame.iter();
 
     for (spec, engine_planes) in specs.iter().zip(planes) {
         let geometry = spec.geometry();
-        let words = geometry.output.plane_bytes(geometry.pixels()) as usize / 4;
+        let output = geometry.output;
 
-        for plane in engine_planes.iter() {
+        for (index, plane) in engine_planes.iter().enumerate() {
             let source = sources
                 .next()
                 .expect("a replayed frame holds every engine's planes");
+            let words = geometry.plane_bytes(index, output) / 4;
             copy_words_into(client, source, plane.handle(), words);
         }
     }

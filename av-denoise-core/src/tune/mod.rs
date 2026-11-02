@@ -15,7 +15,7 @@
 //! - [PriorityTable] orders each site's families and the pipeline profiles for one device class
 //! - [TuningMode] says whether a run tunes, uses stored results or runs every baseline
 //! - [TuneStore] saves and loads results per device
-//! - [build_engine] builds an engine from the stored results, keyed by [profile_key]
+//! - [build_engine] builds an engine from the stored results, keyed by its profile key
 //! - [SearchMode] says how widely tuning searches a key, and [SiteSearch] records how it did
 //! - [tune_frames] runs a tuning pass, and [is_tuned] says whether one is needed
 //! - [TunedGroup] tunes on the first frames of a stream, then replays them through the tuned engines
@@ -143,7 +143,9 @@ pub use self::legality::{
 pub use self::plan::{KernelPlan, PipelineProfile};
 pub use self::precompile::Precompiled;
 pub use self::priority::{Basis, PriorityTable, SitePriority, family_order, priority_for, skipped};
-pub use self::profile_key::{profile_key, tuning_frame_count};
+#[cfg(test)]
+pub(crate) use self::profile_key::profile_key;
+pub use self::profile_key::tuning_frame_count;
 pub use self::result::{
     CandidateRecord,
     CompileProgress,

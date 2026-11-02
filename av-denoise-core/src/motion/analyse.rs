@@ -2,10 +2,22 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::MotionCtx;
-use super::kernels::{BLOCK_MATCH_THREADS, mc_block_match_coarse, mc_block_match_fine};
+use super::context::SearchSchedule;
+use super::escalate::run_escalation;
+use super::global::AFFINE_WORDS;
+use super::kernels::{
+    BLOCK_MATCH_THREADS,
+    STATE_SECTIONS,
+    coarse_match_threads,
+    mc_block_match_coarse,
+    mc_block_match_fine,
+    mc_block_match_fine_tracked,
+};
 use super::pyramid::{level_dims, pyramid_level_offset, pyramid_pixels_per_frame, pyramid_slot_pixels};
+use super::truemotion::{TruemotionTargets, run_truemotion};
 #[cfg(test)]
 use crate::engine::align::StorageAlign;
+use crate::engine::copy_words_into;
 use crate::noise::DERIVED_WORDS;
 
 /// Where a neighbour's motion-field slice starts.
@@ -29,6 +41,14 @@ pub(crate) fn confidence_byte_offset(motion_ctx: &MotionCtx, neighbour_idx: u32)
 /// Every frame is a slot of `pyramid`. Neighbour `n` matches slot `neighbour_slots[n]` against
 /// `centre_slot`. It writes its vectors `n` motion-field strides into `mv_field` and its
 /// confidence `n` confidence strides into `confidence`, as [MotionCtx] lays them out.
+///
+/// With `predictions`, every block also searches around its neighbour's camera model prediction,
+/// [AFFINE_WORDS] words per neighbour. With `sad`, the fine pass writes each block's winning SAD
+/// in the confidence layout, then each block's window mean SAD in the same layout after it.
+///
+/// With `escalation` and a [MotionCtx] schedule that escalates, the fine pass also records what
+/// [run_escalation] needs. With `truemotion`, the truemotion stage of the [MotionCtx] ends the
+/// search.
 pub(crate) struct MatchTargets<'a> {
     pub pyramid: &'a Handle,
     /// Frame slots the pyramid holds.
@@ -44,15 +64,110 @@ pub(crate) struct MatchTargets<'a> {
     /// `f32` values `confidence` holds, 1 for a placeholder.
     pub conf_len: usize,
     pub write_confidence: bool,
+    pub predictions: Option<&'a Handle>,
+    /// Holds twice `neighbours` confidence strides of `f32` when set.
+    pub sad: Option<&'a Handle>,
+    pub escalation: Option<Escalation<'a>>,
+    pub truemotion: Option<TruemotionTargets<'a>>,
+}
+
+/// Where a search keeps what its escalation needs, and where its SAD floor comes from.
+#[derive(Clone, Copy)]
+pub(crate) struct Escalation<'a> {
+    /// Holds [escalation_state_len] `f32` values.
+    pub state: &'a Handle,
+    /// Whether a positive derived word of the search's noise at its `sad_field` is the floor.
+    ///
+    /// A search whose noise is zeroed or does not belong to the window measures its floor instead.
+    pub reads_floor: bool,
+}
+
+/// The `f32` values the escalation state of `neighbours` neighbours holds.
+///
+/// It holds [STATE_SECTIONS] values per block, then the SAD floor.
+pub(crate) fn escalation_state_len(motion_ctx: &MotionCtx, neighbours: u32) -> usize {
+    let sections = STATE_SECTIONS * neighbours * motion_ctx.conf_stride();
+    let values = sections + 1;
+    values as usize
+}
+
+/// The smallest pyramid level the coarse pass searches, and how its blocks map onto the fine grid.
+pub(super) struct CoarseLevel {
+    pub width: u32,
+    pub height: u32,
+    /// Where the level starts in the pyramid, in values.
+    pub level_offset: u32,
+    pub slot_pixels: u32,
+    /// 2 raised to the level.
+    pub scale: u32,
+    pub blksize: u32,
+    pub step: u32,
+    pub blocks_x: u32,
+    pub blocks_y: u32,
+    /// Converts the SAD floor from a full-resolution block to a coarse one.
+    pub floor_scale: f32,
+}
+
+/// The coarse level of a search over `frame_count` pyramid slots, or `None` with a single level.
+pub(super) fn coarse_level(
+    motion_ctx: &MotionCtx,
+    width: u32,
+    height: u32,
+    frame_count: u32,
+) -> Option<CoarseLevel> {
+    if motion_ctx.pyramid_levels <= 1 {
+        return None;
+    }
+
+    let level = motion_ctx.pyramid_levels - 1;
+    let (level_width, level_height) = level_dims(width, height, level);
+    let level_offset = pyramid_level_offset(width, height, frame_count, level, motion_ctx.align);
+    let slot_pixels = pyramid_slot_pixels(width, height, level, motion_ctx.align);
+    let scale = 1u32 << level;
+    // A coarse block covers the same content as a fine block scaled down by `scale`.
+    let content_blksize = (motion_ctx.blksize / scale).max(2);
+    let blksize = content_blksize * motion_ctx.coarse_block_factor;
+    let step = (motion_ctx.step / scale).max(1);
+    let floor_scale = coarse_floor_scale(blksize, motion_ctx.blksize, scale);
+
+    Some(CoarseLevel {
+        width: level_width,
+        height: level_height,
+        level_offset,
+        slot_pixels,
+        scale,
+        blksize,
+        step,
+        blocks_x: level_width.div_ceil(step).max(1),
+        blocks_y: level_height.div_ceil(step).max(1),
+        floor_scale,
+    })
+}
+
+/// The SAD floor's scale on a coarse block, relative to a full-resolution block.
+///
+/// A SAD sums one difference per pixel, so the floor scales with the block's area. Each pyramid
+/// level averages 2x2 pixels, which halves white noise per level, so the floor also shrinks by
+/// `coarse_scale`.
+fn coarse_floor_scale(coarse_blksize: u32, blksize: u32, coarse_scale: u32) -> f32 {
+    let coarse_area = (coarse_blksize * coarse_blksize) as f32;
+    let fine_area = (blksize * blksize) as f32;
+    let area_ratio = coarse_area / fine_area;
+    area_ratio / coarse_scale as f32
 }
 
 /// Estimates how each neighbour frame moved relative to the centre frame.
 ///
 /// A coarse pass on the smallest pyramid level seeds a fine pass at full resolution, which writes
-/// each neighbour's `mv_field` slice. With `write_confidence` set, a per-block score also lands in
-/// its `confidence` slice, scored against the derived word of `noise` at index `sad_field`.
-/// Otherwise `confidence` is never indexed, so a placeholder buffer works and `thsad` may stay at
-/// 0.0.
+/// each neighbour's `mv_field` slice. The fine pass searches the schedule's first radius, then
+/// [run_escalation] searches the blocks that fail again with wider windows at both levels. Both
+/// passes search around the camera model's prediction too when `targets` carries one. With
+/// `write_confidence` set, a per-block score also lands in its `confidence` slice, scored against
+/// the derived word of `noise` at index `sad_field`. Otherwise `confidence` is never indexed, so a
+/// placeholder buffer works. `thsad` may stay at 0.0 only when confidence is unwritten and the
+/// schedule does not escalate, because escalation scores every block's confidence to decide which
+/// ones fail. When `targets` carries a truemotion stage that is on, it picks each block's final
+/// vector last, with the coarse pass's seeds among its candidates.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -71,30 +186,27 @@ pub(crate) fn run_analyse(
     let pyramid_len = pyramid_pixels * targets.frame_count as usize;
     let slots_len = targets.neighbours as usize;
     let mv_stride = motion_ctx.mv_stride();
+    let coarse = coarse_level(motion_ctx, width, height, targets.frame_count);
+    let seeded = coarse.is_some();
 
-    if motion_ctx.pyramid_levels > 1 {
-        let coarse_level = motion_ctx.pyramid_levels - 1;
-        let (coarse_width, coarse_height) = level_dims(width, height, coarse_level);
-        let level_offset =
-            pyramid_level_offset(width, height, targets.frame_count, coarse_level, motion_ctx.align);
-        let slot_pixels = pyramid_slot_pixels(width, height, coarse_level, motion_ctx.align);
-        let coarse_scale = 1u32 << coarse_level;
-        // A coarse block covers the same content as a fine block scaled down by `coarse_scale`.
-        let coarse_blksize = (motion_ctx.blksize / coarse_scale).max(2);
-        let coarse_step = (motion_ctx.step / coarse_scale).max(1);
-        let coarse_blocks_x = coarse_width.div_ceil(coarse_step).max(1);
-        let coarse_blocks_y = coarse_height.div_ceil(coarse_step).max(1);
-        let grid = CubeCount::new_3d(coarse_blocks_x, coarse_blocks_y, targets.neighbours);
+    if let Some(coarse) = coarse {
+        let grid = CubeCount::new_3d(coarse.blocks_x, coarse.blocks_y, targets.neighbours);
         // One cube per image block, with its threads sharing the scoring work.
-        let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+        let threads = coarse_match_threads(motion_ctx.coarse_search_radius);
+        let dim = CubeDim::new_1d(threads);
         let pyramid = targets.pyramid.clone();
         let neighbour_slots = targets.neighbour_slots.clone();
         let mv_field = targets.mv_field.clone();
+        let noise_handle = noise.clone();
+        let (predictions, predictions_len) = prediction_binding(targets, noise);
+        let model_candidate = targets.predictions.is_some();
 
         unsafe {
             let pyramid_arg = BufferArg::from_raw_parts(pyramid, pyramid_len);
             let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, slots_len);
             let mv_field_arg = BufferArg::from_raw_parts(mv_field, targets.mv_len);
+            let noise_arg = BufferArg::from_raw_parts(noise_handle, DERIVED_WORDS as usize);
+            let predictions_arg = BufferArg::from_raw_parts(predictions, predictions_len);
 
             mc_block_match_coarse::launch_unchecked(
                 client,
@@ -103,15 +215,19 @@ pub(crate) fn run_analyse(
                 pyramid_arg,
                 neighbour_slots_arg,
                 mv_field_arg,
+                noise_arg,
+                predictions_arg,
                 targets.centre_slot,
-                coarse_width,
-                coarse_height,
-                level_offset,
-                slot_pixels,
-                coarse_blksize,
-                coarse_step,
-                motion_ctx.search_radius,
-                coarse_scale,
+                coarse.floor_scale,
+                model_candidate,
+                coarse.width,
+                coarse.height,
+                coarse.level_offset,
+                coarse.slot_pixels,
+                coarse.blksize,
+                coarse.step,
+                motion_ctx.coarse_search_radius,
+                coarse.scale,
                 motion_ctx.blocks_x,
                 motion_ctx.blocks_y,
                 motion_ctx.step,
@@ -122,28 +238,82 @@ pub(crate) fn run_analyse(
         // A single level has no coarse seed, and the fine pass then treats the seed as zero.
     }
 
-    let seeded = if motion_ctx.pyramid_levels > 1 { 1u32 } else { 0u32 };
+    if seeded {
+        keep_seeds(client, motion_ctx, targets);
+    }
+
+    let use_seed = u32::from(seeded);
     launch_fine(
         client,
         motion_ctx,
         width,
         height,
         targets,
-        motion_ctx.search_radius,
-        seeded,
+        motion_ctx.schedule.first_radius,
+        use_seed,
         noise,
         sad_field,
         thsad,
     );
 
-    Ok(())
+    run_escalation(
+        client, motion_ctx, width, height, targets, noise, sad_field, thsad, true,
+    )?;
+
+    finish_truemotion(
+        motion_ctx, width, height, targets, seeded, noise, sad_field, thsad,
+    )
+}
+
+/// Copies the seeds in `targets`' field to its truemotion stage, when the stage runs.
+fn keep_seeds(client: &Client, motion_ctx: &MotionCtx, targets: &MatchTargets<'_>) {
+    let Some(stage) = targets.truemotion.as_ref() else {
+        return;
+    };
+
+    if motion_ctx.truemotion.enabled() {
+        copy_words_into(client, targets.mv_field, stage.seeds, targets.mv_len);
+    }
+}
+
+/// Runs the truemotion stage over the search's field when `targets` has one and the stage is on.
+///
+/// `seeded` says whether [keep_seeds] kept the search's seeds.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dispatch threads through every buffer and shape the stage binds"
+)]
+fn finish_truemotion(
+    motion_ctx: &MotionCtx,
+    width: u32,
+    height: u32,
+    targets: &MatchTargets<'_>,
+    seeded: bool,
+    noise: &Handle,
+    sad_field: u32,
+    thsad: f32,
+) -> Result<(), anyhow::Error> {
+    let Some(stage) = targets.truemotion.as_ref() else {
+        return Ok(());
+    };
+
+    if !motion_ctx.truemotion.enabled() {
+        return Ok(());
+    }
+
+    run_truemotion(
+        motion_ctx, width, height, targets, stage, seeded, noise, sad_field, thsad,
+    )
 }
 
 /// Refines the chained seed already sitting in each neighbour's `mv_field` slice.
 ///
 /// It searches `refine_radius` around the seed and writes the corrected vector back. There is no
-/// coarse pass, because the joined seed already carries the large movement. Confidence is written
-/// the same way as in [run_analyse].
+/// coarse pass, because the joined seed already carries the large movement. When the schedule
+/// escalates, [run_escalation] then searches the blocks that fail again with wider windows, up to
+/// the schedule's ceiling. Confidence is written the same way as in [run_analyse]. The chained
+/// seeds join pair fields that each ended with the truemotion stage, so the refine runs none, and
+/// `targets` must not carry one.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -159,9 +329,20 @@ pub(crate) fn run_seeded_refine(
     sad_field: u32,
     thsad: f32,
 ) -> Result<(), anyhow::Error> {
+    let schedule = refine_schedule(motion_ctx.schedule, refine_radius);
+    let refine_ctx = MotionCtx {
+        schedule,
+        ..motion_ctx.clone()
+    };
+
+    debug_assert!(
+        targets.truemotion.is_none(),
+        "the seeded refine runs no truemotion stage"
+    );
+
     launch_fine(
         client,
-        motion_ctx,
+        &refine_ctx,
         width,
         height,
         targets,
@@ -172,10 +353,36 @@ pub(crate) fn run_seeded_refine(
         thsad,
     );
 
-    Ok(())
+    run_escalation(
+        client,
+        &refine_ctx,
+        width,
+        height,
+        targets,
+        noise,
+        sad_field,
+        thsad,
+        false,
+    )
+}
+
+/// The schedule of a seeded refine at `refine_radius` under a search's own schedule.
+///
+/// It escalates to the search's ceiling only when the search escalates at all.
+fn refine_schedule(search: SearchSchedule, refine_radius: u32) -> SearchSchedule {
+    if !search.escalates() || refine_radius >= search.ceiling {
+        return SearchSchedule::fixed(refine_radius);
+    }
+
+    SearchSchedule {
+        first_radius: refine_radius,
+        ..search
+    }
 }
 
 /// Launches the fine block match at pyramid level 0 over every neighbour in `targets`.
+///
+/// It also records the escalation state when `targets` carries one and the schedule escalates.
 #[expect(
     clippy::too_many_arguments,
     reason = "the dispatch threads through every buffer and shape the kernel binds"
@@ -205,13 +412,73 @@ pub(super) fn launch_fine(
     let neighbour_slots = targets.neighbour_slots.clone();
     let mv_field = targets.mv_field.clone();
     let confidence = targets.confidence.clone();
+    let (predictions, predictions_len) = prediction_binding(targets, noise);
+    let model_candidate = targets.predictions.is_some();
+    let write_sad = targets.sad.is_some();
+    // An unwritten SAD output binds the confidence buffer, which the kernel then never indexes.
+    let (sad, sad_len) = match targets.sad {
+        Some(handle) => (handle.clone(), (2 * targets.neighbours * conf_stride) as usize),
+        None => (targets.confidence.clone(), targets.conf_len),
+    };
     let noise = noise.clone();
+    let escalation = targets.escalation.filter(|_| motion_ctx.schedule.escalates());
+    let tracked = escalation.map(|escalation| escalation.state);
+
+    if let Some(state) = tracked {
+        let state_len = escalation_state_len(motion_ctx, targets.neighbours);
+        let state = state.clone();
+
+        unsafe {
+            let pyramid_arg = BufferArg::from_raw_parts(pyramid, pyramid_len);
+            let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, slots_len);
+            let mv_field_arg = BufferArg::from_raw_parts(mv_field, targets.mv_len);
+            let confidence_arg = BufferArg::from_raw_parts(confidence, targets.conf_len);
+            let sad_arg = BufferArg::from_raw_parts(sad, sad_len);
+            let state_arg = BufferArg::from_raw_parts(state, state_len);
+            let predictions_arg = BufferArg::from_raw_parts(predictions, predictions_len);
+            let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
+
+            mc_block_match_fine_tracked::launch_unchecked(
+                client,
+                grid,
+                dim,
+                pyramid_arg,
+                neighbour_slots_arg,
+                mv_field_arg,
+                confidence_arg,
+                sad_arg,
+                state_arg,
+                predictions_arg,
+                targets.centre_slot,
+                targets.write_confidence,
+                write_sad,
+                model_candidate,
+                noise_arg,
+                sad_field,
+                thsad,
+                fine_width,
+                fine_height,
+                slot_pixels,
+                motion_ctx.blksize,
+                motion_ctx.step,
+                search_radius,
+                use_seed,
+                motion_ctx.blocks_x,
+                mv_stride,
+                conf_stride,
+            );
+        }
+
+        return;
+    }
 
     unsafe {
         let pyramid_arg = BufferArg::from_raw_parts(pyramid, pyramid_len);
         let neighbour_slots_arg = BufferArg::from_raw_parts(neighbour_slots, slots_len);
         let mv_field_arg = BufferArg::from_raw_parts(mv_field, targets.mv_len);
         let confidence_arg = BufferArg::from_raw_parts(confidence, targets.conf_len);
+        let sad_arg = BufferArg::from_raw_parts(sad, sad_len);
+        let predictions_arg = BufferArg::from_raw_parts(predictions, predictions_len);
         let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
         mc_block_match_fine::launch_unchecked(
@@ -222,8 +489,12 @@ pub(super) fn launch_fine(
             neighbour_slots_arg,
             mv_field_arg,
             confidence_arg,
+            sad_arg,
+            predictions_arg,
             targets.centre_slot,
             targets.write_confidence,
+            write_sad,
+            model_candidate,
             noise_arg,
             sad_field,
             thsad,
@@ -238,6 +509,17 @@ pub(super) fn launch_fine(
             mv_stride,
             conf_stride,
         );
+    }
+}
+
+/// The predictions buffer and its length, or the noise buffer as a placeholder without one.
+pub(super) fn prediction_binding(targets: &MatchTargets<'_>, noise: &Handle) -> (Handle, usize) {
+    match targets.predictions {
+        Some(handle) => {
+            let words = targets.neighbours * AFFINE_WORDS;
+            (handle.clone(), words as usize)
+        },
+        None => (noise.clone(), DERIVED_WORDS as usize),
     }
 }
 
@@ -256,6 +538,7 @@ mod tests {
             blksize,
             overlap,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };
@@ -270,12 +553,39 @@ mod tests {
             blksize: 4,
             overlap: 0,
             search_radius: 1,
+            max_search_escalation: 1,
             pyramid_levels: 1,
             estimation: MotionEstimation::Direct,
         };
         let align = align();
 
         MotionCtx::new(mode, 4, 4, align).unwrap()
+    }
+
+    #[test]
+    fn a_refine_escalates_only_under_an_escalating_search() {
+        let escalating = SearchSchedule {
+            first_radius: 4,
+            ceiling: 8,
+        };
+        let fixed = SearchSchedule::fixed(4);
+        let expected = SearchSchedule {
+            first_radius: 2,
+            ..escalating
+        };
+
+        assert_eq!(refine_schedule(escalating, 2), expected);
+        assert_eq!(refine_schedule(fixed, 2), SearchSchedule::fixed(2));
+        assert_eq!(refine_schedule(escalating, 8), SearchSchedule::fixed(8));
+    }
+
+    #[test]
+    fn coarse_floor_scale_shrinks_with_area_and_level() {
+        let one_level = coarse_floor_scale(8, 16, 2);
+        let two_levels = coarse_floor_scale(4, 16, 4);
+
+        assert_eq!(one_level, 0.125);
+        assert_eq!(two_levels, 0.015625);
     }
 
     #[test]

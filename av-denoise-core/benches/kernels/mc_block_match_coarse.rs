@@ -1,4 +1,5 @@
-use av_denoise_core::bench_api::kernels::motion::{BLOCK_MATCH_THREADS, mc_block_match_coarse};
+use av_denoise_core::bench_api::kernels::motion::{coarse_match_threads, mc_block_match_coarse};
+use av_denoise_core::bench_api::{DERIVED_WORDS, DerivedValues};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -10,15 +11,21 @@ use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, neighbour_bench_nam
 const FINE_BLKSIZE: u32 = 16;
 const FINE_STEP: u32 = 8;
 const SEARCH_RADIUS: u32 = 4;
+/// The camera model's full-resolution pan, far enough from zero that both windows always run.
+const MODEL_PAN: f32 = 24.0;
+/// The SAD floor's scale on a coarse block, its area over the fine block's halved for one level.
+const FLOOR_SCALE: f32 = 0.125;
 
 /// The hierarchical coarse pass on the half-resolution luma pyramid level.
 ///
 /// One cube per coarse block runs a SAD search over a `(2·r + 1)²` window, and each block's
-/// vector is scaled up to seed the fine pass.
+/// vector is scaled up to seed the fine pass. With `model_candidate`, every block also searches a
+/// window around a [MODEL_PAN] camera pan.
 pub struct BlockMatchCoarseBench {
     pub client: Client,
     /// Neighbours matched in one launch, each against the centre frame.
     pub neighbours: u32,
+    pub model_candidate: bool,
 }
 
 #[derive(Clone)]
@@ -28,6 +35,10 @@ pub struct CoarseInput {
     /// One entry per neighbour, naming slots 1 onwards.
     pub neighbour_slots: Handle,
     pub mv_field: Handle,
+    /// The derived noise values, with SAD floors of 0.
+    pub noise: Handle,
+    /// One pan prediction per neighbour.
+    pub predictions: Handle,
 }
 
 impl Benchmark for BlockMatchCoarseBench {
@@ -56,10 +67,21 @@ impl Benchmark for BlockMatchCoarseBench {
         let mv_len = self.neighbours as usize * mv_stride;
         let mv_field = self.client.empty(mv_len * size_of::<i32>());
 
+        let noise_words = DerivedValues::default().to_words();
+        let noise_bytes = f32::as_bytes(&noise_words);
+        let noise = self.client.create_from_slice(noise_bytes);
+
+        let pan = [1.0f32, 0.0, 0.0, 1.0, MODEL_PAN, 0.0];
+        let prediction_words = pan.repeat(self.neighbours as usize);
+        let prediction_bytes = f32::as_bytes(&prediction_words);
+        let predictions = self.client.create_from_slice(prediction_bytes);
+
         CoarseInput {
             pyramid,
             neighbour_slots,
             mv_field,
+            noise,
+            predictions,
         }
     }
 
@@ -80,12 +102,15 @@ impl Benchmark for BlockMatchCoarseBench {
         let mv_stride = fine_blocks_x * fine_blocks_y * 2;
         let mv_len = self.neighbours as usize * mv_stride as usize;
         let grid = CubeCount::new_3d(coarse_blocks_x, coarse_blocks_y, self.neighbours);
-        let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
+        let threads = coarse_match_threads(SEARCH_RADIUS);
+        let dim = CubeDim::new_1d(threads);
 
         unsafe {
             let pyramid_arg = BufferArg::from_raw_parts(args.pyramid, pyramid_len);
             let neighbour_slots_arg = BufferArg::from_raw_parts(args.neighbour_slots, slots_len);
             let mv_field_arg = BufferArg::from_raw_parts(args.mv_field, mv_len);
+            let noise_arg = BufferArg::from_raw_parts(args.noise, DERIVED_WORDS as usize);
+            let predictions_arg = BufferArg::from_raw_parts(args.predictions, 6 * slots_len);
 
             mc_block_match_coarse::launch_unchecked(
                 &self.client,
@@ -94,7 +119,11 @@ impl Benchmark for BlockMatchCoarseBench {
                 pyramid_arg,
                 neighbour_slots_arg,
                 mv_field_arg,
+                noise_arg,
+                predictions_arg,
                 0u32,
+                FLOOR_SCALE,
+                self.model_candidate,
                 coarse_width,
                 coarse_height,
                 0,
@@ -114,7 +143,13 @@ impl Benchmark for BlockMatchCoarseBench {
     }
 
     fn name(&self) -> String {
-        neighbour_bench_name("mc_block_match_coarse_540p_luma", self.neighbours)
+        let base = if self.model_candidate {
+            "mc_block_match_coarse_model_540p_luma"
+        } else {
+            "mc_block_match_coarse_540p_luma"
+        };
+
+        neighbour_bench_name(base, self.neighbours)
     }
 
     fn sync(&self) {

@@ -2,24 +2,38 @@ use std::time::Duration;
 
 use av_denoise_core::tune::{TuningConfig, TuningMode, build_engine};
 use av_denoise_core::{
-    ChannelMode,
+    ChromaLayout,
     DenoisingMode,
     DevicePlane,
     EdgePadding,
     Engine,
+    EngineTiming,
+    GrainChunk,
     Nl4dOptions,
     NlmTuning,
     NlmeansHqOptions,
     NlmeansOptions,
+    PassTimings,
+    PlaneSource,
     WindowSpan,
 };
 
-use crate::host::{Algorithm, DenoiserError, DenoiserOptions, HostDenoiser, OUTPUT_SETS};
+use crate::host::{Algorithm, ChannelIntent, DenoiserError, DenoiserOptions, HostDenoiser, OUTPUT_SETS};
 
 fn luma_options(mode: DenoisingMode) -> DenoiserOptions {
     DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
+        .intent(ChannelIntent::Luma)
+        .chroma(ChromaLayout::Gray)
         .mode(mode)
+        .build()
+}
+
+/// Spatial options cleaning `intent` on a frame laid out as `chroma`.
+fn spatial_options(intent: ChannelIntent, chroma: ChromaLayout) -> DenoiserOptions {
+    DenoiserOptions::builder()
+        .intent(intent)
+        .chroma(chroma)
+        .mode(DenoisingMode::Spacial)
         .build()
 }
 
@@ -128,32 +142,141 @@ fn a_plane_that_is_not_a_whole_number_of_words_round_trips() {
 
 #[test]
 fn a_chroma_frame_keeps_its_u_and_v_order() {
-    let options = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Chroma)
-        .mode(DenoisingMode::Spacial)
-        .build();
+    let options = spatial_options(ChannelIntent::Chroma, ChromaLayout::Yuv444);
     let mut denoiser = create(16, 16, options).expect("denoiser construction failed");
 
+    let y_plane = frame_filled(100);
     let u_plane = frame_filled(60);
     let v_plane = frame_filled(190);
-    denoiser.push(&[&u_plane, &v_plane]).expect("push failed");
+    denoiser
+        .push(&[&y_plane, &u_plane, &v_plane])
+        .expect("push failed");
 
     let received = denoiser.recv().expect("recv failed");
     let planes = received.expect("no frame");
-    assert_eq!(planes.len(), 2);
+    assert_eq!(planes.len(), 3);
+    assert_eq!(planes[0], y_plane, "uncleaned luma comes out unchanged");
 
-    for &sample in &planes[0] {
+    for &sample in &planes[1] {
         assert!(
             sample.abs_diff(60) <= 2,
             "U plane sample {sample}, expected about 60"
         );
     }
 
-    for &sample in &planes[1] {
+    for &sample in &planes[2] {
         assert!(
             sample.abs_diff(190) <= 2,
             "V plane sample {sample}, expected about 190"
         );
+    }
+}
+
+/// A plane of `width` by `height` samples whose values vary, so a passthrough copy is checkable.
+fn ramp(width: u32, height: u32, seed: u8) -> Vec<u8> {
+    let samples = (width * height) as usize;
+
+    (0..samples)
+        .map(|index| (index as u8).wrapping_mul(7).wrapping_add(seed))
+        .collect()
+}
+
+#[test]
+fn every_layout_takes_each_plane_at_its_own_size() {
+    let layouts = [
+        (ChromaLayout::Gray, vec![(13, 9)]),
+        (ChromaLayout::Yuv420, vec![(13, 9), (7, 5), (7, 5)]),
+        (ChromaLayout::Yuv422, vec![(13, 9), (7, 9), (7, 9)]),
+        (ChromaLayout::Yuv444, vec![(13, 9), (13, 9), (13, 9)]),
+    ];
+
+    for (chroma, dims) in layouts {
+        let options = spatial_options(ChannelIntent::Luma, chroma);
+        let mut denoiser = create(13, 9, options).expect("denoiser construction failed");
+        let planes: Vec<Vec<u8>> = dims
+            .iter()
+            .enumerate()
+            .map(|(index, &(width, height))| ramp(width, height, index as u8))
+            .collect();
+        let frame: Vec<&[u8]> = planes.iter().map(Vec::as_slice).collect();
+
+        denoiser.push(&frame).expect("push failed");
+        let received = denoiser.recv().expect("recv failed");
+        let output = received.expect("no frame");
+
+        assert_eq!(output.len(), planes.len(), "plane count for {chroma:?}");
+        assert_eq!(output[0].len(), planes[0].len(), "luma length for {chroma:?}");
+        assert_eq!(output[1..], planes[1..], "uncleaned chroma for {chroma:?}");
+    }
+}
+
+#[test]
+fn a_chroma_plane_at_the_luma_size_is_rejected_for_subsampled_layouts() {
+    for chroma in [ChromaLayout::Yuv420, ChromaLayout::Yuv422] {
+        let options = spatial_options(ChannelIntent::LumaChroma, chroma);
+        let mut denoiser = create(16, 16, options).expect("denoiser construction failed");
+
+        let plane = frame(16, 16);
+        let result = denoiser.push(&[&plane, &plane, &plane]);
+
+        let is_plane_mismatch = matches!(
+            result,
+            Err(DenoiserError::Engine(av_denoise_core::Error::PlaneMismatch(_)))
+        );
+        assert!(is_plane_mismatch, "{chroma:?} got {result:?}");
+    }
+}
+
+#[test]
+fn a_gray_frame_cannot_clean_chroma() {
+    let options = spatial_options(ChannelIntent::Chroma, ChromaLayout::Gray);
+    let result = create(16, 16, options);
+
+    let is_invalid_geometry = matches!(
+        result,
+        Err(DenoiserError::Engine(av_denoise_core::Error::InvalidGeometry(_)))
+    );
+    assert!(is_invalid_geometry, "got {:?}", result.err());
+}
+
+#[test]
+fn a_temporal_stream_pairs_uncleaned_planes_with_their_own_frame() {
+    let options = DenoiserOptions::builder()
+        .intent(ChannelIntent::Chroma)
+        .chroma(ChromaLayout::Yuv420)
+        .mode(DenoisingMode::Temporal { radius: 2 })
+        .build();
+    let mut denoiser = create(16, 16, options).expect("denoiser construction failed");
+    let (chroma_width, chroma_height) = (8, 8);
+    let frames: Vec<[Vec<u8>; 3]> = (0..7u8)
+        .map(|index| {
+            let y_plane = ramp(16, 16, index * 31);
+            let u_plane = ramp(chroma_width, chroma_height, 1);
+            let v_plane = ramp(chroma_width, chroma_height, 2);
+            [y_plane, u_plane, v_plane]
+        })
+        .collect();
+    let mut outputs: Vec<Vec<Vec<u8>>> = Vec::new();
+
+    for planes in &frames {
+        let frame: Vec<&[u8]> = planes.iter().map(Vec::as_slice).collect();
+        loop {
+            match denoiser.push(&frame) {
+                Ok(()) => break,
+                Err(DenoiserError::QueueFull) => {
+                    let received = denoiser.recv().expect("recv");
+                    outputs.extend(received);
+                },
+                Err(error) => panic!("unexpected push error: {error:?}"),
+            }
+        }
+    }
+
+    denoiser.flush(|planes| outputs.push(planes)).expect("flush");
+
+    assert_eq!(outputs.len(), frames.len());
+    for (index, (output, input)) in outputs.iter().zip(&frames).enumerate() {
+        assert_eq!(output[0], input[0], "frame {index} luma came from another frame");
     }
 }
 
@@ -214,6 +337,10 @@ impl Engine for ScriptedEngine {
         (self.push_outcome)(earlier_pushes)
     }
 
+    fn push_from(&mut self, _source: &mut dyn PlaneSource) -> Result<usize, av_denoise_core::Error> {
+        self.push(&[])
+    }
+
     fn push_context(&mut self, _planes: &[DevicePlane<'_>]) -> Result<(), av_denoise_core::Error> {
         Ok(())
     }
@@ -239,6 +366,19 @@ impl Engine for ScriptedEngine {
     fn max_held_frames(&self) -> usize {
         0
     }
+
+    fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, av_denoise_core::Error> {
+        Ok(Vec::new())
+    }
+
+    fn timing(&mut self) -> PassTimings {
+        PassTimings {
+            luma: Some(EngineTiming::default()),
+            chroma: None,
+        }
+    }
+
+    fn sample_device_time(&mut self, _every: u32) {}
 }
 
 #[test]
@@ -331,7 +471,8 @@ fn a_failed_finish_during_flush_poisons_the_denoiser() {
 fn nl4d_algorithm_round_trips_through_the_host() {
     let algorithm = Algorithm::Nl4d(Nl4dOptions::default());
     let options = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
+        .intent(ChannelIntent::Luma)
+        .chroma(ChromaLayout::Gray)
         .mode(DenoisingMode::Temporal { radius: 2 })
         .algorithm(algorithm)
         .build();
@@ -363,7 +504,8 @@ fn nl4d_algorithm_round_trips_through_the_host() {
 fn nl4d_rejects_a_spatial_denoising_mode() {
     let algorithm = Algorithm::Nl4d(Nl4dOptions::default());
     let options = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
+        .intent(ChannelIntent::Luma)
+        .chroma(ChromaLayout::Gray)
         .mode(DenoisingMode::Spacial)
         .algorithm(algorithm)
         .build();
@@ -383,7 +525,8 @@ fn nl4d_rejects_a_spatial_denoising_mode() {
 fn window_span_is_symmetric_for_nlmeans() {
     let algorithm = Algorithm::Nlmeans(NlmeansOptions::default());
     let options = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
+        .intent(ChannelIntent::Luma)
+        .chroma(ChromaLayout::Gray)
         .mode(DenoisingMode::Temporal { radius: 3 })
         .algorithm(algorithm)
         .build();
@@ -400,7 +543,8 @@ fn window_span_is_symmetric_for_nlmeans() {
 fn window_span_is_doubled_and_looks_ahead_on_both_sides_for_nl4d() {
     let algorithm = Algorithm::Nl4d(Nl4dOptions::default());
     let options = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
+        .intent(ChannelIntent::Luma)
+        .chroma(ChromaLayout::Gray)
         .mode(DenoisingMode::Temporal { radius: 3 })
         .algorithm(algorithm)
         .build();
@@ -424,7 +568,8 @@ fn window_span_is_doubled_and_looks_ahead_on_both_sides_for_nl4d() {
 fn window_span_adds_the_lookahead_for_nlmeans_hq() {
     let algorithm = Algorithm::NlmeansHq(NlmeansHqOptions::default());
     let options = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
+        .intent(ChannelIntent::Luma)
+        .chroma(ChromaLayout::Gray)
         .mode(DenoisingMode::Temporal { radius: 3 })
         .algorithm(algorithm)
         .build();
@@ -456,7 +601,8 @@ fn invalid_params_surface_as_error() {
     };
     let algorithm = Algorithm::Nlmeans(nlmeans_options);
     let options = DenoiserOptions::builder()
-        .channel_mode(ChannelMode::Luma)
+        .intent(ChannelIntent::Luma)
+        .chroma(ChromaLayout::Gray)
         .algorithm(algorithm)
         .build();
     let result = create(16, 16, options);

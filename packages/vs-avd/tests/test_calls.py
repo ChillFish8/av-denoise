@@ -79,7 +79,7 @@ def test_kwargs_pass_through_verbatim(fake, monkeypatch):
     assert kwargs == {"sigma": 0.5, "temporal_radius": 3}
 
 
-def test_psy_settings_are_typed_nl4d_parameters():
+def test_psy_settings_are_not_typed_parameters():
     import inspect
 
     parameters = inspect.signature(Nl4d).parameters
@@ -90,38 +90,12 @@ def test_psy_settings_are_typed_nl4d_parameters():
         "psy_shadow_soften",
         "psy_flat_texture_cut",
         "psy_line_ring",
+        "flat_boost",
+        "chroma_flat_boost",
+        "shadow_soften",
+        "flat_texture_cut",
     ):
-        assert name in parameters, name
-
-
-def test_the_pre_psy_strength_map_settings_are_not_typed_parameters():
-    import inspect
-
-    parameters = inspect.signature(Nl4d).parameters
-    for name in ("flat_boost", "chroma_flat_boost", "shadow_soften", "flat_texture_cut"):
         assert name not in parameters, name
-
-
-def test_nl4d_forwards_the_psy_settings(fake, monkeypatch):
-    monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
-    Nl4d(
-        "clip",
-        enable_psy=True,
-        psy_flat_boost=2.0,
-        psy_chroma_flat_boost=1.2,
-        psy_shadow_soften=0.8,
-        psy_flat_texture_cut=0.3,
-        psy_line_ring=8,
-    )
-    _, kwargs = fake.calls[0]
-    assert kwargs == {
-        "enable_psy": True,
-        "psy_flat_boost": 2.0,
-        "psy_chroma_flat_boost": 1.2,
-        "psy_shadow_soften": 0.8,
-        "psy_flat_texture_cut": 0.3,
-        "psy_line_ring": 8,
-    }
 
 
 def test_sigma_is_not_a_typed_parameter():

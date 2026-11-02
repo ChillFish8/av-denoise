@@ -11,6 +11,25 @@ impl NlmDenoiser {
         self.phys_frame(logical as i32)
     }
 
+    /// The stream frame ring slot `slot` holds, where a duplicate holds the frame it copies.
+    pub(crate) fn slot_frame(&self, slot: u32) -> u32 {
+        self.slot_frames[slot as usize]
+    }
+
+    /// The stream frame at the window centre.
+    pub(crate) fn centre_frame(&self) -> u32 {
+        let radius = self.params.temporal_radius;
+        let slot = self.ring_slot(radius);
+
+        self.slot_frame(slot)
+    }
+
+    /// The frames the stream has taken, counting those still in the look-ahead.
+    pub(crate) fn stream_frames(&self) -> u32 {
+        let taken = self.real_pushes + self.held_frames();
+        taken as u32
+    }
+
     /// Turns the shifted-edge stream layout on or off.
     pub(crate) fn set_shifted_edges(&mut self, on: bool) {
         self.shifted_edges = on;

@@ -10,9 +10,9 @@ use super::fold_reference::{
     largest_relative,
     state_pairs,
 };
-use super::records::{hashed_unit, ulp_gap};
-use crate::collab::geometry::strength_map_dims;
+use super::records::{hashed_unit, ulp_gap, valid_channels};
 use crate::engine::align::StorageAlign;
+use crate::noise::NOISE_CHANNELS;
 use crate::noise::correlation::{CORRELATION_FACTOR_TABLE, correlation_factor};
 use crate::noise::curve::{NOISE_CURVE_BINS, NoiseCurve};
 use crate::noise::derived::{DerivedCoefficients, DerivedValues, NoiseConsumer};
@@ -22,10 +22,8 @@ use crate::noise::history::WindowBounds;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::snapshot::NoiseSnapshot;
 use crate::noise::spatial::{RESULTS_PER_SLOT, immerkaer_sigma_scale, sigma_from_abs_sum};
-use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings, StrengthMapKind};
-use crate::noise::strength_map::StrengthMapParams;
+use crate::noise::state::{NoiseShape, NoiseState, ReadingSettings};
 use crate::noise::temporal::TemporalNoiseSample;
-use crate::noise::{NOISE_BLOCK_1D, NOISE_CHANNELS, STRENGTH_MAP_ALL, STRENGTH_MAP_LUMA, STRENGTH_MAP_OFF};
 use crate::tune::gpu::sync;
 use crate::tune::tests::runtime::test_client;
 
@@ -35,10 +33,6 @@ const FRAMES: u32 = 5;
 const RADIUS: u32 = 2;
 const MAX_RELATIVE: f32 = 1.0e-5;
 const STREAM_FRAMES: u32 = 30;
-const LUMA_PARAMS: StrengthMapParams = StrengthMapParams {
-    flat_boost: 1.5,
-    shadow_soften: 0.65,
-};
 
 fn shape(client: &Client, channels: u32) -> NoiseShape {
     NoiseShape {
@@ -52,17 +46,8 @@ fn shape(client: &Client, channels: u32) -> NoiseShape {
     }
 }
 
-fn quarters() -> usize {
-    let (cols, rows) = strength_map_dims(WIDTH, HEIGHT);
-    (cols * rows) as usize
-}
-
-fn settings(map: StrengthMapKind) -> NoiseSettings {
-    let reading = ReadingSettings {
-        luma_fields: true,
-        map,
-        ..ReadingSettings::default()
-    };
+fn settings() -> NoiseSettings {
+    let reading = ReadingSettings { luma_fields: true };
     let fold = FoldSettings {
         sigma_scale: 1.0,
         consumer: CONSUMER,
@@ -71,10 +56,6 @@ fn settings(map: StrengthMapKind) -> NoiseSettings {
     };
 
     NoiseSettings { reading, fold }
-}
-
-fn luma_map() -> StrengthMapKind {
-    StrengthMapKind::Luma(LUMA_PARAMS)
 }
 
 /// The abs sum whose Immerkær sigma is about `sigma`.
@@ -98,6 +79,7 @@ fn hashed_sample(seed: u32, channels: u32) -> TemporalNoiseSample {
     let rho_unit = hashed_unit(seed, 40);
 
     TemporalNoiseSample {
+        valid: valid_channels(channels),
         sigma,
         sigma_low,
         rho: 0.75 * rho_unit,
@@ -118,13 +100,6 @@ fn hashed_curve(seed: u32) -> NoiseCurve {
         ratios,
         sigma_quarter_median: (2.0 + median_unit) / 255.0,
     }
-}
-
-/// A map whose every multiplier names the seed and the quarter.
-fn hashed_map_of(seed: u32, quarters: usize) -> Vec<f32> {
-    (0..quarters)
-        .map(|quarter| 1.0 + 0.01 * seed as f32 + 1.0e-4 * quarter as f32)
-        .collect()
 }
 
 /// A record with hashed Immerkær sigmas of between 1 and 5 codes, a hashed quartile and, when
@@ -149,14 +124,10 @@ fn hashed_record(seed: u32, channels: u32, sampled: bool, curved: bool) -> HostR
         populated_bins: if curve.is_some() { 6 } else { 0 },
     };
 
-    HostRecord {
-        reading,
-        immerkaer,
-        map: hashed_map_of(seed, quarters()),
-    }
+    HostRecord { reading, immerkaer }
 }
 
-/// A no-sample record with no Immerkær response and a map of ones.
+/// A no-sample record with no Immerkær response.
 fn empty_record() -> HostRecord {
     let reading = ReadingRecord {
         immerkaer_low: [0.0; NOISE_CHANNELS as usize],
@@ -169,7 +140,6 @@ fn empty_record() -> HostRecord {
     HostRecord {
         reading,
         immerkaer: [0.0; NOISE_CHANNELS as usize],
-        map: vec![1.0; quarters()],
     }
 }
 
@@ -197,13 +167,12 @@ fn stream_record(frame: u32, channels: u32, seed: u32) -> HostRecord {
 struct FoldRun {
     snapshot: NoiseSnapshot,
     curve: Vec<f32>,
-    map: Vec<f32>,
 }
 
 impl FoldRun {
     fn bits(&self) -> Vec<u32> {
         let derived = self.snapshot.derived.to_words();
-        let words = derived.iter().chain(&self.curve).chain(&self.map);
+        let words = derived.iter().chain(&self.curve);
 
         words.map(|word| word.to_bits()).collect()
     }
@@ -218,7 +187,6 @@ struct Stream {
     state: NoiseState,
     readings: Vec<ReadingRecord>,
     sums: Vec<[f32; RESULTS_PER_SLOT]>,
-    maps: Vec<Vec<f32>>,
     records: Vec<HostRecord>,
 }
 
@@ -230,9 +198,7 @@ impl Stream {
         let empty = empty_record();
         let readings = vec![empty.reading.clone(); frames];
         let sums = vec![[0.0f32; RESULTS_PER_SLOT]; frames];
-        let maps = vec![empty.map.clone(); frames];
-        let slot_maps = Self::maps_for(&maps, settings);
-        let state = NoiseState::with_readings_for_test(&client, shape, settings, &readings, &sums, slot_maps);
+        let state = NoiseState::with_readings_for_test(&client, shape, settings, &readings, &sums);
 
         Self {
             client,
@@ -241,18 +207,8 @@ impl Stream {
             state,
             readings,
             sums,
-            maps,
             records: Vec::new(),
         }
-    }
-
-    /// The maps a state with `settings` takes, none without a strength map.
-    fn maps_for(maps: &[Vec<f32>], settings: NoiseSettings) -> &[Vec<f32>] {
-        if settings.reading.map == StrengthMapKind::Off {
-            return &[];
-        }
-
-        maps
     }
 
     /// Writes `record` into the next stream frame's ring slot and records it.
@@ -262,11 +218,8 @@ impl Stream {
         let index = slot as usize;
         self.readings[index] = record.reading.clone();
         self.sums[index] = record_sums(&record);
-        self.maps[index] = record.map.clone();
 
-        let slot_maps = Self::maps_for(&self.maps, self.settings);
-        self.state
-            .set_readings_for_test(&self.readings, &self.sums, slot_maps);
+        self.state.set_readings_for_test(&self.readings, &self.sums);
         self.state.record_reading(slot, frame);
         self.records.push(record);
     }
@@ -283,7 +236,6 @@ impl Stream {
         let run = FoldRun {
             snapshot: self.state.snapshot().expect("the snapshot reads back"),
             curve: self.state.read_curve(),
-            map: self.state.read_current_map(),
         };
         self.check(&run, bounds);
 
@@ -307,14 +259,6 @@ impl Stream {
             _ => vec![0.0; NOISE_CURVE_BINS],
         };
         assert_eq!(run.curve, expected_curve, "the curve buffer");
-
-        if settings.reading.map == StrengthMapKind::Off {
-            return;
-        }
-
-        let ones = vec![1.0f32; quarters()];
-        let expected_map = host.map.unwrap_or(ones);
-        assert_eq!(run.map, expected_map, "the current map");
     }
 
     fn reset(&mut self) {
@@ -357,18 +301,10 @@ fn run_stream(channels: u32, settings: NoiseSettings, seed: u32) -> Vec<FoldRun>
 
 #[test]
 fn the_fold_matches_the_host_window_over_a_stream() {
-    let cases = [
-        (1, settings(luma_map()), "luma, luma map"),
-        (
-            2,
-            settings(StrengthMapKind::Chroma { flat_boost: 1.5 }),
-            "chroma, chroma map",
-        ),
-        (1, settings(StrengthMapKind::Off), "luma, no map"),
-    ];
+    let cases = [(1, "luma"), (2, "chroma")];
 
-    for (channels, case_settings, what) in cases {
-        let runs = run_stream(channels, case_settings, 17);
+    for (channels, what) in cases {
+        let runs = run_stream(channels, settings(), 17);
         let curved = runs.iter().filter(|run| run.snapshot.curve.is_some()).count();
         let sampled = runs
             .iter()
@@ -383,7 +319,7 @@ fn the_fold_matches_the_host_window_over_a_stream() {
 #[test]
 fn a_reset_clears_the_history() {
     const CHANNELS: u32 = 2;
-    let stream_settings = settings(StrengthMapKind::Chroma { flat_boost: 1.5 });
+    let stream_settings = settings();
     let mut used = Stream::new(CHANNELS, stream_settings);
     let mut fresh = Stream::new(CHANNELS, stream_settings);
 
@@ -417,7 +353,7 @@ fn a_reset_clears_the_history() {
 
 #[test]
 fn a_window_never_reaches_past_the_newest_recorded_frame() {
-    let mut stream = Stream::new(1, settings(StrengthMapKind::Off));
+    let mut stream = Stream::new(1, settings());
     let record = hashed_record(5, 1, true, false);
     stream.push(record);
 
@@ -432,7 +368,7 @@ fn a_window_never_reaches_past_the_newest_recorded_frame() {
 fn a_perturbed_frame_leaves_the_derived_values_unmoved() {
     const PERTURBED_FRAME: u32 = 10;
     let channels = 1;
-    let stream_settings = settings(luma_map());
+    let stream_settings = settings();
     let mut clean = Stream::new(channels, stream_settings);
     let mut perturbed = Stream::new(channels, stream_settings);
     let mut compared = 0;
@@ -482,13 +418,14 @@ fn the_correlation_factor_matches_the_host_table() {
     }
 
     // A unit sigma over no Immerkær response makes the median the factor itself.
-    let mut stream_settings = settings(StrengthMapKind::Off);
+    let mut stream_settings = settings();
     stream_settings.fold.coefficients = DerivedCoefficients::default();
     let mut stream = Stream::new(1, stream_settings);
     let mut gaps = Vec::new();
 
     for rho in rhos {
         let sample = TemporalNoiseSample {
+            valid: valid_channels(1),
             sigma: [1.0, 0.0],
             sigma_low: [1.0, 0.0],
             rho,
@@ -518,7 +455,7 @@ fn the_correlation_factor_matches_the_host_table() {
 
 #[test]
 fn sigma_scale_scales_each_reading() {
-    let mut scaled = settings(StrengthMapKind::Off);
+    let mut scaled = settings();
     scaled.fold.sigma_scale = 1.5;
     let mut stream = Stream::new(1, scaled);
     let record = hashed_record(31, 1, true, false);
@@ -548,12 +485,10 @@ fn derived_for(settings: NoiseSettings, curved: bool) -> (NoiseSnapshot, Derived
 
     let snapshot = run.snapshot;
     let fold_settings = settings.fold;
-    let expected = fold_settings.coefficients.derive_host(
-        &snapshot,
-        channels as usize,
-        fold_settings.consumer,
-        settings.reading.map,
-    );
+    let expected =
+        fold_settings
+            .coefficients
+            .derive_host(&snapshot, channels as usize, fold_settings.consumer);
 
     (snapshot, expected)
 }
@@ -580,7 +515,7 @@ fn the_derived_values_follow_the_coefficients() {
     };
 
     for coefficients in [COEFFICIENTS, fixed, floor_off, pilot, no_motion] {
-        let mut case = settings(StrengthMapKind::Off);
+        let mut case = settings();
         case.fold.coefficients = coefficients;
         let (snapshot, expected) = derived_for(case, true);
         let derived = snapshot.derived;
@@ -619,7 +554,7 @@ fn the_derived_values_follow_the_coefficients() {
     // The default consumer clamps at the same floor the host's weight scale does.
     let default_consumer = NoiseConsumer::default();
     for consumer in [unread, tiny_gain, default_consumer] {
-        let mut case = settings(StrengthMapKind::Off);
+        let mut case = settings();
         case.fold.consumer = consumer;
         let (snapshot, _) = derived_for(case, true);
 
@@ -630,33 +565,24 @@ fn the_derived_values_follow_the_coefficients() {
         curve_applies: false,
         ..CONSUMER
     };
-    let chroma = StrengthMapKind::Chroma { flat_boost: 1.5 };
-    let modes = [
-        (StrengthMapKind::Off, CONSUMER, true, STRENGTH_MAP_OFF),
-        (luma_map(), CONSUMER, true, STRENGTH_MAP_LUMA),
-        (luma_map(), CONSUMER, false, STRENGTH_MAP_OFF),
-        (luma_map(), unapplied, true, STRENGTH_MAP_OFF),
-        (chroma, CONSUMER, true, STRENGTH_MAP_ALL),
-        (chroma, unapplied, true, STRENGTH_MAP_ALL),
-        (chroma, CONSUMER, false, STRENGTH_MAP_OFF),
-    ];
-    for (map, consumer, curved, mode) in modes {
-        let mut case = settings(map);
+    let curve_cases = [(CONSUMER, true), (CONSUMER, false), (unapplied, true)];
+    for (consumer, curved) in curve_cases {
+        let mut case = settings();
         case.fold.consumer = consumer;
         let (snapshot, _) = derived_for(case, curved);
         let curve_valid = curved && consumer.curve_applies;
+        let applies = consumer.curve_applies;
 
-        assert_eq!(snapshot.derived.map_mode, mode, "{map:?}, curved {curved}");
         assert_eq!(
             snapshot.derived.curve_valid, curve_valid,
-            "{map:?}, curved {curved}"
+            "applies {applies}, curved {curved}"
         );
     }
 }
 
 #[test]
 fn a_fold_on_a_letterboxed_stream_keeps_every_derived_value_finite() {
-    let mut stream = Stream::new(2, settings(luma_map()));
+    let mut stream = Stream::new(2, settings());
     let mut runs = Vec::new();
 
     for frame in 0..FRAMES {
@@ -682,7 +608,7 @@ fn a_fold_on_a_letterboxed_stream_keeps_every_derived_value_finite() {
 
 #[test]
 fn the_fold_is_byte_identical_across_runs() {
-    let stream_settings = settings(luma_map());
+    let stream_settings = settings();
     let first = run_stream(1, stream_settings, 5);
     let second = run_stream(1, stream_settings, 5);
 
@@ -692,96 +618,49 @@ fn the_fold_is_byte_identical_across_runs() {
 }
 
 #[test]
-fn set_settings_rebuilds_the_fold_settings_and_the_history() {
-    let mut stream = Stream::new(1, settings(StrengthMapKind::Off));
+fn set_settings_rebuilds_the_fold_settings() {
+    let mut stream = Stream::new(1, settings());
     let record = hashed_record(81, 1, true, true);
     let sample = record.reading.sample.expect("the record has a sample");
     stream.push(record.clone());
-    let unmapped = stream.fold(0);
+    let before = stream.fold(0);
 
-    let mut after = settings(luma_map());
+    let mut after = settings();
     after.fold.sigma_scale = 2.0;
     stream.state.set_settings(after);
     stream.settings = after;
     stream.reset();
-    stream.push(record.clone());
-    let mapped = stream.fold(0);
+    stream.push(record);
+    let scaled = stream.fold(0);
     stream.finish();
 
-    let temporal = mapped
+    let unscaled_chain = before
         .snapshot
         .temporal_only
         .expect("the sample feeds the temporal chain");
-    let scaled = sample.sigma[0] * 2.0;
-    assert_eq!(unmapped.snapshot.derived.map_mode, STRENGTH_MAP_OFF);
-    assert_eq!(mapped.snapshot.derived.map_mode, STRENGTH_MAP_LUMA);
-    assert_eq!(temporal[0], scaled);
-    assert_eq!(mapped.map, record.map);
-}
-
-#[test]
-fn a_4k_luma_map_folds_across_the_grid() {
-    const WIDTH_4K: u32 = 3840;
-    const HEIGHT_4K: u32 = 2160;
-    let client = test_client();
-    let shape = NoiseShape {
-        width: WIDTH_4K,
-        height: HEIGHT_4K,
-        channels: 1,
-        frames: FRAMES,
-        ring_radius: FRAMES / 2,
-        temporal: true,
-        align: StorageAlign::from_client(&client),
-    };
-    let (cols, rows) = strength_map_dims(WIDTH_4K, HEIGHT_4K);
-    let quarters = (cols * rows) as usize;
-
-    // Frame 0 has a curve, frame 1 a sample without a curve and frame 2 no sample, so the
-    // window's map is frame 0's.
-    let first = hashed_record(91, 1, true, true);
-    let second = hashed_record(92, 1, true, false);
-    let third = hashed_record(93, 1, false, false);
-    let mut readings = vec![empty_record().reading; FRAMES as usize];
-    readings[0] = first.reading;
-    readings[1] = second.reading;
-    readings[2] = third.reading;
-    let sums = vec![[0.0f32; RESULTS_PER_SLOT]; FRAMES as usize];
-    let maps: Vec<Vec<f32>> = (0..FRAMES).map(|slot| hashed_map_of(slot, quarters)).collect();
-
-    let map_settings = settings(luma_map());
-    let state = NoiseState::with_readings_for_test(&client, shape, map_settings, &readings, &sums, &maps);
-    let map_cubes = (quarters as u32).div_ceil(NOISE_BLOCK_1D);
-    assert!(map_cubes > 1, "the map spans {map_cubes} cubes");
-
-    for frame in 0..3 {
-        state.record_reading(frame, frame);
-    }
-
-    let bounds = WindowBounds::around(1, 2);
-    state.queue_window_fold(bounds).expect("the window fold queues");
-    let map = state.read_current_map();
-    sync(&client).expect("the device syncs");
-
-    let bits: Vec<u32> = map.iter().map(|value| value.to_bits()).collect();
-    let expected: Vec<u32> = maps[0].iter().map(|value| value.to_bits()).collect();
-    assert_eq!(bits, expected);
+    let scaled_chain = scaled
+        .snapshot
+        .temporal_only
+        .expect("the sample feeds the temporal chain");
+    let doubled = sample.sigma[0] * 2.0;
+    assert_eq!(unscaled_chain[0], sample.sigma[0]);
+    assert_eq!(scaled_chain[0], doubled);
 }
 
 #[test]
 fn recording_copies_a_slot_into_its_frame_slot() {
-    let mut stream = Stream::new(2, settings(luma_map()));
+    let mut stream = Stream::new(2, settings());
     let record = hashed_record(77, 2, true, true);
     stream.push(record.clone());
     stream.state.record_reading(0, 21);
 
-    let (reading, results, map) = stream.state.read_history_frame(21);
+    let (reading, results) = stream.state.read_history_frame(21);
     let recorded = stream.state.stream_frame_count();
     stream.finish();
 
     let expected_sums = record_sums(&record);
     assert_eq!(reading, record.reading);
     assert_eq!(results, expected_sums);
-    assert_eq!(map, record.map);
     assert_eq!(recorded, 22);
 
     let immerkaer = sigma_from_abs_sum(results[0], WIDTH, HEIGHT);

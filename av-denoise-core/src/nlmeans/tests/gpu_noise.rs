@@ -4,7 +4,7 @@ use super::helpers::{make_client, seeded_unit_gaussian};
 use crate::bench_api::HostIo;
 use crate::collab::kernels::aggregate::weight_scale_with_g_max;
 use crate::motion::sad_noise_floor;
-use crate::nl4d::{Nl4dDenoiser, Nl4dParams, PsyParams};
+use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::dispatch::{mc_sad_noise_floor_sigma, pilot_h2_inv_norm};
 use crate::nlmeans::params::sigma_eff;
 use crate::nlmeans::*;
@@ -14,8 +14,6 @@ use crate::noise::{
     NOISE_CHANNELS,
     NoiseConsumer,
     NoiseSnapshot,
-    STRENGTH_MAP_OFF,
-    StrengthMapKind,
     build_spatial_offset_lut,
     spatial_offset_factor,
     spatial_offset_index,
@@ -92,7 +90,6 @@ fn nl4d_params(channels: ChannelMode) -> Nl4dParams {
     Nl4dParams {
         nlm,
         noise_map: true,
-        psy: Some(PsyParams::default()),
         ..defaults
     }
 }
@@ -198,11 +195,10 @@ fn the_coefficients_reproduce_the_host_formulas() {
                 temporal_only: None,
                 rho: None,
                 curve: None,
-                classes_present: false,
                 derived: DerivedValues::default(),
             };
             let consumer = NoiseConsumer::default();
-            let gpu = coefficients.derive_host(&snapshot, count, consumer, StrengthMapKind::Off);
+            let gpu = coefficients.derive_host(&snapshot, count, consumer);
             let host = host_formulas(&front, median, low);
             let pairs = [
                 ("h2_inv_norm", gpu.h2_inv_norm, host.h2_inv_norm),
@@ -419,7 +415,6 @@ fn pinned_formulas(front: &NlmDenoiser, sigma: f32) -> DerivedValues {
         sigma: sigmas,
         weight_scale: weight,
         curve_valid: false,
-        map_mode: STRENGTH_MAP_OFF,
         sad_noise_floor: sad_floor,
         confidence_sad_noise_floor: confidence_sad_floor,
         h2_inv_norm,

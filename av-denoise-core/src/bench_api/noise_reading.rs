@@ -10,10 +10,7 @@ use crate::noise::{
     NoiseSettings,
     NoiseShape,
     NoiseState,
-    QuarterSettings,
     ReadingSettings,
-    StrengthMapKind,
-    StrengthMapParams,
     WindowBounds,
 };
 
@@ -26,19 +23,6 @@ pub enum ReadingStage {
     /// The curve batch's three histogram passes.
     CurveBatch,
     SampleFinish,
-    Classify,
-    StrengthMap,
-}
-
-/// The luma strength map a reading builds after its curve.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ReadingMap {
-    pub flat_boost: f32,
-    pub shadow_soften: f32,
-    /// The texture veto's coherence cut, where 1.0 or more turns the veto off.
-    pub texture_cut: f32,
-    /// The line ring's radius in quarters, where 0 turns the ring off.
-    pub line_ring: usize,
 }
 
 /// What a reading builds and what its folds write.
@@ -47,8 +31,6 @@ pub struct ReadingOptions {
     /// Whether the stats carry the luma quarter fields and the reading builds a curve, as nl4d's
     /// luma plane does.
     pub luma_fields: bool,
-    /// The luma strength map the reading builds after its curve.
-    pub map: Option<ReadingMap>,
     /// The search radius of the NLM offset tables every fold writes.
     pub offset_tables: Option<u32>,
 }
@@ -79,13 +61,7 @@ impl NoiseReading {
             temporal: true,
             align: StorageAlign::from_client(client),
         };
-        let settings = match options.map {
-            Some(map) => map_settings(luma_fields, map),
-            None => ReadingSettings {
-                luma_fields,
-                ..ReadingSettings::default()
-            },
-        };
+        let settings = ReadingSettings { luma_fields };
         let fold = FoldSettings {
             offset_tables: options.offset_tables,
             ..FoldSettings::default()
@@ -127,18 +103,6 @@ impl NoiseReading {
         }
 
         self.state.queue_curve_batch();
-
-        if stage == ReadingStage::SampleFinish {
-            return;
-        }
-
-        self.state.queue_sample_finish(1);
-
-        if stage == ReadingStage::Classify {
-            return;
-        }
-
-        self.state.queue_classify(1);
     }
 
     /// Queues the launch of `stage`.
@@ -149,15 +113,13 @@ impl NoiseReading {
             ReadingStage::CurveBins => self.state.queue_curve_bins(1),
             ReadingStage::CurveBatch => self.state.queue_curve_batch(),
             ReadingStage::SampleFinish => self.state.queue_sample_finish(1),
-            ReadingStage::Classify => self.state.queue_classify(1),
-            ReadingStage::StrengthMap => self.state.queue_strength_map(1),
         };
     }
 
     /// Queues every launch of the reading.
     pub fn queue_reading(&self) {
-        self.queue_before(ReadingStage::StrengthMap);
-        self.queue_stage(ReadingStage::StrengthMap);
+        self.queue_before(ReadingStage::SampleFinish);
+        self.queue_stage(ReadingStage::SampleFinish);
     }
 
     /// Queues the copy of slot 1's reading into the history as stream frame 0.
@@ -187,22 +149,5 @@ impl NoiseReading {
     /// The curve batch's histogram and state with their lengths in words, which its passes add to.
     pub fn curve_batch_buffers(&self) -> Vec<(Handle, u32)> {
         self.state.curve_batch_buffers()
-    }
-}
-
-fn map_settings(luma_fields: bool, map: ReadingMap) -> ReadingSettings {
-    let params = StrengthMapParams {
-        flat_boost: map.flat_boost,
-        shadow_soften: map.shadow_soften,
-    };
-    let quarter = QuarterSettings {
-        texture_cut: Some(map.texture_cut),
-        line_ring: Some(map.line_ring).filter(|&radius| radius > 0),
-    };
-
-    ReadingSettings {
-        luma_fields,
-        quarter,
-        map: StrengthMapKind::Luma(params),
     }
 }

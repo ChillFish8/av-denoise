@@ -1,16 +1,16 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::motion::kernels::{mc_block_match_coarse, mc_block_match_fine};
+use crate::motion::kernels::{coarse_match_threads, mc_block_match_coarse, mc_block_match_fine};
 use crate::noise::tests::sad_floor_buffer;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 use crate::tune::gpu::{read_i32, zero_words};
 use crate::tune::tests::fixtures::{hashed_unit, upload};
 use crate::tune::tests::runtime::test_client;
 
-/// Cube sizes the argmin runs at. 16 threads leave a 32-wide plane partly empty, 32 is the shipped
-/// size, and 128 spans two to eight planes depending on the device.
-const CUBE_THREADS: [u32; 3] = [16, 32, 128];
+/// Cube sizes the argmin runs at. 16 threads leave a 32-wide plane partly empty, and 32 up to 256
+/// cover every size [coarse_match_threads] picks, spanning one to 32 planes depending on the device.
+const CUBE_THREADS: [u32; 5] = [16, 32, 64, 128, 256];
 
 const WIDTH: u32 = 70;
 const HEIGHT: u32 = 45;
@@ -18,7 +18,7 @@ const BLKSIZE: u32 = 16;
 const STEP: u32 = 8;
 
 /// Search radii with fewer and more candidates than the widest cube has threads.
-const SEARCH_RADII: [u32; 2] = [4, 7];
+const SEARCH_RADII: [u32; 3] = [4, 7, 12];
 
 /// Neighbours each argmin launch covers on z, each matching its own frame.
 const NEIGHBOURS: usize = 3;
@@ -257,6 +257,11 @@ fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>>
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, 0.0);
         let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
+        let sad_placeholder = client.empty(size_of::<f32>());
+        let predictions_placeholder = client.empty(size_of::<f32>());
+        let sad_arg = BufferArg::from_raw_parts(sad_placeholder, 1);
+        let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, 1);
+
         mc_block_match_fine::launch_unchecked(
             &client,
             cube_count,
@@ -265,7 +270,11 @@ fn run_fine(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32>>
             slots_arg,
             field_arg,
             confidence_arg,
+            sad_arg,
+            predictions_arg,
             CENTRE_SLOT,
+            false,
+            false,
             false,
             noise_arg,
             DERIVED_SAD_FLOOR,
@@ -348,6 +357,11 @@ fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32
     let field_arg = unsafe { BufferArg::from_raw_parts(mv_field_handle, field_len) };
 
     unsafe {
+        let noise_placeholder = client.empty(size_of::<f32>());
+        let predictions_placeholder = client.empty(size_of::<f32>());
+        let noise_arg = BufferArg::from_raw_parts(noise_placeholder, 1);
+        let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, 1);
+
         mc_block_match_coarse::launch_unchecked(
             &client,
             cube_count,
@@ -355,7 +369,11 @@ fn run_coarse(content: Content, search_radius: u32, threads: u32) -> Vec<Vec<i32
             pyramid_arg,
             slots_arg,
             field_arg,
+            noise_arg,
+            predictions_arg,
             CENTRE_SLOT,
+            1.0,
+            false,
             WIDTH,
             HEIGHT,
             0,
@@ -438,6 +456,17 @@ fn assert_coarse_matches_the_serial_scan(content: Content) {
             }
         }
     }
+}
+
+#[test]
+fn a_wider_coarse_window_gets_more_threads() {
+    let narrow = coarse_match_threads(4);
+    let middle = coarse_match_threads(8);
+    let wide = coarse_match_threads(12);
+
+    assert_eq!(narrow, 32);
+    assert_eq!(middle, 64);
+    assert_eq!(wide, 128);
 }
 
 #[test]

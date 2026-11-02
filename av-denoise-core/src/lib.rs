@@ -23,12 +23,16 @@ mod tests;
 pub mod tune;
 
 pub use self::engine::{
+    ChromaLayout,
+    ChromaSiting,
     DevicePlane,
     EdgePadding,
     Engine,
     EngineSpec,
     EngineTiming,
     Geometry,
+    PassTimings,
+    PlaneSource,
     SampleFormat,
     WindowSpan,
 };
@@ -40,10 +44,9 @@ pub use self::kernel_cache::{
     merge_kernel_cache,
     refill_kernel_cache,
 };
+pub use self::nl4d::Nl4dOptions;
 pub use self::nl4d::grain::{GrainChunk, SceneGrain, build_table};
-pub use self::nl4d::{Nl4d, Nl4dOptions, PsyParams, nl4d_default_lambda_ht};
 pub use self::nlmeans::{
-    ChannelMode,
     DEFAULT_PILOT_STRENGTH_SCALE,
     DenoisingMode,
     HqParams,
@@ -51,7 +54,6 @@ pub use self::nlmeans::{
     MotionEstimation,
     MotionSearch,
     NlmTuning,
-    Nlmeans,
     NlmeansAlgorithm,
     NlmeansHqOptions,
     NlmeansOptions,
@@ -62,7 +64,7 @@ pub use self::nlmeans::{
     nlmeans_variant_for,
     parse_prefilter,
 };
-pub use self::options::Preset;
+pub use self::options::{Preset, search_escalation_for};
 pub use self::tune::{
     BudgetRequest,
     CacheHook,
@@ -77,7 +79,6 @@ pub use self::tune::{
     TuningMode,
     build_engine,
     is_tuned,
-    profile_key,
     tune_frames,
 };
 

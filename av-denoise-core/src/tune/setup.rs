@@ -73,21 +73,27 @@ pub(crate) fn device_priority(device: &DeviceProfile) -> &'static PriorityTable 
 
 /// Builds `spec` on `client` from the store's picks, with no tuning ledger.
 ///
-/// `device` is the device `client` runs on, and names the stored result to read. With
-/// [TuningMode::Off] every launch site runs its baseline under the device's legality rules.
+/// `device` is the device `client` runs on, and names the stored result to read. Each pass reads
+/// the profile stored under its own profile key. With [TuningMode::Off] every launch site runs its
+/// baseline under the device's legality rules.
 pub fn build_engine(
     device: &cubecl::Device,
     client: &Client,
     spec: EngineSpec,
     config: &TuningConfig,
 ) -> Result<Box<dyn Engine>, Error> {
+    let profile = device_profile(device, client);
+    let setup = KernelSetup::default();
+
+    spec.build(client, |pass| {
+        let key = profile_key(pass);
+        engine_kernels(&setup, config, &key, &profile)
+    })
+}
+
+fn device_profile(device: &cubecl::Device, client: &Client) -> DeviceProfile {
     let identity = describe(device, client);
     let limits = DeviceLimits::from_client(client);
-    let profile = DeviceProfile { identity, limits };
 
-    let setup = KernelSetup::default();
-    let key = profile_key(&spec);
-    let kernels = engine_kernels(&setup, config, &key, &profile);
-
-    spec.build(client, kernels)
+    DeviceProfile { identity, limits }
 }

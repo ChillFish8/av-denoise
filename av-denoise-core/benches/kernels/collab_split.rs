@@ -84,7 +84,7 @@ impl CollabSplitBench {
             channel_name: self.channel_name,
             split_mv: false,
             noise_curve: false,
-            strength_map: false,
+            colour: false,
             pooled: false,
             candidate: CollabVariant::BASELINE,
         }

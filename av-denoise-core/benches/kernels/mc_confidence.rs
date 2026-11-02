@@ -90,12 +90,19 @@ impl Benchmark for McConfidenceBench {
         let grid = CubeCount::new_3d(blocks_x, blocks_y, self.neighbours);
         let dim = CubeDim::new_1d(BLOCK_MATCH_THREADS);
 
+        // The unwritten SAD output and the unread predictions bind the confidence and noise
+        // buffers, as the library's own launch does.
+        let sad_placeholder = args.confidence.clone();
+        let predictions_placeholder = args.noise.clone();
+
         unsafe {
             let pyramid_arg = BufferArg::from_raw_parts(args.pyramid, pyramid_len);
             let neighbour_slots_arg = BufferArg::from_raw_parts(args.neighbour_slots, neighbours);
             let mv_scratch_arg = BufferArg::from_raw_parts(args.mv_scratch, mv_len);
             let confidence_arg = BufferArg::from_raw_parts(args.confidence, conf_len);
             let noise_arg = BufferArg::from_raw_parts(args.noise, DERIVED_WORDS as usize);
+            let sad_arg = BufferArg::from_raw_parts(sad_placeholder, conf_len);
+            let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, DERIVED_WORDS as usize);
 
             mc_block_match_fine::launch_unchecked(
                 &self.client,
@@ -105,8 +112,12 @@ impl Benchmark for McConfidenceBench {
                 neighbour_slots_arg,
                 mv_scratch_arg,
                 confidence_arg,
+                sad_arg,
+                predictions_arg,
                 0u32,
                 true, // The confidence write is what this bench measures.
+                false,
+                false,
                 noise_arg,
                 DERIVED_CONFIDENCE_SAD_FLOOR,
                 thsad,

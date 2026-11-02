@@ -6,6 +6,7 @@ use crate::bench_api::kernels::motion::{
     mc_chain_compose,
     mc_downscale,
     mc_extract_luma,
+    mc_map_luma_fields,
     mc_pair_zero,
     mc_warp,
 };

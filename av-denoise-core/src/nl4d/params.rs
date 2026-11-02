@@ -1,5 +1,6 @@
-use super::psy::PsyParams;
 use crate::collab::MAX_TEMPORAL_RADIUS;
+use crate::motion::DEFAULT_MAX_SEARCH_ESCALATION;
+use crate::motion::truemotion::DEFAULT_FIELD_LAMBDA;
 use crate::nlmeans::{ChannelMode, HqParams, MotionCompensationMode, MotionEstimation, NlmParams};
 
 /// The largest [Nl4dParams::kaiser_beta] worth accepting.
@@ -39,7 +40,7 @@ pub struct Nl4dParams {
     /// Hard-threshold multiplier on the propagated coefficient sigma.
     ///
     /// Higher removes more noise and more fine detail. Defaults to 4.158, though luma and chroma
-    /// want separately tuned values. See [nl4d_default_lambda_ht](crate::nl4d_default_lambda_ht).
+    /// want separately tuned values.
     pub lambda_ht: f32,
     /// The confidence floor below which a whole neighbour block is skipped, in `0.0..1.0`.
     ///
@@ -53,22 +54,20 @@ pub struct Nl4dParams {
     /// patch toward its edges blends those decisions instead of letting each reach its boundary at
     /// full strength. Defaults to 2.0, BM3D's own value, and `0.0` is uniform aggregation.
     pub kaiser_beta: f32,
-    /// The penalty on a block's vector deviating from its neighbourhood median, in the field
-    /// regularisation pass.
+    /// The strength of the truemotion stage's penalty on a block's vector straying from its
+    /// neighbourhood median.
     ///
-    /// The median is taken over the four adjacent blocks' vectors and zero. The penalty is this
-    /// times the distance from the median in pixels, scaled so `1.0` weighs one pixel of deviation
-    /// like a 5/255 per-pixel mismatch. Defaults to `1.0`, calibrated on the `mc_accuracy` bench to
-    /// sit inside the plateau where larger values add little accuracy. `0.0` skips the pass.
+    /// The penalty grows with the distance from the median in pixels and with the noise. At `1.0`,
+    /// one pixel of distance on clean content weighs like a 5/255 per-pixel mismatch. Defaults to
+    /// `1.0`, and `0.0` turns the stage off in the denoiser's own searches. The camera model fit
+    /// keeps its stage at `1.0`.
     pub field_lambda: f32,
-    /// Scales the luma threshold by how noisy each brightness level is in the current frame.
+    /// Scales the luma threshold by how noisy each brightness level and colour is in the current
+    /// frame.
     ///
-    /// On by default.
+    /// On by default. Turning it off also turns off the luma colour gains. Chroma thresholds
+    /// always follow each plane's colour grain.
     pub noise_map: bool,
-    /// Perceptual tuning by area, see [PsyParams](crate::PsyParams).
-    ///
-    /// Only takes effect with `noise_map` on. `None`, the default, filters every area alike.
-    pub psy: Option<PsyParams>,
     /// Judges each transform coefficient together with its frequency neighbours instead of alone.
     ///
     /// Faint texture spreads over several neighbouring frequencies, so it survives where each
@@ -91,6 +90,7 @@ impl Default for Nl4dParams {
                     blksize: 16,
                     overlap: 8,
                     search_radius: 4,
+                    max_search_escalation: DEFAULT_MAX_SEARCH_ESCALATION,
                     pyramid_levels: 2,
                     estimation: MotionEstimation::Auto,
                 },
@@ -103,9 +103,8 @@ impl Default for Nl4dParams {
             lambda_ht: 4.158,
             c_min: 0.05,
             kaiser_beta: 2.0,
-            field_lambda: 1.0,
+            field_lambda: DEFAULT_FIELD_LAMBDA,
             noise_map: true,
-            psy: None,
             pooled_threshold: true,
             grain_export: false,
         }
@@ -191,10 +190,6 @@ impl Nl4dParams {
             return Err(message);
         }
 
-        if let Some(psy) = &self.psy {
-            psy.validate()?;
-        }
-
         Ok(())
     }
 }
@@ -216,24 +211,9 @@ mod tests {
     }
 
     #[test]
-    fn psy_is_off_by_default() {
+    fn pooled_threshold_is_on_by_default() {
         let params = Nl4dParams::default();
-        assert_eq!(params.psy, None);
         assert!(params.pooled_threshold);
-    }
-
-    #[test]
-    fn validate_checks_the_psy_params() {
-        let psy = PsyParams {
-            line_ring: 65,
-            ..PsyParams::default()
-        };
-        let params = Nl4dParams {
-            psy: Some(psy),
-            ..Nl4dParams::default()
-        };
-        let error = params.validate().expect_err("line_ring out of range");
-        assert!(error.contains("psy_line_ring"), "got {error}");
     }
 
     #[test]
@@ -243,6 +223,7 @@ mod tests {
                 blksize,
                 overlap,
                 search_radius: 4,
+                max_search_escalation: 4,
                 pyramid_levels: 2,
                 estimation: MotionEstimation::Auto,
             };
@@ -268,6 +249,7 @@ mod tests {
                 blksize,
                 overlap,
                 search_radius: 4,
+                max_search_escalation: 4,
                 pyramid_levels: 2,
                 estimation: MotionEstimation::Auto,
             };
@@ -297,6 +279,7 @@ mod tests {
             blksize: 16,
             overlap: 16,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Auto,
         };

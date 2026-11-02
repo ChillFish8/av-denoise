@@ -9,6 +9,8 @@ use super::{HEIGHT, WIDTH, block_sync, make_synthetic_frame, neighbour_bench_nam
 const FINE_BLKSIZE: u32 = 16;
 const FINE_STEP: u32 = 8;
 const SEARCH_RADIUS: u32 = 4;
+/// The camera model's pan, far enough from the zero seed that both windows always run.
+const MODEL_PAN: f32 = 12.0;
 
 /// The library's per-pixel SAD threshold.
 ///
@@ -20,10 +22,13 @@ const THSAD_PIXEL: f32 = 0.02;
 /// It reads no seed, so the cost is bounded by the `(2·r + 1)²` search window per block and stays
 /// fair even if the coarse bench's tuning changes. The derived SAD floor is 0.0 because no noise
 /// estimate is available at this level, and `thsad` uses the library's default `thsad_scale` of 1.0.
+///
+/// With `model_candidate`, every block also searches a window around a [MODEL_PAN] camera pan.
 pub struct BlockMatchFineBench {
     pub client: Client,
     /// Neighbours matched in one launch, each against the centre frame.
     pub neighbours: u32,
+    pub model_candidate: bool,
 }
 
 #[derive(Clone)]
@@ -36,6 +41,10 @@ pub struct FineInput {
     pub confidence: Handle,
     /// The derived noise values, with SAD floors of 0.
     pub noise: Handle,
+    /// One pan prediction per neighbour.
+    pub predictions: Handle,
+    /// Bound as the unwritten SAD output.
+    pub sad_placeholder: Handle,
 }
 
 impl Benchmark for BlockMatchFineBench {
@@ -67,12 +76,20 @@ impl Benchmark for BlockMatchFineBench {
         let noise_bytes = f32::as_bytes(&noise_words);
         let noise = self.client.create_from_slice(noise_bytes);
 
+        let pan = [1.0f32, 0.0, 0.0, 1.0, MODEL_PAN, 0.0];
+        let prediction_words = pan.repeat(neighbours);
+        let prediction_bytes = f32::as_bytes(&prediction_words);
+        let predictions = self.client.create_from_slice(prediction_bytes);
+        let sad_placeholder = self.client.empty(size_of::<f32>());
+
         FineInput {
             pyramid,
             neighbour_slots,
             mv_field,
             confidence,
             noise,
+            predictions,
+            sad_placeholder,
         }
     }
 
@@ -97,6 +114,8 @@ impl Benchmark for BlockMatchFineBench {
             let mv_field_arg = BufferArg::from_raw_parts(args.mv_field, mv_len);
             let confidence_arg = BufferArg::from_raw_parts(args.confidence, conf_len);
             let noise_arg = BufferArg::from_raw_parts(args.noise, DERIVED_WORDS as usize);
+            let sad_arg = BufferArg::from_raw_parts(args.sad_placeholder, 1);
+            let predictions_arg = BufferArg::from_raw_parts(args.predictions, 6 * neighbours);
 
             mc_block_match_fine::launch_unchecked(
                 &self.client,
@@ -106,8 +125,12 @@ impl Benchmark for BlockMatchFineBench {
                 neighbour_slots_arg,
                 mv_field_arg,
                 confidence_arg,
+                sad_arg,
+                predictions_arg,
                 0u32,
                 true, // Includes the confidence write, the full production cost.
+                false,
+                self.model_candidate,
                 noise_arg,
                 DERIVED_SAD_FLOOR,
                 thsad,
@@ -128,7 +151,13 @@ impl Benchmark for BlockMatchFineBench {
     }
 
     fn name(&self) -> String {
-        neighbour_bench_name("mc_block_match_fine_1080p_luma", self.neighbours)
+        let base = if self.model_candidate {
+            "mc_block_match_fine_model_1080p_luma"
+        } else {
+            "mc_block_match_fine_1080p_luma"
+        };
+
+        neighbour_bench_name(base, self.neighbours)
     }
 
     fn sync(&self) {

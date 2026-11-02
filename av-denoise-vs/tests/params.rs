@@ -1,5 +1,6 @@
 use av_denoise::{
     ChannelIntent,
+    ChromaSiting,
     DenoisingMode,
     Depth,
     MotionCompensationMode,
@@ -94,6 +95,7 @@ fn accepts_the_three_supported_subsamplings_at_eight_bit() {
 
         assert_eq!(layout.subsampling, expected);
         assert_eq!(layout.depth, Depth::Eight);
+        assert_eq!(layout.chroma_siting, ChromaSiting::Unknown);
     }
 }
 
@@ -144,6 +146,52 @@ fn strength_is_rejected_for_nl4d() {
         err.to_lowercase().contains("nl4d"),
         "error should name the algorithm, got {err}"
     );
+}
+
+#[test]
+fn luma_strength_is_rejected_for_chroma_mode() {
+    let raw = RawParams {
+        channel_mode: Some("chroma".to_string()),
+        luma_strength: Some(0.5),
+        ..RawParams::default()
+    };
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("luma_strength"), "got {err}");
+    assert!(err.contains("chroma"), "error should name the mode, got {err}");
+}
+
+#[test]
+fn chroma_strength_is_rejected_for_luma_mode() {
+    let raw = RawParams {
+        channel_mode: Some("luma".to_string()),
+        chroma_strength: Some(0.5),
+        ..RawParams::default()
+    };
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("chroma_strength"), "got {err}");
+}
+
+#[test]
+fn per_plane_strength_for_a_denoised_plane_is_accepted() {
+    let chroma = RawParams {
+        channel_mode: Some("chroma".to_string()),
+        chroma_strength: Some(0.5),
+        ..RawParams::default()
+    };
+    let luma = RawParams {
+        channel_mode: Some("luma".to_string()),
+        luma_strength: Some(0.5),
+        ..RawParams::default()
+    };
+
+    assert!(plane_options_from(&chroma, AlgorithmKind::Nlmeans).is_ok());
+    assert!(plane_options_from(&luma, AlgorithmKind::Nlmeans).is_ok());
 }
 
 #[test]
@@ -609,8 +657,8 @@ fn nl4d_resolves_the_library_defaults() {
 }
 
 #[test]
-fn nl4d_rejects_presets_other_than_base() {
-    for name in ["veryfast", "fast", "slow", "veryslow"] {
+fn nl4d_rejects_presets_other_than_base_and_slow() {
+    for name in ["veryfast", "fast", "veryslow"] {
         let raw = RawParams {
             preset: Some(name.to_string()),
             ..RawParams::default()
@@ -619,7 +667,63 @@ fn nl4d_rejects_presets_other_than_base() {
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("base preset"), "{name}: got {err}");
+        assert!(err.contains("base and slow presets"), "{name}: got {err}");
+    }
+}
+
+fn nl4d_ceiling_for(preset: &str) -> u32 {
+    let raw = RawParams {
+        preset: Some(preset.to_string()),
+        ..RawParams::default()
+    };
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap();
+
+    match opts.algorithm {
+        av_denoise::Algorithm::Nl4d(nl4d) => nl4d.motion.max_search_escalation,
+        other => panic!("expected Nl4d algorithm, got {other:?}"),
+    }
+}
+
+#[test]
+fn nl4d_slow_widens_failing_motion_searches_up_to_eight() {
+    let defaults = Nl4dOptions::default();
+
+    assert_eq!(nl4d_ceiling_for("slow"), 8);
+    assert_eq!(nl4d_ceiling_for("base"), defaults.motion.search_radius);
+}
+
+fn nlmeans_ceiling_for(preset: &str) -> u32 {
+    let raw = RawParams {
+        preset: Some(preset.to_string()),
+        motion_compensation: Some(true),
+        ..RawParams::default()
+    };
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
+    let motion = match opts.algorithm {
+        av_denoise::Algorithm::NlmeansHq(hq) => hq.nlm.motion_compensation,
+        av_denoise::Algorithm::Nlmeans(nlm) => nlm.motion_compensation,
+        other => panic!("expected an nlmeans algorithm, got {other:?}"),
+    };
+
+    match motion {
+        MotionCompensationMode::Mvtools {
+            max_search_escalation,
+            ..
+        } => max_search_escalation,
+        other => panic!("expected motion compensation, got {other:?}"),
+    }
+}
+
+#[test]
+fn nlmeans_slow_and_veryslow_widen_failing_motion_searches_up_to_eight() {
+    for (preset, expected) in [
+        ("veryfast", 4),
+        ("fast", 4),
+        ("base", 4),
+        ("slow", 8),
+        ("veryslow", 8),
+    ] {
+        assert_eq!(nlmeans_ceiling_for(preset), expected, "{preset}");
     }
 }
 
@@ -923,151 +1027,6 @@ fn the_four_nl4d_dials_are_rejected_for_nlmeans() {
             },
         ),
     ];
-    for (name, raw) in cases {
-        let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains(name), "error should name {name}, got {err}");
-    }
-}
-
-fn nl4d_psy(raw: &RawParams) -> Option<av_denoise::PsyParams> {
-    let algorithm = plane_options_from(raw, AlgorithmKind::Nl4d).unwrap().algorithm;
-
-    match algorithm {
-        av_denoise::Algorithm::Nl4d(nl4d) => nl4d.psy,
-        other => panic!("expected Nl4d, got {other:?}"),
-    }
-}
-
-#[test]
-fn psy_is_off_by_default() {
-    let raw = RawParams::default();
-
-    assert_eq!(nl4d_psy(&raw), None);
-}
-
-#[test]
-fn enable_psy_turns_on_the_library_defaults() {
-    let raw = RawParams {
-        enable_psy: Some(true),
-        ..RawParams::default()
-    };
-
-    assert_eq!(nl4d_psy(&raw), Some(av_denoise::PsyParams::default()));
-}
-
-#[test]
-fn psy_params_reach_nl4d_options() {
-    let raw = RawParams {
-        enable_psy: Some(true),
-        psy_flat_boost: Some(2.0),
-        psy_chroma_flat_boost: Some(1.2),
-        psy_shadow_soften: Some(0.8),
-        psy_flat_texture_cut: Some(0.3),
-        psy_line_ring: Some(8),
-        ..RawParams::default()
-    };
-    let psy = nl4d_psy(&raw).expect("psy on");
-
-    assert_eq!(psy.flat_boost, 2.0);
-    assert_eq!(psy.chroma_flat_boost, 1.2);
-    assert_eq!(psy.shadow_soften, 0.8);
-    assert_eq!(psy.flat_texture_cut, 0.3);
-    assert_eq!(psy.line_ring, 8);
-}
-
-fn single_psy_params() -> [(&'static str, RawParams); 5] {
-    [
-        (
-            "psy_flat_boost",
-            RawParams {
-                psy_flat_boost: Some(1.5),
-                ..RawParams::default()
-            },
-        ),
-        (
-            "psy_chroma_flat_boost",
-            RawParams {
-                psy_chroma_flat_boost: Some(1.5),
-                ..RawParams::default()
-            },
-        ),
-        (
-            "psy_shadow_soften",
-            RawParams {
-                psy_shadow_soften: Some(0.65),
-                ..RawParams::default()
-            },
-        ),
-        (
-            "psy_flat_texture_cut",
-            RawParams {
-                psy_flat_texture_cut: Some(0.21),
-                ..RawParams::default()
-            },
-        ),
-        (
-            "psy_line_ring",
-            RawParams {
-                psy_line_ring: Some(16),
-                ..RawParams::default()
-            },
-        ),
-    ]
-}
-
-#[test]
-fn a_psy_param_without_enable_psy_is_rejected() {
-    for (name, raw) in single_psy_params() {
-        let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains(name), "error should name {name}, got {err}");
-        assert!(
-            err.contains("enable_psy"),
-            "error should say to set enable_psy, got {err}"
-        );
-    }
-}
-
-#[test]
-fn a_psy_param_with_enable_psy_off_is_rejected() {
-    let raw = RawParams {
-        enable_psy: Some(false),
-        psy_line_ring: Some(16),
-        ..RawParams::default()
-    };
-
-    assert!(plane_options_from(&raw, AlgorithmKind::Nl4d).is_err());
-}
-
-#[test]
-fn a_negative_psy_line_ring_is_rejected() {
-    let raw = RawParams {
-        enable_psy: Some(true),
-        psy_line_ring: Some(-1),
-        ..RawParams::default()
-    };
-    let err = plane_options_from(&raw, AlgorithmKind::Nl4d)
-        .unwrap_err()
-        .to_string();
-
-    assert!(err.contains("psy_line_ring"), "got {err}");
-}
-
-#[test]
-fn psy_params_are_rejected_for_nlmeans() {
-    let mut cases = single_psy_params().to_vec();
-    cases.push((
-        "enable_psy",
-        RawParams {
-            enable_psy: Some(true),
-            ..RawParams::default()
-        },
-    ));
     for (name, raw) in cases {
         let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
             .unwrap_err()

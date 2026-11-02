@@ -6,13 +6,13 @@ use cubecl::server::Handle;
 
 use super::denoiser::{AccumClear, Nl4dDenoiser, accumulator_lens};
 use super::nl4d_pool_ratio;
-use super::regularise::run_regularise;
 use super::snapshot::LastFields;
 use crate::collab::geometry::{ref_count, refs_along};
 use crate::collab::grid_frames;
 use crate::collab::kernels::aggregate::collab_zero_accum;
 use crate::engine::timing::timed;
 use crate::nlmeans::{MAX_GRID_1D, RingView};
+use crate::noise::colour::ColourGainInputs;
 use crate::tune::sites::{
     CollabFilterSite,
     CollabInputs,
@@ -30,7 +30,8 @@ struct FusedPass {
     confidence: Handle,
     neighbour_slots: Handle,
     noise_curve: Handle,
-    strength_map: Handle,
+    /// The colour gain tables and the centre frame's block means, when the thresholds scale by them.
+    colour: Option<ColourGainInputs>,
     channels: u32,
     /// Values in the frame ring, which the f16 search ring matches.
     ring_len: usize,
@@ -45,8 +46,13 @@ impl Nl4dDenoiser {
     /// Each filtered member scatters into the accumulator region of the frame it came from, so one
     /// pass adds to every region in the ring. `clear` picks which regions are zeroed first. The
     /// newest region is the slot `temporal_radius` ahead of the centre, which the newest frame has
-    /// just taken over.
+    /// just taken over. A denoiser that only guides counts the pass and launches nothing.
     pub(super) fn run_pass(&mut self, view: &RingView, clear: AccumClear) -> Result<(), anyhow::Error> {
+        if self.guides_only {
+            self.passes_run += 1;
+            return Ok(());
+        }
+
         let centre_slot = view.centre_slot;
         let client = self.front.compute_client().clone();
 
@@ -60,7 +66,13 @@ impl Nl4dDenoiser {
 
         let neighbour_slots_buf = view.neighbour_slots_buf.clone();
         let noise_curve_buf = self.front.noise_curve_handle();
-        let strength_map_buf = self.front.strength_map_handle();
+
+        let centre_frame = self.front.slot_frame(centre_slot);
+        let colour = if self.colour_gains {
+            self.front.colour_gain_inputs(centre_frame)?
+        } else {
+            None
+        };
 
         let cleared_slots = match clear {
             AccumClear::WholeRing => 0..total_frames,
@@ -88,9 +100,8 @@ impl Nl4dDenoiser {
 
         self.passes_run += 1;
 
-        // The regularise launch and the scatter run in separate device spans, so each span fits
-        // one compute pass.
-        let (mv_field, confidence) = timed(&client, self, |denoiser| denoiser.regularise_fields(view))?;
+        let mv_field = view.mv_field.clone();
+        let confidence = view.confidence.clone();
 
         self.last_fields = Some(LastFields {
             mv_field: mv_field.clone(),
@@ -105,7 +116,7 @@ impl Nl4dDenoiser {
             confidence,
             neighbour_slots: neighbour_slots_buf,
             noise_curve: noise_curve_buf,
-            strength_map: strength_map_buf,
+            colour,
             channels,
             ring_len,
             accum_ring_len,
@@ -116,35 +127,6 @@ impl Nl4dDenoiser {
         timed(&client, self, move |denoiser| {
             denoiser.scatter_pass(view, cleared_slots, pass)
         })
-    }
-
-    /// Regularises the view's motion fields when the field regulariser is on.
-    ///
-    /// Returns the motion field and confidence the pass groups with.
-    fn regularise_fields(&self, view: &RingView) -> Result<(Handle, Handle), anyhow::Error> {
-        let (Some(reg_mv), Some(reg_conf)) = (self.reg_mv.as_ref(), self.reg_conf.as_ref()) else {
-            let fields = (view.mv_field.clone(), view.confidence.clone());
-            return Ok(fields);
-        };
-
-        let motion_ctx = self.front.motion_ctx();
-        let noise = self.front.derived_handle();
-        let thsad = self.front.thsad_value();
-        run_regularise(
-            &self.kernels,
-            motion_ctx,
-            view,
-            self.width,
-            self.height,
-            self.field_lambda,
-            &noise,
-            thsad,
-            reg_mv,
-            reg_conf,
-        )?;
-
-        let fields = (reg_mv.clone(), reg_conf.clone());
-        Ok(fields)
     }
 
     /// Zeroes the accumulator regions in `cleared_slots`, then groups, filters and scatters one pass.
@@ -223,13 +205,18 @@ impl Nl4dDenoiser {
         let mv_len = (neighbours * view.mv_stride) as usize;
         let conf_len = (neighbours * view.conf_stride) as usize;
         let neighbour_slots_len = view.neighbour_slots.len();
-        let map_len = (self.map_cols * self.map_rows) as usize;
         let refs_x = refs_along(self.width);
         let refs_y = refs_along(self.height);
         let refs = ref_count(self.width, self.height);
         let motion_ctx = self.front.motion_ctx();
         let frames_per_volume = grid_frames(self.temporal_radius);
         let pool_ratio = nl4d_pool_ratio(self.channels);
+
+        let colour_on = pass.colour.is_some();
+        let placeholder = self.front.placeholder();
+        let colour = pass
+            .colour
+            .unwrap_or_else(|| ColourGainInputs::unread(placeholder));
 
         let inputs = CollabInputs {
             ring: view.input.clone(),
@@ -244,8 +231,10 @@ impl Nl4dDenoiser {
             neighbour_slots_len: neighbour_slots_len.max(1),
             noise: self.front.derived_handle(),
             noise_curve: pass.noise_curve,
-            strength_map: pass.strength_map,
-            map_len,
+            colour_gains: colour.gains,
+            colour_gains_len: colour.gains_len,
+            colour_means: colour.means,
+            colour_means_len: colour.means_len,
             dct_profile: self.dct_profile_buf.clone(),
             kaiser: self.kaiser_buf.clone(),
         };
@@ -258,6 +247,8 @@ impl Nl4dDenoiser {
             lambda_ht: self.lambda_ht,
             accum_scale: self.accum_scale,
             pool_ratio,
+            colour_scale: colour.scale,
+            colour_on,
         };
         let shape = CollabShape {
             f16_search: self.f16_search,
@@ -277,8 +268,6 @@ impl Nl4dDenoiser {
             spatial_radius: self.spatial_radius,
             refs_x,
             refs_y,
-            map_cols: self.map_cols,
-            map_rows: self.map_rows,
             pooled: self.pooled_threshold,
             uniform_walk_only: self.uniform_walk_only,
         };

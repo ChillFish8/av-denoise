@@ -51,9 +51,10 @@ clean = avd.Nl4d(clip)
 clean.set_output()
 ```
 
-NL4D only runs the `base` preset. `temporal_radius` sets how many neighbouring frames are searched
-on each side, between 1 and 8, and defaults to 2. NL4D always needs at least 1, since it has nothing
-to group without neighbours.
+NL4D runs the `base` and `slow` presets. `slow` widens the search for motion blocks whose match
+fails, up to radius 8, and runs slower. `temporal_radius` sets how many neighbouring frames are
+searched on each side, between 1 and 8, and defaults to 2. NL4D always needs at least 1, since it
+has nothing to group without neighbours.
 
 ### The NL4D dials
 
@@ -80,8 +81,9 @@ clean = avd.Nl4d(clip, luma_lambda_ht=5.0, lambda_ht_scale=1.05)
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates.
 
 **`noise_map=False` turns off the luma noise map.** The noise map is on by default. It scales the
-luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
-more lightly.
+luma threshold by how noisy each brightness level and colour is, filtering noisy ones harder and
+clean ones more lightly. Turning it off also turns off the luma colour gains. Chroma thresholds
+always follow each plane's colour grain.
 
 ```python
 clean = avd.Nl4d(clip, noise_map=False)
@@ -89,31 +91,7 @@ clean = avd.Nl4d(clip, noise_map=False)
 
 **`pooled_threshold=False` turns off the pooled threshold.** It is on by default. Each frequency
 is judged together with its neighbours rather than alone, so faint lines and fine texture
-survive where each frequency on its own would fall under the threshold. Turn it off, and set
-`pooled_threshold=False, enable_psy=True, psy_flat_boost=1.5, psy_flat_texture_cut=1, psy_line_ring=0`,
-to get the output of earlier releases.
-
-**`enable_psy=True` turns on the psy options.** They are off by default. Flat, grainy areas such as
-skies are filtered harder, 1.75 times by default on luma and 1.5 times on chroma. Textured dark
-areas are filtered more gently, at 0.65 times by default, fading out between luma 128 and 160. The
-areas within 16 pixels of a strong line skip shadow soften and the flat texture cut, so the grain
-beside dark ink lines is filtered like the rest of the frame. `noise_map=False` turns all of it off.
-
-```python
-clean = avd.Nl4d(clip, enable_psy=True)
-```
-
-**`psy_flat_boost`, `psy_chroma_flat_boost`, `psy_shadow_soften`, `psy_flat_texture_cut` and
-`psy_line_ring` tune the psy options.** Each needs `enable_psy=True`, and `1` (or `0` for the line
-ring) turns that one off. `psy_flat_texture_cut` keeps faint texture out of the flat areas. Grain
-points every which way, while faint lines and edges share one direction, so an area whose
-surroundings line up at or above the cut, 0.21 by default, is filtered as texture rather than
-boosted as flat. Lower it to keep more faint texture in dark scenes. `psy_line_ring` sets how many
-pixels around a strong line skip shadow soften and the flat texture cut, between 0 and 64.
-
-```python
-clean = avd.Nl4d(clip, enable_psy=True, psy_shadow_soften=0.8)
-```
+survive where each frequency on its own would fall under the threshold.
 
 ### What not to touch in NL4D
 
@@ -146,7 +124,8 @@ clean.set_output()
 `preset` sets the temporal window and the search radius, from no window at all at `veryfast`
 through 3 frames at `fast` to 17 at `veryslow`. The variant is already fixed to HQ by calling
 `NlmHQ`, so unlike the CLI, `preset="veryfast"` here still runs the noise estimator, just with
-nothing but the current frame to work from.
+nothing but the current frame to work from. With `motion_compensation=True`, `slow` and `veryslow`
+also widen the search for motion blocks whose match fails, up to radius 8, and run slower.
 
 | Symptom                        | First thing to try                 | Second                     |
 |--------------------------------|------------------------------------|----------------------------|

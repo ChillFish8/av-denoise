@@ -99,7 +99,7 @@ These are global, so they work on either side of the subcommand.
 
 | Flag                               | What it does                                                                                                     | Default       |
 |------------------------------------|------------------------------------------------------------------------------------------------------------------|---------------|
-| `--preset <veryfast..veryslow>`    | Speed vs quality for `nlmeans`, see the ladder below. `nl4d` only runs `base`.                                   | `base`        |
+| `--preset <veryfast..veryslow>`    | Speed vs quality for `nlmeans`, see the ladder below. `nl4d` runs `base` and `slow`.                             | `base`        |
 | `--channel-mode <luma,chroma>`     | Which planes to clean.                                                                                           | `luma,chroma` |
 | `-A, --accelerators <list>`        | Backends to try, in order. Comma-separated, for example `cuda,vulkan`.                                           | `vulkan`      |
 | `-d, --device <spec>`              | `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]`, or `cpu`.                                            | `default`     |
@@ -151,8 +151,9 @@ Motion tracking is always on, and the temporal window always reaches at
 least one frame, which this algorithm needs. There is no NLMeans weighting pass, so none of
 the NLMeans knobs below exist here.
 
-NL4D only runs the `base` preset. Trade speed for quality with `--temporal-radius` and
-`--spatial-radius` instead.
+NL4D runs the `base` and `slow` presets. `slow` widens the search for motion blocks whose match
+fails, up to `--mc-max-search-escalation` (8), and runs slower. Otherwise, trade speed for quality
+with `--temporal-radius` and `--spatial-radius`.
 
 | Flag                               | What it does                                                                                                                                                                                                                    | Default                  |
 |------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
@@ -161,7 +162,7 @@ NL4D only runs the `base` preset. Trade speed for quality with `--temporal-radiu
 | `--lambda-ht-scale <f>`            | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                                 | `1.0`                    |
 | `--spatial-radius <N>`             | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                                  | `9`                      |
 | `--sigma-scale <f>`                | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                               | `1.0`                    |
-| `--unstable-export-av1-fgs <PATH>` | Unstable, and may change between releases. Writes an AV1 film grain table to add with `grav1synth apply`. SVT-AV1 `--fgs-table` applies only its first entry, so it suits a single-scene table only. Needs luma to be denoised. | off                      |
+| `--unstable-export-av1-fgs <PATH>` | Unstable, and may change between releases. Writes an AV1 film grain table to add with `regrain apply`, which applies each scene's entry. SVT-AV1 `--fgs-table` and `grav1synth apply` apply only its first entry, so they suit a single-scene table only. Needs luma to be denoised. | off                      |
 
 <details>
 <summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
@@ -172,15 +173,10 @@ NL4D only runs the `base` preset. Trade speed for quality with `--temporal-radiu
 | `--sigma <f>`                                                        | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely.                                                                                                                                                                              | measured            |
 | `--thsad-scale <f>`                                                  | How badly a neighbour frame may match before its patches stop being trusted.                                                                                                                                                                                      | `1.0`               |
 | `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. A volume left short of frames by the skip makes its group filter from the centre frame alone.                                                                                    | `0.05`              |
-| `--no-noise-map`                                                     | Turns off the luma noise map, which scales the luma threshold by how noisy each brightness level is.                                                                                                                                                              | map on              |
+| `--no-noise-map`                                                     | Turns off the luma noise map, which scales the luma threshold by how noisy each brightness level and colour is. Also turns off the luma colour gains.                                                                                                                                                          | map on              |
 | `--no-pooled-threshold`                                              | Turns off the pooled threshold, which judges each frequency together with its neighbours so faint texture survives.                                                                                                                                               | pooling on          |
-| `--enable-psy`                                                       | Turns on the psy options, which filter each area by what it looks like.                                                                                                                                                                                            | off                 |
-| `--psy-flat-boost <f>`                                               | How much harder flat, grainy areas are filtered on luma, between 1 and 3. `1` turns it off. Needs `--enable-psy`.                                                                                                                                                  | `1.75`              |
-| `--psy-chroma-flat-boost <f>`                                        | The same for the colour planes. Needs `--enable-psy`.                                                                                                                                                                                                              | `1.5`               |
-| `--psy-shadow-soften <f>`                                            | How much more gently textured dark areas are filtered, between 0.1 and 1. `1` turns it off. Needs `--enable-psy`.                                                                                                                                                  | `0.65`              |
-| `--psy-flat-texture-cut <f>`                                         | Keeps areas whose surroundings line up like faint lines or edges out of the flat boost, between 0 and 1. Lower keeps more texture. `1` turns it off. Needs `--enable-psy`.                                                                                         | `0.21`              |
-| `--psy-line-ring <px>`                                               | How many pixels around a strong line skip shadow soften and the flat texture cut, between 0 and 64. `0` turns it off. Needs `--enable-psy`.                                                                                                                        | `16`                |
 | `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. NL4D always tracks motion, so these are always live.                                                                                                                                                                                      | `16`, `8`, `4`, `2` |
+| `--mc-max-search-escalation <N>`                                     | Widest radius a motion block that matched badly searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns the wider search off.                                                                                                              | from `--preset`     |
 
 </details>
 
@@ -191,13 +187,17 @@ either inside a single frame or across a temporal window.
 
 What `--preset` fills in:
 
-| Preset     | Variant | Temporal radius | Search radius |
-|------------|---------|-----------------|---------------|
-| `veryfast` | `fast`  | 0               | 2             |
-| `fast`     | `hq`    | 1               | 2             |
-| `base`     | `hq`    | 2               | 2             |
-| `slow`     | `hq`    | 4               | 4             |
-| `veryslow` | `hq`    | 8               | 4             |
+| Preset     | Variant | Temporal radius | Search radius | Motion search ceiling |
+|------------|---------|-----------------|---------------|-----------------------|
+| `veryfast` | `fast`  | 0               | 2             | `--mc-search`         |
+| `fast`     | `hq`    | 1               | 2             | `--mc-search`         |
+| `base`     | `hq`    | 2               | 2             | `--mc-search`         |
+| `slow`     | `hq`    | 4               | 4             | 8                     |
+| `veryslow` | `hq`    | 8               | 4             | 8                     |
+
+The motion search ceiling is `--mc-max-search-escalation`, and it only applies with
+`--motion-compensation`. At 8, motion blocks whose match fails search again with a wider window,
+which runs slower.
 
 | Flag                    | What it does                                                                                                                                                                                   | Default         |
 |-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------|
@@ -222,6 +222,7 @@ What `--preset` fills in:
 | `--hq-no-noise-floor`                                                | Keeps the expected noise floor inside patch distances instead of subtracting it.                                                                                                   | off                 |
 | `--hq-no-temporal-confidence`                                        | Weights every neighbour equally, however badly it matches.                                                                                                                         | off                 |
 | `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. Only used with `--motion-compensation`.                                                                                                                    | `16`, `8`, `4`, `2` |
+| `--mc-max-search-escalation <N>`                                     | Widest radius a badly matched motion block searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns it off. Only used with `--motion-compensation`.          | from `--preset`     |
 
 </details>
 ---

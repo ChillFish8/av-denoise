@@ -84,7 +84,7 @@ clean.set_output()
 |-------------------|-----------------|-------------------------|------------------------|
 | `lambda_ht_scale` | float           | `--lambda-ht-scale`     | yes, the main dial     |
 | `sigma_scale`     | float           | `--sigma-scale`         | yes                    |
-| `preset`          | string          | `--preset`              | no, `base` only        |
+| `preset`          | string          | `--preset`              | no, `base` or `slow`   |
 | `refine`          | int             | `--refine`              | yes                    |
 | `spatial_radius`  | int             | `--spatial-radius`      | yes, the speed dial    |
 | `lambda_ht`       | float           | `--lambda-ht`           | situational, see below |
@@ -180,7 +180,9 @@ clean.set_output()
 `preset` is the main quality-versus-speed dial for `Nlm` and `NlmHQ`. It takes one of five values,
 from fastest to slowest and best-quality: `veryfast`, `fast`, `base`, `slow`, `veryslow`.
 Each preset resolves every unset numeric and string parameter to a value tuned for that speed tier.
-`Nl4d` only runs `base`, and any other preset raises `vs.Error`.
+`Nl4d` runs `base` and `slow`, and any other preset raises `vs.Error`. `slow` widens the search
+for motion blocks whose match fails, up to radius 8, and runs slower. `Nlm` and
+`NlmHQ` do the same at `slow` and `veryslow` when `motion_compensation=True`.
 
 Any parameter you set explicitly overrides what the preset would have chosen for it,
 other fields still fall back to the preset's values. This lets you take a preset as a
@@ -195,8 +197,9 @@ starting point and adjust just the dial you care about, as the examples above do
 `channel_mode` selects which planes get denoised, and takes one of three values:
 
 - `luma` denoises the luma plane only, leaving chroma untouched.
-- `chroma` denoises the chroma planes only, leaving luma untouched.
-- `lumachroma` denoises both, luma and chroma independently.
+- `chroma` denoises the chroma planes only, leaving luma untouched. Luma's motion is still searched
+  to guide chroma, so it costs more than the chroma planes alone.
+- `lumachroma` denoises both, with chroma following luma's motion.
 
 ## Devices and accelerators
 

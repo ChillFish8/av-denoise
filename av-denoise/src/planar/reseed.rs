@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use super::{DenoiserError, PlanarDenoiser, Planes};
 use crate::EdgePadding;
 
@@ -16,25 +14,6 @@ pub struct ReseedWindow<'a> {
     pub at_clip_end: bool,
 }
 
-/// Pops up to `count` entries off the front of `queue`, discarding them.
-fn drop_leading<T>(queue: &mut VecDeque<T>, count: usize) {
-    for _ in 0..count.min(queue.len()) {
-        queue.pop_front();
-    }
-}
-
-/// The window index of the first frame a primed nl4d stream of `frame_count` frames emits.
-///
-/// A primed stream picks up mid-clip and runs no head passes, so it emits from `radius` frames
-/// in. A stream too short for a pass to finish a region only emits its last `2 * radius` frames,
-/// when it flushes.
-fn first_primed_output(frame_count: usize, radius: usize) -> usize {
-    let flushed = frame_count.min(2 * radius);
-    let before_flush = frame_count - flushed;
-
-    radius.min(before_flush)
-}
-
 impl PlanarDenoiser {
     /// Denoises the target frame of a mid-clip window of exactly
     /// [Self::window_span] frames, oldest first.
@@ -48,7 +27,8 @@ impl PlanarDenoiser {
     /// For the NLM algorithms, callers clamp the window's indices at a
     /// clip's ends, matching how their streams repeat the first and last
     /// frames. For nl4d, a window whose first or last frame is a clip end
-    /// goes through [Self::reseed_window] instead.
+    /// goes through [Self::reseed_window] instead. Its stream never repeats
+    /// a frame, so a clamped window gives different output.
     ///
     /// # Why nl4d's window is wider
     ///
@@ -65,7 +45,7 @@ impl PlanarDenoiser {
     /// counts that depth on both sides, so the window passed here is
     /// wider by it.
     pub fn reseed(&mut self, window: &[Planes]) -> Result<Planes, anyhow::Error> {
-        self.check_engines()?;
+        self.live_host()?;
 
         let span = self.window_span();
         let expected = span.frame_count();
@@ -87,7 +67,7 @@ impl PlanarDenoiser {
 
         self.check_window(window)?;
 
-        self.reset_streams();
+        self.reset_stream()?;
 
         // Prime every frame but the last, filling the underlying
         // denoiser's window without submitting anything, as streaming
@@ -98,11 +78,6 @@ impl PlanarDenoiser {
         for planes in head {
             self.push_priming(planes)?;
         }
-
-        // Priming queues one passthrough entry per frame. Dropping the
-        // frames behind the target puts its own entry at the front.
-        drop_leading(&mut self.luma_passthrough, span.behind);
-        drop_leading(&mut self.chroma_passthrough, span.behind);
 
         let mut result = None;
         for planes in tail {
@@ -124,14 +99,13 @@ impl PlanarDenoiser {
     /// passes match a stream. A window that ends at the clip's end
     /// flushes, so the tail passes match a stream.
     pub fn reseed_window(&mut self, window: ReseedWindow<'_>) -> Result<Vec<Planes>, anyhow::Error> {
-        self.check_engines()?;
+        self.live_host()?;
 
         let span = self.window_span();
         if span.edges != EdgePadding::Shifted {
             anyhow::bail!("reseed_window needs an algorithm with shifted edges, use reseed");
         }
 
-        let radius = self.temporal_radius as usize;
         let frames = window.frames;
         if window.target >= frames.len() {
             anyhow::bail!(
@@ -163,20 +137,17 @@ impl PlanarDenoiser {
 
         self.check_window(frames)?;
 
-        self.reset_streams();
+        self.reset_stream()?;
 
-        let (real_frames, never_emitted) = if window.at_clip_start {
-            (frames, 0)
+        let real_frames = if window.at_clip_start {
+            frames
         } else {
             let (priming, real) = frames.split_at(span.behind);
             for planes in priming {
                 self.push_priming(planes)?;
             }
 
-            let never_emitted = first_primed_output(frames.len(), radius);
-            drop_leading(&mut self.luma_passthrough, never_emitted);
-            drop_leading(&mut self.chroma_passthrough, never_emitted);
-            (real, never_emitted)
+            real
         };
 
         let mut outputs = Vec::new();
@@ -196,8 +167,6 @@ impl PlanarDenoiser {
         }
 
         // The flush emits every frame the pushes have not.
-        let tail_start = never_emitted + outputs.len();
-        self.replace_passthrough_with(&frames[tail_start..]);
         self.flush(|planes| outputs.push(planes))?;
 
         let from_end = frames.len() - window.target;
@@ -218,32 +187,11 @@ impl PlanarDenoiser {
         Ok(())
     }
 
-    /// Abandons the running stream on every enabled half and empties the passthrough queues.
-    pub(crate) fn reset_streams(&mut self) {
-        let halves = [self.luma.as_mut(), self.chroma.as_mut()];
-        for denoiser in halves.into_iter().flatten() {
-            denoiser.reset_stream();
-        }
+    /// Abandons the running stream, keeping every GPU allocation.
+    fn reset_stream(&mut self) -> Result<(), DenoiserError> {
+        let host = self.live_host()?;
+        host.reset_stream();
 
-        self.luma_passthrough.clear();
-        self.chroma_passthrough.clear();
-    }
-
-    /// Resets the passthrough queues to the source planes of the frames
-    /// a flush is about to emit.
-    fn replace_passthrough_with(&mut self, frames: &[Planes]) {
-        self.luma_passthrough.clear();
-        self.chroma_passthrough.clear();
-
-        for planes in frames {
-            if self.luma.is_none() {
-                self.luma_passthrough.push_back(planes.y.clone());
-            }
-
-            if self.chroma.is_none() {
-                let chroma_pair = (planes.u.clone(), planes.v.clone());
-                self.chroma_passthrough.push_back(chroma_pair);
-            }
-        }
+        Ok(())
     }
 }

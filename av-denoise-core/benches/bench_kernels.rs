@@ -1,11 +1,12 @@
 mod kernels;
 
 use av_denoise_core::bench_api::Device;
+use av_denoise_core::bench_api::noise_colour::ColourStage;
 use av_denoise_core::bench_api::noise_reading::ReadingStage;
 use av_denoise_core::bench_api::tune_sites::{
     AccumulateCandidate,
     CollabVariant,
-    RegulariseCandidate,
+    TruemotionCandidate,
     WindowCandidate,
 };
 use av_denoise_core::testing;
@@ -34,11 +35,30 @@ use kernels::ingest::{IngestBench, IngestFormat};
 use kernels::mc_block_match_coarse::BlockMatchCoarseBench;
 use kernels::mc_block_match_fine::BlockMatchFineBench;
 use kernels::mc_chain_compose::ChainComposeBench;
+use kernels::mc_chroma_map::ChromaMapBench;
+use kernels::mc_compose_models::ComposeModelsBench;
 use kernels::mc_confidence::McConfidenceBench;
 use kernels::mc_downscale::DownscaleBench;
+use kernels::mc_escalate::{
+    EscalateStageBench,
+    FailingShare,
+    FlagFailuresBench,
+    GrainSearchBench,
+    MeasureFloorBench,
+    TrackedFineBench,
+};
+use kernels::mc_fit_model::{FitKernel, FitModelBench};
 use kernels::mc_warp::WarpBench;
-use kernels::mv_regularise::MvRegulariseBench;
-use kernels::noise_gpu::{FoldBench, FoldStage, ReadingBench, SelectBench, SelectShape, SelectStage};
+use kernels::mv_truemotion::MvTruemotionBench;
+use kernels::noise_gpu::{
+    ColourBench,
+    FoldBench,
+    FoldStage,
+    ReadingBench,
+    SelectBench,
+    SelectShape,
+    SelectStage,
+};
 use kernels::noise_partial::NoisePartialBench;
 use kernels::temporal_noise_stats::TemporalNoiseStatsBench;
 use kernels::vertical_weight::VWeightBench;
@@ -205,12 +225,18 @@ fn run_all(backend: &str, client: Client) {
         client: client.clone(),
     });
 
-    // `luma_fields` off as nlmeans runs it, and on as nl4d runs it with the noise map. The
-    // compensated row follows a uniform pan, as a pass reading along its motion field does.
+    // `luma_fields` off as nlmeans and nl4d's chroma plane run it, and on as nl4d runs it with the
+    // noise map. The compensated rows follow a uniform pan, as a pass reading along its motion
+    // field does.
     run(TemporalNoiseStatsBench {
         client: client.clone(),
         luma_fields: false,
         compensated: false,
+    });
+    run(TemporalNoiseStatsBench {
+        client: client.clone(),
+        luma_fields: false,
+        compensated: true,
     });
     run(TemporalNoiseStatsBench {
         client: client.clone(),
@@ -255,14 +281,11 @@ fn run_all(backend: &str, client: Client) {
         }
     }
 
-    // The luma curve's launches on a smooth gradient whose quarters fill every bin, then the
-    // classes and the strength map with the line ring and the texture veto on.
+    // The luma curve's launches on a smooth gradient whose quarters fill every bin.
     let curve_stages = [
         ReadingStage::CurveBins,
         ReadingStage::CurveBatch,
         ReadingStage::SampleFinish,
-        ReadingStage::Classify,
-        ReadingStage::StrengthMap,
     ];
     for stage in curve_stages {
         run(ReadingBench {
@@ -273,19 +296,37 @@ fn run_all(backend: &str, client: Client) {
         });
     }
 
-    // The stream state's launches, a window fold alone, with the map and with the offset tables,
-    // and the history record.
-    let fold_stages = [
-        FoldStage::WindowWithoutMap,
-        FoldStage::Window,
-        FoldStage::WindowWithTables,
-        FoldStage::Record,
-    ];
+    // The stream state's launches, a window fold alone and with the offset tables, and the history
+    // record.
+    let fold_stages = [FoldStage::Window, FoldStage::WindowWithTables, FoldStage::Record];
     for stage in fold_stages {
         run(FoldBench {
             client: client.clone(),
             stage,
         });
+    }
+
+    // The colour cells' block means over every plane, then each pass's pooling, window sum, cell
+    // levels and grain model fit.
+    run(ColourBench {
+        client: client.clone(),
+        stage: ColourStage::Means,
+        chroma: false,
+    });
+    let pass_stages = [
+        ColourStage::Pool,
+        ColourStage::Window,
+        ColourStage::Levels,
+        ColourStage::Fit,
+    ];
+    for stage in pass_stages {
+        for chroma in [false, true] {
+            run(ColourBench {
+                client: client.clone(),
+                stage,
+                chroma,
+            });
+        }
     }
 
     // Pyramid build and block matching are luma-only since motion estimation ignores chroma. Warp
@@ -296,28 +337,81 @@ fn run_all(backend: &str, client: Client) {
 
     // Each block-match launch covers every neighbour, so they run at one neighbour and at four.
     for &neighbours in BENCH_NEIGHBOURS {
-        run(BlockMatchCoarseBench {
-            client: client.clone(),
-            neighbours,
-        });
-        run(BlockMatchFineBench {
-            client: client.clone(),
-            neighbours,
-        });
+        for model_candidate in [false, true] {
+            run(BlockMatchCoarseBench {
+                client: client.clone(),
+                neighbours,
+                model_candidate,
+            });
+            run(BlockMatchFineBench {
+                client: client.clone(),
+                neighbours,
+                model_candidate,
+            });
+        }
         run(McConfidenceBench {
             client: client.clone(),
             neighbours,
         });
     }
 
+    // Escalation runs at one neighbour and at four, with none, a tenth or all of the blocks failing.
+    for &neighbours in BENCH_NEIGHBOURS {
+        for search_radius in [2, 4] {
+            run(TrackedFineBench {
+                client: client.clone(),
+                neighbours,
+                search_radius,
+            });
+        }
+        run(MeasureFloorBench {
+            client: client.clone(),
+            neighbours,
+        });
+        run(FlagFailuresBench {
+            client: client.clone(),
+            neighbours,
+        });
+        for &share in FailingShare::ALL {
+            run(EscalateStageBench {
+                client: client.clone(),
+                neighbours,
+                stage_radius: 4,
+                share,
+            });
+        }
+        for adaptive in [false, true] {
+            run(GrainSearchBench {
+                client: client.clone(),
+                neighbours,
+                adaptive,
+            });
+        }
+    }
+
     run(ChainComposeBench {
         client: client.clone(),
     });
 
-    // Each regularise launch covers every neighbour, so every candidate runs at one neighbour and at four.
+    run(ChromaMapBench {
+        client: client.clone(),
+    });
+
+    run(ComposeModelsBench {
+        client: client.clone(),
+    });
+
+    for &kernel in FitKernel::ALL {
+        run(FitModelBench {
+            client: client.clone(),
+            kernel,
+        });
+    }
+
+    // Each truemotion launch covers every neighbour, so every candidate runs at one neighbour and at four.
     for &neighbours in BENCH_NEIGHBOURS {
-        for &candidate in RegulariseCandidate::ALL {
-            run(MvRegulariseBench {
+        for &candidate in TruemotionCandidate::ALL {
+            run(MvTruemotionBench {
                 client: client.clone(),
                 candidate,
                 neighbours,
@@ -326,9 +420,9 @@ fn run_all(backend: &str, client: Client) {
         }
     }
 
-    // A zero motion field, where six of every block's seven candidates repeat.
-    for &candidate in RegulariseCandidate::ALL {
-        run(MvRegulariseBench {
+    // Zero fields, where every candidate but the camera model's repeats.
+    for &candidate in TruemotionCandidate::ALL {
+        run(MvTruemotionBench {
             client: client.clone(),
             candidate,
             neighbours: 4,
@@ -362,7 +456,7 @@ fn run_all(backend: &str, client: Client) {
                 channel_name,
                 split_mv: false,
                 noise_curve: false,
-                strength_map: false,
+                colour: false,
                 pooled: false,
                 candidate,
             });
@@ -390,7 +484,7 @@ fn run_all(backend: &str, client: Client) {
         channel_name: "luma",
         split_mv: false,
         noise_curve: true,
-        strength_map: false,
+        colour: false,
         pooled: false,
         candidate: collab_baseline,
     });
@@ -400,20 +494,24 @@ fn run_all(backend: &str, client: Client) {
         channel_name: "luma",
         split_mv: false,
         noise_curve: true,
-        strength_map: true,
-        pooled: false,
-        candidate: collab_baseline,
-    });
-    run(CollabFusedBench {
-        client: client.clone(),
-        channels: 1,
-        channel_name: "luma",
-        split_mv: false,
-        noise_curve: true,
-        strength_map: true,
+        colour: false,
         pooled: true,
         candidate: collab_baseline,
     });
+
+    for &(channels, channel_name) in CHANNELS {
+        let luma = channels == 1;
+        run(CollabFusedBench {
+            client: client.clone(),
+            channels,
+            channel_name,
+            split_mv: false,
+            noise_curve: luma,
+            colour: true,
+            pooled: false,
+            candidate: collab_baseline,
+        });
+    }
 
     for &(channels, channel_name) in CHANNELS {
         run(CollabFusedBench {
@@ -422,7 +520,7 @@ fn run_all(backend: &str, client: Client) {
             channel_name,
             split_mv: true,
             noise_curve: false,
-            strength_map: false,
+            colour: false,
             pooled: false,
             candidate: collab_baseline,
         });

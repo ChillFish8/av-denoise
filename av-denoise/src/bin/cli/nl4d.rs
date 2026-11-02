@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Nl4dOptions, PlaneOptions, PsyParams};
+use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Nl4dOptions, PlaneOptions, search_escalation_for};
 
 use super::{Args, CommonArgs, MotionArgs, Preset, RunOptions, resolve_channel_intent};
 
@@ -147,8 +147,8 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub field_lambda: Option<f32>,
 
-    /// Turns off the luma noise map, which scales the threshold by how noisy each brightness
-    /// level is.
+    /// Turns off the luma noise map, which scales the luma threshold by how noisy each brightness
+    /// level and colour is. Also turns off the luma colour gains.
     #[arg(long)]
     pub no_noise_map: bool,
 
@@ -157,56 +157,13 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub no_pooled_threshold: bool,
 
-    /// Turns on the psy options, which filter each area by what it looks like.
-    ///
-    /// Flat, grainy areas such as skies are filtered harder, textured dark areas more gently, and
-    /// the areas around strong lines skip shadow soften and the flat texture cut. Off by default.
-    /// Has no effect with `--no-noise-map`. The `--psy-*` flags tune it and need this flag.
-    #[arg(long)]
-    pub enable_psy: bool,
-
-    /// Filters flat, grainy areas harder, as a multiplier on the luma threshold.
-    ///
-    /// Between `1` and `3`. Library default is 1.75. `1` turns it off. Needs `--enable-psy`.
-    #[arg(long)]
-    pub psy_flat_boost: Option<f32>,
-
-    /// Filters flat, grainy areas of the colour planes harder, as a multiplier on the chroma
-    /// threshold.
-    ///
-    /// Between `1` and `3`. Library default is 1.5. `1` turns it off. Applies when chroma is
-    /// denoised in its own pass. Needs `--enable-psy`.
-    #[arg(long)]
-    pub psy_chroma_flat_boost: Option<f32>,
-
-    /// Filters textured dark areas more gently, as a multiplier on the luma threshold.
-    ///
-    /// Between `0.1` and `1`. Library default is 0.65. It applies in full at or below luma 128 of
-    /// 255 and fades out by 160. `1` turns it off. Needs `--enable-psy`.
-    #[arg(long)]
-    pub psy_shadow_soften: Option<f32>,
-
-    /// Stops flat areas whose surroundings line up like faint lines or edges from counting as flat.
-    ///
-    /// Between `0` and `1`. Library default is 0.21. Lower keeps more faint texture, higher
-    /// filters more areas as flat. `1` turns it off. Luma only. Needs `--enable-psy`.
-    #[arg(long)]
-    pub psy_flat_texture_cut: Option<f32>,
-
-    /// Skips shadow soften and the flat texture cut within this many pixels of a strong line.
-    ///
-    /// Between `0` and `64`. Library default is 16. Inside the ring, `--psy-shadow-soften` and
-    /// `--psy-flat-texture-cut` stop applying, so the areas beside dark ink lines lose their band
-    /// of grain. `0` turns it off. Luma only. Needs `--enable-psy`.
-    #[arg(long)]
-    pub psy_line_ring: Option<u32>,
-
     /// Writes an AV1 film grain table for the grain this run removes. Unstable.
     ///
     /// The flag and its output may change between releases. The table describes the source's
     /// luma grain, minus what the output still keeps. Add it to an AV1 encode with
-    /// `grav1synth apply`. SVT-AV1's `--fgs-table` applies only the table's first entry, so it
-    /// suits a single-scene table only. Its timestamps follow this run's output frames from 0,
+    /// `regrain apply`, which applies each scene's entry. SVT-AV1's `--fgs-table` and
+    /// `grav1synth apply` apply only the table's first entry, so they suit a single-scene table
+    /// only. Its timestamps follow this run's output frames from 0,
     /// so it suits constant frame rate sources and encodes of this output.
     #[arg(long, value_name = "PATH")]
     pub unstable_export_av1_fgs: Option<PathBuf>,
@@ -234,46 +191,12 @@ impl Nl4dArgs {
         Ok(radius)
     }
 
-    /// The psy options these flags ask for, or `None` without `--enable-psy`.
-    ///
-    /// A `--psy-*` flag without `--enable-psy` is an error, so a setting is never silently
-    /// ignored.
-    fn psy_options(&self) -> Result<Option<PsyParams>, anyhow::Error> {
-        let tuning_flags = [
-            ("--psy-flat-boost", self.psy_flat_boost.is_some()),
-            ("--psy-chroma-flat-boost", self.psy_chroma_flat_boost.is_some()),
-            ("--psy-shadow-soften", self.psy_shadow_soften.is_some()),
-            ("--psy-flat-texture-cut", self.psy_flat_texture_cut.is_some()),
-            ("--psy-line-ring", self.psy_line_ring.is_some()),
-        ];
-
-        if !self.enable_psy {
-            let set_flag = tuning_flags.iter().find(|(_, is_set)| *is_set);
-            if let Some((name, _)) = set_flag {
-                anyhow::bail!("{name} needs --enable-psy, add it to turn the psy options on");
-            }
-
-            return Ok(None);
-        }
-
-        let defaults = PsyParams::default();
-        let psy = PsyParams {
-            flat_boost: self.psy_flat_boost.unwrap_or(defaults.flat_boost),
-            chroma_flat_boost: self.psy_chroma_flat_boost.unwrap_or(defaults.chroma_flat_boost),
-            shadow_soften: self.psy_shadow_soften.unwrap_or(defaults.shadow_soften),
-            flat_texture_cut: self.psy_flat_texture_cut.unwrap_or(defaults.flat_texture_cut),
-            line_ring: self.psy_line_ring.unwrap_or(defaults.line_ring),
-        };
-
-        Ok(Some(psy))
-    }
-
     /// Builds the run options from these flags and the global flags.
     pub fn build_options(&self, globals: &Args) -> Result<RunOptions, anyhow::Error> {
-        if globals.preset != Preset::Base {
+        if !matches!(globals.preset, Preset::Base | Preset::Slow) {
             anyhow::bail!(
-                "nl4d only runs the base preset, use --temporal-radius and --spatial-radius to \
-                 trade speed for quality"
+                "nl4d only runs the base and slow presets, use --temporal-radius and \
+                 --spatial-radius to trade speed for quality"
             );
         }
 
@@ -309,11 +232,11 @@ impl Nl4dArgs {
         self.warn_on_dead_per_plane_flags(intent);
 
         let temporal_radius = self.temporal_radius(&defaults)?;
-        let psy = self.psy_options()?;
+        let preset_ceiling = search_escalation_for(globals.preset);
 
         let spatial_radius = self.spatial_radius.unwrap_or(defaults.spatial_radius);
         let nl4d_options = Nl4dOptions {
-            motion: self.motion.to_motion_search(),
+            motion: self.motion.to_motion_search(preset_ceiling),
             temporal_radius,
             sigma: self.sigma.map(|sigma| sigma / 255.0),
             sigma_scale: self.sigma_scale.unwrap_or(defaults.sigma_scale),
@@ -328,7 +251,6 @@ impl Nl4dArgs {
             kaiser_beta: self.kaiser_beta.unwrap_or(defaults.kaiser_beta),
             field_lambda: self.field_lambda.unwrap_or(defaults.field_lambda),
             noise_map: defaults.noise_map && !self.no_noise_map,
-            psy,
             pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
             grain_export: exports_grain,
         };
@@ -633,6 +555,8 @@ mod tests {
             "16",
             "--mc-search",
             "6",
+            "--mc-max-search-escalation",
+            "7",
             "--mc-pyramid-levels",
             "1",
         ]);
@@ -642,7 +566,38 @@ mod tests {
         assert_eq!(motion.blksize, 32);
         assert_eq!(motion.overlap, 16);
         assert_eq!(motion.search_radius, 6);
+        assert_eq!(motion.max_search_escalation, 7);
         assert_eq!(motion.pyramid_levels, 1);
+    }
+
+    #[test]
+    fn the_escalation_ceiling_defaults_to_the_search_radius() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+
+        assert_eq!(motion.search_radius, 4);
+        assert_eq!(motion.max_search_escalation, 4);
+    }
+
+    #[test]
+    fn an_unset_escalation_ceiling_follows_a_narrower_search() {
+        let (args, nl4d) = parse(&["--mc-search", "2"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+
+        assert_eq!(motion.search_radius, 2);
+        assert_eq!(motion.max_search_escalation, 2);
+    }
+
+    #[test]
+    fn an_unset_escalation_ceiling_follows_a_wider_search() {
+        let (args, nl4d) = parse(&["--mc-search", "6"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+
+        assert_eq!(motion.search_radius, 6);
+        assert_eq!(motion.max_search_escalation, 6);
     }
 
     #[test]
@@ -656,15 +611,77 @@ mod tests {
     }
 
     #[test]
-    fn a_preset_other_than_base_is_rejected() {
-        for preset in ["veryfast", "fast", "slow", "veryslow"] {
+    fn a_preset_other_than_base_or_slow_is_rejected() {
+        for preset in ["veryfast", "fast", "veryslow"] {
             let (args, nl4d) = parse(&["--preset", preset]);
             let error = nl4d
                 .build_options(&args)
-                .expect_err("nl4d must reject presets other than base");
+                .expect_err("nl4d must reject presets other than base and slow");
 
-            assert!(error.to_string().contains("base preset"), "{preset}: got {error}");
+            assert!(
+                error.to_string().contains("base and slow presets"),
+                "{preset}: got {error}"
+            );
         }
+    }
+
+    #[test]
+    fn the_slow_preset_is_base_with_a_ceiling_of_eight() {
+        let (base_args, base_nl4d) = parse(&[]);
+        let (slow_args, slow_nl4d) = parse(&["--preset", "slow"]);
+        let base_opts = base_nl4d.build_options(&base_args).expect("base should resolve");
+        let slow_opts = slow_nl4d.build_options(&slow_args).expect("slow should resolve");
+        let base = expect_nl4d(&base_opts);
+        let slow = expect_nl4d(&slow_opts);
+
+        let base_with_ceiling = av_denoise::MotionSearch {
+            max_search_escalation: 8,
+            ..base.motion
+        };
+        assert_eq!(slow.motion, base_with_ceiling);
+
+        let slow_with_base_motion = Nl4dOptions {
+            motion: base.motion,
+            ..slow
+        };
+        assert_eq!(slow_with_base_motion, base);
+        assert_eq!(slow_opts.planes.mode, base_opts.planes.mode);
+    }
+
+    #[test]
+    fn explicit_motion_flags_outrank_the_slow_preset() {
+        let (args, nl4d) = parse(&["--preset", "slow", "--mc-search", "6"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+
+        assert_eq!(motion.search_radius, 6);
+        assert_eq!(motion.max_search_escalation, 8);
+
+        let (args, nl4d) = parse(&["--preset", "slow", "--mc-max-search-escalation", "5"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+
+        assert_eq!(motion.max_search_escalation, 5);
+    }
+
+    #[test]
+    fn an_explicit_ceiling_below_the_search_radius_is_rejected_under_slow() {
+        let (args, nl4d) = parse(&[
+            "--preset",
+            "slow",
+            "--mc-search",
+            "6",
+            "--mc-max-search-escalation",
+            "5",
+        ]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let motion = expect_nl4d(&opts).motion;
+        let mode = av_denoise::MotionCompensationMode::from(motion);
+
+        assert!(
+            mode.validate().is_err(),
+            "a ceiling of 5 below a radius of 6 must fail"
+        );
     }
 
     #[test]
@@ -794,89 +811,10 @@ mod tests {
     }
 
     #[test]
-    fn psy_is_off_without_enable_psy() {
-        let (args, nl4d) = parse(&[]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+    fn enable_psy_is_an_unknown_argument() {
+        let error = parse_err(&["--enable-psy"]);
 
-        assert_eq!(expect_nl4d(&opts).psy, None);
-    }
-
-    #[test]
-    fn enable_psy_turns_on_the_library_defaults() {
-        let (args, nl4d) = parse(&["--enable-psy"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-
-        assert_eq!(expect_nl4d(&opts).psy, Some(PsyParams::default()));
-    }
-
-    #[test]
-    fn the_psy_flags_flow_into_the_nl4d_algorithm() {
-        let (args, nl4d) = parse(&[
-            "--enable-psy",
-            "--psy-flat-boost",
-            "2.0",
-            "--psy-chroma-flat-boost",
-            "1.2",
-            "--psy-shadow-soften",
-            "0.8",
-            "--psy-flat-texture-cut",
-            "0.3",
-            "--psy-line-ring",
-            "8",
-        ]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        let psy = expect_nl4d(&opts).psy.expect("psy on");
-
-        assert_eq!(psy.flat_boost, 2.0);
-        assert_eq!(psy.chroma_flat_boost, 1.2);
-        assert_eq!(psy.shadow_soften, 0.8);
-        assert_eq!(psy.flat_texture_cut, 0.3);
-        assert_eq!(psy.line_ring, 8);
-    }
-
-    #[test]
-    fn a_psy_flag_without_enable_psy_is_rejected() {
-        let cases = [
-            ["--psy-flat-boost", "2.0"],
-            ["--psy-chroma-flat-boost", "1.2"],
-            ["--psy-shadow-soften", "0.8"],
-            ["--psy-flat-texture-cut", "0.3"],
-            ["--psy-line-ring", "8"],
-        ];
-        for flags in cases {
-            let (args, nl4d) = parse(&flags);
-            let error = nl4d
-                .build_options(&args)
-                .expect_err("a psy flag alone should be rejected")
-                .to_string();
-
-            assert!(
-                error.contains(flags[0]),
-                "error should name {}, got {error}",
-                flags[0]
-            );
-            assert!(
-                error.contains("--enable-psy"),
-                "error should say to add --enable-psy, got {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_psy_flag_at_its_default_still_needs_enable_psy() {
-        let (args, nl4d) = parse(&["--psy-line-ring", "16"]);
-
-        assert!(nl4d.build_options(&args).is_err());
-    }
-
-    #[test]
-    fn enable_psy_with_no_noise_map_builds() {
-        let (args, nl4d) = parse(&["--enable-psy", "--no-noise-map"]);
-        let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        let nl4d_options = expect_nl4d(&opts);
-
-        assert!(!nl4d_options.noise_map);
-        assert_eq!(nl4d_options.psy, Some(PsyParams::default()));
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

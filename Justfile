@@ -74,6 +74,7 @@ build-static features=static_features:
     prefix="$PWD/vcpkg_installed/{{vcpkg_triplet}}"
     export FFMS_INCLUDE_DIR="$prefix/include"
     export FFMS_LIB_DIR="$prefix/lib"
+    export FFMPEG_DIR="$prefix"
     export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
     cargo build --release -p av-denoise --features {{features}},static-ffms2
 

@@ -1,5 +1,30 @@
 use super::search::{DEFAULT_BLKSIZE, DEFAULT_OVERLAP, MotionCompensationMode, MotionEstimation};
+use super::truemotion::TruemotionParams;
 use crate::engine::align::StorageAlign;
+
+/// How a block search widens for blocks that fail a small first window.
+///
+/// The first pass searches `first_radius`. Blocks that fail search again once at `ceiling`.
+/// A `first_radius` equal to `ceiling` searches once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SearchSchedule {
+    pub first_radius: u32,
+    pub ceiling: u32,
+}
+
+impl SearchSchedule {
+    /// A schedule that searches `radius` once.
+    pub fn fixed(radius: u32) -> Self {
+        Self {
+            first_radius: radius,
+            ceiling: radius,
+        }
+    }
+
+    pub fn escalates(&self) -> bool {
+        self.first_radius < self.ceiling
+    }
+}
 
 /// The block geometry a [MotionCompensationMode] resolves to for one frame size.
 #[derive(Debug, Clone)]
@@ -7,7 +32,15 @@ pub(crate) struct MotionCtx {
     pub blksize: u32,
     pub step: u32,
     pub search_radius: u32,
+    /// The search radius of the coarse pass, on the smallest pyramid level.
+    pub coarse_search_radius: u32,
+    /// How many times wider a coarse block is than the content one fine block covers.
+    pub coarse_block_factor: u32,
     pub pyramid_levels: u32,
+    /// How the search widens, from `search_radius` up to the mode's `max_search_escalation`.
+    pub schedule: SearchSchedule,
+    /// How the truemotion stage that ends a search picks its vectors.
+    pub truemotion: TruemotionParams,
     pub blocks_x: u32,
     pub blocks_y: u32,
     /// The alignment each per-slot slice of the motion field, confidence, pair ring and pyramid
@@ -21,6 +54,7 @@ impl MotionCtx {
             blksize,
             overlap,
             search_radius,
+            max_search_escalation,
             pyramid_levels,
             estimation: _,
         } = mode
@@ -31,16 +65,54 @@ impl MotionCtx {
         let step = blksize - overlap;
         let blocks_x = width.div_ceil(step).max(1);
         let blocks_y = height.div_ceil(step).max(1);
+        let schedule = SearchSchedule {
+            first_radius: search_radius,
+            ceiling: max_search_escalation.max(search_radius),
+        };
 
         Some(Self {
             blksize,
             step,
             search_radius,
+            coarse_search_radius: search_radius,
+            coarse_block_factor: 1,
             pyramid_levels,
+            schedule,
+            truemotion: TruemotionParams::for_schedule(schedule),
             blocks_x,
             blocks_y,
             align,
         })
+    }
+
+    /// This geometry with the truemotion stage's penalty at `field_lambda`, which 0 turns off.
+    pub fn with_field_lambda(self, field_lambda: f32) -> Self {
+        let truemotion = TruemotionParams {
+            field_lambda,
+            ..self.truemotion
+        };
+
+        Self { truemotion, ..self }
+    }
+
+    /// This geometry with the coarse pass searching `radius` with blocks `block_factor` times wider.
+    pub fn with_coarse_search(self, radius: u32, block_factor: u32) -> Self {
+        Self {
+            coarse_search_radius: radius,
+            coarse_block_factor: block_factor,
+            ..self
+        }
+    }
+
+    /// This block grid with a single pyramid level and one fixed search of `radius`.
+    pub fn single_level(&self, radius: u32) -> Self {
+        Self {
+            search_radius: radius,
+            coarse_search_radius: radius,
+            pyramid_levels: 1,
+            schedule: SearchSchedule::fixed(radius),
+            ..self.clone()
+        }
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
@@ -117,6 +189,7 @@ impl MotionCtx {
                 blksize: DEFAULT_BLKSIZE,
                 overlap: DEFAULT_OVERLAP,
                 search_radius: 0,
+                max_search_escalation: 0,
                 pyramid_levels: 1,
                 estimation: MotionEstimation::Direct,
             },
@@ -151,11 +224,55 @@ mod tests {
     }
 
     #[test]
+    fn fixed_schedule_does_not_escalate() {
+        let schedule = SearchSchedule::fixed(4);
+
+        assert!(!schedule.escalates());
+    }
+
+    #[test]
+    fn a_ceiling_equal_to_the_radius_searches_once() {
+        let mode = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 6,
+            max_search_escalation: 6,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
+        };
+        let align = StorageAlign::new(32);
+        let ctx = MotionCtx::new(mode, 64, 64, align).unwrap();
+
+        assert_eq!(ctx.schedule, SearchSchedule::fixed(6));
+    }
+
+    #[test]
+    fn new_contexts_widen_to_their_escalation_ceiling() {
+        let mode = MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius: 4,
+            max_search_escalation: 8,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
+        };
+        let align = StorageAlign::new(32);
+        let ctx = MotionCtx::new(mode, 64, 64, align).unwrap();
+        let expected = SearchSchedule {
+            first_radius: 4,
+            ceiling: 8,
+        };
+
+        assert_eq!(ctx.schedule, expected);
+    }
+
+    #[test]
     fn motion_ctx_blocks_match_step() {
         let mode = MotionCompensationMode::Mvtools {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };

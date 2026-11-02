@@ -1,8 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::engine::kernels::copy_words;
-use crate::engine::{BLOCK_1D, DevicePlane, EngineSpec, Geometry, MAX_GRID_1D};
+use crate::engine::{DevicePlane, EngineSpec, copy_words_into};
 use crate::error::Error;
 
 /// One frame on the GPU, as each engine of a group reads it.
@@ -14,17 +13,17 @@ pub struct TuningFrame {
 impl TuningFrame {
     /// A frame whose handles the caller has uploaded, one list per engine in group order.
     ///
-    /// Each list holds one handle per channel of its engine, and each handle holds at least the
-    /// engine's input plane bytes. [tune_frames](crate::tune::tune_frames) skips a frame set that
-    /// breaks this.
+    /// Each list holds every plane of the frame its engine reads, luma first, and each handle holds
+    /// at least that plane's input bytes. [tune_frames](crate::tune::tune_frames) skips a frame set
+    /// that breaks this.
     pub fn new(planes: Vec<Vec<Handle>>) -> Self {
         Self { planes }
     }
 
     /// Copies `planes` on the device into new handles, one list of planes per engine in `specs`.
     ///
-    /// Each handle holds the engine's input plane bytes, rounded up to whole words. A list that
-    /// does not match its engine's planes is a [Error::PlaneMismatch].
+    /// Each handle holds its plane's input bytes, rounded up to whole words. A list that does not
+    /// match its engine's planes is a [Error::PlaneMismatch].
     pub fn copy_from(
         client: &Client,
         specs: &[EngineSpec],
@@ -36,12 +35,16 @@ impl TuningFrame {
 
         for (spec, engine_planes) in specs.iter().zip(planes) {
             let geometry = spec.geometry();
-            geometry.check_planes(engine_planes, geometry.input)?;
+            let input = geometry.input;
+            geometry.check_planes(engine_planes, input)?;
 
-            let bytes = geometry.input.plane_bytes(geometry.pixels()) as usize;
             let handles: Vec<Handle> = engine_planes
                 .iter()
-                .map(|plane| copy_plane(client, plane, bytes))
+                .enumerate()
+                .map(|(index, plane)| {
+                    let bytes = geometry.plane_bytes(index, input);
+                    copy_plane(client, plane, bytes)
+                })
                 .collect();
 
             copied.push(handles);
@@ -50,15 +53,14 @@ impl TuningFrame {
         Ok(Self::new(copied))
     }
 
-    pub(crate) fn planes_for(&self, engine: usize, geometry: Geometry) -> Vec<DevicePlane<'_>> {
-        self.planes[engine]
-            .iter()
-            .map(|handle| DevicePlane::new(handle, geometry.width, geometry.height))
-            .collect()
+    /// The planes engine `engine` reads, each at the size `spec` gives it.
+    pub(crate) fn planes_for(&self, engine: usize, spec: &EngineSpec) -> Vec<DevicePlane<'_>> {
+        let geometry = spec.geometry();
+        geometry.device_planes(0, &self.planes[engine])
     }
 }
 
-/// Checks every frame holds the planes each engine in `specs` reads, with handles large enough.
+/// Checks every frame holds the planes each engine of `specs` reads, with handles large enough.
 pub(crate) fn check_frames(specs: &[EngineSpec], frames: &[TuningFrame]) -> Result<(), Error> {
     for frame in frames {
         let expected = specs.len();
@@ -69,8 +71,8 @@ pub(crate) fn check_frames(specs: &[EngineSpec], frames: &[TuningFrame]) -> Resu
         }
 
         for (index, spec) in specs.iter().enumerate() {
+            let planes = frame.planes_for(index, spec);
             let geometry = spec.geometry();
-            let planes = frame.planes_for(index, geometry);
             geometry.check_planes(&planes, geometry.input)?;
         }
     }
@@ -96,22 +98,4 @@ fn copy_plane(client: &Client, plane: &DevicePlane<'_>, bytes: usize) -> Handle 
     copy_words_into(client, plane.handle(), &destination, words);
 
     destination
-}
-
-/// Copies the first `words` 4-byte words of `source` into `destination` on the device.
-pub(crate) fn copy_words_into(client: &Client, source: &Handle, destination: &Handle, words: usize) {
-    let groups = (words as u32).div_ceil(BLOCK_1D).clamp(1, MAX_GRID_1D);
-    let total_threads = groups * BLOCK_1D;
-
-    unsafe {
-        copy_words::launch_unchecked(
-            client,
-            CubeCount::new_1d(groups),
-            CubeDim::new_1d(BLOCK_1D),
-            BufferArg::from_raw_parts(source.clone(), words),
-            BufferArg::from_raw_parts(destination.clone(), words),
-            words as u32,
-            total_threads,
-        );
-    }
 }

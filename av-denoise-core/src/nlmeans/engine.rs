@@ -9,13 +9,15 @@ use crate::engine::{
     DevicePlane,
     EdgePadding,
     EgressSource,
-    Engine,
     EngineTiming,
-    Geometry,
+    FramePass,
+    PassEngine,
+    PassGeometry,
     WindowSpan,
     egress,
 };
 use crate::error::Error;
+use crate::motion::SharedMotion;
 use crate::tune::{EngineKernels, KernelSelector};
 
 /// The frames an engine at `temporal_radius` holds with a noise look-ahead `lookahead` deep.
@@ -24,31 +26,40 @@ fn held_frames(temporal_radius: u32, lookahead: usize) -> usize {
 }
 
 /// Non-local means over GPU planes.
-pub struct Nlmeans {
+pub(crate) struct Nlmeans {
     front: NlmDenoiser,
-    geometry: Geometry,
+    geometry: PassGeometry,
     /// The finished frame waiting for `emit_into`, if any.
     ready: Option<Handle>,
     /// Tail frames still to produce after `finish`.
     tail_remaining: usize,
     /// Whether the current stream has had a real push, after which context frames are refused.
     pushed: bool,
+    /// The stream frame of the last emit.
+    emitted: Option<u32>,
     poisoned: bool,
 }
 
 impl Nlmeans {
     /// Builds the engine, returning [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
-    pub fn new(client: &Client, algorithm: NlmeansAlgorithm, geometry: Geometry) -> Result<Self, Error> {
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub fn new(client: &Client, algorithm: NlmeansAlgorithm, geometry: PassGeometry) -> Result<Self, Error> {
         let kernels = EngineKernels::default();
-        Self::with_kernels(client, algorithm, geometry, kernels)
+        Self::with_kernels(client, algorithm, geometry, kernels, None, false)
     }
 
-    /// [Nlmeans::new] with each launch site's candidate picked from `kernels`.
+    /// Builds the engine with each launch site's candidate picked from `kernels`.
+    ///
+    /// Its motion searches start from the camera models in `motion` when given. With `guides_only`,
+    /// it runs only its motion and noise reading and its emits write nothing. Returns
+    /// [Error::InvalidGeometry] or [Error::InvalidOptions] for unusable input.
     pub fn with_kernels(
         client: &Client,
         algorithm: NlmeansAlgorithm,
-        geometry: Geometry,
+        geometry: PassGeometry,
         kernels: EngineKernels,
+        motion: Option<SharedMotion>,
+        guides_only: bool,
     ) -> Result<Self, Error> {
         geometry.validate()?;
 
@@ -68,12 +79,26 @@ impl Nlmeans {
         let ring_slots = u64::from(params.total_frames());
         geometry.check_ring_fits(ring_slots)?;
 
-        let sizes = front_buffer_sizes(client, &params, geometry.width, geometry.height);
+        let reads_luma_motion = motion.as_ref().is_some_and(SharedMotion::reads_luma_motion);
+        let sizes = front_buffer_sizes(
+            client,
+            &params,
+            geometry.width,
+            geometry.height,
+            reads_luma_motion,
+        );
         let indexable = check_u32_indexable(&sizes.buffers);
         indexable.map_err(Error::InvalidGeometry)?;
 
         let selector = KernelSelector::new(client, kernels);
-        let front = NlmDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
+        let mut front = NlmDenoiser::with_kernels(client, params, geometry.width, geometry.height, selector);
+        if let Some(motion) = motion {
+            front.set_shared_motion(motion);
+        }
+
+        if guides_only {
+            front.set_guides_only();
+        }
 
         Ok(Self {
             front,
@@ -81,6 +106,7 @@ impl Nlmeans {
             ready: None,
             tail_remaining: 0,
             pushed: false,
+            emitted: None,
             poisoned: false,
         })
     }
@@ -133,7 +159,12 @@ impl Nlmeans {
         }
     }
 
+    /// Writes `frame` into `planes`, unless the engine only guides.
     fn write_out(&self, frame: &Handle, planes: &[DevicePlane<'_>]) {
+        if self.front.guides_only() {
+            return;
+        }
+
         let channels = self.geometry.channels;
         // The constructor bounds the ring to `u32` elements, so one plane always fits.
         let pixels = self.geometry.pixels() as u32;
@@ -167,7 +198,7 @@ impl Nlmeans {
     }
 }
 
-impl Engine for Nlmeans {
+impl PassEngine for Nlmeans {
     fn push(&mut self, planes: &[DevicePlane<'_>]) -> Result<usize, Error> {
         self.check_usable()?;
         self.check_nothing_pending()?;
@@ -200,7 +231,10 @@ impl Engine for Nlmeans {
         self.check_usable()?;
         self.geometry.check_planes(planes, self.geometry.output)?;
 
+        // The window has not moved since the frame was denoised, so its centre is still that frame.
         if let Some(frame) = self.ready.take() {
+            let emitted = self.front.centre_frame();
+            self.emitted = Some(emitted);
             self.write_out(&frame, planes);
             return Ok(());
         }
@@ -211,6 +245,8 @@ impl Engine for Nlmeans {
 
         let step = self.next_tail_frame();
         let output = self.guard(step)?;
+        let emitted = self.front.centre_frame();
+        self.emitted = Some(emitted);
         self.write_out(&output.handle, planes);
 
         self.tail_remaining -= 1;
@@ -235,6 +271,7 @@ impl Engine for Nlmeans {
 
     fn reset(&mut self) {
         self.ready = None;
+        self.emitted = None;
         self.tail_remaining = 0;
         self.poisoned = false;
         self.restart_stream();
@@ -262,5 +299,19 @@ impl Engine for Nlmeans {
 
     fn sample_device_time(&mut self, every: u32) {
         self.front.sample_device_time(every);
+    }
+}
+
+impl FramePass for Nlmeans {
+    fn next_frame(&self) -> u32 {
+        self.front.stream_frames()
+    }
+
+    fn emitted_frame(&self) -> Option<u32> {
+        self.emitted
+    }
+
+    fn guides_only(&self) -> bool {
+        self.front.guides_only()
     }
 }

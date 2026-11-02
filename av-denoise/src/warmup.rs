@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
+use av_denoise_core::ChromaSiting;
 use av_denoise_core::lockfile::{open_lock_file, wait_for_lock};
 use cubecl::hash::StableHasher;
 
@@ -64,8 +65,14 @@ fn release_key(key: u128) {
 /// A rebuild of the kernel sources needs nothing here, because the stamps live in that build's own
 /// cache directory.
 pub fn kernel_key(options: &PlaneOptions, layout: FrameLayout) -> u128 {
+    // The siting never reaches a kernel, so every siting shares one key.
+    let kernel_layout = FrameLayout {
+        chroma_siting: ChromaSiting::Unknown,
+        ..layout
+    };
+
     let version = env!("CARGO_PKG_VERSION");
-    let rendered = format!("{version}|{options:?}|{layout:?}");
+    let rendered = format!("{version}|{options:?}|{kernel_layout:?}");
     StableHasher::hash_one(&rendered)
 }
 
@@ -270,6 +277,7 @@ mod tests {
             height: 1080,
             subsampling: crate::Subsampling::Yuv420,
             depth: crate::Depth::Eight,
+            chroma_siting: crate::ChromaSiting::Unknown,
         }
     }
 
@@ -284,6 +292,27 @@ mod tests {
         let second = kernel_key(&second_options, second_layout);
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn every_chroma_siting_gives_the_same_key() {
+        let test_options = options();
+        let unknown_key = kernel_key(&test_options, layout());
+        let sitings = [
+            crate::ChromaSiting::Left,
+            crate::ChromaSiting::Center,
+            crate::ChromaSiting::TopLeft,
+        ];
+
+        for siting in sitings {
+            let sited = FrameLayout {
+                chroma_siting: siting,
+                ..layout()
+            };
+            let sited_key = kernel_key(&test_options, sited);
+
+            assert_eq!(sited_key, unknown_key, "{siting:?}");
+        }
     }
 
     #[test]

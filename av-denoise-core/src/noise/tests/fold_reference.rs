@@ -8,6 +8,7 @@ use crate::noise::fold::NoiseSettings;
 use crate::noise::history::WindowBounds;
 use crate::noise::reading::ReadingRecord;
 use crate::noise::snapshot::NoiseSnapshot;
+use crate::noise::temporal::TemporalNoiseSample;
 
 /// One value per channel slot.
 type ChannelValues = [f32; NOISE_CHANNELS as usize];
@@ -75,7 +76,6 @@ pub(super) fn state_pairs(
     let gpu_curve = gpu.curve.is_some();
     let host_curve = host.curve.is_some();
     assert_eq!(gpu_curve, host_curve, "curve presence");
-    assert_eq!(gpu.classes_present, host.classes_present, "classes presence");
 
     // The curve is copied, never computed, so it matches bit for bit.
     let gpu_bits = gpu
@@ -89,14 +89,13 @@ pub(super) fn state_pairs(
     pairs
 }
 
-/// The values of two sets of derived values, after checking their flags and modes match.
+/// The values of two sets of derived values, after checking their curve flags match.
 pub(super) fn derived_pairs(
     gpu: &DerivedValues,
     host: &DerivedValues,
     channels: u32,
 ) -> Vec<(&'static str, f32, f32)> {
     assert_eq!(gpu.curve_valid, host.curve_valid, "derived curve flag");
-    assert_eq!(gpu.map_mode, host.map_mode, "derived map mode");
 
     let mut pairs = Vec::new();
     for channel in 0..NOISE_CHANNELS as usize {
@@ -157,7 +156,7 @@ pub(super) fn largest_gap(gpu: &[f32], host: &[f32]) -> f32 {
 }
 
 /// The largest relative gap of the values two snapshots both hold, and whether they hold the
-/// same chains, rho, flags and map mode.
+/// same chains, rho and flags.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SnapshotGap {
     pub(crate) state: f32,
@@ -194,7 +193,6 @@ impl SnapshotGap {
         let gpu_derived = gpu.derived;
         let host_derived = host.derived;
         structure_matches &= gpu_derived.curve_valid == host_derived.curve_valid;
-        structure_matches &= gpu_derived.map_mode == host_derived.map_mode;
 
         let derived_gap = derived_value_gaps(&gpu_derived, &host_derived);
 
@@ -206,8 +204,7 @@ impl SnapshotGap {
     }
 }
 
-/// The largest relative gap of two sets of derived values, leaving out the curve flag and the map
-/// mode.
+/// The largest relative gap of two sets of derived values, leaving out the curve flag.
 fn derived_value_gaps(gpu: &DerivedValues, host: &DerivedValues) -> f32 {
     let gpu_values = [
         gpu.sigma[0],
@@ -256,23 +253,19 @@ pub(crate) struct HostRecord {
     pub(crate) reading: ReadingRecord,
     /// The per-channel Immerkær sigma from the frame's abs sums.
     pub(crate) immerkaer: ChannelValues,
-    /// The frame's strength map, empty without one.
-    pub(crate) map: Vec<f32>,
 }
 
-/// The chains, rho, curve, classes and map one window fold gives.
+/// The chains, rho and curve one window fold gives.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HostDerived {
     pub(crate) median: ChannelValues,
     pub(crate) low: ChannelValues,
     pub(crate) low_unboosted: ChannelValues,
-    /// `None` when no frame of the window has a sample.
+    /// `None` when no frame of the window has a sample of any channel.
     pub(crate) temporal_only: Option<ChannelValues>,
     pub(crate) rho: Option<f32>,
-    /// The curve's ratios and quarter median, present exactly when the classes are.
+    /// The curve's ratios and quarter median.
     pub(crate) curve: Option<([f32; NOISE_CURVE_BINS], f32)>,
-    /// The elementwise median map, present when the window holds a curve.
-    pub(crate) map: Option<Vec<f32>>,
 }
 
 impl HostDerived {
@@ -287,13 +280,10 @@ impl HostDerived {
             temporal_only: self.temporal_only.map(|chain| active_channels(chain, active)),
             rho: self.rho,
             curve: self.curve,
-            classes_present: self.curve.is_some(),
             derived: DerivedValues::default(),
         };
         let fold = settings.fold;
-        let derived = fold
-            .coefficients
-            .derive_host(&bare, active, fold.consumer, settings.reading.map);
+        let derived = fold.coefficients.derive_host(&bare, active, fold.consumer);
 
         NoiseSnapshot { derived, ..bare }
     }
@@ -326,6 +316,10 @@ fn frame_readings(record: &HostRecord, sigma_scale: f32) -> [ChannelValues; 3] {
     if let Some(sample) = reading.sample {
         let factor = correlation_factor(sample.rho);
         for channel in 0..NOISE_CHANNELS as usize {
+            if !sample.valid[channel] {
+                continue;
+            }
+
             raw[channel] = raw[channel].max(sample.sigma[channel] * factor);
             raw_low[channel] = raw_low[channel].max(sample.sigma_low[channel] * factor);
             raw_unboosted[channel] = raw_unboosted[channel].max(sample.sigma_low[channel]);
@@ -360,7 +354,7 @@ pub(crate) fn fold_window(records: &[HostRecord], bounds: WindowBounds, sigma_sc
     let window = &records[first..=last];
     let sampled: Vec<&HostRecord> = window
         .iter()
-        .filter(|record| record.reading.sample.is_some())
+        .filter(|record| channel_sample(record, 0).is_some())
         .collect();
     let curved: Vec<&HostRecord> = sampled
         .iter()
@@ -375,11 +369,8 @@ pub(crate) fn fold_window(records: &[HostRecord], bounds: WindowBounds, sigma_sc
     let medians: Vec<ChannelValues> = readings.iter().map(|reading| reading[0]).collect();
     let lows: Vec<ChannelValues> = readings.iter().map(|reading| reading[1]).collect();
     let unboosted: Vec<ChannelValues> = readings.iter().map(|reading| reading[2]).collect();
-    let temporal: Vec<ChannelValues> = sampled
-        .iter()
-        .map(|record| record.reading.sample.unwrap().sigma)
-        .map(|sigma| sigma.map(|value| value * sigma_scale))
-        .collect();
+    let low_unboosted = chain_median(&unboosted).expect("the window holds a frame");
+    let temporal_only = temporal_chain(window, low_unboosted, sigma_scale);
 
     let mut rhos: Vec<f32> = sampled
         .iter()
@@ -389,17 +380,50 @@ pub(crate) fn fold_window(records: &[HostRecord], bounds: WindowBounds, sigma_sc
 
     let curve_present = !sampled.is_empty() && 2 * curved.len() >= sampled.len();
     let curve = curve_present.then(|| window_curve(&curved));
-    let map = curve_present.then(|| window_map(&curved));
 
     HostDerived {
         median: chain_median(&medians).expect("the window holds a frame"),
         low: chain_median(&lows).expect("the window holds a frame"),
-        low_unboosted: chain_median(&unboosted).expect("the window holds a frame"),
-        temporal_only: chain_median(&temporal),
+        low_unboosted,
+        temporal_only,
         rho,
         curve,
-        map,
     }
+}
+
+/// The record's sample when it holds one of channel `channel`.
+fn channel_sample(record: &HostRecord, channel: usize) -> Option<TemporalNoiseSample> {
+    record.reading.sample.filter(|sample| sample.valid[channel])
+}
+
+/// Each channel's floored median of its scaled sigma over the frames with a sample of it.
+///
+/// A channel with no such frame takes its `low_unboosted` value. It is `None` when no channel has
+/// a sampled frame.
+fn temporal_chain(
+    window: &[HostRecord],
+    low_unboosted: ChannelValues,
+    sigma_scale: f32,
+) -> Option<ChannelValues> {
+    let mut chain = low_unboosted;
+    let mut sampled = false;
+
+    for (channel, value) in chain.iter_mut().enumerate() {
+        let mut sigmas: Vec<f32> = window
+            .iter()
+            .filter_map(|record| channel_sample(record, channel))
+            .map(|sample| sample.sigma[channel] * sigma_scale)
+            .collect();
+        if sigmas.is_empty() {
+            continue;
+        }
+
+        let median = window_median(&mut sigmas);
+        *value = median.max(SIGMA_FLOOR);
+        sampled = true;
+    }
+
+    sampled.then_some(chain)
 }
 
 /// The elementwise median ratios and quarter median of `curved`, which all hold a curve.
@@ -419,16 +443,4 @@ fn window_curve(curved: &[&HostRecord]) -> ([f32; NOISE_CURVE_BINS], f32) {
     let quarter_median = window_median(&mut quarter_medians);
 
     (ratios, quarter_median)
-}
-
-/// The elementwise median map of `curved`.
-fn window_map(curved: &[&HostRecord]) -> Vec<f32> {
-    let quarters = curved[0].map.len();
-
-    (0..quarters)
-        .map(|quarter| {
-            let mut values: Vec<f32> = curved.iter().map(|record| record.map[quarter]).collect();
-            window_median(&mut values)
-        })
-        .collect()
 }

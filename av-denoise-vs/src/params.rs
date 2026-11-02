@@ -2,6 +2,7 @@ use av_denoise::accelerate::{Accelerator, get_default_accelerators};
 use av_denoise::{
     Algorithm,
     ChannelIntent,
+    ChromaSiting,
     DenoisingMode,
     Depth,
     Device,
@@ -17,13 +18,13 @@ use av_denoise::{
     PlaneOptions,
     PrefilterMode,
     Preset,
-    PsyParams,
     Subsampling,
     TuningMode,
     nlmeans_search_radius_for,
     nlmeans_temporal_radius_for,
     nlmeans_variant_for,
     parse_prefilter,
+    search_escalation_for,
 };
 use vapoursynth::format::{ColorFamily, SampleType};
 
@@ -85,6 +86,7 @@ pub fn layout_from_format(format: RawFormat, width: u32, height: u32) -> Result<
         height,
         subsampling,
         depth,
+        chroma_siting: ChromaSiting::Unknown,
     })
 }
 
@@ -144,12 +146,6 @@ pub struct RawParams {
     pub spatial_radius: Option<i64>,
     pub refine: Option<i64>,
     pub noise_map: Option<bool>,
-    pub enable_psy: Option<bool>,
-    pub psy_flat_boost: Option<f64>,
-    pub psy_chroma_flat_boost: Option<f64>,
-    pub psy_shadow_soften: Option<f64>,
-    pub psy_flat_texture_cut: Option<f64>,
-    pub psy_line_ring: Option<i64>,
     pub pooled_threshold: Option<bool>,
     /// The kernel tuning mode, `auto`, `cached` or `off`.
     ///
@@ -211,12 +207,6 @@ fn reject_mismatched_params(
         ("spatial_radius", raw.spatial_radius.is_some()),
         ("refine", raw.refine.is_some()),
         ("noise_map", raw.noise_map.is_some()),
-        ("enable_psy", raw.enable_psy.is_some()),
-        ("psy_flat_boost", raw.psy_flat_boost.is_some()),
-        ("psy_chroma_flat_boost", raw.psy_chroma_flat_boost.is_some()),
-        ("psy_shadow_soften", raw.psy_shadow_soften.is_some()),
-        ("psy_flat_texture_cut", raw.psy_flat_texture_cut.is_some()),
-        ("psy_line_ring", raw.psy_line_ring.is_some()),
         ("pooled_threshold", raw.pooled_threshold.is_some()),
     ];
 
@@ -259,54 +249,30 @@ fn reject_mismatched_params(
     Ok(())
 }
 
-/// The psy options these parameters ask for, or `None` unless `enable_psy` is set.
-///
-/// A `psy_*` parameter without `enable_psy` is an error, so a setting is never silently ignored.
-fn psy_options(raw: &RawParams) -> Result<Option<PsyParams>, anyhow::Error> {
-    let tuning_params = [
-        ("psy_flat_boost", raw.psy_flat_boost.is_some()),
-        ("psy_chroma_flat_boost", raw.psy_chroma_flat_boost.is_some()),
-        ("psy_shadow_soften", raw.psy_shadow_soften.is_some()),
-        ("psy_flat_texture_cut", raw.psy_flat_texture_cut.is_some()),
-        ("psy_line_ring", raw.psy_line_ring.is_some()),
-    ];
-    let enabled = raw.enable_psy.unwrap_or(false);
-
-    if !enabled {
-        let set_param = tuning_params.iter().find(|(_, is_set)| *is_set);
-        if let Some((name, _)) = set_param {
-            anyhow::bail!("{name} needs enable_psy=True, add enable_psy=True to turn the psy options on");
-        }
-
-        return Ok(None);
+/// Rejects a per-plane strength for a plane group that is not denoised.
+fn reject_unused_plane_strength(raw: &RawParams, intent: ChannelIntent) -> Result<(), anyhow::Error> {
+    if intent == ChannelIntent::Chroma && raw.luma_strength.is_some() {
+        anyhow::bail!("luma_strength has no effect on channel_mode=\"chroma\", which does not denoise luma");
     }
 
-    let defaults = PsyParams::default();
-    let line_ring = match raw.psy_line_ring {
-        Some(radius) => nonnegative(radius, "psy_line_ring")?,
-        None => defaults.line_ring,
-    };
-    let psy = PsyParams {
-        flat_boost: raw
-            .psy_flat_boost
-            .map(|value| value as f32)
-            .unwrap_or(defaults.flat_boost),
-        chroma_flat_boost: raw
-            .psy_chroma_flat_boost
-            .map(|value| value as f32)
-            .unwrap_or(defaults.chroma_flat_boost),
-        shadow_soften: raw
-            .psy_shadow_soften
-            .map(|value| value as f32)
-            .unwrap_or(defaults.shadow_soften),
-        flat_texture_cut: raw
-            .psy_flat_texture_cut
-            .map(|value| value as f32)
-            .unwrap_or(defaults.flat_texture_cut),
-        line_ring,
-    };
+    if intent == ChannelIntent::Luma && raw.chroma_strength.is_some() {
+        anyhow::bail!(
+            "chroma_strength has no effect on channel_mode=\"luma\", which does not denoise chroma"
+        );
+    }
 
-    Ok(Some(psy))
+    Ok(())
+}
+
+/// The default motion search with the ceiling `preset` widens failing blocks to.
+fn preset_motion_search(preset: Preset) -> MotionSearch {
+    let defaults = MotionSearch::default();
+    let ceiling = search_escalation_for(preset).unwrap_or(defaults.search_radius);
+
+    MotionSearch {
+        max_search_escalation: ceiling.max(defaults.search_radius),
+        ..defaults
+    }
 }
 
 /// Validates `raw` and builds the denoiser's [PlaneOptions].
@@ -326,12 +292,15 @@ pub fn plane_options_from(
         Some(name) => parse_preset(name)?,
     };
 
-    if algorithm_kind == AlgorithmKind::Nl4d && preset != Preset::Base {
+    let runs_preset = matches!(preset, Preset::Base | Preset::Slow);
+    if algorithm_kind == AlgorithmKind::Nl4d && !runs_preset {
         anyhow::bail!(
-            "Nl4d only runs the base preset, use temporal_radius and spatial_radius to trade \
-             speed for quality"
+            "Nl4d only runs the base and slow presets, use temporal_radius and spatial_radius to \
+             trade speed for quality"
         );
     }
+
+    let motion_search = preset_motion_search(preset);
 
     // Only nlmeans reads `variant`, so nl4d never parses it and a set value fails as a mismatch below.
     let variant = match algorithm_kind {
@@ -342,7 +311,13 @@ pub fn plane_options_from(
         AlgorithmKind::Nl4d => NlmeansVariant::Hq,
     };
 
+    let intent = match raw.channel_mode.as_deref() {
+        None => ChannelIntent::LumaChroma,
+        Some(mode) => parse_channel_mode(mode)?,
+    };
+
     reject_mismatched_params(raw, algorithm_kind, variant)?;
+    reject_unused_plane_strength(raw, intent)?;
 
     if let Some(radius) = raw.search_radius
         && radius > 4
@@ -352,11 +327,6 @@ pub fn plane_options_from(
             "search_radius {radius} needs a raised stack, but RUST_MIN_STACK is not set. Values above 4 overflow the default 2 MiB stack during kernel codegen"
         );
     }
-
-    let intent = match raw.channel_mode.as_deref() {
-        None => ChannelIntent::LumaChroma,
-        Some(mode) => parse_channel_mode(mode)?,
-    };
 
     let device = match &raw.device {
         None => Device::default(),
@@ -411,7 +381,6 @@ pub fn plane_options_from(
                 ..NlmTuning::default()
             };
 
-            let motion_search = MotionSearch::default();
             let motion_compensation = match raw.motion_compensation {
                 Some(true) => MotionCompensationMode::from(motion_search),
                 Some(false) | None => MotionCompensationMode::None,
@@ -421,6 +390,17 @@ pub fn plane_options_from(
                 None => PrefilterMode::None,
                 Some(spec) => parse_prefilter(spec)?,
             };
+
+            let guides_motion =
+                motion_compensation != MotionCompensationMode::None && mode != DenoisingMode::Spacial;
+            let pilot = matches!(prefilter, PrefilterMode::NlmSpatial { .. });
+            let per_plane_strength = raw.luma_strength.is_some() || raw.chroma_strength.is_some();
+            if intent == ChannelIntent::Chroma && pilot && guides_motion && per_plane_strength {
+                tracing::warn!(
+                    "prefilter nlm with channel_mode chroma searches luma motion on a pilot at the \
+                     chroma strength, so chroma differs from a lumachroma run with per-plane strengths"
+                );
+            }
 
             let nlm = NlmeansOptions {
                 prefilter,
@@ -447,7 +427,6 @@ pub fn plane_options_from(
             }
         },
         AlgorithmKind::Nl4d => {
-            let psy = psy_options(raw)?;
             let options = Nl4dOptions {
                 sigma: raw.sigma.map(|value| value as f32),
                 sigma_scale: raw
@@ -471,11 +450,11 @@ pub fn plane_options_from(
                     Some(enabled) => enabled,
                     None => Nl4dOptions::default().noise_map,
                 },
-                psy,
                 pooled_threshold: match raw.pooled_threshold {
                     Some(enabled) => enabled,
                     None => Nl4dOptions::default().pooled_threshold,
                 },
+                motion: motion_search,
                 ..Nl4dOptions::default()
             };
 

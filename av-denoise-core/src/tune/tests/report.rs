@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::tune::report::{format_report, replay, replay_profiles};
-use crate::tune::sites::{Centre, CollabVariant, NeighbourWalk, RegulariseCandidate, Walk};
+use crate::tune::sites::{Centre, CollabVariant, NeighbourWalk, TruemotionCandidate, Walk};
 use crate::tune::{
     BASELINE_FAMILY,
     Basis,
@@ -497,12 +497,12 @@ fn collab_nanos(variant: CollabVariant) -> u64 {
 
 /// The cooperative family leads, and the serial family stays shut although it holds a member faster
 /// than its representative.
-fn regularise_nanos(candidate: RegulariseCandidate) -> u64 {
+fn truemotion_nanos(candidate: TruemotionCandidate) -> u64 {
     match candidate {
-        RegulariseCandidate::Serial8x8 => 10_000_000,
-        RegulariseCandidate::Serial8x4 => 9_800_000,
-        RegulariseCandidate::Serial4x4 => 10_400_000,
-        RegulariseCandidate::Coop32 => 9_000_000,
+        TruemotionCandidate::Serial8x8 => 10_000_000,
+        TruemotionCandidate::Serial8x4 => 9_800_000,
+        TruemotionCandidate::Serial4x4 => 10_400_000,
+        TruemotionCandidate::Coop32 => 9_000_000,
     }
 }
 
@@ -533,10 +533,10 @@ fn replay_matches_the_families_search_without_an_illegal_representative() {
 
 #[test]
 fn replay_matches_the_families_search_on_a_flat_site() {
-    let allowed = RegulariseCandidate::ALL;
+    let allowed = TruemotionCandidate::ALL;
     let neutral = PriorityTable::neutral();
 
-    assert_replay_matches_the_search(allowed, regularise_nanos, neutral);
+    assert_replay_matches_the_search(allowed, truemotion_nanos, neutral);
 }
 
 #[test]

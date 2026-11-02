@@ -6,7 +6,6 @@
 //!
 //! - [Nl4d], the engine
 //! - [Nl4dOptions] and the per-preset defaults it is built from
-//! - [PsyParams], the perceptual tuning that filters each area by what it looks like
 //! - film grain measurement for AV1 grain tables
 
 mod collab_pass;
@@ -17,8 +16,6 @@ pub(crate) mod harness;
 pub(crate) mod kernels;
 mod options;
 pub(crate) mod params;
-mod psy;
-mod regularise;
 pub(crate) mod snapshot;
 
 // The tests run against a real GPU runtime, so they need a wgpu-backed feature.
@@ -27,13 +24,14 @@ pub(crate) mod tests;
 
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::denoiser::Nl4dDenoiser;
-pub use self::engine::Nl4d;
+pub(crate) use self::engine::Nl4d;
+pub use self::options::Nl4dOptions;
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+pub(crate) use self::options::nl4d_default_lambda_ht;
 pub(crate) use self::options::nl4d_pool_ratio;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::options::resolve_params;
-pub use self::options::{Nl4dOptions, nl4d_default_lambda_ht};
 #[cfg(test)]
 pub(crate) use self::params::MAX_KAISER_BETA;
 pub(crate) use self::params::Nl4dParams;
-pub use self::psy::PsyParams;
 pub(crate) use self::snapshot::MotionSnapshot;

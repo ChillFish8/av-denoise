@@ -81,10 +81,10 @@ def test_every_preset_literal_is_accepted():
 
 
 @pytest.mark.gpu
-def test_nl4d_rejects_presets_other_than_base():
+def test_nl4d_rejects_presets_other_than_base_and_slow():
     src = synthetic_clip()
     for preset in set(get_args(Preset)) - set(get_args(Nl4dPreset)):
-        with pytest.raises(vs.Error, match="base preset"):
+        with pytest.raises(vs.Error, match="base and slow presets"):
             Nl4d(src, preset=preset).get_frame(0)
 
 

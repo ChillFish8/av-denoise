@@ -66,6 +66,7 @@ fn sampling_leaves_chunked_motion_compensation_unchanged() {
         blksize: 16,
         overlap: 8,
         search_radius: 4,
+        max_search_escalation: 4,
         pyramid_levels: 2,
         estimation: MotionEstimation::Direct,
     };

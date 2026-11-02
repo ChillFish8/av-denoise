@@ -2,7 +2,16 @@
 
 use std::io::{Cursor, Read};
 
-use av_denoise::{Algorithm, DenoisingMode, Depth, FrameLayout, Nl4dOptions, PlaneOptions, Subsampling};
+use av_denoise::{
+    Algorithm,
+    ChromaSiting,
+    DenoisingMode,
+    Depth,
+    FrameLayout,
+    Nl4dOptions,
+    PlaneOptions,
+    Subsampling,
+};
 
 use super::{SCENE_CLIP_SIZE, SharedBuffer, frame_count, multi_scene_clip, temporal_opts};
 use crate::pipeline::source::open_y4m;
@@ -111,6 +120,7 @@ fn scene_clip_layout() -> FrameLayout {
         height: SCENE_CLIP_SIZE as u32,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

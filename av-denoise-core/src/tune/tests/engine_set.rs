@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
-use crate::engine::{DevicePlane, EngineSpec, Geometry, SampleFormat};
-use crate::nlmeans::{ChannelMode, DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
+use crate::engine::{ChromaLayout, ChromaSiting, DevicePlane, EngineSpec, Geometry, SampleFormat};
+use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansOptions};
 use crate::tune::engine_set::EngineSet;
 use crate::tune::setup::KernelSetup;
 use crate::tune::{TuningConfig, TuningFrame, TuningMode};
@@ -15,22 +15,27 @@ fn fill_words(words: &mut [u32], value: u32) {
     words[ABSOLUTE_POS_X as usize] = value;
 }
 
-fn spec(mode: DenoisingMode) -> EngineSpec {
-    let geometry = Geometry {
-        width: WIDTH,
-        height: HEIGHT,
-        channels: ChannelMode::Luma,
+fn gray_geometry(width: u32, height: u32) -> Geometry {
+    Geometry {
+        width,
+        height,
+        chroma: ChromaLayout::Gray,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
-    };
+        chroma_siting: ChromaSiting::Unknown,
+    }
+}
+
+fn spec(mode: DenoisingMode) -> EngineSpec {
     let options = NlmeansOptions {
         mode,
         ..NlmeansOptions::default()
     };
 
     EngineSpec::Nlmeans {
-        algorithm: NlmeansAlgorithm::Fast(options),
-        geometry,
+        luma: Some(NlmeansAlgorithm::Fast(options)),
+        chroma: None,
+        geometry: gray_geometry(WIDTH, HEIGHT),
     }
 }
 
@@ -113,7 +118,7 @@ fn copied_frames_are_independent_of_their_source() {
         );
     }
 
-    let copied = frame.planes_for(0, specs[0].geometry());
+    let copied = frame.planes_for(0, &specs[0]);
     let read = client
         .read_one(copied[0].handle().clone())
         .expect("the copy reads");
@@ -159,28 +164,66 @@ fn an_empty_set_is_an_error() {
 #[test]
 fn copies_of_an_odd_sized_plane_match_their_source_byte_for_byte() {
     let client = crate::testing::test_client();
-    let geometry = Geometry {
-        width: 61,
-        height: 37,
-        channels: ChannelMode::Luma,
-        input: SampleFormat::U8,
-        output: SampleFormat::U8,
-    };
     let specs = [EngineSpec::Nlmeans {
-        algorithm: NlmeansAlgorithm::Fast(NlmeansOptions::default()),
-        geometry,
+        luma: Some(NlmeansAlgorithm::Fast(NlmeansOptions::default())),
+        chroma: None,
+        geometry: gray_geometry(61, 37),
     }];
-    let bytes = geometry.input.plane_bytes(geometry.pixels()) as usize;
+    let geometry = specs[0].geometry();
+    let bytes = geometry.plane_bytes(0, SampleFormat::U8);
     let pattern: Vec<u8> = (0..bytes).map(|index| (index * 7 + index / 251) as u8).collect();
     let source = client.create_from_slice(&pattern);
     let planes = [DevicePlane::new(&source, 61, 37)];
 
     let frame = TuningFrame::copy_from(&client, &specs, &[&planes]).expect("the frame copies");
 
-    let copied = frame.planes_for(0, geometry);
+    let copied = frame.planes_for(0, &specs[0]);
     let read = client
         .read_one(copied[0].handle().clone())
         .expect("the copy reads");
 
     assert_eq!(read.to_vec(), pattern);
+}
+
+#[test]
+fn copies_of_a_yuv_frame_keep_each_planes_size() {
+    let client = crate::testing::test_client();
+    let geometry = Geometry {
+        chroma: ChromaLayout::Yuv420,
+        ..gray_geometry(61, 37)
+    };
+    let specs = [EngineSpec::Nlmeans {
+        luma: Some(NlmeansAlgorithm::Fast(NlmeansOptions::default())),
+        chroma: None,
+        geometry,
+    }];
+    let patterns: Vec<Vec<u8>> = (0..3)
+        .map(|plane| {
+            let bytes = geometry.plane_bytes(plane, SampleFormat::U8);
+            (0..bytes).map(|index| (index * 3 + plane) as u8).collect()
+        })
+        .collect();
+    let sources: Vec<_> = patterns
+        .iter()
+        .map(|pattern| client.create_from_slice(pattern))
+        .collect();
+    let planes = [
+        DevicePlane::new(&sources[0], 61, 37),
+        DevicePlane::new(&sources[1], 31, 19),
+        DevicePlane::new(&sources[2], 31, 19),
+    ];
+
+    let frame = TuningFrame::copy_from(&client, &specs, &[&planes]).expect("the frame copies");
+
+    let copied = frame.planes_for(0, &specs[0]);
+    let sizes: Vec<(u32, u32)> = copied
+        .iter()
+        .map(|plane| (plane.width(), plane.height()))
+        .collect();
+    assert_eq!(sizes, [(61, 37), (31, 19), (31, 19)]);
+
+    for (plane, pattern) in copied.iter().zip(&patterns) {
+        let read = client.read_one(plane.handle().clone()).expect("the copy reads");
+        assert_eq!(&read.to_vec(), pattern);
+    }
 }

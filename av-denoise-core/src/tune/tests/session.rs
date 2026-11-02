@@ -7,11 +7,12 @@ use cubecl::server::Handle;
 
 use super::fixtures::{
     AccumulateSpec,
-    RegulariseContent,
-    RegulariseSpec,
+    TruemotionContent,
+    TruemotionSpec,
+    TruemotionStage,
     WindowSpec,
     accumulate_site,
-    regularise_site,
+    truemotion_site,
     window_site,
 };
 use super::probe::{ProbeCandidate, ProbeSite, small_device_limits};
@@ -271,14 +272,15 @@ fn candidate_timing_leaves_the_real_outputs_untouched() {
 #[test]
 fn deterministic_tuning_never_ranks_a_rounding_candidate() {
     let client = test_client();
-    let spec = RegulariseSpec {
+    let spec = TruemotionSpec {
         width: 128,
         height: 64,
-        content: RegulariseContent::Textured,
+        content: TruemotionContent::Textured,
         field_lambda: 1.0,
         neighbours: 4,
+        stage: TruemotionStage::Shipped,
     };
-    let site = regularise_site(&client, &spec);
+    let site = truemotion_site(&client, &spec);
     let key = site.key();
     let limits = DeviceLimits::from_client(&client);
     let fitted = fit_candidates(&site, &limits).expect("the baseline fits");

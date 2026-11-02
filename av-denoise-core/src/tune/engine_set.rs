@@ -11,9 +11,9 @@ use super::gpu::sync;
 use super::identity::describe;
 use super::ledger::TuneLedger;
 use super::plan::PipelineProfile;
-use super::profile_key::profile_key;
+use super::profile_key::{profile_key, spec_profile_keys};
 use super::setup::{KernelSetup, engine_kernels};
-use crate::engine::{DevicePlane, Engine, EngineSpec, WindowSpan};
+use crate::engine::{Engine, EngineSpec, WindowSpan};
 use crate::error::Error;
 
 /// The engines of one group, driven together on one device.
@@ -59,12 +59,14 @@ impl EngineSet {
         let mut scratch = Vec::with_capacity(specs.len());
 
         for spec in specs {
-            let key = profile_key(spec);
-            let kernels = engine_kernels(setup, config, &key, &profile);
-            let engine = spec.build(client, kernels)?;
+            let engine = spec.build_quiet(client, |pass| {
+                let key = profile_key(pass);
+                engine_kernels(setup, config, &key, &profile)
+            })?;
             engines.push(engine);
 
-            let handles = scratch_planes(client, spec);
+            let geometry = spec.geometry();
+            let handles = geometry.empty_planes(client, geometry.output);
             scratch.push(handles);
         }
 
@@ -90,8 +92,7 @@ impl EngineSet {
         let mut ready_counts = Vec::with_capacity(self.engines.len());
 
         for (index, engine) in self.engines.iter_mut().enumerate() {
-            let geometry = self.specs[index].geometry();
-            let planes = frame.planes_for(index, geometry);
+            let planes = frame.planes_for(index, &self.specs[index]);
             let ready = engine.push(&planes)?;
             ready_counts.push(ready);
         }
@@ -109,7 +110,7 @@ impl EngineSet {
 
         for (index, engine) in self.engines.iter_mut().enumerate() {
             let geometry = self.specs[index].geometry();
-            let planes = scratch_device_planes(&self.scratch[index], geometry.width, geometry.height);
+            let planes = geometry.device_planes(0, &self.scratch[index]);
 
             for _ in 0..ready {
                 engine.emit_into(&planes)?;
@@ -155,7 +156,7 @@ impl EngineSet {
     }
 
     pub(crate) fn profile_keys(&self) -> Vec<String> {
-        self.specs.iter().map(profile_key).collect()
+        spec_profile_keys(&self.specs)
     }
 
     pub(crate) fn device(&self) -> &DeviceProfile {
@@ -179,19 +180,4 @@ impl EngineSet {
 
         Self::build(&self.device, &self.client, &self.specs, config, &setup)
     }
-}
-
-fn scratch_planes(client: &Client, spec: &EngineSpec) -> Vec<Handle> {
-    let geometry = spec.geometry();
-    let bytes = geometry.output.plane_bytes(geometry.pixels()) as usize;
-    let count = geometry.channels.count() as usize;
-
-    (0..count).map(|_| client.empty(bytes)).collect()
-}
-
-fn scratch_device_planes(handles: &[Handle], width: u32, height: u32) -> Vec<DevicePlane<'_>> {
-    handles
-        .iter()
-        .map(|handle| DevicePlane::new(handle, width, height))
-        .collect()
 }

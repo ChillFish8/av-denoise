@@ -1,6 +1,8 @@
 use cubecl::prelude::*;
 use cubecl::terminate;
 
+use super::helpers::clamp_i32;
+
 /// Builds the next pyramid level by averaging each 2x2 group of luma pixels.
 ///
 /// `src_frame` and `dst_frame` are slots in the per-level frame rings. An odd last row or column
@@ -60,4 +62,71 @@ pub fn mc_extract_luma<N: Size>(
 
     let dst_idx = (dst_frame * height + y) * width + x;
     dst[dst_idx as usize] = pixel.extract(0usize);
+}
+
+/// Averages each pixel with its row neighbours up to `radius` either side, clamped to the frame.
+///
+/// The taps are summed left to right, so the result is the same on every run.
+#[cube(launch_unchecked)]
+pub fn mc_box_rows(
+    src: &[f32],
+    dst: &mut [f32],
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] radius: u32,
+) {
+    let x = ABSOLUTE_POS_X;
+    let y = ABSOLUTE_POS_Y;
+
+    if x >= width || y >= height {
+        terminate!();
+    }
+
+    let taps = comptime!(2 * radius + 1);
+    let inverse_taps = comptime!(1.0f32 / taps as f32);
+    let row_base = y * width;
+    let mut total = 0.0f32;
+
+    for tap in 0..taps {
+        let source_x = x as i32 + tap as i32 - radius as i32;
+        let clamped_x = clamp_i32(source_x, width as i32) as u32;
+        total += src[(row_base + clamped_x) as usize];
+    }
+
+    dst[(row_base + x) as usize] = total * inverse_taps;
+}
+
+/// Writes `src` minus its local mean, the box `radius` either side on both axes, to `dst`.
+///
+/// `rows` holds `src` already averaged along each row by [mc_box_rows]. Taps are summed top to
+/// bottom and clamped to the frame.
+#[cube(launch_unchecked)]
+pub fn mc_high_pass_cols(
+    src: &[f32],
+    rows: &[f32],
+    dst: &mut [f32],
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+    #[comptime] radius: u32,
+) {
+    let x = ABSOLUTE_POS_X;
+    let y = ABSOLUTE_POS_Y;
+
+    if x >= width || y >= height {
+        terminate!();
+    }
+
+    let taps = comptime!(2 * radius + 1);
+    let inverse_taps = comptime!(1.0f32 / taps as f32);
+    let mut total = 0.0f32;
+
+    for tap in 0..taps {
+        let source_y = y as i32 + tap as i32 - radius as i32;
+        let clamped_y = clamp_i32(source_y, height as i32) as u32;
+        total += rows[(clamped_y * width + x) as usize];
+    }
+
+    let index = (y * width + x) as usize;
+    let local_mean = total * inverse_taps;
+    dst[index] = src[index] - local_mean;
 }

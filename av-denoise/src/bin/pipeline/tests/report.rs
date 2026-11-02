@@ -14,19 +14,18 @@ use crate::pipeline::source::open_y4m;
 #[cfg(feature = "vulkan")]
 use crate::pipeline::{RunSettings, run_with};
 
-fn plane(blocked_ms: u64, submit_ms: u64, busy_ms: Option<u64>, frames: u64) -> PlaneTiming {
-    PlaneTiming {
-        blocked: Duration::from_millis(blocked_ms),
-        submit: Duration::from_millis(submit_ms),
-        device_busy: busy_ms.map(Duration::from_millis),
-        frames,
-    }
+fn plane(busy_ms: Option<u64>) -> PlaneTiming {
+    let device_busy = busy_ms.map(Duration::from_millis);
+    PlaneTiming { device_busy }
 }
 
 fn summary(luma_busy: Option<u64>) -> RunSummary {
     let planes = PlanarTiming {
-        luma: Some(plane(100, 400, luma_busy, 50)),
-        chroma: Some(plane(50, 200, Some(250), 50)),
+        blocked: Duration::from_millis(150),
+        submit: Duration::from_millis(600),
+        frames: 50,
+        luma: Some(plane(luma_busy)),
+        chroma: Some(plane(Some(250))),
     };
     let worker = WorkerTiming {
         wall: Duration::from_secs(1),
@@ -44,16 +43,25 @@ fn summary(luma_busy: Option<u64>) -> RunSummary {
 }
 
 #[test]
-fn the_report_gives_per_frame_host_time_and_busy_share() {
+fn the_report_gives_shared_host_time_and_per_plane_busy_share() {
     let measured = summary(Some(1000));
     let report = format_report(&measured);
 
     assert!(report.contains("50 frames in 2.00 s (25.00 fps)"), "{report}");
     assert!(report.contains("luma"), "{report}");
-    assert!(report.contains("2.00 ms"), "luma blocked per frame: {report}");
-    assert!(report.contains("8.00 ms"), "luma submit per frame: {report}");
+    assert!(report.contains("blocked 3.00 ms"), "blocked per frame: {report}");
+    assert!(report.contains("submit 12.00 ms"), "submit per frame: {report}");
     assert!(report.contains("50.0%"), "luma busy share: {report}");
     assert!(report.contains("12.5%"), "chroma busy share: {report}");
+}
+
+#[test]
+fn host_time_is_printed_once_for_every_plane() {
+    let measured = summary(None);
+    let report = format_report(&measured);
+    let host_lines = report.lines().filter(|line| line.contains("blocked")).count();
+
+    assert_eq!(host_lines, 1, "{report}");
 }
 
 #[test]

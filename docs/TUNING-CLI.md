@@ -24,9 +24,10 @@ you're following the guide for the algorithm you're using specifically.
 av-denoise nl4d --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
 ```
 
-NL4D only runs the `base` preset. `--temporal-radius` sets how many neighbouring frames are searched
-on each side, between 1 and 8, and defaults to 2. NL4D always needs at least 1, since it has nothing
-to group without neighbours.
+NL4D runs the `base` and `slow` presets. `slow` widens the search for motion blocks whose match
+fails, up to `--mc-max-search-escalation` (8), and runs slower. `--temporal-radius` sets how many
+neighbouring frames are searched on each side, between 1 and 8, and defaults to 2. NL4D always needs
+at least 1, since it has nothing to group without neighbours.
 
 ### The NL4D dials
 
@@ -45,40 +46,25 @@ applies on top of whatever is pinned.
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates.
 
 **`--field-lambda` pulls each block's motion vector toward its neighbours.** `1.0` (the library
-default) is the shipped calibration and smooths the tracked field. Raise it further on noisy or
-flat content where vectors wander, at the cost of following small objects less closely. `0` turns
-the smoothing off and leaves the tracked field as it is.
+default) is the shipped calibration and smooths the tracked field, more strongly as the noise
+grows. Raise it further on noisy or flat content where vectors wander, at the cost of following
+small objects less closely. `0` turns the smoothing off and leaves the tracked field as it is.
 
 **`--no-noise-map` turns off the luma noise map.** The noise map is on by default. It scales the
-luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
-more lightly.
+luma threshold by how noisy each brightness level and colour is, filtering noisy ones harder and
+clean ones more lightly. Turning it off also turns off the luma colour gains. Chroma thresholds
+always follow each plane's colour grain.
 
 **`--no-pooled-threshold` turns off the pooled threshold.** It is on by default. Each frequency
 is judged together with its neighbours rather than alone, so faint lines and fine texture
-survive where each frequency on its own would fall under the threshold. Turn it off, and set
-`--enable-psy --psy-flat-boost 1.5 --psy-flat-texture-cut 1 --psy-line-ring 0`, to get the output
-of earlier releases.
-
-**`--enable-psy` turns on the psy options.** They are off by default. Flat, grainy areas such as
-skies are filtered harder, 1.75 times by default on luma and 1.5 times on chroma. Textured dark
-areas are filtered more gently, at 0.65 times by default, fading out between luma 128 and 160. The
-areas within 16 pixels of a strong line skip shadow soften and the flat texture cut, so the grain
-beside dark ink lines is filtered like the rest of the frame. `--no-noise-map` turns all of it off.
-
-**`--psy-flat-boost`, `--psy-chroma-flat-boost`, `--psy-shadow-soften`, `--psy-flat-texture-cut`
-and `--psy-line-ring` tune the psy options.** Each needs `--enable-psy`, and `1` (or `0` for the
-line ring) turns that one off. `--psy-flat-texture-cut` keeps faint texture out of the flat areas.
-Grain points every which way, while faint lines and edges share one direction, so an area whose
-surroundings line up at or above the cut, 0.21 by default, is filtered as texture rather than
-boosted as flat. Lower it to keep more faint texture in dark scenes. `--psy-line-ring` sets how
-many pixels around a strong line skip shadow soften and the flat texture cut, between 0 and 64.
+survive where each frequency on its own would fall under the threshold.
 
 **`--unstable-export-av1-fgs <PATH>` keeps the look of film grain.** It writes an AV1 film grain
 table to PATH. The flag is unstable, so its name and output may change between releases. The table describes the source's luma grain, minus whatever the output
-still keeps. Add it to a finished AV1 encode with `grav1synth apply`. The decoder then adds
-matching grain back, so the encode stays clean while the picture keeps its grain. SVT-AV1's
-`--fgs-table` applies only the table's first entry to every frame, so it suits a single-scene
-table only. The y4m output is the same with or without the flag. It is rejected with
+still keeps. Add it to a finished AV1 encode with `regrain apply`, which applies each scene's
+entry. The decoder then adds matching grain back, so the encode stays clean while the picture
+keeps its grain. SVT-AV1's `--fgs-table` and `grav1synth apply` apply only the table's first entry
+to every frame, so they suit a single-scene table only. The y4m output is the same with or without the flag. It is rejected with
 `--channel-mode chroma`, and a failed run leaves no table.
 
 The table's timestamps count this run's output frames from 0 at the source frame rate. It fits
@@ -93,8 +79,9 @@ sources, or an encode of the original file when av-denoise dropped frames that c
 - **`--c-min`** skips a neighbour block below its confidence floor entirely. A skip that leaves a
   volume short of frames makes its group filter from the centre frame alone, so this can change
   the output.
-- **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`** tune
-  the motion machinery's internals, changing any of these will likely invalidate all other defaults.
+- **`--thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-max-search-escalation`,
+  `--mc-pyramid-levels`** tune the motion machinery's internals, changing any of these will likely
+  invalidate all other defaults.
 - **`--sigma-scale`**, and it does something different. The lambda dials decide how
   aggressive to be at a given noise level. `--sigma-scale` corrects the noise level itself. That
   estimate also feeds the motion confidence scoring, so when the whole result reads uniformly
@@ -110,7 +97,8 @@ av-denoise nlmeans --input noisy.mkv | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 cle
 
 `--preset` picks the variant as well as the window: `veryfast` runs the `fast` variant with no
 temporal window at all, and everything above it runs NLMeans-HQ with a window from 3 frames at `fast`
-to 17 at `veryslow`.
+to 17 at `veryslow`. With `--motion-compensation`, `slow` and `veryslow` also widen the search for
+motion blocks whose match fails, up to `--mc-max-search-escalation` (8), and run slower.
 
 | Symptom                        | First thing to try                 | Second                      |
 |--------------------------------|------------------------------------|-----------------------------|
@@ -177,8 +165,8 @@ makes things worse.
   (`--hq-sigma-scale`) instead.
 - **`--hq-no-noise-floor`, `--hq-no-auto-strength`, `--hq-no-temporal-confidence`** switch off
   measured machinery. They are comparison and debugging switches, not quality options.
-- **`--hq-thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels`**
-  tune the motion machinery's internals. The defaults are calibrated together.
+- **`--hq-thsad-scale`, `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-max-search-escalation`,
+  `--mc-pyramid-levels`** tune the motion machinery's internals. The defaults are calibrated together.
 - **`--prefilter`** (the NLMeans pilot and bilateral modes) changes what patch matching sees, and
   under NLMeans-HQ's calibrated automatic handling both modes measured neutral at best on
   default settings. They exist for experimentation and for library users supplying their own

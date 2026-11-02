@@ -133,6 +133,11 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
         let noise = sad_floor_buffer(&client, DERIVED_SAD_FLOOR, NOISE_FLOOR);
         let noise_arg = BufferArg::from_raw_parts(noise, DERIVED_WORDS as usize);
 
+        let sad_placeholder = client.empty(size_of::<f32>());
+        let predictions_placeholder = client.empty(size_of::<f32>());
+        let sad_arg = BufferArg::from_raw_parts(sad_placeholder, 1);
+        let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, 1);
+
         mc_block_match_fine::launch_unchecked(
             &client,
             grid,
@@ -141,8 +146,12 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
             table_arg,
             mv_field_arg,
             confidence_arg,
+            sad_arg,
+            predictions_arg,
             CENTRE_SLOT,
             true,
+            false,
+            false,
             noise_arg,
             DERIVED_SAD_FLOOR,
             THSAD,
@@ -180,6 +189,8 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
             let centre_arg = BufferArg::from_raw_parts(centre, level_len);
             let neighbour_arg = BufferArg::from_raw_parts(neighbour, level_len);
             let reference_mv_arg = BufferArg::from_raw_parts(reference_mv_handle, 2 * blocks);
+            let reference_predictions = client.empty(size_of::<f32>());
+            let reference_predictions_arg = BufferArg::from_raw_parts(reference_predictions, 1);
             let reference_conf_arg = BufferArg::from_raw_parts(reference_conf_handle, blocks);
 
             reference_block_match_fine::launch_unchecked(
@@ -190,6 +201,9 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
                 neighbour_arg,
                 reference_mv_arg,
                 reference_conf_arg,
+                reference_predictions_arg,
+                0.0,
+                false,
                 true,
                 NOISE_FLOOR,
                 THSAD,
@@ -263,6 +277,11 @@ fn run_coarse_merged_against_reference(threads: u32) {
         let table_arg = BufferArg::from_raw_parts(table, neighbours);
         let mv_field_arg = BufferArg::from_raw_parts(mv_field_handle, unwritten_len);
 
+        let noise_placeholder = client.empty(size_of::<f32>());
+        let predictions_placeholder = client.empty(size_of::<f32>());
+        let noise_arg = BufferArg::from_raw_parts(noise_placeholder, 1);
+        let predictions_arg = BufferArg::from_raw_parts(predictions_placeholder, 1);
+
         mc_block_match_coarse::launch_unchecked(
             &client,
             grid,
@@ -270,7 +289,11 @@ fn run_coarse_merged_against_reference(threads: u32) {
             pyramid_arg,
             table_arg,
             mv_field_arg,
+            noise_arg,
+            predictions_arg,
             CENTRE_SLOT,
+            1.0,
+            false,
             level_width,
             level_height,
             level_offset as u32,
@@ -302,6 +325,8 @@ fn run_coarse_merged_against_reference(threads: u32) {
             let centre_arg = BufferArg::from_raw_parts(centre, level_len);
             let neighbour_arg = BufferArg::from_raw_parts(neighbour, level_len);
             let reference_mv_arg = BufferArg::from_raw_parts(reference_mv_handle, 2 * fine_blocks);
+            let reference_predictions = client.empty(size_of::<f32>());
+            let reference_predictions_arg = BufferArg::from_raw_parts(reference_predictions, 1);
 
             reference_block_match_coarse::launch_unchecked(
                 &client,
@@ -310,6 +335,9 @@ fn run_coarse_merged_against_reference(threads: u32) {
                 centre_arg,
                 neighbour_arg,
                 reference_mv_arg,
+                reference_predictions_arg,
+                0.0,
+                false,
                 level_width,
                 level_height,
                 coarse_blksize,

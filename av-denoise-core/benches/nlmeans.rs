@@ -6,6 +6,7 @@ use av_denoise_core::bench_api::prefilter::bilateral_radius;
 use av_denoise_core::bench_api::{
     BLOCK_X,
     BLOCK_Y,
+    ChannelMode,
     Device,
     HostIo,
     NlmDenoiser,
@@ -13,7 +14,7 @@ use av_denoise_core::bench_api::{
     start_read,
     wait_read,
 };
-use av_denoise_core::{ChannelMode, PrefilterMode, testing};
+use av_denoise_core::{PrefilterMode, testing};
 use clap::Parser;
 use cubecl::prelude::*;
 

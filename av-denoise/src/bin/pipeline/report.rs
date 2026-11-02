@@ -1,7 +1,7 @@
 use std::time::Duration;
 
+use av_denoise::PlanarTiming;
 use av_denoise::accelerate::Accelerator;
-use av_denoise::{PlanarTiming, PlaneTiming};
 
 /// One frame in this many has its device time sampled when the report is on.
 pub const DEVICE_SAMPLE_EVERY: u32 = 8;
@@ -23,13 +23,7 @@ pub struct WorkerTiming {
 impl WorkerTiming {
     /// Host time spent inside the denoiser, blocked and building work together.
     pub fn denoising(&self) -> Duration {
-        let mut total = Duration::ZERO;
-
-        for (_, plane) in self.planes.planes() {
-            total += plane.blocked + plane.submit;
-        }
-
-        total
+        self.planes.blocked + self.planes.submit
     }
 
     /// Wall time that none of the measured parts covers.
@@ -50,42 +44,46 @@ pub struct RunSummary {
     pub workers: Vec<WorkerTiming>,
 }
 
-/// One plane's timing summed over every worker.
+/// The shared host time summed over every worker.
 #[derive(Debug, Clone, Copy, Default)]
-struct PlaneTotals {
+struct HostTotals {
     blocked: Duration,
     submit: Duration,
-    device_busy: Option<Duration>,
     frames: u64,
 }
 
-impl PlaneTotals {
-    fn add(&mut self, plane: PlaneTiming) {
-        self.blocked += plane.blocked;
-        self.submit += plane.submit;
-        self.frames += plane.frames;
+fn host_totals(workers: &[WorkerTiming]) -> HostTotals {
+    let mut totals = HostTotals::default();
 
-        if let Some(busy) = plane.device_busy {
-            let total = self.device_busy.unwrap_or_default() + busy;
-            self.device_busy = Some(total);
-        }
+    for worker in workers {
+        totals.blocked += worker.planes.blocked;
+        totals.submit += worker.planes.submit;
+        totals.frames += worker.planes.frames;
     }
+
+    totals
 }
 
-/// Every plane's totals over all workers, in luma, chroma order.
-fn plane_totals(workers: &[WorkerTiming]) -> Vec<(&'static str, PlaneTotals)> {
-    let mut totals: Vec<(&'static str, PlaneTotals)> = Vec::new();
+/// Every plane's device time over all workers, in luma, chroma order.
+///
+/// A plane's time is `None` when no worker sampled it.
+fn plane_device_totals(workers: &[WorkerTiming]) -> Vec<(&'static str, Option<Duration>)> {
+    let mut totals: Vec<(&'static str, Option<Duration>)> = Vec::new();
 
     for worker in workers {
         for (name, plane) in worker.planes.planes() {
             let position = totals.iter().position(|(existing, _)| *existing == name);
-            match position {
-                Some(index) => totals[index].1.add(plane),
+            let index = match position {
+                Some(index) => index,
                 None => {
-                    let mut fresh = PlaneTotals::default();
-                    fresh.add(plane);
-                    totals.push((name, fresh));
+                    totals.push((name, None));
+                    totals.len() - 1
                 },
+            };
+
+            if let Some(busy) = plane.device_busy {
+                let total = totals[index].1.unwrap_or_default() + busy;
+                totals[index].1 = Some(total);
             }
         }
     }
@@ -141,18 +139,19 @@ pub fn format_report(summary: &RunSummary) -> String {
     );
     push_line(&mut report, &heading);
 
-    let columns = format!(
-        "  {:<8}{:>16}{:>16}{:>10}",
-        "plane", "blocked/frame", "submit/frame", "gpu busy"
-    );
+    let host = host_totals(&summary.workers);
+    let blocked = per_frame_ms(host.blocked, host.frames);
+    let submit = per_frame_ms(host.submit, host.frames);
+    let host_line = format!("  host per frame, all planes: blocked {blocked:.2} ms, submit {submit:.2} ms");
+    push_line(&mut report, &host_line);
+
+    let columns = format!("  {:<8}{:>10}", "plane", "gpu busy");
     push_line(&mut report, &columns);
 
-    let totals = plane_totals(&summary.workers);
-    for (name, plane) in totals {
-        let blocked = per_frame_ms(plane.blocked, plane.frames);
-        let submit = per_frame_ms(plane.submit, plane.frames);
-        let busy = busy_share(plane.device_busy, summary.wall, streams);
-        let row = format!("  {name:<8}{blocked:>13.2} ms{submit:>13.2} ms{busy:>10}");
+    let device_totals = plane_device_totals(&summary.workers);
+    for (name, device_busy) in device_totals {
+        let busy = busy_share(device_busy, summary.wall, streams);
+        let row = format!("  {name:<8}{busy:>10}");
         push_line(&mut report, &row);
     }
 
@@ -170,8 +169,8 @@ pub fn format_report(summary: &RunSummary) -> String {
     }
 
     let legend = format!(
-        "Blocked and submit are host time per frame. GPU busy is device time over wall time, from \
-         timestamps on 1 in {DEVICE_SAMPLE_EVERY} frames.",
+        "Blocked and submit are host time per frame, shared by every plane. GPU busy is each plane's \
+         device time over wall time, from timestamps on 1 in {DEVICE_SAMPLE_EVERY} frames.",
     );
     push_line(&mut report, &legend);
 

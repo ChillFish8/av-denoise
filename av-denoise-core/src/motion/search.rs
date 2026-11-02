@@ -1,6 +1,6 @@
 /// The motion search's tuning, for a denoiser that always tracks motion.
 ///
-/// [MotionCompensationMode::Mvtools] carries the same five values.
+/// [MotionCompensationMode::Mvtools] carries the same values.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MotionSearch {
     /// The side length of each search block, in pixels at the finest pyramid level.
@@ -13,6 +13,11 @@ pub struct MotionSearch {
     ///
     /// The coarse pass uses the same radius on a half-size image, so its reach is twice as far.
     pub search_radius: u32,
+    /// The widest radius a block that fails its first search may search again with.
+    ///
+    /// It applies at the coarse and fine levels. It must lie between `search_radius` and
+    /// [MAX_SEARCH_RADIUS], and a value equal to `search_radius` never searches again.
+    pub max_search_escalation: u32,
     /// How many levels the pyramid has, up to [MAX_PYRAMID_LEVELS].
     ///
     /// `1` searches at full resolution only, and `2` adds a half-size coarse pass that seeds it.
@@ -27,6 +32,7 @@ impl Default for MotionSearch {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: DEFAULT_MAX_SEARCH_ESCALATION,
             pyramid_levels: 2,
             estimation: MotionEstimation::Auto,
         }
@@ -39,6 +45,7 @@ impl From<MotionSearch> for MotionCompensationMode {
             blksize: search.blksize,
             overlap: search.overlap,
             search_radius: search.search_radius,
+            max_search_escalation: search.max_search_escalation,
             pyramid_levels: search.pyramid_levels,
             estimation: search.estimation,
         }
@@ -65,6 +72,11 @@ pub enum MotionCompensationMode {
         ///
         /// The coarse pass uses the same radius on a half-size image, so its reach is twice as far.
         search_radius: u32,
+        /// The widest radius a block that fails its first search may search again with.
+        ///
+        /// It applies at the coarse and fine levels. It must lie between `search_radius` and
+        /// [MAX_SEARCH_RADIUS], and a value equal to `search_radius` never searches again.
+        max_search_escalation: u32,
         /// How many levels the pyramid has, up to [MAX_PYRAMID_LEVELS].
         ///
         /// `1` searches at full resolution only, and `2` adds a half-size coarse pass that seeds it.
@@ -154,6 +166,11 @@ pub const DEFAULT_OVERLAP: u32 = 8;
 /// With a two-level pyramid it reaches motion of roughly 12 pixels at full resolution.
 pub const DEFAULT_SEARCH_RADIUS: u32 = 4;
 
+/// The default widest radius a failing block searches again with.
+///
+/// It equals [DEFAULT_SEARCH_RADIUS], so by default a failing block does not search again.
+pub const DEFAULT_MAX_SEARCH_ESCALATION: u32 = DEFAULT_SEARCH_RADIUS;
+
 /// The default number of pyramid levels.
 ///
 /// One half-size coarse pass handles most heavy-motion anime while keeping kernel launches down.
@@ -185,6 +202,7 @@ impl MotionCompensationMode {
             blksize: DEFAULT_BLKSIZE,
             overlap: DEFAULT_OVERLAP,
             search_radius: DEFAULT_SEARCH_RADIUS,
+            max_search_escalation: DEFAULT_MAX_SEARCH_ESCALATION,
             pyramid_levels: DEFAULT_PYRAMID_LEVELS,
             estimation: MotionEstimation::Direct,
         }
@@ -213,6 +231,7 @@ impl MotionCompensationMode {
             blksize,
             overlap,
             search_radius,
+            max_search_escalation,
             pyramid_levels,
             estimation,
         } = *self
@@ -248,6 +267,13 @@ impl MotionCompensationMode {
         if search_radius == 0 || search_radius > MAX_SEARCH_RADIUS {
             anyhow::bail!(
                 "motion-compensation search_radius={search_radius} must be in 1..={MAX_SEARCH_RADIUS}"
+            );
+        }
+
+        if max_search_escalation < search_radius || max_search_escalation > MAX_SEARCH_RADIUS {
+            anyhow::bail!(
+                "motion-compensation max_search_escalation={max_search_escalation} must be between \
+                 search_radius, which is {search_radius}, and {MAX_SEARCH_RADIUS}"
             );
         }
 
@@ -287,6 +313,7 @@ mod tests {
             blksize: 2,
             overlap: 0,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };
@@ -299,6 +326,7 @@ mod tests {
             blksize: 9,
             overlap: 0,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };
@@ -311,6 +339,7 @@ mod tests {
             blksize: 16,
             overlap: 16,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };
@@ -324,6 +353,7 @@ mod tests {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };
@@ -336,10 +366,61 @@ mod tests {
             blksize: 16,
             overlap: 4,
             search_radius: 0,
+            max_search_escalation: 0,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         };
         assert!(mode.validate().is_err());
+    }
+
+    fn mode_with_ceiling(search_radius: u32, max_search_escalation: u32) -> MotionCompensationMode {
+        MotionCompensationMode::Mvtools {
+            blksize: 16,
+            overlap: 8,
+            search_radius,
+            max_search_escalation,
+            pyramid_levels: 2,
+            estimation: MotionEstimation::Direct,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_an_escalation_ceiling_below_the_search_radius() {
+        let mode = mode_with_ceiling(4, 3);
+        let error = mode.validate().unwrap_err().to_string();
+
+        assert!(error.contains("max_search_escalation"), "got {error}");
+    }
+
+    #[test]
+    fn validate_rejects_an_escalation_ceiling_above_max() {
+        let mode = mode_with_ceiling(4, MAX_SEARCH_RADIUS + 1);
+
+        assert!(mode.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_an_escalation_ceiling_from_the_search_radius_to_max() {
+        let at_radius = mode_with_ceiling(4, 4);
+        let at_max = mode_with_ceiling(4, MAX_SEARCH_RADIUS);
+
+        at_radius.validate().unwrap();
+        at_max.validate().unwrap();
+    }
+
+    #[test]
+    fn the_defaults_do_not_escalate() {
+        let search = MotionSearch::default();
+        let MotionCompensationMode::Mvtools {
+            max_search_escalation,
+            ..
+        } = MotionCompensationMode::mvtools_default()
+        else {
+            panic!("mvtools_default is Mvtools");
+        };
+
+        assert_eq!(search.max_search_escalation, search.search_radius);
+        assert_eq!(max_search_escalation, DEFAULT_SEARCH_RADIUS);
     }
 
     #[test]
@@ -348,6 +429,7 @@ mod tests {
             blksize: 16,
             overlap: 4,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 0,
             estimation: MotionEstimation::Direct,
         };
@@ -361,6 +443,7 @@ mod tests {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation,
         };
@@ -373,6 +456,7 @@ mod tests {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: expected_estimation,
         };
@@ -386,6 +470,7 @@ mod tests {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation,
         };
@@ -401,6 +486,7 @@ mod tests {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation,
         };
@@ -416,6 +502,7 @@ mod tests {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation,
         };
@@ -465,6 +552,7 @@ mod tests {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Auto,
         };
@@ -482,6 +570,7 @@ mod tests {
             blksize: 16,
             overlap: 8,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Auto,
         };

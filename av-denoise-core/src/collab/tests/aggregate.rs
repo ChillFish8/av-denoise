@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 use super::helpers::{make_client, noisy_flat_field};
-use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along, strength_map_dims};
+use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
 use crate::collab::kernels::aggregate::{
     ACCUM_SCALE,
     WEIGHT_GAIN,
@@ -15,7 +15,7 @@ use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 use crate::noise::tests::{CollabNoise, collab_noise_buffer};
-use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS, STRENGTH_MAP_OFF};
+use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS};
 
 /// Runs [collab_normalise] over hand-built accumulators.
 fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32) -> Vec<f32> {
@@ -259,7 +259,6 @@ fn run_scatter_stage_windowed(
         sigma: &sigma_values,
         weight_scale: scale,
         curve_valid: false,
-        map_mode: STRENGTH_MAP_OFF,
     };
     let noise_buf = collab_noise_buffer(&client, noise_values);
     let profile_bytes = f32::as_bytes(&profile);
@@ -271,11 +270,6 @@ fn run_scatter_stage_windowed(
     let curve_bytes = f32::as_bytes(&zeroed_curve);
     let zero_curve = client.create_from_slice(curve_bytes);
 
-    let (map_cols, map_rows) = strength_map_dims(width, height);
-    let map_len = (map_cols * map_rows) as usize;
-    let unit_map = vec![1.0f32; map_len];
-    let unit_map_bytes = f32::as_bytes(&unit_map);
-    let unit_map_buf = client.create_from_slice(unit_map_bytes);
     let output = client.empty(pixels * size_of::<f32>());
 
     let zero_dim = 256u32;
@@ -319,8 +313,9 @@ fn run_scatter_stage_windowed(
             BufferArg::from_raw_parts(conf_dummy, 1),
             BufferArg::from_raw_parts(slots_dummy, 1),
             BufferArg::from_raw_parts(noise_buf, DERIVED_WORDS as usize),
-            BufferArg::from_raw_parts(zero_curve, NOISE_CURVE_BINS),
-            BufferArg::from_raw_parts(unit_map_buf, map_len),
+            BufferArg::from_raw_parts(zero_curve.clone(), NOISE_CURVE_BINS),
+            BufferArg::from_raw_parts(zero_curve.clone(), 1),
+            BufferArg::from_raw_parts(zero_curve, 1),
             BufferArg::from_raw_parts(profile_buf, 8),
             BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             BufferArg::from_raw_parts(accum.clone(), pixels),
@@ -330,6 +325,8 @@ fn run_scatter_stage_windowed(
             0.0f32,
             2.7f32,
             ACCUM_SCALE,
+            0.0f32,
+            0u32,
             false,
             0u32,
             grid_frame_count,
@@ -346,8 +343,6 @@ fn run_scatter_stage_windowed(
             k_max,
             9u32,
             refs_x,
-            map_cols,
-            map_rows,
             0.0f32,
             false,
             variant,

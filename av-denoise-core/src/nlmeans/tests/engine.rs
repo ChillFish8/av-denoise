@@ -9,7 +9,7 @@ use super::helpers::{
     upload_planes,
 };
 use crate::bench_api::HostIo;
-use crate::engine::{DevicePlane, Engine, Geometry, SampleFormat};
+use crate::engine::{DevicePlane, PassEngine, PassGeometry, SampleFormat};
 use crate::error::Error;
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::{
@@ -30,8 +30,8 @@ const HEIGHT: u32 = 40;
 /// The pushes an HQ engine holds in its noise look-ahead before a frame enters its ring.
 const LOOKAHEAD: usize = LOOKAHEAD_FRAMES as usize;
 
-fn geometry(channels: ChannelMode) -> Geometry {
-    Geometry {
+fn geometry(channels: ChannelMode) -> PassGeometry {
+    PassGeometry {
         width: WIDTH,
         height: HEIGHT,
         channels,
@@ -555,14 +555,14 @@ fn u8_input_matches_f32_input_from_the_ingest_kernel() {
         })
         .collect();
 
-    let u8_geometry = Geometry {
+    let u8_geometry = PassGeometry {
         width: WIDTH,
         height: HEIGHT,
         channels: ChannelMode::Luma,
         input: SampleFormat::U8,
         output: SampleFormat::U8,
     };
-    let f32_geometry = Geometry {
+    let f32_geometry = PassGeometry {
         input: SampleFormat::F32,
         ..u8_geometry
     };
@@ -580,7 +580,7 @@ fn u8_input_matches_f32_input_from_the_ingest_kernel() {
 #[test]
 fn a_plane_past_u32_pixels_is_invalid_geometry() {
     let client = make_client();
-    let oversized = Geometry {
+    let oversized = PassGeometry {
         width: 65_536,
         height: 65_536,
         ..geometry(ChannelMode::Luma)
@@ -595,7 +595,7 @@ fn a_plane_past_u32_pixels_is_invalid_geometry() {
 #[test]
 fn a_ring_past_u32_elements_is_invalid_geometry() {
     let client = make_client();
-    let oversized = Geometry {
+    let oversized = PassGeometry {
         width: 32_768,
         height: 16_384,
         ..geometry(ChannelMode::Chroma)
@@ -613,7 +613,7 @@ fn a_ring_past_u32_elements_is_invalid_geometry() {
 #[test]
 fn a_motion_pyramid_past_u32_elements_is_invalid_geometry() {
     let client = make_client();
-    let oversized = Geometry {
+    let oversized = PassGeometry {
         width: 32_768,
         height: 24_576,
         ..geometry(ChannelMode::Luma)
@@ -641,7 +641,7 @@ fn hd_and_4k_geometries_construct() {
     let client = make_client();
 
     for (width, height) in [(1920, 1080), (3840, 2160)] {
-        let sized = Geometry {
+        let sized = PassGeometry {
             width,
             height,
             ..geometry(ChannelMode::Luma)

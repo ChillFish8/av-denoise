@@ -1,14 +1,7 @@
 use super::family::{BASELINE_FAMILY, FamilyId};
 use super::legality::DeviceClass;
 use super::plan::PipelineProfile;
-use super::sites::{
-    COLLAB_FILTER,
-    COLLAB_FUSED,
-    COLLAB_SEARCH,
-    NL4D_MV_REGULARISE,
-    NLM_ACCUMULATE,
-    NLM_WINDOW,
-};
+use super::sites::{COLLAB_FILTER, COLLAB_FUSED, COLLAB_SEARCH, MC_TRUEMOTION, NLM_ACCUMULATE, NLM_WINDOW};
 
 /// Where a table entry's order comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,9 +95,9 @@ const AMD_VULKAN: PriorityTable = PriorityTable {
             order: &[FamilyId("thin32x16"), FamilyId("thin32x8")],
             skip: &[],
         },
-        // serial 0%, coop -2..+1%
+        // serial 0%, coop +40..+74%
         SitePriority {
-            site: NL4D_MV_REGULARISE,
+            site: MC_TRUEMOTION,
             basis: Basis::Measured,
             order: &[FamilyId("serial"), FamilyId("coop")],
             skip: &[],
@@ -175,10 +168,10 @@ const AMD_ROCM: PriorityTable = PriorityTable {
             order: &[FamilyId("thin32x16"), FamilyId("thin32x8")],
             skip: &[],
         },
-        // coop -72..-67%, serial 0%
+        // No timings, expected order
         SitePriority {
-            site: NL4D_MV_REGULARISE,
-            basis: Basis::Measured,
+            site: MC_TRUEMOTION,
+            basis: Basis::Expected,
             order: &[FamilyId("coop"), FamilyId("serial")],
             skip: &[],
         },
@@ -237,7 +230,7 @@ const NVIDIA: PriorityTable = PriorityTable {
         },
         NVIDIA_WINDOW,
         NVIDIA_ACCUMULATE,
-        NVIDIA_REGULARISE,
+        NVIDIA_TRUEMOTION,
     ],
     // split_search fastest, then f32_search
     profiles_basis: Basis::Measured,
@@ -293,7 +286,7 @@ const NVIDIA_CUDA: PriorityTable = PriorityTable {
         },
         NVIDIA_WINDOW,
         NVIDIA_ACCUMULATE,
-        NVIDIA_REGULARISE,
+        NVIDIA_TRUEMOTION,
     ],
     // split_search fastest, then f32_search
     profiles_basis: Basis::Measured,
@@ -320,10 +313,10 @@ const NVIDIA_ACCUMULATE: SitePriority = SitePriority {
     skip: &[],
 };
 
-// coop -56..-29%, serial 0%
-const NVIDIA_REGULARISE: SitePriority = SitePriority {
-    site: NL4D_MV_REGULARISE,
-    basis: Basis::Measured,
+// No timings, expected order
+const NVIDIA_TRUEMOTION: SitePriority = SitePriority {
+    site: MC_TRUEMOTION,
+    basis: Basis::Expected,
     order: &[FamilyId("coop"), FamilyId("serial")],
     skip: &[],
 };
@@ -382,7 +375,7 @@ const NVIDIA_PRE_VOLTA: PriorityTable = PriorityTable {
         },
         // No timings, expected order
         SitePriority {
-            site: NL4D_MV_REGULARISE,
+            site: MC_TRUEMOTION,
             basis: Basis::Expected,
             order: &[FamilyId("coop"), FamilyId("serial")],
             skip: &[],
@@ -454,10 +447,10 @@ const APPLE: PriorityTable = PriorityTable {
             order: &[FamilyId("thin32x8"), FamilyId("thin32x16")],
             skip: &[],
         },
-        // coop -43..-34%, serial 0%
+        // No timings, expected order
         SitePriority {
-            site: NL4D_MV_REGULARISE,
-            basis: Basis::Measured,
+            site: MC_TRUEMOTION,
+            basis: Basis::Expected,
             order: &[FamilyId("coop"), FamilyId("serial")],
             skip: &[],
         },
@@ -527,7 +520,7 @@ const INTEL: PriorityTable = PriorityTable {
         },
         // No timings, expected order
         SitePriority {
-            site: NL4D_MV_REGULARISE,
+            site: MC_TRUEMOTION,
             basis: Basis::Expected,
             order: &[FamilyId("coop"), FamilyId("serial")],
             skip: &[],

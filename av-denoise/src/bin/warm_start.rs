@@ -33,7 +33,16 @@ pub fn finish_warm_up(warm_up: &mut Option<WarmUp>) {
 
 #[cfg(test)]
 mod tests {
-    use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Depth, Device, Subsampling, TuningMode};
+    use av_denoise::{
+        Algorithm,
+        ChannelIntent,
+        ChromaSiting,
+        DenoisingMode,
+        Depth,
+        Device,
+        Subsampling,
+        TuningMode,
+    };
 
     use super::*;
 
@@ -60,6 +69,7 @@ mod tests {
             height: 0,
             subsampling: Subsampling::Yuv420,
             depth: Depth::Eight,
+            chroma_siting: ChromaSiting::Unknown,
         };
 
         let direct = PlanarDenoiser::create(&opts, layout)

@@ -53,9 +53,9 @@ impl SampleFormat {
 
 /// One plane of samples on the GPU, tightly packed with a stride equal to its width.
 ///
-/// The handle must hold whole 4-byte words, which is `SampleFormat::plane_bytes(width * height)` bytes,
-/// and [Engine::emit_into](crate::engine::Engine::emit_into) writes zeros into the padding past the last
-/// sample.
+/// The handle must hold whole 4-byte words, which is `SampleFormat::plane_bytes(width * height)` bytes.
+/// [PassEngine::emit_into](crate::engine::PassEngine::emit_into) writes zeros into the padding past the
+/// last sample.
 #[derive(Debug, Clone, Copy)]
 pub struct DevicePlane<'a> {
     handle: &'a Handle,
@@ -90,7 +90,7 @@ impl<'a> DevicePlane<'a> {
 /// `width` and `height` are the dimensions of the planes the engine sees, so a chroma engine is built at
 /// chroma size. Luma takes one plane and Chroma takes U and V.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Geometry {
+pub(crate) struct PassGeometry {
     pub width: u32,
     pub height: u32,
     pub channels: ChannelMode,
@@ -98,7 +98,7 @@ pub struct Geometry {
     pub output: SampleFormat,
 }
 
-impl Geometry {
+impl PassGeometry {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         self.input.validate()?;
         self.output.validate()?;

@@ -2,6 +2,7 @@ mod convert;
 mod coordinator;
 mod decode;
 mod dispatch;
+mod frame_rate;
 mod grain_table;
 mod report;
 mod run;
@@ -12,12 +13,15 @@ mod tune;
 mod worker;
 
 use std::io::{Cursor, Read};
+use std::path::{Path, PathBuf};
 #[cfg(feature = "vulkan")]
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "vulkan")]
 use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, PlaneOptions, TuningMode};
-use av_denoise::{Depth, FrameLayout, Planes, Subsampling, fill_plane};
+use av_denoise::{ChromaSiting, Depth, FrameLayout, Planes, Subsampling, fill_plane};
+
+use super::source::{OpenedSource, open_file};
 
 /// A writer the test can read back after the coordinator thread drops it.
 #[cfg(feature = "vulkan")]
@@ -34,6 +38,29 @@ impl std::io::Write for SharedBuffer {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+/// The path of a clip under `data/`, or `None` when the clip is not checked out.
+pub(super) fn data_clip(name: &str) -> Option<PathBuf> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("data")
+        .join(name);
+
+    if !path.exists() {
+        eprintln!("skipping, {} is not available", path.display());
+        return None;
+    }
+
+    Some(path)
+}
+
+/// Opens a clip under `data/`, or skips the test when the clip is not checked out.
+pub(super) fn open_data_clip(name: &str) -> Option<OpenedSource> {
+    let path = data_clip(name)?;
+    let opened = open_file(&path).expect("the clip opens");
+
+    Some(opened)
 }
 
 pub(super) fn y4m_reader(bytes: Vec<u8>) -> Box<dyn Read> {
@@ -66,6 +93,7 @@ pub fn tiny_layout() -> FrameLayout {
         height: 8,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 
@@ -162,6 +190,7 @@ pub(super) fn scene_clip_layout() -> FrameLayout {
         height: SCENE_CLIP_SIZE as u32,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     }
 }
 

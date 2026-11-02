@@ -45,6 +45,7 @@ fn machinery_params() -> NlmParams {
             blksize: DEFAULT_BLKSIZE_FOR_TEST,
             overlap: DEFAULT_OVERLAP_FOR_TEST,
             search_radius: 4,
+            max_search_escalation: 4,
             pyramid_levels: 2,
             estimation: MotionEstimation::Direct,
         },
@@ -205,23 +206,16 @@ fn submit_machinery_at_centre_zero_finds_motion_at_the_far_offset() {
 }
 
 #[test]
-fn ring_view_exposes_the_analysed_pyramid_and_the_noise_floor() {
+fn a_full_window_reads_the_pinned_noise_floor() {
     let client = make_client();
     let mut denoiser = push_translating_sequence(&client);
     let view = denoiser
         .submit_machinery(RADIUS)
-        .expect("submit_machinery dispatch failed")
-        .expect("window is exactly full, submit_machinery should report Some");
-
-    let frames = machinery_params().total_frames();
-    assert_eq!(view.frame_count, frames);
-
-    // The pyramid holds every level of every slot, so it is at least one full-resolution luma plane
-    // per slot.
-    let pyramid = view.pyramid.clone();
-    let bytes = client.read_one(pyramid).expect("pyramid readback failed");
-    let plane = bytes.len() / (frames as usize * size_of::<f32>());
-    assert!(plane > 0, "the pyramid must hold at least one plane per slot");
+        .expect("submit_machinery dispatch failed");
+    assert!(
+        view.is_some(),
+        "window is exactly full, submit_machinery should report Some"
+    );
 
     let snapshot = denoiser.noise_snapshot().expect("the noise state reads back");
     let floor_sigma = mc_sad_noise_floor_sigma(PrefilterMode::None, 4.0 / 255.0);

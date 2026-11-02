@@ -1,7 +1,7 @@
 use std::num::{NonZeroU8, NonZeroUsize};
 use std::sync::Arc;
 
-use av_denoise::{Depth, FrameLayout, Subsampling};
+use av_denoise::{ChromaSiting, Depth, FrameLayout, Subsampling};
 use v_frame::chroma::ChromaSubsampling;
 use v_frame::frame::{Frame, FrameBuilder};
 
@@ -43,6 +43,7 @@ fn planes_from_v_frame_u8_matching_layout_succeeds() {
         height: 2,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let width = NonZeroUsize::new(2).expect("width is non-zero");
     let height = NonZeroUsize::new(2).expect("height is non-zero");
@@ -65,6 +66,7 @@ fn planes_from_v_frame_u16_matching_layout_succeeds() {
         height: 2,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Ten,
+        chroma_siting: ChromaSiting::Unknown,
     };
     let width = NonZeroUsize::new(2).expect("width is non-zero");
     let height = NonZeroUsize::new(2).expect("height is non-zero");
@@ -94,6 +96,7 @@ fn planes_from_v_frame_u8_mismatched_layout_errors() {
         height: 4,
         subsampling: Subsampling::Yuv420,
         depth: Depth::Eight,
+        chroma_siting: ChromaSiting::Unknown,
     };
 
     let err = planes_from_v_frame_u8(&frame, layout).expect_err("a smaller frame should not pass");

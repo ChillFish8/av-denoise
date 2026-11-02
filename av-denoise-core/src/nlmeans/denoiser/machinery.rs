@@ -2,7 +2,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::NlmDenoiser;
-use crate::motion::{self, MotionCtx};
+use crate::motion::MotionCtx;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::nlmeans::mirror::MirroredBuffer;
 use crate::nlmeans::params::ChannelMode;
@@ -30,12 +30,6 @@ pub(crate) struct RingView {
     pub mv_stride: u32,
     /// `f32` element stride between neighbours in `confidence`.
     pub conf_stride: u32,
-    /// The luma pyramid the motion estimator analysed.
-    ///
-    /// It is built from the reference ring when a prefilter is active. Level 0 of slot `s` starts
-    /// at `pyramid_slot_byte_offset(width, height, frame_count, 0, s, align)`.
-    pub pyramid: Handle,
-    pub frame_count: u32,
 }
 
 impl NlmDenoiser {
@@ -59,10 +53,11 @@ impl NlmDenoiser {
             return Ok(None);
         }
 
-        // The table upload comes before the first motion dispatch, because an upload ends a device
+        // The table uploads come before the first motion dispatch, because an upload ends a device
         // span's timed pass.
         let neighbour_slots = self.window_neighbour_slots(center_t);
         self.update_neighbour_slots(&neighbour_slots);
+        self.update_window_seeds(center_t);
 
         // The look-ahead has read every frame the window reaches, so the fold runs first and the
         // match scores confidence against this centre's own derived values.
@@ -86,13 +81,6 @@ impl NlmDenoiser {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("submit_machinery requires HQ temporal confidence to be active"))?
             .clone();
-        let pyramid = self
-            .pyramid_reference
-            .as_ref()
-            .or(self.pyramid_input.as_ref())
-            .expect("pyramid allocated when mc_ctx is Some")
-            .clone();
-
         let centre_slot = self.phys_frame(center_t as i32);
         let mv_stride = motion_ctx.mv_stride();
         let conf_stride = motion_ctx.conf_stride();
@@ -108,8 +96,6 @@ impl NlmDenoiser {
             neighbour_slots_buf,
             mv_stride,
             conf_stride,
-            pyramid,
-            frame_count: self.params.total_frames(),
         };
         Ok(Some(view))
     }
@@ -152,17 +138,6 @@ impl NlmDenoiser {
         self.mc_ctx
             .as_ref()
             .expect("motion_ctx called without motion compensation active")
-    }
-
-    /// The SAD threshold that confidence is scored against.
-    ///
-    /// # Panics
-    ///
-    /// Panics unless motion compensation is active.
-    pub(crate) fn thsad_value(&self) -> f32 {
-        let blksize = self.motion_ctx().blksize;
-        let thsad_scale = self.params.hq.map_or(1.0, |hq| hq.thsad_scale);
-        motion::thsad(blksize, thsad_scale)
     }
 
     pub(crate) fn compute_client(&self) -> &Client {
