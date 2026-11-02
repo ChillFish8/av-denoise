@@ -319,6 +319,12 @@ pub struct CollabInputs {
     pub noise: Handle,
     /// [NOISE_CURVE_BINS](crate::nlmeans::NOISE_CURVE_BINS) ratios.
     pub noise_curve: Handle,
+    /// One log gain table per channel, read only with the colour gains on.
+    pub colour_gains: Handle,
+    pub colour_gains_len: usize,
+    /// The centre frame's block means, read only with the colour gains on.
+    pub colour_means: Handle,
+    pub colour_means_len: usize,
     /// Eight profile values.
     pub dct_profile: Handle,
     /// [PATCH_SIZE](crate::collab::PATCH_SIZE) taps.
@@ -333,6 +339,10 @@ pub struct CollabValues {
     pub lambda_ht: f32,
     pub accum_scale: f32,
     pub pool_ratio: f32,
+    /// The factor from a normalised sample to the 8-bit scale of the colour tables.
+    pub colour_scale: f32,
+    /// Whether the thresholds scale by the colour gains.
+    pub colour_on: bool,
 }
 
 /// The compile-time geometry and switches `collab_fused` is built for.
@@ -511,11 +521,14 @@ impl<S: Float> CollabSite<S> {
         let neighbour_slots = bind(&inputs.neighbour_slots, inputs.neighbour_slots_len);
         let noise = bind(&inputs.noise, DERIVED_WORDS as usize);
         let noise_curve = bind(&inputs.noise_curve, NOISE_CURVE_BINS);
+        let colour_gains = bind(&inputs.colour_gains, inputs.colour_gains_len);
+        let colour_means = bind(&inputs.colour_means, inputs.colour_means_len);
         let dct_profile = bind(&inputs.dct_profile, 8);
         let kaiser = bind(&inputs.kaiser, PATCH_SIZE as usize);
         let accum = bind(&outputs.accum, outputs.accum_len);
         let wsum = bind(&outputs.wsum, outputs.wsum_len);
         let group_weight = bind(&outputs.group_weight, outputs.refs);
+        let colour_on = u32::from(values.colour_on);
 
         unsafe {
             collab_fused::launch_unchecked::<S>(
@@ -531,6 +544,8 @@ impl<S: Float> CollabSite<S> {
                 neighbour_slots,
                 noise,
                 noise_curve,
+                colour_gains,
+                colour_means,
                 dct_profile,
                 kaiser,
                 accum,
@@ -540,6 +555,8 @@ impl<S: Float> CollabSite<S> {
                 values.c_min,
                 values.lambda_ht,
                 values.accum_scale,
+                values.colour_scale,
+                colour_on,
                 shape.f16_search,
                 shape.radius,
                 shape.grid_frames,
@@ -616,6 +633,10 @@ pub(crate) fn blank_collab_inputs(client: &Client) -> CollabInputs {
         neighbour_slots_len: 1,
         noise: zeroed_words(client, DERIVED_WORDS as usize),
         noise_curve: zeroed_words(client, NOISE_CURVE_BINS),
+        colour_gains: zeroed_words(client, 1),
+        colour_gains_len: 1,
+        colour_means: zeroed_words(client, 1),
+        colour_means_len: 1,
         dct_profile: zeroed_words(client, 8),
         kaiser: zeroed_words(client, PATCH_SIZE as usize),
     }

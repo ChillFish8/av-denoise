@@ -29,6 +29,7 @@ use crate::nl4d::tests::helpers::noisy_frames;
 use crate::nlmeans::tests::luma_motion::{flat_chroma, panning_luma};
 use crate::nlmeans::tests::models::{PanShape, pan_clip};
 use crate::nlmeans::{DenoisingMode, NlmeansAlgorithm, NlmeansHqOptions, NlmeansOptions};
+use crate::noise::colour::{ColourBlocks, ColourGrid};
 use crate::tune::EngineKernels;
 
 const WIDTH: u32 = 64;
@@ -156,27 +157,33 @@ fn build(client: &Client, spec: &EngineSpec) -> Result<Box<dyn Engine>, Error> {
     spec.build(client, default_kernels)
 }
 
-/// A pass engine that reads the camera models a producer fits from the clip's luma, as the passes
-/// of a merged engine do.
+/// A pass engine that reads the camera models a producer fits from the clip's luma, and the block
+/// colour of the clip's frames, as the passes of a merged engine do.
 struct SeededPass {
     pass: Box<dyn FramePass>,
     producer: Option<PairModelProducer>,
-    /// The clip's luma planes, by stream frame.
-    luma: Vec<Handle>,
+    colour: Option<ColourBlocks>,
+    /// The clip's planes, by stream frame.
+    planes: Vec<Vec<Handle>>,
 }
 
 impl SeededPass {
-    /// Fits the model of the frame the pass takes next.
+    /// Fits the model and measures the block colour of the frame the pass takes next.
     fn fit(&mut self) -> Result<(), Error> {
+        let frame = self.pass.next_frame();
+        let handles = &self.planes[frame as usize];
+        let dims = plane_dims(handles.len(), true);
+        let planes = as_planes(handles, &dims);
+
+        if let Some(colour) = self.colour.as_ref() {
+            colour.queue(&planes, frame);
+        }
+
         let Some(producer) = self.producer.as_mut() else {
             return Ok(());
         };
 
-        let frame = self.pass.next_frame();
-        let luma = &self.luma[frame as usize];
-        let plane = DevicePlane::new(luma, WIDTH, HEIGHT);
-
-        producer.push(&plane, frame).map_err(Error::Gpu)
+        producer.push(&planes[0], frame).map_err(Error::Gpu)
     }
 }
 
@@ -192,15 +199,29 @@ fn seeded_pass(client: &Client, spec: &EngineSpec, luma: bool, clip: &[Planes]) 
         luma_motion: None,
     });
     let kernels = EngineKernels::default();
-    let pass = pass
+    let mut pass = pass
         .build_pass(client, kernels, motion, false)
         .expect("build pass");
-    let luma = clip
-        .iter()
-        .map(|frame| client.create_from_slice(&frame[0]))
-        .collect();
 
-    SeededPass { pass, producer, luma }
+    let colour = spec.colour_blocks(client);
+    if let Some(blocks) = colour.as_ref() {
+        let grid = if luma {
+            ColourGrid::Luma
+        } else {
+            ColourGrid::Chroma
+        };
+        let source = blocks.source(grid);
+        pass.measure_colour(source);
+    }
+
+    let planes = clip.iter().map(|frame| upload(client, frame)).collect();
+
+    SeededPass {
+        pass,
+        producer,
+        colour,
+        planes,
+    }
 }
 
 fn to_codes(samples: &[f32]) -> Vec<u8> {

@@ -534,7 +534,7 @@ fn rectangle_mean(plane: &[u32], stride: u32, left: u32, top: u32, right: u32, b
 
 /// Reads both grids' block means of a frame of `codes` uploaded in `format`.
 fn measured_means(client: &Client, geometry: Geometry, codes: &[Vec<u32>; 3]) -> [Vec<f32>; 2] {
-    let blocks = ColourBlocks::new(client, geometry).expect("a colour frame has block means");
+    let blocks = ColourBlocks::new(client, geometry, 0).expect("a colour frame has block means");
     let (chroma_width, chroma_height) = geometry.plane_dims(1);
     let handles: Vec<Handle> = codes
         .iter()
@@ -616,7 +616,7 @@ fn high_bit_depth_maps_to_the_same_cells() {
 
         assert_eq!(deep, eight_bit, "{depth}-bit means");
 
-        let blocks = ColourBlocks::new(&client, geometry).expect("a colour frame has block means");
+        let blocks = ColourBlocks::new(&client, geometry, 0).expect("a colour frame has block means");
         let source = blocks.source(ColourGrid::Luma);
         let max = ((1u32 << depth) - 1) as f32;
         let grain = 2.5 * (1u32 << shift) as f32 / max * source.grain_scale();
@@ -796,13 +796,13 @@ fn a_frame_read_again_replaces_its_cells() {
     let first_read = [120, 128, 128];
     let second_read = [70, 160, 100];
 
-    let blocks = ColourBlocks::new(&client, geometry).expect("a colour frame has block means");
+    let blocks = ColourBlocks::new(&client, geometry, 0).expect("a colour frame has block means");
     let state = colour_state(&client, &blocks, geometry.width, geometry.height);
     pool_frame(&client, &state, &blocks, first_read, 11, 0);
     pool_frame(&client, &state, &blocks, second_read, 12, 0);
     let read_twice = window_of(&client, &state);
 
-    let fresh_blocks = ColourBlocks::new(&client, geometry).expect("a colour frame has block means");
+    let fresh_blocks = ColourBlocks::new(&client, geometry, 0).expect("a colour frame has block means");
     let fresh = colour_state(&client, &fresh_blocks, geometry.width, geometry.height);
     pool_frame(&client, &fresh, &fresh_blocks, second_read, 12, 0);
     let expected = window_of(&client, &fresh);
@@ -825,7 +825,7 @@ fn a_stream_reset_windows_only_the_new_stream() {
     let scene_a = [120, 128, 128];
     let scene_b = [70, 160, 100];
 
-    let blocks = ColourBlocks::new(&client, geometry).expect("a colour frame has block means");
+    let blocks = ColourBlocks::new(&client, geometry, 0).expect("a colour frame has block means");
     let state = colour_state(&client, &blocks, width, height);
     pool_frame(&client, &state, &blocks, scene_a, 11, 0);
     pool_frame(&client, &state, &blocks, scene_a, 12, 1);
@@ -834,7 +834,7 @@ fn a_stream_reset_windows_only_the_new_stream() {
     pool_frame(&client, &state, &blocks, scene_b, 13, 0);
     let after_reset = window_of(&client, &state);
 
-    let fresh_blocks = ColourBlocks::new(&client, geometry).expect("a colour frame has block means");
+    let fresh_blocks = ColourBlocks::new(&client, geometry, 0).expect("a colour frame has block means");
     let fresh = colour_state(&client, &fresh_blocks, width, height);
     pool_frame(&client, &fresh, &fresh_blocks, scene_b, 13, 0);
     let expected = window_of(&client, &fresh);
@@ -865,7 +865,7 @@ fn a_frame_without_held_means_is_an_error() {
         input: SampleFormat::U8,
         output: SampleFormat::U8,
     };
-    let blocks = ColourBlocks::new(&client, geometry).expect("a colour frame has block means");
+    let blocks = ColourBlocks::new(&client, geometry, 0).expect("a colour frame has block means");
     let state = colour_state(&client, &blocks, geometry.width, geometry.height);
     queue_flat_means(&client, &blocks, geometry, [120, 128, 128], 0);
 
@@ -926,7 +926,7 @@ fn greyscale_builds_no_colour_cells() {
         geometry: geometry(ChromaLayout::Yuv420),
     };
 
-    assert!(ColourBlocks::new(&client, geometry(ChromaLayout::Gray)).is_none());
+    assert!(ColourBlocks::new(&client, geometry(ChromaLayout::Gray), 0).is_none());
     assert!(gray.colour_blocks(&client).is_none());
     assert!(fixed_sigma.colour_blocks(&client).is_none());
     assert!(nlmeans.colour_blocks(&client).is_none());

@@ -375,7 +375,9 @@ impl EngineSpec {
         }
 
         let geometry = self.geometry();
-        ColourBlocks::new(client, geometry)
+        let held = passes.iter().map(PassSpec::max_held_frames);
+        let held_frames = held.max().unwrap_or(0);
+        ColourBlocks::new(client, geometry, held_frames)
     }
 
     /// Builds the engine on `client`, picking each pass's launch site candidates from `kernels`.

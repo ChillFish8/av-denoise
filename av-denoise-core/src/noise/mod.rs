@@ -70,6 +70,7 @@ pub(crate) use self::temporal::{
     QUARTER_SUM_D,
     QUARTER_SUM_D2,
     StatsMotion,
+    TEMPORAL_NOISE_BLOCK,
     TEMPORAL_QUARTER_BASE,
     TEMPORAL_QUARTER_FIELDS,
     TEMPORAL_QUARTERS,
@@ -79,7 +80,6 @@ pub(crate) use self::temporal::{
 };
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::temporal::{
-    TEMPORAL_NOISE_BLOCK,
     TEMPORAL_QUARTER_SIZE,
     TemporalStatsCtx,
     accepted_static_blocks,

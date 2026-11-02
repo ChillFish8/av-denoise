@@ -12,6 +12,7 @@ use crate::collab::grid_frames;
 use crate::collab::kernels::aggregate::collab_zero_accum;
 use crate::engine::timing::timed;
 use crate::nlmeans::{MAX_GRID_1D, RingView};
+use crate::noise::colour::ColourGainInputs;
 use crate::tune::sites::{
     CollabFilterSite,
     CollabInputs,
@@ -29,6 +30,8 @@ struct FusedPass {
     confidence: Handle,
     neighbour_slots: Handle,
     noise_curve: Handle,
+    /// The colour gain tables and the centre frame's block means, when the thresholds scale by them.
+    colour: Option<ColourGainInputs>,
     channels: u32,
     /// Values in the frame ring, which the f16 search ring matches.
     ring_len: usize,
@@ -63,6 +66,13 @@ impl Nl4dDenoiser {
 
         let neighbour_slots_buf = view.neighbour_slots_buf.clone();
         let noise_curve_buf = self.front.noise_curve_handle();
+
+        let centre_frame = self.front.slot_frame(centre_slot);
+        let colour = if self.colour_gains {
+            self.front.colour_gain_inputs(centre_frame)?
+        } else {
+            None
+        };
 
         let cleared_slots = match clear {
             AccumClear::WholeRing => 0..total_frames,
@@ -106,6 +116,7 @@ impl Nl4dDenoiser {
             confidence,
             neighbour_slots: neighbour_slots_buf,
             noise_curve: noise_curve_buf,
+            colour,
             channels,
             ring_len,
             accum_ring_len,
@@ -201,6 +212,12 @@ impl Nl4dDenoiser {
         let frames_per_volume = grid_frames(self.temporal_radius);
         let pool_ratio = nl4d_pool_ratio(self.channels);
 
+        let colour_on = pass.colour.is_some();
+        let placeholder = self.front.placeholder();
+        let colour = pass
+            .colour
+            .unwrap_or_else(|| ColourGainInputs::unread(placeholder));
+
         let inputs = CollabInputs {
             ring: view.input.clone(),
             ring_len: pass.ring_len,
@@ -214,6 +231,10 @@ impl Nl4dDenoiser {
             neighbour_slots_len: neighbour_slots_len.max(1),
             noise: self.front.derived_handle(),
             noise_curve: pass.noise_curve,
+            colour_gains: colour.gains,
+            colour_gains_len: colour.gains_len,
+            colour_means: colour.means,
+            colour_means_len: colour.means_len,
             dct_profile: self.dct_profile_buf.clone(),
             kaiser: self.kaiser_buf.clone(),
         };
@@ -226,6 +247,8 @@ impl Nl4dDenoiser {
             lambda_ht: self.lambda_ht,
             accum_scale: self.accum_scale,
             pool_ratio,
+            colour_scale: colour.scale,
+            colour_on,
         };
         let shape = CollabShape {
             f16_search: self.f16_search,

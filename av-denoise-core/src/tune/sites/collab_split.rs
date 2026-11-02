@@ -537,11 +537,14 @@ impl CollabFilterSite {
         let neighbour_slots = bind(&inputs.neighbour_slots, inputs.neighbour_slots_len);
         let noise = bind(&inputs.noise, DERIVED_WORDS as usize);
         let noise_curve = bind(&inputs.noise_curve, NOISE_CURVE_BINS);
+        let colour_gains = bind(&inputs.colour_gains, inputs.colour_gains_len);
+        let colour_means = bind(&inputs.colour_means, inputs.colour_means_len);
         let dct_profile = bind(&inputs.dct_profile, 8);
         let kaiser = bind(&inputs.kaiser, PATCH_SIZE as usize);
         let accum = bind(&outputs.accum, outputs.accum_len);
         let wsum = bind(&outputs.wsum, outputs.wsum_len);
         let group_weight = bind(&outputs.group_weight, outputs.refs);
+        let colour_on = u32::from(values.colour_on);
 
         unsafe {
             collab_filter::launch_unchecked(
@@ -555,6 +558,8 @@ impl CollabFilterSite {
                 neighbour_slots,
                 noise,
                 noise_curve,
+                colour_gains,
+                colour_means,
                 dct_profile,
                 kaiser,
                 accum,
@@ -564,6 +569,8 @@ impl CollabFilterSite {
                 values.lambda_ht,
                 values.accum_scale,
                 values.pool_ratio,
+                values.colour_scale,
+                colour_on,
                 shape.grid_frames,
                 shape.width,
                 shape.height,

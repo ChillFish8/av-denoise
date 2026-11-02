@@ -1,5 +1,6 @@
 mod behaviour;
 mod channel_sigma;
+mod colour;
 mod corpus;
 mod noise_curve;
 mod pooled;
@@ -102,6 +103,19 @@ pub(super) struct Setup {
     pub(super) channel_mode: ChannelMode,
     /// Scores candidates from an f16 copy of the ring.
     pub(super) f16_search: bool,
+    /// The colour gains the thresholds scale by. `None` launches with the gains off.
+    pub(super) colour: Option<SetupColour>,
+}
+
+/// The colour gain inputs one launch reads.
+#[derive(Clone)]
+pub(super) struct SetupColour {
+    /// One log gain table of [COLOUR_CELLS](crate::noise::colour::COLOUR_CELLS) values per channel.
+    pub(super) log_gains: Vec<f32>,
+    /// The centre frame's block means, luma, Cb and Cr per 16x16 block, on the 8-bit scale.
+    pub(super) means: Vec<f32>,
+    /// The factor from a normalised sample to the 8-bit scale.
+    pub(super) scale: f32,
 }
 
 impl Setup {
@@ -139,6 +153,7 @@ impl Setup {
             pooled: None,
             channel_mode: ChannelMode::Luma,
             f16_search: false,
+            colour: None,
         }
     }
 
@@ -324,6 +339,10 @@ pub(super) struct Buffers {
     neighbour_slots: Handle,
     noise: Handle,
     curve: Handle,
+    colour_gains: Handle,
+    colour_gains_len: usize,
+    colour_means: Handle,
+    colour_means_len: usize,
     dct_profile: Handle,
     kaiser: Handle,
     accum: Handle,
@@ -395,6 +414,21 @@ pub(super) fn buffers(setup: &Setup) -> Buffers {
     let search_bytes = half::f16::as_bytes(&search_values);
     let search_ring = client.create_from_slice(search_bytes);
 
+    // Without colour the kernel never reads the tables, so one zero stands in for each.
+    let placeholder = [0.0f32];
+    let colour_gains_host = setup
+        .colour
+        .as_ref()
+        .map_or(&placeholder[..], |colour| &colour.log_gains);
+    let colour_means_host = setup
+        .colour
+        .as_ref()
+        .map_or(&placeholder[..], |colour| &colour.means);
+    let colour_gains_bytes = f32::as_bytes(colour_gains_host);
+    let colour_means_bytes = f32::as_bytes(colour_means_host);
+    let colour_gains = client.create_from_slice(colour_gains_bytes);
+    let colour_means = client.create_from_slice(colour_means_bytes);
+
     Buffers {
         ring,
         search_ring,
@@ -403,6 +437,10 @@ pub(super) fn buffers(setup: &Setup) -> Buffers {
         neighbour_slots,
         noise,
         curve,
+        colour_gains,
+        colour_gains_len: colour_gains_host.len(),
+        colour_means,
+        colour_means_len: colour_means_host.len(),
         dct_profile,
         kaiser,
         accum,
@@ -485,6 +523,8 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
     let accum_scale = setup.accum_scale();
     let grid_frame_count = grid_frames(setup.radius);
     let pooled_ratio = setup.pooled.unwrap_or(0.0);
+    let colour_scale = setup.colour.as_ref().map_or(0.0, |colour| colour.scale);
+    let colour_on = u32::from(setup.colour.is_some());
 
     unsafe {
         let ring_scalar = BufferArg::from_raw_parts(handles.ring.clone(), setup.ring.len());
@@ -501,6 +541,8 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             BufferArg::from_raw_parts(handles.neighbour_slots.clone(), setup.neighbour_slots.len()),
             BufferArg::from_raw_parts(handles.noise.clone(), DERIVED_WORDS as usize),
             BufferArg::from_raw_parts(handles.curve.clone(), NOISE_CURVE_BINS),
+            BufferArg::from_raw_parts(handles.colour_gains.clone(), handles.colour_gains_len),
+            BufferArg::from_raw_parts(handles.colour_means.clone(), handles.colour_means_len),
             BufferArg::from_raw_parts(handles.dct_profile.clone(), 8),
             BufferArg::from_raw_parts(handles.kaiser.clone(), PATCH_SIZE as usize),
             BufferArg::from_raw_parts(handles.accum.clone(), handles.accum_len),
@@ -510,6 +552,8 @@ fn launch_fused<S: Float>(setup: &Setup, handles: &Buffers, search_ring: Handle,
             setup.c_min,
             setup.lambda_ht,
             accum_scale,
+            colour_scale,
+            colour_on,
             setup.f16_search,
             setup.radius,
             grid_frame_count,

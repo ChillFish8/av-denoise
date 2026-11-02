@@ -15,14 +15,7 @@ pub use self::colour::{
     noise_colour_means,
     noise_colour_window,
 };
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "the gain tables are fitted before any kernel reads them"
-    )
-)]
-pub(crate) use self::colour_fit::colour_gain;
+pub(crate) use self::colour_fit::{colour_gain, colour_gain_pair};
 pub use self::colour_fit::{
     noise_colour_fit_base,
     noise_colour_fit_ceilings,

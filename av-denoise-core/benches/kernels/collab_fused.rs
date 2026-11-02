@@ -8,6 +8,7 @@ use av_denoise_core::bench_api::collab::kernels::aggregate::{
 };
 use av_denoise_core::bench_api::collab::kernels::transforms::dct_noise_profile;
 use av_denoise_core::bench_api::collab::{grid_frames, needs_warp_uniform_search};
+use av_denoise_core::bench_api::noise_colour::{colour_gain_words, colour_mean_words};
 use av_denoise_core::bench_api::tune_sites::{
     CollabInputs,
     CollabOutputs,
@@ -63,6 +64,8 @@ pub struct CollabFusedBench {
     pub split_mv: bool,
     /// Launches with a stepped noise curve and the curve flag set.
     pub noise_curve: bool,
+    /// Launches with the colour gains on, over hashed gain tables and block means.
+    pub colour: bool,
     /// Launches with the pooled threshold on.
     pub pooled: bool,
     pub candidate: CollabVariant,
@@ -86,6 +89,7 @@ pub fn fitted_variants(client: &Client, channels: u32, channel_name: &'static st
         channel_name,
         split_mv: false,
         noise_curve: false,
+        colour: false,
         pooled: false,
         candidate: CollabVariant::BASELINE,
     };
@@ -105,6 +109,21 @@ fn stepped_curve() -> [f32; NOISE_CURVE_BINS] {
     let mut curve = [2.0f32; NOISE_CURVE_BINS];
     curve[NOISE_CURVE_BINS / 2..].fill(0.5);
     curve
+}
+
+/// `count` hashed values spread between `-spread` and `spread`.
+fn hashed_values(count: usize, spread: f32) -> Vec<f32> {
+    (0..count as u32)
+        .map(|index| {
+            let mut hash = index.wrapping_mul(0x9E37_79B9);
+            hash ^= hash >> 15;
+            hash = hash.wrapping_mul(0x2C1B_3C6D);
+            hash ^= hash >> 12;
+            let unit = (hash >> 8) as f32 / (1u32 << 24) as f32;
+
+            spread * (2.0 * unit - 1.0)
+        })
+        .collect()
 }
 
 /// How far apart two neighbouring blocks' vectors sit in the split field, in pixels.
@@ -133,6 +152,10 @@ pub struct CollabFusedInput {
     pub ring_len: usize,
     /// The noise curve, all zeros unless the arm runs one.
     pub noise_curve: Handle,
+    /// One hashed log gain table per channel.
+    pub colour_gains: Handle,
+    /// Hashed block means over the frame.
+    pub colour_means: Handle,
 }
 
 impl CollabFusedBench {
@@ -165,6 +188,10 @@ impl CollabFusedBench {
             neighbour_slots_len: NEIGHBOUR_SLOTS.len(),
             noise: args.noise.clone(),
             noise_curve: args.noise_curve.clone(),
+            colour_gains: args.colour_gains.clone(),
+            colour_gains_len: colour_gain_words(self.channels),
+            colour_means: args.colour_means.clone(),
+            colour_means_len: colour_mean_words(WIDTH, HEIGHT),
             dct_profile: args.dct_profile.clone(),
             kaiser: args.kaiser.clone(),
         };
@@ -174,6 +201,8 @@ impl CollabFusedBench {
             lambda_ht: LAMBDA_HT,
             accum_scale,
             pool_ratio: POOL_RATIO,
+            colour_scale: 255.0,
+            colour_on: self.colour,
         };
         let uniform_walk_only = needs_warp_uniform_search(&self.client);
         let shape = CollabShape {
@@ -292,6 +321,13 @@ impl Benchmark for CollabFusedBench {
         let curve_bytes = f32::as_bytes(&curve_host);
         let noise_curve = self.client.create_from_slice(curve_bytes);
 
+        let gains_host = hashed_values(colour_gain_words(self.channels), 0.5);
+        let gains_bytes = f32::as_bytes(&gains_host);
+        let colour_gains = self.client.create_from_slice(gains_bytes);
+        let means_host = hashed_values(colour_mean_words(WIDTH, HEIGHT), 100.0);
+        let means_bytes = f32::as_bytes(&means_host);
+        let colour_means = self.client.create_from_slice(means_bytes);
+
         CollabFusedInput {
             ring,
             mv_field,
@@ -305,6 +341,8 @@ impl Benchmark for CollabFusedBench {
             group_weight,
             ring_len: ring_data.len(),
             noise_curve,
+            colour_gains,
+            colour_means,
         }
     }
 
@@ -320,10 +358,11 @@ impl Benchmark for CollabFusedBench {
     fn name(&self) -> String {
         let field = if self.split_mv { "_split_mv" } else { "" };
         let curve = if self.noise_curve { "_noise_curve" } else { "" };
+        let colour = if self.colour { "_colour" } else { "" };
         let pool = if self.pooled { "_pooled" } else { "" };
 
         format!(
-            "{}/{}/1080p_{}{field}{curve}{pool}",
+            "{}/{}/1080p_{}{field}{curve}{colour}{pool}",
             CollabVariant::SITE,
             self.candidate.name(),
             self.channel_name,

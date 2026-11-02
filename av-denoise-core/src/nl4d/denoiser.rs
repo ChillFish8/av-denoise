@@ -68,6 +68,9 @@ pub struct Nl4dDenoiser {
     pub(super) refine: u32,
     pub(super) spatial_radius: u32,
     pub(super) lambda_ht: f32,
+    /// Whether the thresholds scale by the colour gains the front fits, which the luma noise map
+    /// turns on for luma and chroma always takes.
+    pub(super) colour_gains: bool,
     pub(super) c_min: f32,
     pub(super) k_max: u32,
     /// Whether candidate distances read the f16 search ring.
@@ -205,6 +208,7 @@ impl Nl4dDenoiser {
         let channels = params.nlm.channels;
         let apply_noise_map = params.noise_map && channels != ChannelMode::Chroma && !guides_only;
         front.set_luma_noise_fields(apply_noise_map);
+        let colour_gains = apply_noise_map || channels == ChannelMode::Chroma;
 
         front.set_shifted_edges(true);
         front.set_field_lambda(params.field_lambda);
@@ -302,6 +306,7 @@ impl Nl4dDenoiser {
             refine: params.refine,
             spatial_radius: params.spatial_radius,
             lambda_ht: params.lambda_ht,
+            colour_gains,
             c_min: params.c_min,
             k_max,
             f16_search,

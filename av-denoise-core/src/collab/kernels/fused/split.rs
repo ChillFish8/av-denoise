@@ -1,12 +1,13 @@
 use cubecl::prelude::*;
 
+use super::colour::patch_colour;
 use super::shape::{SearchCursor, SearchShape};
 use super::tile::load_centre_tile;
 use super::variant::{Centre, CollabVariant, TRANSPOSE_REGION_FLOATS, tile_height, tile_width};
 use super::{
     GROUP_SIZE_MASK,
     GROUP_USES_GRID,
-    column_luma_of,
+    column_sum_of,
     filter_group,
     load_reference_column,
     search_group,
@@ -184,6 +185,8 @@ pub fn collab_filter<N: Size>(
     neighbour_slots: &[u32],
     noise: &[f32],
     noise_curve: &[f32],
+    colour_gains: &[f32],
+    colour_means: &[f32],
     dct_profile: &[f32],
     kaiser: &[f32],
     accum: &mut [Atomic<i32>],
@@ -193,6 +196,8 @@ pub fn collab_filter<N: Size>(
     lambda_ht: f32,
     accum_scale: f32,
     pool_ratio: f32,
+    colour_scale: f32,
+    colour_on: u32,
     #[comptime] grid_frames: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -236,13 +241,17 @@ pub fn collab_filter<N: Size>(
     let use_grid = (group_word & GROUP_USES_GRID) != 0u32;
 
     let current = load_reference_column(ring, ref_x, ref_y, centre_slot, sub, width, height, channels);
-    let column_luma = column_luma_of(current.as_slice(), channels);
+    let column_first = column_sum_of(current.as_slice(), 0u32, channels);
+    let column_second = column_sum_of(current.as_slice(), 1u32, channels);
+    let colour = patch_colour(ref_x, ref_y, colour_scale, colour_on, width);
 
     filter_group(
         ring_scalar,
         neighbour_slots,
         noise,
         noise_curve,
+        colour_gains,
+        colour_means,
         dct_profile,
         kaiser,
         accum,
@@ -252,7 +261,9 @@ pub fn collab_filter<N: Size>(
         member_pos.as_slice(),
         k_use,
         use_grid,
-        column_luma,
+        column_first,
+        column_second,
+        &colour,
         ref_idx,
         live,
         centre_slot,

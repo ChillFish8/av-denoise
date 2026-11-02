@@ -168,10 +168,10 @@ pub(crate) const COLOUR_FIT_PLANE_WORDS: u32 = COLOUR_FIT_PLANE_LUMA_HIGH + 1;
 /// The base queries of one plane, every cell's mean colour then every cell's centre.
 pub(crate) const COLOUR_FIT_QUERIES: u32 = 2 * COLOUR_CELLS;
 
-/// The frames the block means are held for.
+/// The frames the block means are held for beyond the frames the passes hold.
 ///
 /// A motion-compensated stream reads its first frame again on its second push.
-const COLOUR_SLOTS: usize = 2;
+const COLOUR_SLOT_MARGIN: usize = 2;
 
 /// Which noise grid a pass reads its block means on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,37 +193,47 @@ pub(crate) struct ColourBlocks {
     geometry: Geometry,
     /// Each slot's luma grid means, then its chroma grid means.
     slots: Arc<[[Handle; 2]]>,
-    tags: Arc<Mutex<[Option<u32>; COLOUR_SLOTS]>>,
+    tags: Arc<Mutex<Vec<Option<u32>>>>,
 }
 
 impl ColourBlocks {
     /// The block means of a stream of `geometry` frames, `None` for gray frames.
-    pub(crate) fn new(client: &Client, geometry: Geometry) -> Option<Self> {
+    ///
+    /// They are held for the `held_frames` frames the passes hold, so a pass still reads the means
+    /// of the frame it is centred on.
+    pub(crate) fn new(client: &Client, geometry: Geometry, held_frames: usize) -> Option<Self> {
         if geometry.chroma == ChromaLayout::Gray {
             return None;
         }
 
+        let slot_count = held_frames + COLOUR_SLOT_MARGIN;
         let luma_bytes =
             grid_blocks(geometry, ColourGrid::Luma) * COLOUR_MEAN_FIELDS as usize * size_of::<f32>();
         let chroma_bytes =
             grid_blocks(geometry, ColourGrid::Chroma) * COLOUR_MEAN_FIELDS as usize * size_of::<f32>();
-        let slots: Arc<[[Handle; 2]]> = (0..COLOUR_SLOTS)
+        let slots: Arc<[[Handle; 2]]> = (0..slot_count)
             .map(|_| [client.empty(luma_bytes), client.empty(chroma_bytes)])
             .collect();
+        let tags = vec![None; slot_count];
 
         let blocks = Self {
             client: client.clone(),
             geometry,
             slots,
-            tags: Arc::new(Mutex::new([None; COLOUR_SLOTS])),
+            tags: Arc::new(Mutex::new(tags)),
         };
 
         Some(blocks)
     }
 
+    /// The slot that holds stream frame `frame`.
+    fn slot_index(&self, frame: u32) -> usize {
+        frame as usize % self.slots.len()
+    }
+
     /// Queues the measure of stream frame `frame`'s block means from its `planes`, luma first.
     pub(crate) fn queue(&self, planes: &[DevicePlane<'_>], frame: u32) {
-        let index = frame as usize % COLOUR_SLOTS;
+        let index = self.slot_index(frame);
         let [luma_means, chroma_means] = &self.slots[index];
         let geometry = self.geometry;
         let format = geometry.input;
@@ -263,7 +273,7 @@ impl ColourBlocks {
 
     /// Stream frame `frame`'s means on `grid`, or `None` if its slot holds another frame.
     pub(crate) fn read(&self, grid: ColourGrid, frame: u32) -> Option<Handle> {
-        let index = frame as usize % COLOUR_SLOTS;
+        let index = self.slot_index(frame);
         let tags = self.lock_tags();
         let holds_frame = tags[index] == Some(frame);
         let means = &self.slots[index][grid_index(grid)];
@@ -285,7 +295,7 @@ impl ColourBlocks {
         }
     }
 
-    fn lock_tags(&self) -> MutexGuard<'_, [Option<u32>; COLOUR_SLOTS]> {
+    fn lock_tags(&self) -> MutexGuard<'_, Vec<Option<u32>>> {
         self.tags.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -768,12 +778,64 @@ impl NoiseState {
 
     /// Each plane's log gain table from the last window, `None` for a state that pools no colour
     /// cells.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the gain tables are fitted before any kernel reads them")
-    )]
+    #[cfg(test)]
     pub(crate) fn colour_gains(&self) -> Option<&Handle> {
         let colour = self.colour.as_ref();
         colour.map(|colour| colour.fit.gains())
+    }
+
+    /// The gain tables and stream frame `frame`'s block means, which the collaborative filter
+    /// scales its thresholds by, `None` for a state that pools no colour cells.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the block means of `frame` are not held.
+    pub(crate) fn colour_gain_inputs(&self, frame: u32) -> Result<Option<ColourGainInputs>, anyhow::Error> {
+        let Some(colour) = self.colour.as_ref() else {
+            return Ok(None);
+        };
+
+        let gains = colour.fit.gains();
+        let source = &colour.source;
+        let means = source.blocks.read(source.grid, frame);
+        let means =
+            means.ok_or_else(|| anyhow::anyhow!("the block colour of stream frame {frame} is not held"))?;
+        let geometry = source.blocks.geometry;
+        let blocks = grid_blocks(geometry, source.grid);
+
+        let inputs = ColourGainInputs {
+            gains: gains.clone(),
+            gains_len: (self.shape.channels * COLOUR_CELLS) as usize,
+            means,
+            means_len: blocks * COLOUR_MEAN_FIELDS as usize,
+            scale: source.grain_scale(),
+        };
+
+        Ok(Some(inputs))
+    }
+}
+
+/// The buffers and scale one collaborative pass reads its colour gains from.
+pub(crate) struct ColourGainInputs {
+    /// One log gain table per channel.
+    pub gains: Handle,
+    pub gains_len: usize,
+    /// The block means of the pass's centre frame, on the pass's own grid.
+    pub means: Handle,
+    pub means_len: usize,
+    /// The factor from a normalised sample to the 8-bit scale.
+    pub scale: f32,
+}
+
+impl ColourGainInputs {
+    /// Inputs for a pass whose kernel never reads them, every buffer one word of `placeholder`.
+    pub(crate) fn unread(placeholder: &Handle) -> Self {
+        Self {
+            gains: placeholder.clone(),
+            gains_len: 1,
+            means: placeholder.clone(),
+            means_len: 1,
+            scale: 0.0,
+        }
     }
 }

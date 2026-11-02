@@ -121,14 +121,24 @@ fn table_index(brightness: u32, level: u32, sector: u32) -> u32 {
     brightness * COLOUR_CELLS_PER_BRIGHTNESS + ring
 }
 
-/// The value of the table that starts at word `base` of `table`, at mean luma `luma` and chroma
-/// `cb` and `cr`, centred on 0.
+/// Where a colour falls between the table's cell centres, as the lower centre and the fraction
+/// towards the next along brightness, saturation and hue.
+#[derive(CubeType, Clone, Copy)]
+struct TablePosition {
+    brightness_low: u32,
+    brightness_fraction: f32,
+    level_low: u32,
+    level_fraction: f32,
+    sector_low: u32,
+    hue_fraction: f32,
+}
+
+/// The position of mean luma `luma` and chroma `cb` and `cr`, centred on 0, between the table's
+/// cell centres.
 ///
-/// Every value is on the 8-bit scale. The table holds one value per colour cell, at the cell's
-/// centre. The value is interpolated between the 8 nearest centres in brightness, saturation and
-/// hue. Hue wraps around, and colours past the outer centres clamp to them.
+/// Hue wraps around, and colours past the outer centres clamp to them.
 #[cube]
-pub(crate) fn colour_table_value(table: &[f32], base: u32, luma: f32, cb: f32, cr: f32) -> f32 {
+fn table_position(luma: f32, cb: f32, cr: f32) -> TablePosition {
     let raw_brightness = luma / COLOUR_BRIGHTNESS_STEP - 0.5f32;
     let brightness_position = f32::clamp(raw_brightness, 0.0f32, LAST_BRIGHTNESS);
     let brightness_floor = f32::floor(brightness_position);
@@ -148,26 +158,78 @@ pub(crate) fn colour_table_value(table: &[f32], base: u32, luma: f32, cb: f32, c
     let wrapped_floor = hue_floor + HUE_SECTORS;
     let sector_low = u32::cast_from(wrapped_floor) % COLOUR_HUE_BINS;
 
+    TablePosition {
+        brightness_low,
+        brightness_fraction,
+        level_low,
+        level_fraction,
+        sector_low,
+        hue_fraction,
+    }
+}
+
+/// The cell index and interpolation weight of corner `corner` of the 8 centres around `position`.
+#[cube]
+fn table_corner(position: &TablePosition, #[comptime] corner: u32) -> (u32, f32) {
+    let brightness_step = comptime!(corner / 4u32);
+    let level_step = comptime!((corner / 2u32) % 2u32);
+    let sector_step = comptime!(corner % 2u32);
+
+    let brightness_weight = corner_weight(position.brightness_fraction, comptime!(brightness_step == 1));
+    let level_weight = corner_weight(position.level_fraction, comptime!(level_step == 1));
+    let sector_weight = corner_weight(position.hue_fraction, comptime!(sector_step == 1));
+    let sector = (position.sector_low + sector_step) % COLOUR_HUE_BINS;
+    let brightness = position.brightness_low + brightness_step;
+    let level = position.level_low + level_step;
+    let index = table_index(brightness, level, sector);
+    let weight = brightness_weight * level_weight * sector_weight;
+
+    (index, weight)
+}
+
+/// The value of the table that starts at word `base` of `table`, at mean luma `luma` and chroma
+/// `cb` and `cr`, centred on 0.
+///
+/// Every value is on the 8-bit scale. The table holds one value per colour cell, at the cell's
+/// centre. The value is interpolated between the 8 nearest centres in brightness, saturation and
+/// hue. Hue wraps around, and colours past the outer centres clamp to them.
+#[cube]
+pub(crate) fn colour_table_value(table: &[f32], base: u32, luma: f32, cb: f32, cr: f32) -> f32 {
+    let position = table_position(luma, cb, cr);
+
     let mut value = 0.0f32;
     #[unroll]
     for corner in 0..8u32 {
-        let brightness_step = comptime!(corner / 4u32);
-        let level_step = comptime!((corner / 2u32) % 2u32);
-        let sector_step = comptime!(corner % 2u32);
-
-        let brightness_weight = corner_weight(brightness_fraction, comptime!(brightness_step == 1));
-        let level_weight = corner_weight(level_fraction, comptime!(level_step == 1));
-        let sector_weight = corner_weight(hue_fraction, comptime!(sector_step == 1));
-        let sector = (sector_low + sector_step) % COLOUR_HUE_BINS;
-        let brightness = brightness_low + brightness_step;
-        let level = level_low + level_step;
-        let index = table_index(brightness, level, sector);
-        let weight = brightness_weight * level_weight * sector_weight;
-
+        let (index, weight) = table_corner(&position, corner);
         value += weight * table[(base + index) as usize];
     }
 
     value
+}
+
+/// [colour_table_value] of the tables that start at words `first_base` and `second_base`, at one
+/// colour, which shares the interpolation weights between them.
+#[cube]
+pub(crate) fn colour_table_values(
+    table: &[f32],
+    first_base: u32,
+    second_base: u32,
+    luma: f32,
+    cb: f32,
+    cr: f32,
+) -> (f32, f32) {
+    let position = table_position(luma, cb, cr);
+
+    let mut first_value = 0.0f32;
+    let mut second_value = 0.0f32;
+    #[unroll]
+    for corner in 0..8u32 {
+        let (index, weight) = table_corner(&position, corner);
+        first_value += weight * table[(first_base + index) as usize];
+        second_value += weight * table[(second_base + index) as usize];
+    }
+
+    (first_value, second_value)
 }
 
 /// The gain the log-gain table that starts at word `base` of `table` gives a patch of mean luma
@@ -177,6 +239,23 @@ pub(crate) fn colour_gain(table: &[f32], base: u32, luma: f32, cb: f32, cr: f32)
     let log_gain = colour_table_value(table, base, luma, cb, cr);
 
     f32::exp(log_gain)
+}
+
+/// [colour_gain] of the tables that start at words `first_base` and `second_base`, at one colour.
+#[cube]
+pub(crate) fn colour_gain_pair(
+    table: &[f32],
+    first_base: u32,
+    second_base: u32,
+    luma: f32,
+    cb: f32,
+    cr: f32,
+) -> (f32, f32) {
+    let (first_log_gain, second_log_gain) = colour_table_values(table, first_base, second_base, luma, cb, cr);
+    let first_gain = f32::exp(first_log_gain);
+    let second_gain = f32::exp(second_log_gain);
+
+    (first_gain, second_gain)
 }
 
 /// The mean luma, Cb and Cr of the colour at the centre of cell `cell`.

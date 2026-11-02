@@ -20,7 +20,7 @@ use crate::noise::{
     NOISE_CURVE_BINS,
 };
 use crate::tune::SiteCandidate;
-use crate::tune::gpu::zero_words;
+use crate::tune::gpu::{zero_words, zeroed_words};
 use crate::tune::sites::{
     AccumulateSite,
     CollabFilterSite,
@@ -390,6 +390,10 @@ pub(crate) fn collab_site(client: &Client, spec: &CollabSpec) -> CollabSite<f32>
         neighbour_slots_len: slot_values.len(),
         noise,
         noise_curve,
+        colour_gains: zeroed_words(client, 1),
+        colour_gains_len: 1,
+        colour_means: zeroed_words(client, 1),
+        colour_means_len: 1,
         dct_profile,
         kaiser,
     };
@@ -405,6 +409,8 @@ pub(crate) fn collab_site(client: &Client, spec: &CollabSpec) -> CollabSite<f32>
         lambda_ht: 2.7,
         accum_scale,
         pool_ratio,
+        colour_scale: 0.0,
+        colour_on: false,
     };
     let frames_per_volume = grid_frames(spec.radius);
     let refs_x = refs_along(spec.width);

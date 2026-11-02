@@ -5,6 +5,7 @@ use crate::engine::{ChromaLayout, DevicePlane, Geometry, SampleFormat};
 use crate::noise::colour::{
     COLOUR_CELLS,
     COLOUR_LEVEL_FIELDS,
+    COLOUR_MEAN_FIELDS,
     CellFrame,
     ColourBlocks,
     ColourCells,
@@ -25,6 +26,19 @@ use crate::noise::{
 
 /// The temporal radius of nl4d's default window, which sizes the bench's frame ring.
 const BENCH_RING_RADIUS: u32 = 2;
+
+/// The words of `channels` log gain tables.
+pub fn colour_gain_words(channels: u32) -> usize {
+    (channels * COLOUR_CELLS) as usize
+}
+
+/// The words of the block means grid over a `width` by `height` plane.
+pub fn colour_mean_words(width: u32, height: u32) -> usize {
+    let (blocks_x, blocks_y) = temporal_stats_blocks(width, height);
+    let blocks = blocks_x * blocks_y;
+
+    (blocks * COLOUR_MEAN_FIELDS) as usize
+}
 
 /// The launches of the colour cell measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +96,7 @@ impl ColourMeasurement {
             client.create_from_slice(&cr_plane),
         ];
 
-        let blocks = ColourBlocks::new(client, geometry).expect("a 4:2:0 frame has block means");
+        let blocks = ColourBlocks::new(client, geometry, 0).expect("a 4:2:0 frame has block means");
         let (grid, channels, plane_width, plane_height) = if chroma {
             (ColourGrid::Chroma, 2, chroma_width, chroma_height)
         } else {
