@@ -108,6 +108,8 @@ pub(crate) trait PassEngine: Send {
 }
 
 /// The device time of each pass of an [Engine], `None` for a plane group it does not clean.
+///
+/// A chroma only run counts the luma motion that guides it under chroma.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PassTimings {
     pub luma: Option<EngineTiming>,

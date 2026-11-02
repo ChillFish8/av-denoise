@@ -147,6 +147,52 @@ fn strength_is_rejected_for_nl4d() {
 }
 
 #[test]
+fn luma_strength_is_rejected_for_chroma_mode() {
+    let raw = RawParams {
+        channel_mode: Some("chroma".to_string()),
+        luma_strength: Some(0.5),
+        ..RawParams::default()
+    };
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("luma_strength"), "got {err}");
+    assert!(err.contains("chroma"), "error should name the mode, got {err}");
+}
+
+#[test]
+fn chroma_strength_is_rejected_for_luma_mode() {
+    let raw = RawParams {
+        channel_mode: Some("luma".to_string()),
+        chroma_strength: Some(0.5),
+        ..RawParams::default()
+    };
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("chroma_strength"), "got {err}");
+}
+
+#[test]
+fn per_plane_strength_for_a_denoised_plane_is_accepted() {
+    let chroma = RawParams {
+        channel_mode: Some("chroma".to_string()),
+        chroma_strength: Some(0.5),
+        ..RawParams::default()
+    };
+    let luma = RawParams {
+        channel_mode: Some("luma".to_string()),
+        luma_strength: Some(0.5),
+        ..RawParams::default()
+    };
+
+    assert!(plane_options_from(&chroma, AlgorithmKind::Nlmeans).is_ok());
+    assert!(plane_options_from(&luma, AlgorithmKind::Nlmeans).is_ok());
+}
+
+#[test]
 fn luma_lambda_ht_is_rejected_for_nlmeans() {
     let raw = RawParams {
         luma_lambda_ht: Some(1.2),

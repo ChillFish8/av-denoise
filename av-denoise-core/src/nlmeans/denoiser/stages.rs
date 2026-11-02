@@ -63,7 +63,8 @@ impl NlmDenoiser {
     ///
     /// A front that refines luma motion builds only the level its refine reads.
     pub(super) fn build_pyramids_for_slot(&self, slot: u32) -> Result<(), anyhow::Error> {
-        let window_ctx = self.refine_ctx.as_ref().or(self.mc_ctx.as_ref());
+        let search_ctx = self.mc_ctx.as_ref();
+        let window_ctx = self.refine_ctx.as_ref().or(search_ctx);
         let Some(motion_ctx) = window_ctx else {
             return Ok(());
         };

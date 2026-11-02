@@ -247,6 +247,21 @@ fn reject_mismatched_params(
     Ok(())
 }
 
+/// Rejects a per-plane strength for a plane group that is not denoised.
+fn reject_unused_plane_strength(raw: &RawParams, intent: ChannelIntent) -> Result<(), anyhow::Error> {
+    if intent == ChannelIntent::Chroma && raw.luma_strength.is_some() {
+        anyhow::bail!("luma_strength has no effect on channel_mode=\"chroma\", which does not denoise luma");
+    }
+
+    if intent == ChannelIntent::Luma && raw.chroma_strength.is_some() {
+        anyhow::bail!(
+            "chroma_strength has no effect on channel_mode=\"luma\", which does not denoise chroma"
+        );
+    }
+
+    Ok(())
+}
+
 /// The default motion search with the ceiling `preset` widens failing blocks to.
 fn preset_motion_search(preset: Preset) -> MotionSearch {
     let defaults = MotionSearch::default();
@@ -294,7 +309,13 @@ pub fn plane_options_from(
         AlgorithmKind::Nl4d => NlmeansVariant::Hq,
     };
 
+    let intent = match raw.channel_mode.as_deref() {
+        None => ChannelIntent::LumaChroma,
+        Some(mode) => parse_channel_mode(mode)?,
+    };
+
     reject_mismatched_params(raw, algorithm_kind, variant)?;
+    reject_unused_plane_strength(raw, intent)?;
 
     if let Some(radius) = raw.search_radius
         && radius > 4
@@ -304,11 +325,6 @@ pub fn plane_options_from(
             "search_radius {radius} needs a raised stack, but RUST_MIN_STACK is not set. Values above 4 overflow the default 2 MiB stack during kernel codegen"
         );
     }
-
-    let intent = match raw.channel_mode.as_deref() {
-        None => ChannelIntent::LumaChroma,
-        Some(mode) => parse_channel_mode(mode)?,
-    };
 
     let device = match &raw.device {
         None => Device::default(),
@@ -372,6 +388,17 @@ pub fn plane_options_from(
                 None => PrefilterMode::None,
                 Some(spec) => parse_prefilter(spec)?,
             };
+
+            let guides_motion =
+                motion_compensation != MotionCompensationMode::None && mode != DenoisingMode::Spacial;
+            let pilot = matches!(prefilter, PrefilterMode::NlmSpatial { .. });
+            let per_plane_strength = raw.luma_strength.is_some() || raw.chroma_strength.is_some();
+            if intent == ChannelIntent::Chroma && pilot && guides_motion && per_plane_strength {
+                tracing::warn!(
+                    "prefilter nlm with channel_mode chroma searches luma motion on a pilot at the \
+                     chroma strength, so chroma differs from a lumachroma run with per-plane strengths"
+                );
+            }
 
             let nlm = NlmeansOptions {
                 prefilter,

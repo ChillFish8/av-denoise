@@ -58,7 +58,8 @@ impl LumaMotionRing {
         let neighbours = u64::from(2 * temporal_radius);
         let slot_bytes = neighbours * chroma.mv_field_bytes_per_neighbour();
         let fields: Arc<[Handle]> = (0..slots).map(|_| client.empty(slot_bytes as usize)).collect();
-        let lookahead = client.empty(chroma.pair_slot_bytes() as usize);
+        let lookahead_bytes = chroma.pair_slot_bytes() as usize;
+        let lookahead = client.empty(lookahead_bytes);
         let tags = Tags {
             window: vec![None; slots as usize],
             lookahead: None,

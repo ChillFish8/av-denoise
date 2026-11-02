@@ -197,8 +197,9 @@ starting point and adjust just the dial you care about, as the examples above do
 `channel_mode` selects which planes get denoised, and takes one of three values:
 
 - `luma` denoises the luma plane only, leaving chroma untouched.
-- `chroma` denoises the chroma planes only, leaving luma untouched.
-- `lumachroma` denoises both, luma and chroma independently.
+- `chroma` denoises the chroma planes only, leaving luma untouched. Luma's motion is still searched
+  to guide chroma, so it costs more than the chroma planes alone.
+- `lumachroma` denoises both, with chroma following luma's motion.
 
 ## Devices and accelerators
 

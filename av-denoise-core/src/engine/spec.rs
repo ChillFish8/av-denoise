@@ -131,7 +131,8 @@ impl PassSpec {
 /// Which engine to build, and which planes of the frame it cleans.
 ///
 /// A `Some` option cleans that plane group with those options. Luma is plane 0 and chroma is planes
-/// 1 and 2. A plane group left `None` comes out unchanged.
+/// 1 and 2. A plane group left `None` comes out unchanged. A chroma group with motion compensation
+/// still searches luma motion to guide it.
 #[derive(Debug, Clone, Copy)]
 pub enum EngineSpec {
     Nlmeans {
