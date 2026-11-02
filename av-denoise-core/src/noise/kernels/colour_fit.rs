@@ -2,7 +2,6 @@ use std::f32::consts::{LN_2, PI, TAU};
 
 use cubecl::prelude::*;
 
-use crate::noise::DERIVED_CURVE_VALID;
 use crate::noise::colour::{
     COLOUR_BRIGHTNESS_BINS,
     COLOUR_BRIGHTNESS_STEP,
@@ -52,6 +51,7 @@ use crate::noise::colour::{
     COLOUR_LEVEL_FIELDS,
     COLOUR_SATURATION_CENTRES,
 };
+use crate::noise::{DERIVED_CURVE_VALID, NOISE_CURVE_BINS};
 
 const LAST_KNOT: u32 = COLOUR_FIT_KNOTS - 1;
 /// The codes between two knots of the brightness base, which spans 0 to 255.
@@ -1147,3 +1147,4 @@ fn corner_weight(fraction: f32, #[comptime] upper: bool) -> f32 {
 }
 
 const _: () = assert!(COLOUR_CALIBRATION_RECORDS == NORMALISER_RECORDS);
+const _: () = assert!(NOISE_CURVE_BINS == COLOUR_BRIGHTNESS_BINS as usize);

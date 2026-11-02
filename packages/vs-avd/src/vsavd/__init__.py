@@ -229,8 +229,9 @@ def Nl4d(
             positions, so it dominates the work, lowering it is the fastest way to speed a run-up.
         refine: Half-width of the window searched around each neighbour frame's motion-predicted position.
             Raise it when motion tracking lands close but not exact.
-        noise_map: Whether to scale the luma threshold by how noisy each brightness level is.
-            On by default, `False` turns it off.
+        noise_map: Whether to scale the luma threshold by how noisy each brightness level and
+            colour is. On by default, `False` turns it off along with the luma colour gains.
+            Chroma thresholds always follow each plane's colour grain.
         pooled_threshold: Whether to judge each frequency together with its neighbours, which
             keeps faint texture. On by default, `False` turns it off.
         accelerators: The accelerators to try and use in the order to attempt.

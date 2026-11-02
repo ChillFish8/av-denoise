@@ -62,9 +62,11 @@ pub struct Nl4dParams {
     /// `1.0`, and `0.0` turns the stage off in the denoiser's own searches. The camera model fit
     /// keeps its stage at `1.0`.
     pub field_lambda: f32,
-    /// Scales the luma threshold by how noisy each brightness level is in the current frame.
+    /// Scales the luma threshold by how noisy each brightness level and colour is in the current
+    /// frame.
     ///
-    /// On by default.
+    /// On by default. Turning it off also turns off the luma colour gains. Chroma thresholds
+    /// always follow each plane's colour grain.
     pub noise_map: bool,
     /// Judges each transform coefficient together with its frequency neighbours instead of alone.
     ///

@@ -222,12 +222,14 @@ impl Nl4d {
 
     /// Whether an engine built from `options` pools its grain into colour cells.
     ///
-    /// That needs the noise measured, from residuals against a neighbour frame.
+    /// That needs the noise measured, from residuals against a neighbour frame, and a gain to
+    /// apply. Luma takes colour gains only with the noise map, chroma always.
     pub fn measures_colour_for(options: &Nl4dOptions, channels: ChannelMode) -> bool {
         let front_params = nlm_params(options, channels);
         let lookahead = lookahead_depth_for(&front_params);
+        let gains_apply = options.noise_map || channels == ChannelMode::Chroma;
 
-        lookahead > 0 && options.temporal_radius >= 1
+        lookahead > 0 && options.temporal_radius >= 1 && gains_apply
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
@@ -385,6 +387,10 @@ impl FramePass for Nl4d {
     }
 
     fn measure_colour(&mut self, source: ColourSource) {
+        if !self.inner.colour_gains {
+            return;
+        }
+
         self.inner.front.measure_colour(source);
     }
 

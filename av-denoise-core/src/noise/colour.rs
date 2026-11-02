@@ -308,6 +308,17 @@ pub(crate) struct ColourSource {
 }
 
 impl ColourSource {
+    /// Stream frame `frame`'s block means, or an error when they are no longer held.
+    fn held_means(&self, frame: u32) -> Result<Handle, anyhow::Error> {
+        let means = self.blocks.read(self.grid, frame);
+        let Some(means) = means else {
+            let message = format!("the block colour of stream frame {frame} is not held");
+            return Err(anyhow::anyhow!(message));
+        };
+
+        Ok(means)
+    }
+
     /// The width and height of the plane the grid covers.
     fn plane_dims(&self) -> (u32, u32) {
         let geometry = self.blocks.geometry;
@@ -732,9 +743,7 @@ impl NoiseState {
         };
 
         let source = &colour.source;
-        let means = source.blocks.read(source.grid, frame);
-        let means =
-            means.ok_or_else(|| anyhow::anyhow!("the block colour of stream frame {frame} is not held"))?;
+        let means = source.held_means(frame)?;
         let records = self.records_view(slot);
         let (records, records_len) = records.expect("colour cells imply temporal stats");
 
@@ -797,9 +806,7 @@ impl NoiseState {
 
         let gains = colour.fit.gains();
         let source = &colour.source;
-        let means = source.blocks.read(source.grid, frame);
-        let means =
-            means.ok_or_else(|| anyhow::anyhow!("the block colour of stream frame {frame} is not held"))?;
+        let means = source.held_means(frame)?;
         let geometry = source.blocks.geometry;
         let blocks = grid_blocks(geometry, source.grid);
 

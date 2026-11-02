@@ -147,8 +147,8 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub field_lambda: Option<f32>,
 
-    /// Turns off the luma noise map, which scales the threshold by how noisy each brightness
-    /// level is.
+    /// Turns off the luma noise map, which scales the luma threshold by how noisy each brightness
+    /// level and colour is. Also turns off the luma colour gains.
     #[arg(long)]
     pub no_noise_map: bool,
 

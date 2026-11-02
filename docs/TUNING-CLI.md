@@ -51,8 +51,9 @@ grows. Raise it further on noisy or flat content where vectors wander, at the co
 small objects less closely. `0` turns the smoothing off and leaves the tracked field as it is.
 
 **`--no-noise-map` turns off the luma noise map.** The noise map is on by default. It scales the
-luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
-more lightly.
+luma threshold by how noisy each brightness level and colour is, filtering noisy ones harder and
+clean ones more lightly. Turning it off also turns off the luma colour gains. Chroma thresholds
+always follow each plane's colour grain.
 
 **`--no-pooled-threshold` turns off the pooled threshold.** It is on by default. Each frequency
 is judged together with its neighbours rather than alone, so faint lines and fine texture

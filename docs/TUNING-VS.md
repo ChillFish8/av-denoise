@@ -81,8 +81,9 @@ clean = avd.Nl4d(clip, luma_lambda_ht=5.0, lambda_ht_scale=1.05)
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates.
 
 **`noise_map=False` turns off the luma noise map.** The noise map is on by default. It scales the
-luma threshold by how noisy each brightness level is, filtering noisy levels harder and clean ones
-more lightly.
+luma threshold by how noisy each brightness level and colour is, filtering noisy ones harder and
+clean ones more lightly. Turning it off also turns off the luma colour gains. Chroma thresholds
+always follow each plane's colour grain.
 
 ```python
 clean = avd.Nl4d(clip, noise_map=False)
