@@ -4,7 +4,7 @@ use std::process::Command;
 use av_decoders::Rational32;
 use av_denoise::{ChromaSiting, Depth, Subsampling};
 
-use super::{data_clip, open_data_clip, y4m_reader};
+use super::{data_clip, open_data_clip, silent_wav, y4m_reader};
 use crate::pipeline::convert::SourcePixel;
 use crate::pipeline::probe::nominal_frame_rate;
 use crate::pipeline::source::{
@@ -227,33 +227,6 @@ fn an_unreadable_path_has_no_nominal_frame_rate() {
     let missing = directory.path().join("missing.mkv");
 
     assert_eq!(nominal_frame_rate(&missing), None);
-}
-
-/// A short silent mono WAV file, which holds an audio track and no video.
-fn silent_wav() -> Vec<u8> {
-    let samples = 16u32;
-    let data_bytes = samples * 2;
-    let riff_bytes = 36 + data_bytes;
-    let mut bytes = Vec::new();
-
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&riff_bytes.to_le_bytes());
-    bytes.extend_from_slice(b"WAVEfmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    // PCM, one channel, 8 kHz, 16000 bytes a second, 2 byte frames, 16 bits.
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&8000u32.to_le_bytes());
-    bytes.extend_from_slice(&16000u32.to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_bytes.to_le_bytes());
-
-    let length = bytes.len() + data_bytes as usize;
-    bytes.resize(length, 0);
-
-    bytes
 }
 
 #[test]

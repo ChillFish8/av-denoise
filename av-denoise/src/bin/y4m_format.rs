@@ -1,18 +1,13 @@
 use av_denoise::{ChromaSiting, Depth, Subsampling};
-use ffms2_sys::FFMS_ChromaLocations;
 
-/// Maps an ffms2 chroma location onto a siting.
+/// Maps an FFmpeg chroma location onto a siting.
 ///
 /// Locations that have no y4m tag, such as top or bottom, are [ChromaSiting::Unknown].
-pub fn siting_from_ffms2(location: i32) -> ChromaSiting {
-    let left = FFMS_ChromaLocations::FFMS_LOC_LEFT as i32;
-    let center = FFMS_ChromaLocations::FFMS_LOC_CENTER as i32;
-    let top_left = FFMS_ChromaLocations::FFMS_LOC_TOPLEFT as i32;
-
+pub fn siting_from_chroma_location(location: i32) -> ChromaSiting {
     match location {
-        value if value == left => ChromaSiting::Left,
-        value if value == center => ChromaSiting::Center,
-        value if value == top_left => ChromaSiting::TopLeft,
+        1 => ChromaSiting::Left,
+        2 => ChromaSiting::Center,
+        3 => ChromaSiting::TopLeft,
         _ => ChromaSiting::Unknown,
     }
 }
@@ -207,12 +202,12 @@ mod colorspace_tests {
     }
 
     #[test]
-    fn ffms2_locations_map_to_sitings() {
-        assert_eq!(siting_from_ffms2(1), ChromaSiting::Left);
-        assert_eq!(siting_from_ffms2(2), ChromaSiting::Center);
-        assert_eq!(siting_from_ffms2(3), ChromaSiting::TopLeft);
-        assert_eq!(siting_from_ffms2(0), ChromaSiting::Unknown);
-        assert_eq!(siting_from_ffms2(4), ChromaSiting::Unknown);
-        assert_eq!(siting_from_ffms2(6), ChromaSiting::Unknown);
+    fn chroma_locations_map_to_sitings() {
+        assert_eq!(siting_from_chroma_location(1), ChromaSiting::Left);
+        assert_eq!(siting_from_chroma_location(2), ChromaSiting::Center);
+        assert_eq!(siting_from_chroma_location(3), ChromaSiting::TopLeft);
+        assert_eq!(siting_from_chroma_location(0), ChromaSiting::Unknown);
+        assert_eq!(siting_from_chroma_location(4), ChromaSiting::Unknown);
+        assert_eq!(siting_from_chroma_location(6), ChromaSiting::Unknown);
     }
 }

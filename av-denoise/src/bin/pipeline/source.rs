@@ -4,14 +4,19 @@ use std::path::Path;
 
 use av_decoders::{Decoder, DecoderImpl, Rational32, VideoDetails};
 use av_denoise::{ChromaSiting, Depth, FrameLayout, Subsampling};
-use ffms2_sys::{FFMS_ColorRanges, FFMS_ErrorInfo, FFMS_GetFrame, FFMS_GetVideoProperties, FFMS_VideoSource};
+use ffms2_sys::{FFMS_ErrorInfo, FFMS_GetFrame, FFMS_GetVideoProperties, FFMS_VideoSource};
 
 use super::convert::subsampling_from_av_decoders;
 use super::frame_rate::{check_constant_rate, variable_rate_error};
 use super::probe::nominal_frame_rate;
 use crate::cli::InputSource;
 use crate::frame_index::{self, IndexEntry};
-use crate::y4m_format::{siting_from_ffms2, siting_from_y4m, subsampling_from_y4m, y4m_vendor_extensions};
+use crate::y4m_format::{
+    siting_from_chroma_location,
+    siting_from_y4m,
+    subsampling_from_y4m,
+    y4m_vendor_extensions,
+};
 
 /// What the rest of a run needs to know about its input.
 #[derive(Clone)]
@@ -174,14 +179,13 @@ pub struct FileColour {
     pub chroma_siting: ChromaSiting,
 }
 
-/// Maps an ffms2 colour range onto the y4m `XCOLORRANGE` tag, without its leading `X`.
+/// Maps an FFmpeg colour range onto the y4m `XCOLORRANGE` tag, without its leading `X`.
+///
+/// `1` is limited and `2` is full.
 pub fn color_range_extension(range: i32) -> Option<y4m::VendorExtensionString> {
-    let limited = FFMS_ColorRanges::FFMS_CR_MPEG as i32;
-    let full = FFMS_ColorRanges::FFMS_CR_JPEG as i32;
-
     let tag: &[u8] = match range {
-        value if value == limited => b"COLORRANGE=LIMITED",
-        value if value == full => b"COLORRANGE=FULL",
+        1 => b"COLORRANGE=LIMITED",
+        2 => b"COLORRANGE=FULL",
         _ => return None,
     };
 
@@ -254,7 +258,7 @@ fn first_frame_siting(video_source: *mut FFMS_VideoSource) -> ChromaSiting {
     // SAFETY: checked non-null just above, and ffms2 keeps the frame alive until the next call.
     let location = unsafe { (*frame_ptr).ChromaLocation };
 
-    siting_from_ffms2(location)
+    siting_from_chroma_location(location)
 }
 
 /// Opens a y4m stream.
@@ -292,7 +296,7 @@ pub fn open_y4m(reader: Box<dyn Read>) -> Result<OpenedSource, anyhow::Error> {
     })
 }
 
-fn layout_from_details(details: &VideoDetails) -> Result<FrameLayout, anyhow::Error> {
+pub fn layout_from_details(details: &VideoDetails) -> Result<FrameLayout, anyhow::Error> {
     let depth = Depth::from_bits(details.bit_depth)?;
     let subsampling = subsampling_from_av_decoders(details.chroma_sampling)?;
 

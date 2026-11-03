@@ -1,3 +1,5 @@
+#[cfg_attr(not(test), expect(dead_code, reason = "file input switches to it in a later change"))]
+mod bestsource;
 mod convert;
 mod coordinator;
 mod decode;

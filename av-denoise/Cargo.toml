@@ -56,6 +56,9 @@ ffms2-sys = { version = "0.3", optional = true }
 ffmpeg-sys-the-third = { version = "6.0.0", optional = true, default-features = false, features = ["avformat"] }
 v_frame = { version = "0.5", optional = true }
 
+# Frame ingestion via BestSource
+avtbx-bestsource = { version = "0.2.0", optional = true }
+
 # Frame ingestion via y4m stdin
 y4m = { version = "0.8", optional = true }
 
@@ -92,6 +95,7 @@ binary = [
     "ffms2-sys",
     "ffmpeg-sys-the-third",
     "v_frame",
+    "avtbx-bestsource",
     "y4m",
     "indicatif",
     "tracing-indicatif",

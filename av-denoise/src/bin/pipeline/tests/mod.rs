@@ -1,3 +1,4 @@
+mod bestsource;
 mod convert;
 mod coordinator;
 mod decode;
@@ -84,6 +85,33 @@ pub(super) fn temporal_opts() -> PlaneOptions {
         tuning: TuningMode::Off,
         deterministic: false,
     }
+}
+
+/// A short silent mono WAV file, which holds an audio track and no video.
+pub(super) fn silent_wav() -> Vec<u8> {
+    let samples = 16u32;
+    let data_bytes = samples * 2;
+    let riff_bytes = 36 + data_bytes;
+    let mut bytes = Vec::new();
+
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&riff_bytes.to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    // PCM, one channel, 8 kHz, 16000 bytes a second, 2 byte frames, 16 bits.
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&8000u32.to_le_bytes());
+    bytes.extend_from_slice(&16000u32.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+
+    let length = bytes.len() + data_bytes as usize;
+    bytes.resize(length, 0);
+
+    bytes
 }
 
 pub fn tiny_layout() -> FrameLayout {
