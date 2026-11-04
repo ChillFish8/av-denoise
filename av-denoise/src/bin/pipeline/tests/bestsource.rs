@@ -5,44 +5,9 @@ use av_decoders::Rational32;
 use av_denoise::ChromaSiting;
 use avtbx_bestsource::IndexCache;
 
-use super::{data_clip, silent_wav};
-use crate::pipeline::bestsource::{BestSourceReader, open_bestsource, pixel_aspect_from_sar};
+use super::{ffmpeg_clip, silent_wav};
+use crate::pipeline::bestsource::{open_bestsource, pixel_aspect_from_sar};
 use crate::pipeline::convert::planes_from_v_frame_u16;
-use crate::pipeline::source::SourceInfo;
-
-/// Builds an ffv1 clip with ffmpeg, or `None` when ffmpeg cannot.
-pub(super) fn ffmpeg_clip(
-    directory: &Path,
-    name: &str,
-    size: &str,
-    pix_fmt: &str,
-    extra: &[&str],
-) -> Option<PathBuf> {
-    let path = directory.join(name);
-    let source = format!("testsrc2=size={size}:rate=25");
-    let status = Command::new("ffmpeg")
-        .args(["-v", "error", "-y", "-f", "lavfi", "-i", &source])
-        .args(["-frames:v", "10"])
-        .args(extra)
-        .args(["-pix_fmt", pix_fmt, "-c:v", "ffv1"])
-        .arg(&path)
-        .status();
-
-    let built = matches!(status, Ok(status) if status.success());
-    if !built {
-        eprintln!("skipping, ffmpeg could not build {name}");
-        return None;
-    }
-
-    Some(path)
-}
-
-fn open_data(name: &str) -> Option<(BestSourceReader, SourceInfo)> {
-    let path = data_clip(name)?;
-    let opened = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
-
-    Some(opened)
-}
 
 fn open_error(path: &Path) -> String {
     let result = open_bestsource(path, IndexCache::Disabled);
@@ -55,47 +20,49 @@ fn open_error(path: &Path) -> String {
 
 #[test]
 fn a_left_sited_file_reports_left() {
-    let Some((_, info)) = open_data("patema-problem-clip-raw.mkv") else {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let extra = ["-chroma_sample_location", "left"];
+    let Some(path) = ffmpeg_clip(directory.path(), "left.mkv", "64x48", "yuv420p", &extra) else {
         return;
     };
+    let (_, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
     assert_eq!(info.layout.chroma_siting, ChromaSiting::Left);
 }
 
 #[test]
 fn a_centre_sited_file_reports_centre() {
-    let Some((_, info)) = open_data("food-problem-clip2-raw.mkv") else {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let extra = ["-chroma_sample_location", "center"];
+    let Some(path) = ffmpeg_clip(directory.path(), "centre.mkv", "64x48", "yuv420p", &extra) else {
         return;
     };
+    let (_, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
     assert_eq!(info.layout.chroma_siting, ChromaSiting::Center);
 }
 
 #[test]
 fn a_file_takes_its_container_frame_rate() {
-    let clips = [
-        "apothecary-clip.mkv",
-        "food-problem-clip2-raw.mkv",
-        "patema-problem-clip3-raw.mkv",
-    ];
-    let ntsc_film = Rational32::new(24000, 1001);
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let extra = ["-r", "24000/1001"];
+    let Some(path) = ffmpeg_clip(directory.path(), "ntsc.mkv", "64x48", "yuv420p", &extra) else {
+        return;
+    };
+    let (_, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
-    for clip in clips {
-        let Some((_, info)) = open_data(clip) else {
-            continue;
-        };
-
-        assert_eq!(info.details.frame_rate, ntsc_film, "{clip}");
-    }
+    assert_eq!(info.details.frame_rate, Rational32::new(24000, 1001));
 }
 
 #[test]
 fn estimated_frames_is_the_source_frame_count() {
-    let Some((_, info)) = open_data("delie-sample-source.mkv") else {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let Some(path) = ffmpeg_clip(directory.path(), "ten.mkv", "64x48", "yuv420p", &[]) else {
         return;
     };
+    let (_, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
-    assert_eq!(info.estimated_frames, Some(143));
+    assert_eq!(info.estimated_frames, Some(10));
 }
 
 #[test]

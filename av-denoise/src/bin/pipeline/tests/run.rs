@@ -14,8 +14,7 @@ use av_denoise::{
 };
 use avtbx_bestsource::IndexCache;
 
-use super::bestsource::ffmpeg_clip;
-use super::{SCENE_CLIP_SIZE, SharedBuffer, frame_count, multi_scene_clip, temporal_opts};
+use super::{SCENE_CLIP_SIZE, SharedBuffer, ffmpeg_clip, frame_count, multi_scene_clip, temporal_opts};
 use crate::pipeline::source::{open_file, open_y4m};
 use crate::pipeline::stage::{IN_TRANSIT_FRAMES, frame_permits};
 use crate::pipeline::{RunSettings, run_with};

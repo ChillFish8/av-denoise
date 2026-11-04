@@ -1,14 +1,16 @@
 use av_denoise::ChromaSiting;
+#[cfg(feature = "vulkan")]
+use avtbx_bestsource::IndexCache;
 use indicatif::ProgressBar;
 
 #[cfg(feature = "vulkan")]
-use super::{open_data_clip, y4m_reader};
+use super::{ffmpeg_clip, y4m_reader};
 use super::{tiny_layout, tiny_planes};
 #[cfg(feature = "vulkan")]
 use crate::pipeline::coordinator::run_coordinator;
 use crate::pipeline::coordinator::{OutputMsg, emit_frames};
 #[cfg(feature = "vulkan")]
-use crate::pipeline::source::{SourceInfo, open_y4m};
+use crate::pipeline::source::{SourceInfo, open_file, open_y4m};
 use crate::pipeline::stage::frame_permit_channel;
 use crate::y4m_format::subsampling_to_y4m;
 
@@ -149,10 +151,13 @@ fn the_coordinator_writes_the_source_siting_into_the_header() {
 
 #[cfg(feature = "vulkan")]
 #[test]
-fn the_apothecary_header_carries_the_declared_frame_rate() {
-    let Some(opened) = open_data_clip("apothecary-clip.mkv") else {
+fn a_file_header_carries_the_declared_frame_rate() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let extra = ["-r", "24000/1001"];
+    let Some(path) = ffmpeg_clip(directory.path(), "ntsc.mkv", "64x48", "yuv420p", &extra) else {
         return;
     };
+    let opened = open_file(&path, IndexCache::Disabled).expect("the clip opens");
 
     let header_line = written_header(opened.info);
 
