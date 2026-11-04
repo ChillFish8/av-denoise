@@ -7,7 +7,7 @@
     {
       "name": "ffmpeg",
       "default-features": false,
-      "features": ["avcodec", "avformat", "swscale", "swresample", "dav1d", "zlib", "bzip2"]
+      "features": ["avcodec", "avformat", "dav1d", "zlib", "bzip2"]
     },
     {
       "name": "pkgconf",
