@@ -27,6 +27,7 @@ fn a_left_sited_file_reports_left() {
     let Some(path) = ffmpeg_clip(directory.path(), "left.mkv", "64x48", "yuv420p", &extra) else {
         return;
     };
+
     let (_, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
     assert_eq!(info.layout.chroma_siting, ChromaSiting::Left);
@@ -39,6 +40,7 @@ fn a_centre_sited_file_reports_centre() {
     let Some(path) = ffmpeg_clip(directory.path(), "centre.mkv", "64x48", "yuv420p", &extra) else {
         return;
     };
+
     let (_, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
     assert_eq!(info.layout.chroma_siting, ChromaSiting::Center);
@@ -51,6 +53,7 @@ fn a_file_takes_its_container_frame_rate() {
     let Some(path) = ffmpeg_clip(directory.path(), "ntsc.mkv", "64x48", "yuv420p", &extra) else {
         return;
     };
+
     let (_, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
     assert_eq!(info.details.frame_rate, Rational32::new(24000, 1001));
@@ -62,6 +65,7 @@ fn estimated_frames_is_the_source_frame_count() {
     let Some(path) = ffmpeg_clip(directory.path(), "ten.mkv", "64x48", "yuv420p", &[]) else {
         return;
     };
+
     let (_, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
     assert_eq!(info.estimated_frames, Some(10));
@@ -73,6 +77,7 @@ fn reading_stops_after_the_last_frame() {
     let Some(path) = ffmpeg_clip(directory.path(), "ten.mkv", "64x48", "yuv420p", &[]) else {
         return;
     };
+
     let (mut reader, _) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
     let mut count = 0;
@@ -90,6 +95,7 @@ fn file_frames_pass_through_scene_detection() {
     let Some(path) = ffmpeg_clip(directory.path(), "scenes.mkv", "64x48", "yuv420p", &[]) else {
         return;
     };
+
     let (mut reader, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
     let mut splitter = SceneSplitter::<u8>::new(&info.details);
 
@@ -109,6 +115,7 @@ fn a_ten_bit_file_matches_ffmpeg_raw_bytes() {
     let Some(path) = ffmpeg_clip(directory.path(), "ten-bit.mkv", "64x48", "yuv420p10le", &[]) else {
         return;
     };
+
     let raw = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(&path)
@@ -223,6 +230,7 @@ fn a_read_only_source_directory_still_opens() {
     let Some(clip) = ffmpeg_clip(build_directory.path(), "ten.mkv", "64x48", "yuv420p", &[]) else {
         return;
     };
+
     let read_only = tempfile::tempdir().expect("a temporary directory");
     let path = read_only.path().join("ten.mkv");
     std::fs::copy(&clip, &path).expect("the clip copies");
@@ -250,6 +258,7 @@ fn the_sar_becomes_the_pixel_aspect() {
     ) else {
         return;
     };
+
     let (_, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
     let aspect = info.pixel_aspect.expect("the clip declares a SAR");
@@ -269,6 +278,7 @@ fn a_full_range_file_tags_full_range() {
     ) else {
         return;
     };
+
     let (_, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
 
     let tags: Vec<&[u8]> = info

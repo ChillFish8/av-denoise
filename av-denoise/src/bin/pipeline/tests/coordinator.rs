@@ -157,6 +157,7 @@ fn a_file_header_carries_the_declared_frame_rate() {
     let Some(path) = ffmpeg_clip(directory.path(), "ntsc.mkv", "64x48", "yuv420p", &extra) else {
         return;
     };
+
     let opened = open_file(&path, IndexCache::Disabled).expect("the clip opens");
 
     let header_line = written_header(opened.info);

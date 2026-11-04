@@ -72,6 +72,10 @@ pub fn open_bestsource(
     path: &Path,
     cache: IndexCache,
 ) -> Result<(BestSourceReader, SourceInfo), anyhow::Error> {
+    if !matches!(cache, IndexCache::Disabled) {
+        tracing::info!(path = %path.display(), "opening the input, which may need indexing first");
+    }
+
     let mut source = open_video_source(path, cache)?;
     let properties = *source.properties();
 
@@ -201,8 +205,10 @@ impl BestSourceReader {
         let decoded = self.source.frame(number)?;
         let shape = self.shape;
 
-        let decoded_width = usize::try_from(decoded.ss_mod_width()).ok();
-        let decoded_height = usize::try_from(decoded.ss_mod_height()).ok();
+        let raw_width = decoded.ss_mod_width();
+        let raw_height = decoded.ss_mod_height();
+        let decoded_width = usize::try_from(raw_width).ok();
+        let decoded_height = usize::try_from(raw_height).ok();
         let width_matches = decoded_width == Some(shape.width.get());
         let height_matches = decoded_height == Some(shape.height.get());
         if !width_matches || !height_matches {
@@ -229,11 +235,16 @@ impl BestSourceReader {
             .build::<T>()?;
 
         let y_plane = Some(&mut frame.y_plane);
-        copy_plane(y_plane, &self.scratch[0], shape.row_bytes(0))?;
+        let y_row_bytes = shape.row_bytes(0);
+        copy_plane(y_plane, &self.scratch[0], y_row_bytes)?;
+
         let u_plane = frame.u_plane.as_mut();
-        copy_plane(u_plane, &self.scratch[1], shape.row_bytes(1))?;
+        let u_row_bytes = shape.row_bytes(1);
+        copy_plane(u_plane, &self.scratch[1], u_row_bytes)?;
+
         let v_plane = frame.v_plane.as_mut();
-        copy_plane(v_plane, &self.scratch[2], shape.row_bytes(2))?;
+        let v_row_bytes = shape.row_bytes(2);
+        copy_plane(v_plane, &self.scratch[2], v_row_bytes)?;
 
         Ok(frame)
     }
@@ -298,9 +309,18 @@ fn frame_shape(properties: &VideoProperties) -> Result<FrameShape, anyhow::Error
     let raw_width = usize::try_from(properties.width)?;
     let raw_height = usize::try_from(properties.height)?;
     let bits = u8::try_from(format.bits)?;
-    let width = NonZeroUsize::new(raw_width).ok_or_else(|| anyhow::anyhow!("the video has no width"))?;
-    let height = NonZeroUsize::new(raw_height).ok_or_else(|| anyhow::anyhow!("the video has no height"))?;
-    let bit_depth = NonZeroU8::new(bits).ok_or_else(|| anyhow::anyhow!("the video has no bit depth"))?;
+    let Some(width) = NonZeroUsize::new(raw_width) else {
+        anyhow::bail!("the video has no width");
+    };
+
+    let Some(height) = NonZeroUsize::new(raw_height) else {
+        anyhow::bail!("the video has no height");
+    };
+
+    let Some(bit_depth) = NonZeroU8::new(bits) else {
+        anyhow::bail!("the video has no bit depth");
+    };
+
     let shape = FrameShape {
         width,
         height,
