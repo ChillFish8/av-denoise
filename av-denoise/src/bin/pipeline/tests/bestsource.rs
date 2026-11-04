@@ -307,3 +307,70 @@ fn an_unset_or_invalid_sar_gives_no_pixel_aspect() {
         assert!(aspect.is_none(), "SAR {numerator}:{denominator} must give none");
     }
 }
+
+fn bsindex_files(directory: &Path) -> Vec<PathBuf> {
+    let entries = std::fs::read_dir(directory).expect("the directory lists");
+
+    entries
+        .map(|entry| entry.expect("an entry reads").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "bsindex"))
+        .collect()
+}
+
+#[test]
+fn an_index_is_written_beside_the_source() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let Some(path) = ffmpeg_clip(directory.path(), "ten.mkv", "64x48", "yuv420p", &[]) else {
+        return;
+    };
+
+    let opened = open_bestsource(&path, IndexCache::BesideSource).expect("the clip opens");
+
+    assert!(!bsindex_files(directory.path()).is_empty());
+    drop(opened);
+}
+
+#[test]
+fn no_index_is_written_when_disabled() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let Some(path) = ffmpeg_clip(directory.path(), "ten.mkv", "64x48", "yuv420p", &[]) else {
+        return;
+    };
+
+    let opened = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
+
+    let entries = std::fs::read_dir(directory.path())
+        .expect("the directory lists")
+        .count();
+    assert_eq!(entries, 1);
+    drop(opened);
+}
+
+#[test]
+fn a_replaced_source_is_reindexed() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let Some(first) = ffmpeg_clip(directory.path(), "first.mkv", "64x48", "yuv420p", &[]) else {
+        return;
+    };
+
+    let Some(second) = ffmpeg_clip(
+        directory.path(),
+        "second.mkv",
+        "64x48",
+        "yuv420p",
+        &["-frames:v", "20"],
+    ) else {
+        return;
+    };
+
+    let path = directory.path().join("clip.mkv");
+    std::fs::copy(&first, &path).expect("the first clip copies");
+
+    let (_, first_info) = open_bestsource(&path, IndexCache::BesideSource).expect("the clip opens");
+    assert_eq!(first_info.estimated_frames, Some(10));
+
+    std::fs::copy(&second, &path).expect("the second clip replaces the first");
+    let (_, second_info) = open_bestsource(&path, IndexCache::BesideSource).expect("the clip reopens");
+
+    assert_eq!(second_info.estimated_frames, Some(20));
+}

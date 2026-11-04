@@ -1,5 +1,6 @@
 use av_denoise::TuningMode;
 use av_denoise::tune::tuning_mode_from_env;
+use avtbx_bestsource::IndexCache;
 
 use super::InputSource;
 
@@ -99,6 +100,10 @@ pub struct CommonArgs {
     /// Sharing saves about 30 MiB of GPU memory per extra worker.
     #[arg(long)]
     pub shared_device: bool,
+
+    /// Never read or write a BestSource index beside the input file.
+    #[arg(long)]
+    pub no_index_cache: bool,
 }
 
 /// The longest tuning budget accepted, one day in seconds.
@@ -139,6 +144,15 @@ fn check_tune_budget(seconds: f64) -> Result<(), anyhow::Error> {
 }
 
 impl CommonArgs {
+    /// Where BestSource keeps its index for a file input.
+    pub fn index_cache(&self) -> IndexCache {
+        if self.no_index_cache {
+            return IndexCache::Disabled;
+        }
+
+        IndexCache::BesideSource
+    }
+
     /// The tuning mode, with `AV_DENOISE_TUNE` applied.
     pub fn tuning_mode(&self) -> TuningMode {
         tuning_mode_from_env(self.tune)

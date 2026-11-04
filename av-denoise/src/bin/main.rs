@@ -8,6 +8,7 @@ mod progress;
 mod warm_start;
 mod y4m_format;
 
+use avtbx_bestsource::IndexCache;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -26,6 +27,7 @@ const DEFAULT_FRAME_BUDGET_BYTES: u64 = 1536 << 20;
 fn run_input(
     opts: &RunOptions,
     input: &InputSource,
+    cache: IndexCache,
     workers: Option<usize>,
     frame_budget: Option<u64>,
 ) -> Result<(), anyhow::Error> {
@@ -34,7 +36,7 @@ fn run_input(
 
     tracing::info!(input = %input, "reading input");
 
-    pipeline::run(opts, input, workers, frame_budget)
+    pipeline::run(opts, input, cache, workers, frame_budget)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -110,16 +112,18 @@ fn run_command(args: &Args) -> anyhow::Result<()> {
         return run_tune(tune, args);
     }
 
-    let (opts, input, workers, frame_budget) = match &args.command {
+    let (opts, input, cache, workers, frame_budget) = match &args.command {
         Command::Nlmeans(nlm) => (
             nlm.build_options(args)?,
             &nlm.common.input,
+            nlm.common.index_cache(),
             nlm.common.workers,
             nlm.common.frame_budget,
         ),
         Command::Nl4d(nl4d) => (
             nl4d.build_options(args)?,
             &nl4d.common.input,
+            nl4d.common.index_cache(),
             nl4d.common.workers,
             nl4d.common.frame_budget,
         ),
@@ -129,5 +133,5 @@ fn run_command(args: &Args) -> anyhow::Result<()> {
         Command::Tune(_) => unreachable!(),
     };
 
-    run_input(&opts, input, workers, frame_budget)
+    run_input(&opts, input, cache, workers, frame_budget)
 }

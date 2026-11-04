@@ -53,13 +53,14 @@ pub struct RunSettings {
 pub fn run(
     opts: &RunOptions,
     input: &InputSource,
+    cache: IndexCache,
     workers: usize,
     frame_budget_bytes: u64,
 ) -> Result<(), anyhow::Error> {
     let is_terminal = std::io::stderr().is_terminal();
     let visible = denoise_bar_visible(opts.progress, is_terminal);
     let owned_input = input.clone();
-    let opener = move || source::open_source(&owned_input, IndexCache::BesideSource);
+    let opener = move || source::open_source(&owned_input, cache);
     let output = stdout();
     let grain_table = opts.grain_table.clone();
     let settings = RunSettings {

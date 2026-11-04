@@ -109,8 +109,9 @@ Both subcommands also take:
 
 | Flag                    | What it does                                                                                     | Default  |
 |-------------------------|--------------------------------------------------------------------------------------------------|----------|
-| `-i, --input <path\|->` | A path is opened with ffms2. `-` or `pipe:0` reads y4m from stdin. Both are split by scene.      | required |
+| `-i, --input <path\|->` | A path is opened with BestSource. `-` or `pipe:0` reads y4m from stdin. Both are split by scene. | required |
 | `-W, --workers <N>`     | How many scenes to clean in parallel. Trades GPU memory for throughput.                          | `2`      |
+| `--no-index-cache`      | Never read or write a BestSource index beside the input file.                                    | off      |
 
 ### Listing devices
 
