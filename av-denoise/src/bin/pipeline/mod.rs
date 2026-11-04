@@ -1,9 +1,8 @@
+mod bestsource;
 mod convert;
 mod coordinator;
 mod decode;
-mod frame_rate;
 mod grain_table;
-mod probe;
 pub mod report;
 mod scenes;
 mod source;
@@ -19,6 +18,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use av_denoise::{Depth, FrameLayout, PlaneOptions, SceneGrain};
+use avtbx_bestsource::IndexCache;
 
 use self::convert::SourcePixel;
 use self::coordinator::spawn_coordinator;
@@ -53,13 +53,14 @@ pub struct RunSettings {
 pub fn run(
     opts: &RunOptions,
     input: &InputSource,
+    cache: IndexCache,
     workers: usize,
     frame_budget_bytes: u64,
 ) -> Result<(), anyhow::Error> {
     let is_terminal = std::io::stderr().is_terminal();
     let visible = denoise_bar_visible(opts.progress, is_terminal);
     let owned_input = input.clone();
-    let opener = move || source::open_source(&owned_input);
+    let opener = move || source::open_source(&owned_input, cache);
     let output = stdout();
     let grain_table = opts.grain_table.clone();
     let settings = RunSettings {

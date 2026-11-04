@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::num::{NonZeroU8, NonZeroUsize};
 
 use v_frame::chroma::ChromaSubsampling;
@@ -28,21 +27,6 @@ fn frames(count: usize) -> impl Iterator<Item = Result<Frame<u8>, anyhow::Error>
 }
 
 #[test]
-fn phantom_frames_are_skipped_and_take_no_permit() {
-    let (_give, take) = frame_permit_channel(8);
-    let (decoded_tx, decoded_rx) = crossbeam_channel::unbounded::<FrameMsg>();
-    let phantom = BTreeSet::from([1, 3]);
-
-    let decoded = frames(6);
-
-    pump_frames(decoded, &phantom, &take, &decoded_tx).expect("pumping should succeed");
-    drop(decoded_tx);
-
-    assert_eq!(decoded_rx.iter().count(), 4);
-    assert_eq!(take.len(), 4, "only the four sent frames hold a permit");
-}
-
-#[test]
 fn a_read_error_stops_pumping_after_earlier_frames() {
     let (_give, take) = frame_permit_channel(8);
     let (decoded_tx, decoded_rx) = crossbeam_channel::unbounded::<FrameMsg>();
@@ -52,9 +36,7 @@ fn a_read_error_stops_pumping_after_earlier_frames() {
     let leading = frames(2);
     let failing = leading.chain(corrupt_frame);
 
-    let phantom = BTreeSet::new();
-
-    let result = pump_frames(failing, &phantom, &take, &decoded_tx);
+    let result = pump_frames(failing, &take, &decoded_tx);
 
     assert!(result.is_err());
     assert_eq!(decoded_rx.len(), 2, "frames before the error are still sent");
@@ -67,9 +49,7 @@ fn pumping_stops_quietly_when_the_splitter_hangs_up() {
     drop(decoded_rx);
 
     let decoded = frames(4);
-    let phantom = BTreeSet::new();
-
-    pump_frames(decoded, &phantom, &take, &decoded_tx).expect("a closed channel is not an error");
+    pump_frames(decoded, &take, &decoded_tx).expect("a closed channel is not an error");
 }
 
 #[test]
@@ -79,9 +59,7 @@ fn pumping_fails_when_the_coordinator_drops_every_permit() {
 
     let (decoded_tx, _decoded_rx) = crossbeam_channel::unbounded::<FrameMsg>();
     let decoded = frames(4);
-    let phantom = BTreeSet::new();
-
-    let result = pump_frames(decoded, &phantom, &take, &decoded_tx);
+    let result = pump_frames(decoded, &take, &decoded_tx);
 
     assert!(result.is_err(), "a second frame cannot get a permit");
 }

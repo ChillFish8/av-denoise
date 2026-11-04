@@ -1,8 +1,8 @@
+mod bestsource;
 mod convert;
 mod coordinator;
 mod decode;
 mod dispatch;
-mod frame_rate;
 mod grain_table;
 mod report;
 mod run;
@@ -14,14 +14,16 @@ mod worker;
 
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 #[cfg(feature = "vulkan")]
 use std::sync::{Arc, Mutex};
 
+use av_decoders::Decoder;
 #[cfg(feature = "vulkan")]
 use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, PlaneOptions, TuningMode};
 use av_denoise::{ChromaSiting, Depth, FrameLayout, Planes, Subsampling, fill_plane};
 
-use super::source::{OpenedSource, open_file};
+use super::source::{FrameReader, OpenedSource};
 
 /// A writer the test can read back after the coordinator thread drops it.
 #[cfg(feature = "vulkan")]
@@ -40,27 +42,39 @@ impl std::io::Write for SharedBuffer {
     }
 }
 
-/// The path of a clip under `data/`, or `None` when the clip is not checked out.
-pub(super) fn data_clip(name: &str) -> Option<PathBuf> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("data")
-        .join(name);
+/// Builds an ffv1 clip with ffmpeg, or `None` when ffmpeg cannot.
+pub(super) fn ffmpeg_clip(
+    directory: &Path,
+    name: &str,
+    size: &str,
+    pix_fmt: &str,
+    extra: &[&str],
+) -> Option<PathBuf> {
+    let path = directory.join(name);
+    let source = format!("testsrc2=size={size}:rate=25");
+    let status = Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", &source])
+        .args(["-frames:v", "10"])
+        .args(extra)
+        .args(["-pix_fmt", pix_fmt, "-c:v", "ffv1"])
+        .arg(&path)
+        .status();
 
-    if !path.exists() {
-        eprintln!("skipping, {} is not available", path.display());
+    let built = matches!(status, Ok(status) if status.success());
+    if !built {
+        eprintln!("skipping, ffmpeg could not build {name}");
         return None;
     }
 
     Some(path)
 }
 
-/// Opens a clip under `data/`, or skips the test when the clip is not checked out.
-pub(super) fn open_data_clip(name: &str) -> Option<OpenedSource> {
-    let path = data_clip(name)?;
-    let opened = open_file(&path).expect("the clip opens");
-
-    Some(opened)
+/// The y4m decoder behind `opened`.
+pub(super) fn y4m_decoder(opened: &mut OpenedSource) -> &mut Decoder {
+    match &mut opened.reader {
+        FrameReader::Y4m(decoder) => decoder,
+        FrameReader::File(_) => panic!("the source is a file, not a y4m stream"),
+    }
 }
 
 pub(super) fn y4m_reader(bytes: Vec<u8>) -> Box<dyn Read> {
@@ -84,6 +98,33 @@ pub(super) fn temporal_opts() -> PlaneOptions {
         tuning: TuningMode::Off,
         deterministic: false,
     }
+}
+
+/// A short silent mono WAV file, which holds an audio track and no video.
+pub(super) fn silent_wav() -> Vec<u8> {
+    let samples = 16u32;
+    let data_bytes = samples * 2;
+    let riff_bytes = 36 + data_bytes;
+    let mut bytes = Vec::new();
+
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&riff_bytes.to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    // PCM, one channel, 8 kHz, 16000 bytes a second, 2 byte frames, 16 bits.
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&8000u32.to_le_bytes());
+    bytes.extend_from_slice(&16000u32.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+
+    let length = bytes.len() + data_bytes as usize;
+    bytes.resize(length, 0);
+
+    bytes
 }
 
 pub fn tiny_layout() -> FrameLayout {

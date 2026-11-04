@@ -12,9 +12,10 @@ use av_denoise::{
     PlaneOptions,
     Subsampling,
 };
+use avtbx_bestsource::IndexCache;
 
-use super::{SCENE_CLIP_SIZE, SharedBuffer, frame_count, multi_scene_clip, temporal_opts};
-use crate::pipeline::source::open_y4m;
+use super::{SCENE_CLIP_SIZE, SharedBuffer, ffmpeg_clip, frame_count, multi_scene_clip, temporal_opts};
+use crate::pipeline::source::{open_file, open_y4m};
 use crate::pipeline::stage::{IN_TRANSIT_FRAMES, frame_permits};
 use crate::pipeline::{RunSettings, run_with};
 
@@ -79,6 +80,34 @@ fn a_pipe_round_trips_every_frame_and_its_colour_range() {
 
     assert_eq!(frames, 30);
     assert!(output.windows(17).any(|window| window == b"XCOLORRANGE=LIMIT"));
+}
+
+#[test]
+fn a_file_input_round_trips_every_frame() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let Some(path) = ffmpeg_clip(directory.path(), "ten.mkv", "64x64", "yuv420p", &[]) else {
+        return;
+    };
+
+    let options = temporal_opts();
+    let output = SharedBuffer::default();
+    let writer = output.clone();
+    let opener = move || open_file(&path, IndexCache::Disabled);
+    let settings = RunSettings {
+        workers: 1,
+        frame_budget_bytes: 1 << 30,
+        visible: false,
+        grain_table: None,
+        tune_budget: None,
+        timing_report: false,
+        shared_device: false,
+    };
+
+    run_with(&options, opener, settings, writer).expect("the run succeeds");
+
+    let written = output.0.lock().expect("buffer lock").clone();
+
+    assert_eq!(frame_count(&written), 10);
 }
 
 #[test]

@@ -78,7 +78,7 @@ jobs:
         # and ash load their driver libraries at runtime, so a vulkan+cuda binary
         # runs on a host that has only one of them and `--accelerators` still picks.
         # Linux builds on 22.04 for the older glibc floor.
-        # The CLI links ffms2 and FFmpeg statically from vcpkg, so the host needs neither.
+        # The CLI links BestSource and FFmpeg statically from vcpkg, so the host needs neither.
         #
         # The VapourSynth plugin ships from the same job, built from the same tree
         # with the same backends. `rocm` is left out of `plugin_features` for the
@@ -87,7 +87,7 @@ jobs:
         include:
           - os: ubuntu-22.04
             platform: linux-x86
-            features: vulkan,cuda,static-ffms2
+            features: vulkan,cuda,static-bestsource
             triplet: x64-linux-release
             archive: av-denoise-linux-x86.tar.gz
             binary: av-denoise
@@ -96,7 +96,7 @@ jobs:
             plugin_archive: av-denoise-vs-linux-x86.tar.gz
           - os: windows-latest
             platform: win64-x86
-            features: vulkan,cuda,static-ffms2
+            features: vulkan,cuda,static-bestsource
             triplet: x64-windows-static-md-release
             archive: av-denoise-win64-x86.zip
             binary: av-denoise.exe
@@ -105,7 +105,7 @@ jobs:
             plugin_archive: av-denoise-vs-win64-x86.zip
           - os: macos-14
             platform: macos-aarch64
-            features: metal,static-ffms2
+            features: metal,static-bestsource
             triplet: arm64-osx-release
             archive: av-denoise-macos-aarch64.tar.gz
             binary: av-denoise
@@ -122,8 +122,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # nasm builds av-scenechange's assembly and clang backs ffms2-sys's bindgen. The
-      # rest is what vcpkg needs to build FFmpeg and dav1d.
+      # nasm builds av-scenechange's assembly and clang backs bindgen. The rest is what
+      # vcpkg needs to build BestSource, FFmpeg and dav1d.
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -167,7 +167,7 @@ jobs:
             vcpkg-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg/ports/**') }}-
             vcpkg-${{ matrix.triplet }}-
 
-      - name: Build static ffms2 and FFmpeg
+      - name: Build static BestSource and FFmpeg
         shell: bash
         env:
           TRIPLET: ${{ matrix.triplet }}
@@ -185,9 +185,8 @@ jobs:
           path: ${{ runner.temp }}/vcpkg-cache
           key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
-      # ffms2-sys reads the headers and archive from FFMS_INCLUDE_DIR and FFMS_LIB_DIR,
-      # and the build script reads the rest of the chain through pkg-config.
-      # ffmpeg-sys-the-third reads the same FFmpeg from FFMPEG_DIR.
+      # avtbx-bestsource reads its archive from BESTSOURCE_LIB_DIR, and the build
+      # scripts read the rest of the chain through pkg-config.
       - name: Export the static library paths
         shell: bash
         env:
@@ -198,14 +197,10 @@ jobs:
           if [ "${RUNNER_OS}" = "Windows" ]; then
             prefix="$(cygpath -w "${prefix}")"
             echo "PKG_CONFIG=${prefix}\\tools\\pkgconf\\pkgconf.exe" >> "${GITHUB_ENV}"
-            echo "FFMS_INCLUDE_DIR=${prefix}\\include" >> "${GITHUB_ENV}"
-            echo "FFMS_LIB_DIR=${prefix}\\lib" >> "${GITHUB_ENV}"
-            echo "FFMPEG_DIR=${prefix}" >> "${GITHUB_ENV}"
+            echo "BESTSOURCE_LIB_DIR=${prefix}\\lib" >> "${GITHUB_ENV}"
             echo "PKG_CONFIG_PATH=${prefix}\\lib\\pkgconfig" >> "${GITHUB_ENV}"
           else
-            echo "FFMS_INCLUDE_DIR=${prefix}/include" >> "${GITHUB_ENV}"
-            echo "FFMS_LIB_DIR=${prefix}/lib" >> "${GITHUB_ENV}"
-            echo "FFMPEG_DIR=${prefix}" >> "${GITHUB_ENV}"
+            echo "BESTSOURCE_LIB_DIR=${prefix}/lib" >> "${GITHUB_ENV}"
             echo "PKG_CONFIG_PATH=${prefix}/lib/pkgconfig" >> "${GITHUB_ENV}"
           fi
 
@@ -221,7 +216,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # Fails if the binary still loads ffms2, FFmpeg or dav1d from the host.
+      # Fails if the binary still loads BestSource, FFmpeg, dav1d or xxHash from the host.
       - name: Check nothing is linked dynamically
         shell: bash
         env:
@@ -234,7 +229,7 @@ jobs:
             Windows) listing="$(dumpbin //dependents "${BINARY}")" ;;
           esac
           echo "${listing}"
-          if echo "${listing}" | grep -Ei 'ffms2|avcodec|avformat|avutil|swscale|swresample|dav1d'; then
+          if echo "${listing}" | grep -Ei 'bestsource|avcodec|avformat|avutil|swscale|swresample|dav1d|xxhash'; then
             echo "::error::${BINARY} links a codec library dynamically"
             exit 1
           fi

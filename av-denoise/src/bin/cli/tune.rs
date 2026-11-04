@@ -85,14 +85,22 @@ pub fn run_tune(tune: &TuneArgs, globals: &Args) -> Result<(), anyhow::Error> {
         anyhow::bail!("name an algorithm to tune, for example `av-denoise tune nl4d -i clip.mkv`");
     };
 
-    let (opts, input) = match algorithm {
-        TuneAlgorithm::Nlmeans(nlmeans) => (nlmeans.build_options(globals)?, &nlmeans.common.input),
-        TuneAlgorithm::Nl4d(nl4d) => (nl4d.build_options(globals)?, &nl4d.common.input),
+    let (opts, input, cache) = match algorithm {
+        TuneAlgorithm::Nlmeans(nlmeans) => (
+            nlmeans.build_options(globals)?,
+            &nlmeans.common.input,
+            nlmeans.common.index_cache(),
+        ),
+        TuneAlgorithm::Nl4d(nl4d) => (
+            nl4d.build_options(globals)?,
+            &nl4d.common.input,
+            nl4d.common.index_cache(),
+        ),
     };
 
     let budget = tune_budget(tune, opts.tune_budget);
     let request = tune_request(tune);
-    let report = tune_input(&opts.planes, input, budget, &request)?;
+    let report = tune_input(&opts.planes, input, cache, budget, &request)?;
 
     if let Some(summary) = &report.summary {
         print!("{summary}");
@@ -216,6 +224,7 @@ mod tests {
     use av_denoise::TuningMode;
     use av_denoise::tune::{DeviceIdentity, TuneResult};
     use av_denoise_core::tune::{CandidateRecord, CompileProgress, FidelityClass, SiteKey, SiteRanking};
+    use avtbx_bestsource::IndexCache;
     use clap::Parser;
 
     use super::*;
@@ -242,6 +251,36 @@ mod tests {
         assert_eq!(nl4d.common.tune, TuningMode::Cached);
         assert!(nl4d.common.deterministic);
         assert_eq!(nl4d.common.tune_budget, Some(30.0));
+    }
+
+    #[test]
+    fn no_index_cache_defaults_to_beside_source() {
+        let args = Args::try_parse_from(["av-denoise", "nlmeans", "-i", "a.mkv"]).expect("the flags parse");
+
+        let Command::Nlmeans(nlmeans) = args.command else {
+            panic!("expected nlmeans");
+        };
+
+        assert_eq!(nlmeans.common.index_cache(), IndexCache::BesideSource);
+    }
+
+    #[test]
+    fn no_index_cache_disables_the_index() {
+        let args = Args::try_parse_from(["av-denoise", "nl4d", "-i", "a.mkv", "--no-index-cache"])
+            .expect("the flags parse");
+
+        let Command::Nl4d(nl4d) = args.command else {
+            panic!("expected nl4d");
+        };
+
+        assert_eq!(nl4d.common.index_cache(), IndexCache::Disabled);
+    }
+
+    #[test]
+    fn tune_accepts_no_index_cache() {
+        let result = Args::try_parse_from(["av-denoise", "tune", "nl4d", "-i", "a.mkv", "--no-index-cache"]);
+
+        assert!(result.is_ok());
     }
 
     #[test]

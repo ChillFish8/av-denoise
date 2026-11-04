@@ -32,7 +32,8 @@ jobs:
 
   rust-clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    # Pinned to the release Linux runner so both jobs share one vcpkg toolchain and cache.
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,16 +43,58 @@ jobs:
         with:
           components: clippy
 
-      # nasm builds av-scenechange's assembly and clang backs ffms2-sys's bindgen.
-      # ffmpeg-sys-the-third finds libavformat, libavcodec and libavutil through
-      # pkg-config. vapoursynth-sys ships pregenerated bindings and loads VapourSynth
-      # through libloading, so av-denoise-vs needs nothing installed.
+      # nasm builds av-scenechange's assembly and clang backs bindgen. The rest is what
+      # vcpkg needs to build BestSource, FFmpeg and dav1d. vapoursynth-sys ships
+      # pregenerated bindings and loads VapourSynth through libloading, so av-denoise-vs
+      # needs nothing installed.
       - name: Install build dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends nasm clang libclang-dev pkg-config \
-            libffms2-dev libavformat-dev libavcodec-dev libavutil-dev
+          sudo apt-get install -y --no-install-recommends nasm clang libclang-dev pkg-config ninja-build
+
+      - name: Checkout vcpkg
+        run: |
+          set -euo pipefail
+          baseline="$(jq -r '."builtin-baseline"' vcpkg.json)"
+          git clone https://github.com/microsoft/vcpkg.git "${RUNNER_TEMP}/vcpkg"
+          git -C "${RUNNER_TEMP}/vcpkg" checkout --quiet "${baseline}"
+          echo "VCPKG_ROOT=${RUNNER_TEMP}/vcpkg" >> "${GITHUB_ENV}"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=${RUNNER_TEMP}/vcpkg-cache" >> "${GITHUB_ENV}"
+          mkdir -p "${RUNNER_TEMP}/vcpkg-cache"
+
+      # The release job restores from the same keys, so a cold build only happens when
+      # the manifest or the ports change.
+      - name: Restore vcpkg packages
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: vcpkg-x64-linux-release-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg/ports/**') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-x64-linux-release-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg/ports/**') }}-
+            vcpkg-x64-linux-release-
+
+      - name: Build static BestSource and FFmpeg
+        run: |
+          set -euo pipefail
+          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+          "${VCPKG_ROOT}/vcpkg" install --triplet x64-linux-release --host-triplet x64-linux-release
+
+      - name: Save vcpkg packages
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      # avtbx-bestsource reads its archive from BESTSOURCE_LIB_DIR, and the build
+      # scripts read the rest of the chain through pkg-config.
+      - name: Export the static library paths
+        run: |
+          set -euo pipefail
+          prefix="${GITHUB_WORKSPACE}/vcpkg_installed/x64-linux-release"
+          echo "BESTSOURCE_LIB_DIR=${prefix}/lib" >> "${GITHUB_ENV}"
+          echo "PKG_CONFIG_PATH=${prefix}/lib/pkgconfig" >> "${GITHUB_ENV}"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -62,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy -p av-denoise-core --features vulkan --all-targets -- -D warnings
-          cargo clippy -p av-denoise --features vulkan,binary --all-targets -- -D warnings
+          cargo clippy -p av-denoise --features vulkan,static-bestsource --all-targets -- -D warnings
           cargo clippy -p av-denoise-vs --features vulkan --all-targets -- -D warnings
 
   rust-macos:
@@ -77,10 +120,53 @@ jobs:
         with:
           components: clippy
 
-      # nasm builds av-scenechange's assembly and Homebrew's ffms2 backs ffms2-sys,
-      # found through pkg-config. bindgen uses the libclang from the Xcode tools.
+      # nasm builds av-scenechange's assembly. The rest is what vcpkg needs to build
+      # BestSource, FFmpeg and dav1d. bindgen uses the libclang from the Xcode tools.
       - name: Install build dependencies
-        run: brew install nasm pkg-config ffms2
+        run: brew install nasm pkg-config ninja
+
+      - name: Checkout vcpkg
+        run: |
+          set -euo pipefail
+          baseline="$(jq -r '."builtin-baseline"' vcpkg.json)"
+          git clone https://github.com/microsoft/vcpkg.git "${RUNNER_TEMP}/vcpkg"
+          git -C "${RUNNER_TEMP}/vcpkg" checkout --quiet "${baseline}"
+          echo "VCPKG_ROOT=${RUNNER_TEMP}/vcpkg" >> "${GITHUB_ENV}"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=${RUNNER_TEMP}/vcpkg-cache" >> "${GITHUB_ENV}"
+          mkdir -p "${RUNNER_TEMP}/vcpkg-cache"
+
+      # The release job restores from the same keys, so a cold build only happens when
+      # the manifest or the ports change.
+      - name: Restore vcpkg packages
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: vcpkg-arm64-osx-release-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg/ports/**') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-arm64-osx-release-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg/ports/**') }}-
+            vcpkg-arm64-osx-release-
+
+      - name: Build static BestSource and FFmpeg
+        run: |
+          set -euo pipefail
+          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+          "${VCPKG_ROOT}/vcpkg" install --triplet arm64-osx-release --host-triplet arm64-osx-release
+
+      - name: Save vcpkg packages
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      # avtbx-bestsource reads its archive from BESTSOURCE_LIB_DIR, and the build
+      # scripts read the rest of the chain through pkg-config.
+      - name: Export the static library paths
+        run: |
+          set -euo pipefail
+          prefix="${GITHUB_WORKSPACE}/vcpkg_installed/arm64-osx-release"
+          echo "BESTSOURCE_LIB_DIR=${prefix}/lib" >> "${GITHUB_ENV}"
+          echo "PKG_CONFIG_PATH=${prefix}/lib/pkgconfig" >> "${GITHUB_ENV}"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -89,14 +175,14 @@ jobs:
         run: |
           set -euo pipefail
           cargo build -p av-denoise-core --no-default-features --features metal
-          cargo build -p av-denoise --no-default-features --features metal,binary
+          cargo build -p av-denoise --no-default-features --features metal,static-bestsource
           cargo build -p av-denoise-vs --no-default-features --features metal
 
       - name: Clippy
         run: |
           set -euo pipefail
           cargo clippy -p av-denoise-core --no-default-features --features metal --all-targets -- -D warnings
-          cargo clippy -p av-denoise --no-default-features --features metal,binary --all-targets -- -D warnings
+          cargo clippy -p av-denoise --no-default-features --features metal,static-bestsource --all-targets -- -D warnings
           cargo clippy -p av-denoise-vs --no-default-features --features metal --all-targets -- -D warnings
 
   rust-check-windows:

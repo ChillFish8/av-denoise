@@ -258,9 +258,8 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93ef6a87c007444f81cb3948e39dd2566e2d70d7abbbb806d4bf19e98cae3b60"
 dependencies = [
- "ffms2-sys",
  "num-rational",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "v_frame",
  "y4m",
 ]
@@ -273,6 +272,7 @@ dependencies = [
  "av-decoders",
  "av-denoise-core",
  "av-scenechange",
+ "avtbx-bestsource",
  "bon",
  "bytesize",
  "clap",
@@ -280,17 +280,14 @@ dependencies = [
  "cubecl",
  "cubecl-environment",
  "etcetera",
- "ffmpeg-sys-the-third",
- "ffms2-sys",
  "indicatif",
  "mimalloc",
- "pkg-config",
  "serde",
  "serde_json",
  "strum 0.28.0",
  "strum_macros 0.28.0",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracing",
  "tracing-indicatif",
  "tracing-subscriber",
@@ -317,7 +314,7 @@ dependencies = [
  "strum 0.28.0",
  "strum_macros 0.28.0",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracing",
  "wgpu",
  "y4m",
@@ -357,9 +354,20 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "v_frame",
  "y4m",
+]
+
+[[package]]
+name = "avtbx-bestsource"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ff695beedb1d7bd676bf469e7662da6954805c99c7d1d2eb249adb3b13c82a5"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -497,26 +505,6 @@ dependencies = [
  "shlex 1.3.0",
  "syn 2.0.117",
  "which",
-]
-
-[[package]]
-name = "bindgen"
-version = "0.72.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
-dependencies = [
- "bitflags",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease 0.2.37",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 2.1.2",
- "shlex 1.3.0",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -781,16 +769,6 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common",
  "inout",
-]
-
-[[package]]
-name = "clang"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2ed30b30e1e17966b55ddd0b9dd2758fd824f0a6da6875c8abb17e6aba47c28"
-dependencies = [
- "clang-sys",
- "libc",
 ]
 
 [[package]]
@@ -1061,7 +1039,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde",
- "spin 0.12.3",
+ "spin",
  "tynm",
  "xxhash-rust",
 ]
@@ -1117,7 +1095,7 @@ dependencies = [
  "paste",
  "pliron",
  "sanitize-filename",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1138,7 +1116,7 @@ dependencies = [
  "libc",
  "log",
  "pliron",
- "spin 0.12.3",
+ "spin",
  "sysinfo",
  "winapi",
 ]
@@ -1193,8 +1171,8 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "spin 0.12.3",
- "toml 1.1.2+spec-1.1.0",
+ "spin",
+ "toml",
  "turso",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -1262,8 +1240,8 @@ dependencies = [
  "rustc_apfloat",
  "serde",
  "smallvec",
- "spin 0.12.3",
- "thiserror 2.0.18",
+ "spin",
+ "thiserror 2.0.21",
  "variadics_please",
 ]
 
@@ -1283,7 +1261,7 @@ dependencies = [
  "llvm-sys",
  "pliron",
  "pliron-llvm",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracel-llvm-bundler",
 ]
 
@@ -1377,7 +1355,7 @@ dependencies = [
  "log",
  "pliron",
  "smallvec",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1406,8 +1384,8 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "thiserror 2.0.18",
- "toml 1.1.2+spec-1.1.0",
+ "thiserror 2.0.21",
+ "toml",
  "wasm-bindgen-futures",
 ]
 
@@ -1437,7 +1415,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1478,7 +1456,7 @@ dependencies = [
  "num-traits",
  "paste",
  "serde",
- "spin 0.12.3",
+ "spin",
  "variadics_please",
 ]
 
@@ -1510,7 +1488,7 @@ dependencies = [
  "objc2-metal",
  "pliron",
  "sanitize-filename",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracel-ash",
  "wasm-bindgen-futures",
  "wgpu",
@@ -1867,12 +1845,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "error-chain"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9435d864e017c3c6afeac1654189b06cdb491cf2ff73dbf0d73b0f292f42ff8"
-
-[[package]]
 name = "etcetera"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1927,30 +1899,6 @@ name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
-
-[[package]]
-name = "ffmpeg-sys-the-third"
-version = "6.0.0+ffmpeg-9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8beaa5d31a4dee3c5a93caf6c0dd3e9d49fb9849c96354f8d619ec6b062036f2"
-dependencies = [
- "bindgen 0.72.1",
- "cc",
- "clang",
- "libc",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
-name = "ffms2-sys"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42b5b0a8fe112d30a34aacc940b0c23fd44c806a3980b815c17f804c5fc2b3b2"
-dependencies = [
- "bindgen 0.72.1",
- "metadeps",
-]
 
 [[package]]
 name = "filetime"
@@ -2262,7 +2210,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "log",
  "presser",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "windows",
 ]
 
@@ -2664,15 +2612,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -2964,17 +2903,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metadeps"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73b122901b3a675fac8cecf68dcb2f0d3036193bc861d1ac0e1c337f7d5254c2"
-dependencies = [
- "error-chain",
- "pkg-config",
- "toml 0.2.1",
-]
-
-[[package]]
 name = "miette"
 version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3048,7 +2976,7 @@ dependencies = [
  "once_cell",
  "rustc-hash 1.1.0",
  "spirv",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "unicode-ident",
 ]
 
@@ -3061,7 +2989,7 @@ dependencies = [
  "hashbrown 0.17.0",
  "indexmap",
  "rustc-hash 1.1.0",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3498,8 +3426,8 @@ dependencies = [
  "rustc_apfloat",
  "slotmap",
  "smallvec",
- "spin 0.10.1",
- "thiserror 2.0.18",
+ "spin",
+ "thiserror 2.0.21",
  "utf8-chars",
 ]
 
@@ -3528,7 +3456,7 @@ dependencies = [
  "llvm-sys",
  "log",
  "pliron",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3541,7 +3469,7 @@ dependencies = [
  "derive_more",
  "itertools 0.15.0",
  "pliron",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracel-rspirv",
 ]
 
@@ -3876,7 +3804,7 @@ checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
  "getrandom 0.2.17",
  "libredox",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4282,15 +4210,6 @@ checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
 
 [[package]]
 name = "spin"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
-dependencies = [
- "lock_api",
-]
-
-[[package]]
-name = "spin"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0134f9043ed38b087ac4f7d4af44c79e2c9e5094421fe3164f435ce585953b10"
@@ -4498,11 +4417,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.18"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl 2.0.18",
+ "thiserror-impl 2.0.21",
 ]
 
 [[package]]
@@ -4518,13 +4437,13 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.18"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -4585,12 +4504,6 @@ checksum = "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6"
 dependencies = [
  "pin-project-lite",
 ]
-
-[[package]]
-name = "toml"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "736b60249cb25337bc196faa43ee12c705e426f3d55c214d73a4e7be06f92cb4"
 
 [[package]]
 name = "toml"
@@ -4692,7 +4605,7 @@ checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
 dependencies = [
  "crossbeam-channel",
  "symlink",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "time",
  "tracing-subscriber",
 ]
@@ -4774,7 +4687,7 @@ version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1cf9c519a3a971e845a42c870930557cb53c2368c5737d4c78f8fbfd0444e98"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
  "turso_core",
@@ -4843,7 +4756,7 @@ dependencies = [
  "strum 0.26.3",
  "strum_macros 0.26.4",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
  "turso_ext",
@@ -4888,7 +4801,7 @@ dependencies = [
  "miette",
  "strum 0.26.3",
  "strum_macros 0.26.4",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "turso_macros",
 ]
 
@@ -4898,7 +4811,7 @@ version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "819a17926d04dbeb5b03f00cdab6ed7351bbb6778d00840364b9af62bca02914"
 dependencies = [
- "bindgen 0.69.5",
+ "bindgen",
  "env_logger",
  "parking_lot",
  "tracing",
@@ -4936,7 +4849,7 @@ dependencies = [
  "roaring",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracing",
  "turso_core",
  "turso_parser",
@@ -4949,7 +4862,7 @@ version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fe4b961c9cc90f6339447dabfe83ed13a498721e41378932ab7eaf8ddd6976"
 dependencies = [
- "bindgen 0.69.5",
+ "bindgen",
  "env_logger",
  "genawaiter",
  "parking_lot",
@@ -5138,7 +5051,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "706b485cfdd36c867e946509da6f8b9fa38f40a1aecb92d702e04d135c4335bb"
 dependencies = [
  "num-traits",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "wasm-bindgen",
 ]
 
@@ -5155,7 +5068,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413b994d9955202f99298ef502dec6d84f1be7603483d19158a365f9fdb8f128"
 dependencies = [
  "anyhow",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "vapoursynth-sys",
 ]
 
@@ -5177,12 +5090,6 @@ dependencies = [
  "quote",
  "unsynn",
 ]
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"
@@ -5437,7 +5344,7 @@ dependencies = [
  "raw-window-handle",
  "rustc-hash 1.1.0",
  "smallvec",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "wgpu-core-deps-apple",
  "wgpu-core-deps-emscripten",
  "wgpu-core-deps-windows-linux-android",
@@ -5518,7 +5425,7 @@ dependencies = [
  "renderdoc-sys",
  "smallvec",
  "static_assertions",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "wasm-bindgen",
  "wayland-sys",
  "web-sys",

@@ -1,0 +1,13 @@
+{
+  "name": "libp2p",
+  "version-date": "2026-07-05",
+  "description": "Pack and unpack pixel formats, used by BestSource.",
+  "homepage": "https://github.com/sekrit-twc/libp2p",
+  "license": "WTFPL",
+  "dependencies": [
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    }
+  ]
+}
