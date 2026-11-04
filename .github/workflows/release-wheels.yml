@@ -147,7 +147,8 @@ jobs:
       CIBW_BUILD: ${{ matrix.cibw_build }}
       CIBW_ARCHS: ${{ matrix.cibw_archs }}
       # The CUDA backend builds against tracel's prebuilt LLVM, which needs glibc 2.34.
-      CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_34
+      # cibuildwheel 2.x has no short name for this image, so it takes the full path.
+      CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_34_x86_64
       CIBW_BEFORE_ALL_LINUX: curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH" VSAVD_VERSION=${{ needs.resolve-version.outputs.pep440_version }}
       CIBW_ENVIRONMENT: VSAVD_VERSION=${{ needs.resolve-version.outputs.pep440_version }}
