@@ -3,15 +3,24 @@ name: Release wheels
 on:
   release:
     types: [published]
-  # A dispatch run is a dry run. It builds and tests the wheels and uploads them as
-  # workflow artifacts, but attaches nothing to a release and publishes nothing to
-  # PyPI. Leave `version` empty to just check that the three wheels still build.
+  # A dispatch run builds and tests the wheels and uploads them as workflow artifacts.
+  # Leave `version` empty to just check that the three wheels still build.
+  #
+  # With `attach` set, the run also attaches the wheels to the existing release for
+  # `v<version>` and publishes them to PyPI, skipping any already there. This re-runs a
+  # failed release from the branch the dispatch runs on, which must carry the same
+  # Cargo.toml version.
   workflow_dispatch:
     inputs:
       version:
         description: "Version to build, e.g. 0.4.0-alpha4. Defaults to the Cargo.toml version."
         required: false
         type: string
+      attach:
+        description: "Attach to the existing release v<version> and publish to PyPI. Needs `version`."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,6 +32,7 @@ jobs:
     outputs:
       raw_version: ${{ steps.version.outputs.raw_version }}
       pep440_version: ${{ steps.version.outputs.pep440_version }}
+      attach_tag: ${{ steps.version.outputs.attach_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,10 +43,17 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           DISPATCH_VERSION: ${{ inputs.version }}
+          ATTACH: ${{ inputs.attach }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           cargo_version="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")"
+
+          if [ "${ATTACH}" = "true" ] && [ -z "${DISPATCH_VERSION}" ]; then
+            echo "::error::attach needs an explicit version"
+            exit 1
+          fi
 
           if [ "${EVENT_NAME}" = "release" ]; then
             raw_version="${RELEASE_TAG}"
@@ -53,11 +70,11 @@ jobs:
             exit 1
           fi
 
-          # A mismatch is fatal for a real release, since the wrong version would be
-          # published to PyPI. A dispatch run publishes nothing, so it only warns.
+          # A mismatch is fatal whenever the wheels publish, since the wrong version
+          # would reach PyPI. A dry run publishes nothing, so it only warns.
           if [ "${cargo_version}" != "${raw_version}" ]; then
             message="version ${raw_version} does not match Cargo.toml ${cargo_version}"
-            if [ "${EVENT_NAME}" = "release" ]; then
+            if [ "${EVENT_NAME}" = "release" ] || [ "${ATTACH}" = "true" ]; then
               echo "::error::${message}"
               exit 1
             else
@@ -72,9 +89,27 @@ jobs:
           print(semver_to_pep440(sys.argv[1]))
           " "${raw_version}")"
 
+          attach_tag=""
+          if [ "${EVENT_NAME}" = "release" ]; then
+            attach_tag="${RELEASE_TAG}"
+          elif [ "${ATTACH}" = "true" ]; then
+            attach_tag="v${raw_version}"
+            if ! gh release view "${attach_tag}" --repo "${GITHUB_REPOSITORY}" > /dev/null; then
+              echo "::error::no release exists for ${attach_tag}"
+              exit 1
+            fi
+
+            git fetch --quiet origin "refs/tags/${attach_tag}:refs/tags/${attach_tag}"
+            tag_commit="$(git rev-parse "${attach_tag}^{commit}")"
+            if [ "${tag_commit}" != "${GITHUB_SHA}" ]; then
+              echo "::warning::building ${GITHUB_SHA}, not ${attach_tag} at ${tag_commit}"
+            fi
+          fi
+
           {
             echo "raw_version=${raw_version}"
             echo "pep440_version=${pep440_version}"
+            echo "attach_tag=${attach_tag}"
           } >> "${GITHUB_OUTPUT}"
 
   build-wheels:
@@ -111,7 +146,8 @@ jobs:
     env:
       CIBW_BUILD: ${{ matrix.cibw_build }}
       CIBW_ARCHS: ${{ matrix.cibw_archs }}
-      CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+      # The CUDA backend builds against tracel's prebuilt LLVM, which needs glibc 2.34.
+      CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_34
       CIBW_BEFORE_ALL_LINUX: curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH" VSAVD_VERSION=${{ needs.resolve-version.outputs.pep440_version }}
       CIBW_ENVIRONMENT: VSAVD_VERSION=${{ needs.resolve-version.outputs.pep440_version }}
@@ -166,14 +202,24 @@ jobs:
         with:
           files: wheelhouse/*.whl
 
+      # `--clobber` replaces the wheels a failed or partial run left behind.
+      - name: Attach wheels to the existing GitHub Release
+        if: github.event_name != 'release' && needs.resolve-version.outputs.attach_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-version.outputs.attach_tag }}
+        run: gh release upload "${TAG}" wheelhouse/*.whl --clobber --repo "${GITHUB_REPOSITORY}"
+
+      # PyPI never accepts a file twice, so a re-run skips the wheels already there.
       - name: Publish to PyPI
-        if: github.event_name == 'release'
+        if: needs.resolve-version.outputs.attach_tag != ''
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: wheelhouse
+          skip-existing: true
 
       - name: Report the dry run
-        if: github.event_name != 'release'
+        if: needs.resolve-version.outputs.attach_tag == ''
         env:
           RAW_VERSION: ${{ needs.resolve-version.outputs.raw_version }}
           PEP440_VERSION: ${{ needs.resolve-version.outputs.pep440_version }}

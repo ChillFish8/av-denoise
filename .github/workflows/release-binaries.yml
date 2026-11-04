@@ -3,15 +3,25 @@ name: Release binaries
 on:
   release:
     types: [published]
-  # A dispatch run is a dry run. It builds, smoke tests and checks the linkage of
-  # the statically linked CLI, packages it with its licences, and packages the VapourSynth
-  # plugin. Both archives upload as workflow artifacts but never attach to a release. Leave `version` empty to just check that everything still compiles.
+  # A dispatch run builds, smoke tests and checks the linkage of the statically linked
+  # CLI, packages it with its licences, and packages the VapourSynth plugin. Both
+  # archives upload as workflow artifacts. Leave `version` empty to just check that
+  # everything still compiles.
+  #
+  # With `attach` set, the run also uploads the archives to the existing release for
+  # `v<version>`, replacing any assets of the same name. This re-runs a failed release
+  # from the branch the dispatch runs on, which must carry the same Cargo.toml version.
   workflow_dispatch:
     inputs:
       version:
         description: "Version to build, e.g. 0.4.0-alpha4. Defaults to the Cargo.toml version."
         required: false
         type: string
+      attach:
+        description: "Attach the archives to the existing release v<version>. Needs `version`."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      attach_tag: ${{ steps.version.outputs.attach_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,10 +43,17 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           DISPATCH_VERSION: ${{ inputs.version }}
+          ATTACH: ${{ inputs.attach }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           cargo_version="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'])")"
+
+          if [ "${ATTACH}" = "true" ] && [ -z "${DISPATCH_VERSION}" ]; then
+            echo "::error::attach needs an explicit version"
+            exit 1
+          fi
 
           if [ "${EVENT_NAME}" = "release" ]; then
             version="${RELEASE_TAG}"
@@ -52,11 +70,11 @@ jobs:
             exit 1
           fi
 
-          # A mismatch is fatal for a real release, since the wrong version would ship.
-          # A dispatch run attaches nothing, so it only warns and carries on building.
+          # A mismatch is fatal whenever the archives attach to a release, since the
+          # wrong version would ship. A dry run only warns and carries on building.
           if [ "${cargo_version}" != "${version}" ]; then
             message="version ${version} does not match Cargo.toml ${cargo_version}"
-            if [ "${EVENT_NAME}" = "release" ]; then
+            if [ "${EVENT_NAME}" = "release" ] || [ "${ATTACH}" = "true" ]; then
               echo "::error::${message}"
               exit 1
             else
@@ -64,7 +82,27 @@ jobs:
             fi
           fi
 
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          attach_tag=""
+          if [ "${EVENT_NAME}" = "release" ]; then
+            attach_tag="${RELEASE_TAG}"
+          elif [ "${ATTACH}" = "true" ]; then
+            attach_tag="v${version}"
+            if ! gh release view "${attach_tag}" --repo "${GITHUB_REPOSITORY}" > /dev/null; then
+              echo "::error::no release exists for ${attach_tag}"
+              exit 1
+            fi
+
+            git fetch --quiet origin "refs/tags/${attach_tag}:refs/tags/${attach_tag}"
+            tag_commit="$(git rev-parse "${attach_tag}^{commit}")"
+            if [ "${tag_commit}" != "${GITHUB_SHA}" ]; then
+              echo "::warning::building ${GITHUB_SHA}, not ${attach_tag} at ${tag_commit}"
+            fi
+          fi
+
+          {
+            echo "version=${version}"
+            echo "attach_tag=${attach_tag}"
+          } >> "${GITHUB_OUTPUT}"
 
   build:
     name: ${{ matrix.platform }}
@@ -338,8 +376,16 @@ jobs:
         with:
           files: release-assets/*
 
+      # `--clobber` replaces the assets a failed or partial run left behind.
+      - name: Attach release assets to the existing GitHub Release
+        if: github.event_name != 'release' && needs.resolve-version.outputs.attach_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-version.outputs.attach_tag }}
+        run: gh release upload "${TAG}" release-assets/* --clobber --repo "${GITHUB_REPOSITORY}"
+
       - name: Report the dry run
-        if: github.event_name != 'release'
+        if: github.event_name != 'release' && needs.resolve-version.outputs.attach_tag == ''
         env:
           VERSION: ${{ needs.resolve-version.outputs.version }}
         run: |
