@@ -9,7 +9,7 @@ ARG ARCH_SNAPSHOT
 
 RUN printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' "${ARCH_SNAPSHOT}" > /etc/pacman.d/mirrorlist \
     && pacman -Syyuu --noconfirm --needed --disable-download-timeout \
-        git rust clang nasm ffms2 \
+        git rust clang nasm ffmpeg xxhash pkgconf \
     && rm -rf /var/cache/pacman/pkg/*
 
 WORKDIR /build
@@ -28,7 +28,7 @@ ARG ARCH_SNAPSHOT
 
 RUN printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' "${ARCH_SNAPSHOT}" > /etc/pacman.d/mirrorlist \
     && pacman -Syyuu --noconfirm --needed --disable-download-timeout \
-        ffmpeg ffms2 gcc-libs vulkan-icd-loader vulkan-radeon vulkan-intel \
+        ffmpeg gcc-libs vulkan-icd-loader vulkan-radeon vulkan-intel \
     && rm -rf /var/cache/pacman/pkg/* \
 
 WORKDIR /app

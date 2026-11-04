@@ -10,7 +10,7 @@ ARG ARCH_SNAPSHOT
 # cubecl-hip-sys's build script runs hipconfig and links hiprtc and amdhip64, so HIP must be present at build time.
 RUN printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' "${ARCH_SNAPSHOT}" > /etc/pacman.d/mirrorlist \
     && pacman -Syyuu --noconfirm --needed --disable-download-timeout \
-        git rust clang nasm ffms2 rocm-hip-runtime \
+        git rust clang nasm ffmpeg xxhash pkgconf rocm-hip-runtime \
     && rm -rf /var/cache/pacman/pkg/*
 
 ENV ROCM_PATH=/opt/rocm
@@ -35,7 +35,7 @@ ARG ARCH_SNAPSHOT
 
 RUN printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' "${ARCH_SNAPSHOT}" > /etc/pacman.d/mirrorlist \
     && pacman -Syyuu --noconfirm --needed --disable-download-timeout \
-        ffmpeg ffms2 gcc-libs rocm-hip-runtime \
+        ffmpeg gcc-libs rocm-hip-runtime \
     && rm -rf /var/cache/pacman/pkg/* \
 
 ENV ROCM_PATH=/opt/rocm

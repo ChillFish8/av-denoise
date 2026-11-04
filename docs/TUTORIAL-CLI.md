@@ -13,20 +13,24 @@ you will want to use.
 > If you are building on macOS, you will want to add `--no-default-features` and add `--features metal` to
 > enable acceleration for Apple Silicon.
 
-When compiling the binary, enable the `binary` feature. It pulls in both ingestion paths (FFMS2 for
+When compiling the binary, enable the `binary` feature. It pulls in both ingestion paths (BestSource for
 file input, y4m for piped input), so there's nothing else to pick between.
 
 The following (non-accelerator) features are available:
 
 - `binary` - Enables the dependencies and code required to compile `av-denoise` as a binary.
-    * This pulls in `ffms2` as hard dependencies. This means you must install `ffms2` before you can compile and link
-      the binary.
+    * This pulls in BestSource as a hard dependency. You must install FFmpeg (libavcodec and libavformat 63.1 or
+      newer, libavutil 61.1 or newer) and xxHash 0.8 or newer, and `pkg-config` must be able to find them.
+    * BestSource saves an index beside each source file so later runs open faster. Use `--no-index-cache` to disable it.
+- `static-bestsource` - Enables `binary` and links BestSource statically. It reads the library from
+  `BESTSOURCE_LIB_DIR` and FFmpeg from `PKG_CONFIG_PATH`. `just static-deps` builds both with vcpkg and
+  `just build-static` builds the binary against them.
 
 ### Release binaries
 
 Each [GitHub release](https://github.com/ChillFish8/av-denoise/releases) carries a prebuilt CLI for
-Linux x86, Windows x86 and macOS on Apple Silicon. FFMS2 and FFmpeg are linked statically, so
-it is not required to have FFmpeg and FFMS2 installed on your host system, however, the JIT will still 
+Linux x86, Windows x86 and macOS on Apple Silicon. BestSource and FFmpeg are linked statically, so
+it is not required to have FFmpeg installed on your host system, however, the JIT will still 
 attempt to dynamically load the CUDA headers and compiler system from your system if you attempt to use
 CUDA.
 

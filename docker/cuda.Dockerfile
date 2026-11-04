@@ -10,7 +10,7 @@ ARG ARCH_SNAPSHOT
 # cudarc dynamic-loads CUDA through libloading, so the toolkit is not needed to compile.
 RUN printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' "${ARCH_SNAPSHOT}" > /etc/pacman.d/mirrorlist \
     && pacman -Syyuu --noconfirm --needed --disable-download-timeout \
-        git rust clang nasm ffms2 \
+        git rust clang nasm ffmpeg xxhash pkgconf \
     && rm -rf /var/cache/pacman/pkg/*
 
 WORKDIR /build
@@ -29,7 +29,7 @@ ARG ARCH_SNAPSHOT
 
 RUN printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' "${ARCH_SNAPSHOT}" > /etc/pacman.d/mirrorlist \
     && pacman -Syyuu --noconfirm --needed --disable-download-timeout \
-        ffmpeg ffms2 gcc-libs cuda \
+        ffmpeg gcc-libs cuda \
     && rm -rf /opt/cuda/doc /opt/cuda/extras /opt/cuda/nsight* /opt/cuda/libnvvp /opt/cuda/compute-sanitizer /opt/cuda/gds /opt/cuda/tools \
     && rm -rf /var/cache/pacman/pkg/* \
 
