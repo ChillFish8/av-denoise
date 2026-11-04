@@ -2,7 +2,7 @@ use std::io::{Cursor, Read};
 use std::sync::Arc;
 use std::thread;
 
-use super::y4m_clip;
+use super::{y4m_clip, y4m_decoder};
 use crate::pipeline::convert::SourcePixel;
 use crate::pipeline::decode::FrameMsg;
 use crate::pipeline::dispatch;
@@ -18,10 +18,8 @@ fn dispatch_fails_on_a_forwarded_decode_error() {
     let (frames_tx, frames_rx) = crossbeam_channel::unbounded::<FrameMsg>();
 
     for _ in 0..3 {
-        let frame = opened
-            .decoder
-            .read_video_frame::<u8>()
-            .expect("the clip has 3 frames");
+        let decoder = y4m_decoder(&mut opened);
+        let frame = decoder.read_video_frame::<u8>().expect("the clip has 3 frames");
         let shared = Arc::new(frame);
         let decoded = u8::into_decoded(shared);
         frames_tx.send(Ok(decoded)).expect("the receiver is alive");

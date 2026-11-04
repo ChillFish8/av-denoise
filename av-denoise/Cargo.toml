@@ -45,15 +45,9 @@ strum_macros.workspace = true
 # Own-device placement and the CUDA adapter listing.
 wgpu = { version = "30", optional = true }
 
-# Frame ingestion via ffms2
-av-scenechange = { version = "0.23", optional = true, features = ["ffms2"] }
-av-decoders = { version = "0.9", optional = true, features = ["ffms2"] }
-# Reads the frame index av-decoders does not surface. Must track the
-# ffms2-sys that av-decoders links, so both share one set of handles.
-ffms2-sys = { version = "0.3", optional = true }
-# Probes the nominal frame rate, which ffms2 only reports averaged over packet timestamps. Must
-# link the same FFmpeg as ffms2, see `static-ffms2`.
-ffmpeg-sys-the-third = { version = "6.0.0", optional = true, default-features = false, features = ["avformat"] }
+# Frame ingestion via av-decoders
+av-scenechange = { version = "0.23", optional = true }
+av-decoders = { version = "0.9", optional = true }
 v_frame = { version = "0.5", optional = true }
 
 # Frame ingestion via BestSource
@@ -77,9 +71,6 @@ tempfile = "3"
 cubecl-environment = { version = "0.11.3", default-features = false, features = ["persistence"] }
 wgpu = "30"
 
-[build-dependencies]
-pkg-config = { version = "0.3.34", optional = true }
-
 [features]
 vulkan = ["av-denoise-core/vulkan", "cubecl/vulkan", "dep:wgpu"]
 metal = ["av-denoise-core/metal", "cubecl/metal-native"]
@@ -92,8 +83,6 @@ binary = [
     "mimalloc",
     "av-scenechange",
     "av-decoders",
-    "ffms2-sys",
-    "ffmpeg-sys-the-third",
     "v_frame",
     "avtbx-bestsource",
     "y4m",
@@ -101,8 +90,8 @@ binary = [
     "tracing-indicatif",
     "tracing-subscriber",
 ]
-# Links ffms2 and FFmpeg statically from the vcpkg tree. See `just build-static`.
-static-ffms2 = ["binary", "av-decoders/ffms2_static", "ffmpeg-sys-the-third/static", "dep:pkg-config"]
+# Links BestSource and FFmpeg statically.
+static-bestsource = ["binary", "avtbx-bestsource/static"]
 default = ["vulkan"]
 
 [[bench]]

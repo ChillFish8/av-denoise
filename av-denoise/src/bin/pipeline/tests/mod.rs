@@ -3,7 +3,6 @@ mod convert;
 mod coordinator;
 mod decode;
 mod dispatch;
-mod frame_rate;
 mod grain_table;
 mod report;
 mod run;
@@ -18,11 +17,13 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "vulkan")]
 use std::sync::{Arc, Mutex};
 
+use av_decoders::Decoder;
 #[cfg(feature = "vulkan")]
 use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, PlaneOptions, TuningMode};
 use av_denoise::{ChromaSiting, Depth, FrameLayout, Planes, Subsampling, fill_plane};
+use avtbx_bestsource::IndexCache;
 
-use super::source::{OpenedSource, open_file};
+use super::source::{FrameReader, OpenedSource, open_file};
 
 /// A writer the test can read back after the coordinator thread drops it.
 #[cfg(feature = "vulkan")]
@@ -59,9 +60,17 @@ pub(super) fn data_clip(name: &str) -> Option<PathBuf> {
 /// Opens a clip under `data/`, or skips the test when the clip is not checked out.
 pub(super) fn open_data_clip(name: &str) -> Option<OpenedSource> {
     let path = data_clip(name)?;
-    let opened = open_file(&path).expect("the clip opens");
+    let opened = open_file(&path, IndexCache::Disabled).expect("the clip opens");
 
     Some(opened)
+}
+
+/// The y4m decoder behind `opened`.
+pub(super) fn y4m_decoder(opened: &mut OpenedSource) -> &mut Decoder {
+    match &mut opened.reader {
+        FrameReader::Y4m(decoder) => decoder,
+        FrameReader::File(_) => panic!("the source is a file, not a y4m stream"),
+    }
 }
 
 pub(super) fn y4m_reader(bytes: Vec<u8>) -> Box<dyn Read> {

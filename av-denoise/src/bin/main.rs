@@ -1,7 +1,6 @@
 //! The `av-denoise` command line tool.
 
 mod cli;
-mod frame_index;
 #[cfg(feature = "cuda")]
 mod libdevice;
 mod pipeline;

@@ -16,7 +16,7 @@ use v_frame::frame::{Frame, FrameBuilder};
 use v_frame::plane::Plane;
 
 use super::convert::SourcePixel;
-use super::source::{SourceInfo, color_range_extension, layout_from_details, pixel_aspect_from_sar};
+use super::source::{SourceInfo, color_range_extension, layout_from_details};
 use crate::y4m_format::siting_from_chroma_location;
 
 /// Planes in a YUV frame.
@@ -110,6 +110,19 @@ pub fn open_bestsource(
     };
 
     Ok((reader, info))
+}
+
+/// Turns a sample aspect ratio into a y4m pixel aspect.
+///
+/// An unset ratio is reported as 0, so anything but a positive pair gives none.
+pub fn pixel_aspect_from_sar(numerator: i32, denominator: i32) -> Option<y4m::Ratio> {
+    if numerator <= 0 || denominator <= 0 {
+        return None;
+    }
+
+    let ratio = y4m::Ratio::new(numerator as usize, denominator as usize);
+
+    Some(ratio)
 }
 
 /// Opens the track, indexing without a cache when the index location is not writable.

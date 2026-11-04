@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::thread;
 
@@ -7,7 +6,7 @@ use av_denoise::Depth;
 use v_frame::frame::Frame;
 
 use super::convert::{DecodedFrame, SourcePixel};
-use super::source::{OpenedSource, SourceInfo};
+use super::source::{FrameReader, OpenedSource, SourceInfo};
 
 /// Frames the decode thread may run ahead of the scene splitter.
 pub const PREFETCH_FRAMES: usize = 4;
@@ -100,15 +99,11 @@ fn run_decode_thread<F>(
         return;
     };
 
-    let OpenedSource {
-        decoder,
-        phantom,
-        info,
-    } = opened;
+    let OpenedSource { reader, info } = opened;
 
     let result = match info.layout.depth {
-        Depth::Eight => pump_decoder::<u8>(decoder, &phantom, &start),
-        Depth::Ten | Depth::Twelve => pump_decoder::<u16>(decoder, &phantom, &start),
+        Depth::Eight => pump_reader::<u8>(reader, &start),
+        Depth::Ten | Depth::Twelve => pump_reader::<u16>(reader, &start),
     };
 
     if let Err(err) = result {
@@ -116,18 +111,23 @@ fn run_decode_thread<F>(
     }
 }
 
-fn pump_decoder<T: SourcePixel>(
-    mut decoder: Decoder,
-    phantom: &BTreeSet<usize>,
-    start: &DecodeStart,
-) -> Result<(), anyhow::Error> {
-    let frames = std::iter::from_fn(move || read_frame::<T>(&mut decoder));
+fn pump_reader<T: SourcePixel>(reader: FrameReader, start: &DecodeStart) -> Result<(), anyhow::Error> {
+    match reader {
+        FrameReader::File(mut file) => {
+            let frames = std::iter::from_fn(move || file.read_frame::<T>());
 
-    pump_frames(frames, phantom, &start.permits, &start.frames)
+            pump_frames(frames, &start.permits, &start.frames)
+        },
+        FrameReader::Y4m(mut decoder) => {
+            let frames = std::iter::from_fn(move || read_y4m_frame::<T>(&mut decoder));
+
+            pump_frames(frames, &start.permits, &start.frames)
+        },
+    }
 }
 
 /// Reads the next frame, ending the iterator at end of file.
-fn read_frame<T: SourcePixel>(decoder: &mut Decoder) -> Option<Result<Frame<T>, anyhow::Error>> {
+fn read_y4m_frame<T: SourcePixel>(decoder: &mut Decoder) -> Option<Result<Frame<T>, anyhow::Error>> {
     match decoder.read_video_frame::<T>() {
         Ok(frame) => Some(Ok(frame)),
         Err(DecoderError::EndOfFile) => None,
@@ -138,12 +138,11 @@ fn read_frame<T: SourcePixel>(decoder: &mut Decoder) -> Option<Result<Frame<T>, 
     }
 }
 
-/// Forwards decoded frames, skipping phantom ones and taking a permit per frame sent.
+/// Forwards decoded frames, taking a permit per frame sent.
 ///
 /// Returns quietly when the receiving end hangs up.
 pub fn pump_frames<T, I>(
     frames: I,
-    phantom: &BTreeSet<usize>,
     permits: &crossbeam_channel::Receiver<()>,
     decoded_tx: &crossbeam_channel::Sender<FrameMsg>,
 ) -> Result<(), anyhow::Error>
@@ -151,13 +150,8 @@ where
     T: SourcePixel,
     I: Iterator<Item = Result<Frame<T>, anyhow::Error>>,
 {
-    // Every frame is read, phantom or not, because the decoder walks the file in order.
-    for (file_index, frame) in frames.enumerate() {
+    for frame in frames {
         let frame = frame?;
-
-        if phantom.contains(&file_index) {
-            continue;
-        }
 
         permits
             .recv()

@@ -6,12 +6,18 @@ use av_denoise::ChromaSiting;
 use avtbx_bestsource::IndexCache;
 
 use super::{data_clip, silent_wav};
-use crate::pipeline::bestsource::{BestSourceReader, open_bestsource};
+use crate::pipeline::bestsource::{BestSourceReader, open_bestsource, pixel_aspect_from_sar};
 use crate::pipeline::convert::planes_from_v_frame_u16;
 use crate::pipeline::source::SourceInfo;
 
 /// Builds an ffv1 clip with ffmpeg, or `None` when ffmpeg cannot.
-fn ffmpeg_clip(directory: &Path, name: &str, size: &str, pix_fmt: &str, extra: &[&str]) -> Option<PathBuf> {
+pub(super) fn ffmpeg_clip(
+    directory: &Path,
+    name: &str,
+    size: &str,
+    pix_fmt: &str,
+    extra: &[&str],
+) -> Option<PathBuf> {
     let path = directory.join(name);
     let source = format!("testsrc2=size={size}:rate=25");
     let status = Command::new("ffmpeg")
@@ -284,4 +290,20 @@ fn a_full_range_file_tags_full_range() {
         .collect();
 
     assert_eq!(tags, vec![b"COLORRANGE=FULL".as_slice()]);
+}
+
+#[test]
+fn a_positive_sar_becomes_the_pixel_aspect() {
+    let aspect = pixel_aspect_from_sar(32, 27).expect("32:27 is a valid SAR");
+
+    assert_eq!((aspect.num, aspect.den), (32, 27));
+}
+
+#[test]
+fn an_unset_or_invalid_sar_gives_no_pixel_aspect() {
+    for (numerator, denominator) in [(0, 0), (0, 1), (1, 0), (-4, 3)] {
+        let aspect = pixel_aspect_from_sar(numerator, denominator);
+
+        assert!(aspect.is_none(), "SAR {numerator}:{denominator} must give none");
+    }
 }

@@ -10,6 +10,7 @@ use av_denoise::tune::{
     tuning_frame_count,
 };
 use av_denoise::{PlaneOptions, Planes, TuningMode};
+use avtbx_bestsource::IndexCache;
 
 use super::convert::decoded_planes;
 use super::decode::{DecodeThread, FrameMsg};
@@ -182,7 +183,7 @@ pub fn tune_input(
     request: &TuneRequest,
 ) -> Result<TuneReport, anyhow::Error> {
     let owned_input = input.clone();
-    let opener = move || source::open_source(&owned_input);
+    let opener = move || source::open_source(&owned_input, IndexCache::BesideSource);
     let (decode_thread, info) = DecodeThread::spawn(opener)?;
 
     let wanted = tuning_frame_count(planes, info.layout);

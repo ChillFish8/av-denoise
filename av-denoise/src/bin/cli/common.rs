@@ -8,8 +8,8 @@ use super::InputSource;
 pub struct CommonArgs {
     /// Where to read frames from.
     ///
-    /// A path opens the file with ffms2. Any container or codec
-    /// supported by ffmpeg works.
+    /// A path opens the file with BestSource. Any container or codec
+    /// supported by FFmpeg works.
     ///
     /// `-` or `pipe:0` reads a y4m stream from standard input.
     ///

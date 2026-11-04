@@ -9,7 +9,15 @@ use av_denoise::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest, is_t
 use av_denoise::{PlaneOptions, TuningMode, install_compilation_cache_at};
 use av_denoise_core::tune::{TUNE_UNKNOWN, tuning_budget};
 
-use super::{SharedBuffer, frame_count, multi_scene_clip, scene_clip_layout, temporal_opts, y4m_reader};
+use super::{
+    SharedBuffer,
+    frame_count,
+    multi_scene_clip,
+    scene_clip_layout,
+    temporal_opts,
+    y4m_decoder,
+    y4m_reader,
+};
 use crate::cli::InputSource;
 use crate::pipeline::convert::SourcePixel;
 use crate::pipeline::decode::FrameMsg;
@@ -230,10 +238,8 @@ fn a_decode_error_among_the_first_frames_is_kept_in_order_and_skips_tuning() {
             frames_tx.send(Err(decode_error)).expect("the receiver is alive");
         }
 
-        let frame = opened
-            .decoder
-            .read_video_frame::<u8>()
-            .expect("the clip has 4 frames");
+        let decoder = y4m_decoder(&mut opened);
+        let frame = decoder.read_video_frame::<u8>().expect("the clip has 4 frames");
         let shared = Arc::new(frame);
         let decoded = u8::into_decoded(shared);
         frames_tx.send(Ok(decoded)).expect("the receiver is alive");

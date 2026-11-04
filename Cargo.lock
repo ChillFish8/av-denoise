@@ -258,7 +258,6 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93ef6a87c007444f81cb3948e39dd2566e2d70d7abbbb806d4bf19e98cae3b60"
 dependencies = [
- "ffms2-sys",
  "num-rational",
  "thiserror 2.0.21",
  "v_frame",
@@ -281,11 +280,8 @@ dependencies = [
  "cubecl",
  "cubecl-environment",
  "etcetera",
- "ffmpeg-sys-the-third",
- "ffms2-sys",
  "indicatif",
  "mimalloc",
- "pkg-config",
  "serde",
  "serde_json",
  "strum 0.28.0",
@@ -509,26 +505,6 @@ dependencies = [
  "shlex 1.3.0",
  "syn 2.0.117",
  "which",
-]
-
-[[package]]
-name = "bindgen"
-version = "0.72.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
-dependencies = [
- "bitflags",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease 0.2.37",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 2.1.2",
- "shlex 1.3.0",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -793,16 +769,6 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common",
  "inout",
-]
-
-[[package]]
-name = "clang"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2ed30b30e1e17966b55ddd0b9dd2758fd824f0a6da6875c8abb17e6aba47c28"
-dependencies = [
- "clang-sys",
- "libc",
 ]
 
 [[package]]
@@ -1206,7 +1172,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "spin",
- "toml 1.1.2+spec-1.1.0",
+ "toml",
  "turso",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -1419,7 +1385,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror 2.0.21",
- "toml 1.1.2+spec-1.1.0",
+ "toml",
  "wasm-bindgen-futures",
 ]
 
@@ -1879,12 +1845,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "error-chain"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9435d864e017c3c6afeac1654189b06cdb491cf2ff73dbf0d73b0f292f42ff8"
-
-[[package]]
 name = "etcetera"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1939,30 +1899,6 @@ name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
-
-[[package]]
-name = "ffmpeg-sys-the-third"
-version = "6.0.0+ffmpeg-9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8beaa5d31a4dee3c5a93caf6c0dd3e9d49fb9849c96354f8d619ec6b062036f2"
-dependencies = [
- "bindgen 0.72.1",
- "cc",
- "clang",
- "libc",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
-name = "ffms2-sys"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42b5b0a8fe112d30a34aacc940b0c23fd44c806a3980b815c17f804c5fc2b3b2"
-dependencies = [
- "bindgen 0.72.1",
- "metadeps",
-]
 
 [[package]]
 name = "filetime"
@@ -2676,15 +2612,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -2973,17 +2900,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "metadeps"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73b122901b3a675fac8cecf68dcb2f0d3036193bc861d1ac0e1c337f7d5254c2"
-dependencies = [
- "error-chain",
- "pkg-config",
- "toml 0.2.1",
 ]
 
 [[package]]
@@ -4591,12 +4507,6 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "736b60249cb25337bc196faa43ee12c705e426f3d55c214d73a4e7be06f92cb4"
-
-[[package]]
-name = "toml"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
@@ -4901,7 +4811,7 @@ version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "819a17926d04dbeb5b03f00cdab6ed7351bbb6778d00840364b9af62bca02914"
 dependencies = [
- "bindgen 0.69.5",
+ "bindgen",
  "env_logger",
  "parking_lot",
  "tracing",
@@ -4952,7 +4862,7 @@ version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fe4b961c9cc90f6339447dabfe83ed13a498721e41378932ab7eaf8ddd6976"
 dependencies = [
- "bindgen 0.69.5",
+ "bindgen",
  "env_logger",
  "genawaiter",
  "parking_lot",
@@ -5180,12 +5090,6 @@ dependencies = [
  "quote",
  "unsynn",
 ]
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

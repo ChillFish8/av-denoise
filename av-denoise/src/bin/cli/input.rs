@@ -27,7 +27,7 @@ impl InputSource {
             },
             InputSource::Fd(fd) => open_fd(*fd),
             InputSource::File(path) => anyhow::bail!(
-                "`{}` is a file path and is opened with ffms2, not read as a stream",
+                "`{}` is a file path and is opened as a file, not read as a stream",
                 path.display(),
             ),
         }
@@ -214,7 +214,7 @@ mod tests {
 
         // `Box<dyn Read>` isn't `Debug`, so `expect_err` can't be used here.
         let error = match source.open_reader() {
-            Ok(_) => panic!("paths are opened with ffms2, not read as a stream"),
+            Ok(_) => panic!("paths are opened as files, not read as a stream"),
             Err(error) => error,
         };
 
