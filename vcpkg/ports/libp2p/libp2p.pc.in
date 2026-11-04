@@ -1,0 +1,9 @@
+prefix=${pcfiledir}/../..
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libp2p
+Description: Pack and unpack pixel formats
+Version: 0
+Libs: -L${libdir} -lp2p
+Cflags: -I${includedir}

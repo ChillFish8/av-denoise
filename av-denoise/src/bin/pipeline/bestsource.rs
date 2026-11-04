@@ -22,6 +22,9 @@ use crate::y4m_format::siting_from_chroma_location;
 /// Planes in a YUV frame.
 const PLANE_COUNT: usize = 3;
 
+/// Samples of padding on each side of the luma plane, which scene detection needs.
+const LUMA_PADDING: usize = 88;
+
 /// The size and sample format of every frame in the track.
 #[derive(Clone, Copy)]
 struct FrameShape {
@@ -218,8 +221,12 @@ impl BestSourceReader {
         let mut target = PlanarTarget { planes, alpha: None };
         decoded.export_planar(&mut target)?;
 
-        let mut frame =
-            FrameBuilder::new(shape.width, shape.height, shape.subsampling, shape.bit_depth).build::<T>()?;
+        let mut frame = FrameBuilder::new(shape.width, shape.height, shape.subsampling, shape.bit_depth)
+            .luma_padding_top(LUMA_PADDING)
+            .luma_padding_bottom(LUMA_PADDING)
+            .luma_padding_left(LUMA_PADDING)
+            .luma_padding_right(LUMA_PADDING)
+            .build::<T>()?;
 
         let y_plane = Some(&mut frame.y_plane);
         copy_plane(y_plane, &self.scratch[0], shape.row_bytes(0))?;

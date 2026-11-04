@@ -1,0 +1,20 @@
+{
+  "name": "bestsource",
+  "version": "22",
+  "description": "Frame accurate audio and video source library built on FFmpeg.",
+  "homepage": "https://github.com/vapoursynth/bestsource",
+  "license": "MIT",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat"]
+    },
+    "libp2p",
+    "xxhash",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    }
+  ]
+}

@@ -52,7 +52,7 @@ build *ARGS:
 run *ARGS:
     cargo run -p av-denoise {{ARGS}}
 
-# Builds the static ffms2 and FFmpeg tree from vcpkg.json into vcpkg_installed/.
+# Builds the static BestSource and FFmpeg tree from vcpkg.json into vcpkg_installed/.
 static-deps:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -67,16 +67,14 @@ static-deps:
     fi
     .vcpkg/vcpkg install --triplet {{vcpkg_triplet}} --host-triplet {{vcpkg_triplet}}
 
-# Builds a release CLI with ffms2 and FFmpeg linked statically. Run `static-deps` first.
+# Builds a release CLI with BestSource and FFmpeg linked statically. Run `static-deps` first.
 build-static features=static_features:
     #!/usr/bin/env bash
     set -euo pipefail
     prefix="$PWD/vcpkg_installed/{{vcpkg_triplet}}"
-    export FFMS_INCLUDE_DIR="$prefix/include"
-    export FFMS_LIB_DIR="$prefix/lib"
-    export FFMPEG_DIR="$prefix"
+    export BESTSOURCE_LIB_DIR="$prefix/lib"
     export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
-    cargo build --release -p av-denoise --features {{features}},static-ffms2
+    cargo build --release -p av-denoise --features {{features}},static-bestsource
 
 # The backend comes first and defaults to vulkan, so `just bench -- --device discrete:1` and
 # `just bench rocm --bench bench_kernels` both work.

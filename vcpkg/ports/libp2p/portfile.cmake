@@ -1,16 +1,17 @@
+# Keep REF in step with the thirdparty/bestsource/vendor submodules.
 vcpkg_check_linkage(ONLY_STATIC_LIBRARY)
 
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
-    REPO FFMS/ffms2
-    REF 5.0
-    SHA512 0b75a0ad0a0ea466d1d19be55886eee5470e6b08ede8159a5099cd962ca0f41222044fc98119de64c72ecea8b64ec2e2abebb8c362f3f377b4d054ba77752348
+    REPO sekrit-twc/libp2p
+    REF 869fa993041f9f3af7d9ac8b10158920c6ddce66
+    SHA512 b5a575648db9b74cd27c5feb1740050864f2329d65c7b05744faf9200a20efb5cb3a374856c4139bb49630dca021aac7377a4b0df7a263abaa33c429a6dbd505
     HEAD_REF master
 )
 
 file(COPY
     "${CMAKE_CURRENT_LIST_DIR}/CMakeLists.txt"
-    "${CMAKE_CURRENT_LIST_DIR}/ffms2.pc.in"
+    "${CMAKE_CURRENT_LIST_DIR}/libp2p.pc.in"
     DESTINATION "${SOURCE_PATH}"
 )
 

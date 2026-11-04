@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use av_decoders::Rational32;
 use av_denoise::ChromaSiting;
@@ -8,6 +9,7 @@ use avtbx_bestsource::IndexCache;
 use super::{ffmpeg_clip, silent_wav};
 use crate::pipeline::bestsource::{open_bestsource, pixel_aspect_from_sar};
 use crate::pipeline::convert::planes_from_v_frame_u16;
+use crate::pipeline::scenes::SceneSplitter;
 
 fn open_error(path: &Path) -> String {
     let result = open_bestsource(path, IndexCache::Disabled);
@@ -80,6 +82,25 @@ fn reading_stops_after_the_last_frame() {
     }
 
     assert_eq!(count, 10);
+}
+
+#[test]
+fn file_frames_pass_through_scene_detection() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let Some(path) = ffmpeg_clip(directory.path(), "scenes.mkv", "64x48", "yuv420p", &[]) else {
+        return;
+    };
+    let (mut reader, info) = open_bestsource(&path, IndexCache::Disabled).expect("the clip opens");
+    let mut splitter = SceneSplitter::<u8>::new(&info.details);
+
+    let mut released = 0;
+    while let Some(frame) = reader.read_frame::<u8>() {
+        let frame = frame.expect("the frame decodes");
+        released += splitter.push(Arc::new(frame)).len();
+    }
+    released += splitter.finish().len();
+
+    assert_eq!(released, 10);
 }
 
 #[test]

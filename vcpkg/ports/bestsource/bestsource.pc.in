@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../..
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: bestsource
+Description: Frame accurate audio and video source library
+Version: @BESTSOURCE_VERSION@
+Requires.private: libavformat libavcodec libavutil libxxhash libp2p
+Libs: -L${libdir} -lbestsource
+Cflags: -I${includedir}/bestsource
