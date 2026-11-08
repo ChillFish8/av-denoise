@@ -105,7 +105,7 @@ pub(crate) fn packed_partial<S: Float, N: Size>(
     let width = comptime!(shape.width);
     let height = comptime!(shape.height);
     let channels = comptime!(shape.channels);
-    let mut sum = Vector::<S, Const<2>>::new(S::new(0.0f32));
+    let mut sum = Vector::<S, Const<2>>::new(S::new(0.0));
 
     if comptime!(channels == 1) {
         #[unroll]

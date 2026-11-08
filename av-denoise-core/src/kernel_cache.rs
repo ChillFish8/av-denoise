@@ -727,9 +727,31 @@ mod tests {
     const NAMESPACE: &str = "cubecl/test/kernels";
 
     fn insert(database: &Path, key: &str, origin: Origin) {
+        let opened = insert_open(database, key, origin);
+        drop(opened);
+    }
+
+    /// Inserts an entry and keeps the database open, as CubeCL does with the file it caches in.
+    ///
+    /// The write sits in the write-ahead log until the returned handle is dropped.
+    fn insert_open(database: &Path, key: &str, origin: Origin) -> Database {
         let opened = Database::open_at(database, Access::ReadWrite).expect("open the database");
         let value = format!("value of {key}");
         opened.insert(NAMESPACE, key.as_bytes(), value.as_bytes(), origin);
+        opened
+    }
+
+    /// Leaves `database` with an entry still in its write-ahead log, as a crashed process does.
+    fn crashed_insert(database: &Path, key: &str, origin: Origin) {
+        let source = database.with_extension("source");
+        let opened = insert_open(&source, key, origin);
+
+        let source_log = sidecar(&source, SIDECARS[0]);
+        let log = sidecar(database, SIDECARS[0]);
+        std::fs::copy(&source, database).expect("copy the database");
+        std::fs::copy(&source_log, &log).expect("copy the write-ahead log");
+
+        drop(opened);
     }
 
     /// Every entry of [NAMESPACE] in `database`, by key, with its origin.
@@ -821,7 +843,7 @@ mod tests {
     fn a_fill_checkpoints_a_shared_file_with_a_log_first() {
         let dir = tempfile::tempdir().unwrap();
         let mut cache = active_cache(dir.path());
-        insert(&cache.shared, "logged", Origin::Imported);
+        crashed_insert(&cache.shared, "logged", Origin::Imported);
         assert!(
             has_log(&cache.shared),
             "the insert should leave a write-ahead log"
@@ -871,9 +893,10 @@ mod tests {
         insert(&cache.shared, "shared", Origin::Imported);
         standalone(&cache.shared);
         fill(&mut cache);
-        insert(&cache.private, "compiled", Origin::Local);
+        let private = insert_open(&cache.private, "compiled", Origin::Local);
 
         cache.merge();
+        drop(private);
 
         let merged = entries(&cache.shared);
         let expected = vec![
@@ -911,9 +934,10 @@ mod tests {
         standalone(&cache.shared);
         fill(&mut cache);
 
-        insert(&cache.private, "compiled", Origin::Local);
+        let private = insert_open(&cache.private, "compiled", Origin::Local);
 
         assert_ne!(write_state(&cache.private), cache.written);
+        drop(private);
     }
 
     #[test]

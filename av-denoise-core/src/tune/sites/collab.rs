@@ -44,10 +44,10 @@ const fn count_variants() -> usize {
     let mut count = 0;
     let mut centre_index = 0;
 
-    while centre_index < CENTRE_OPTIONS.len() {
+    while centre_index < CENTRE_OPTIONS.as_slice().len() {
         let mut batched_index = 0;
 
-        while batched_index < BATCHED_OPTIONS.len() {
+        while batched_index < BATCHED_OPTIONS.as_slice().len() {
             let centre = CENTRE_OPTIONS[centre_index];
             let batched = BATCHED_OPTIONS[batched_index];
             if builds(centre, batched) {
@@ -60,7 +60,10 @@ const fn count_variants() -> usize {
         centre_index += 1;
     }
 
-    count * GROUP_OPTIONS.len() * WALK_OPTIONS.len() * NEIGHBOUR_OPTIONS.len()
+    count
+        * GROUP_OPTIONS.as_slice().len()
+        * WALK_OPTIONS.as_slice().len()
+        * NEIGHBOUR_OPTIONS.as_slice().len()
 }
 
 pub(crate) const VARIANT_COUNT: usize = count_variants();
@@ -160,11 +163,11 @@ const COLLAB_DIMENSIONS: &[Dimension] = &[
 
 // Keeps each dimension's families in step with its options.
 const _: () = assert!(
-    CENTRE_DIMENSION.values.len() == CENTRE_OPTIONS.len()
-        && BATCHED_DIMENSION.values.len() == BATCHED_OPTIONS.len()
-        && GROUPS_DIMENSION.values.len() == GROUP_OPTIONS.len()
-        && WALK_DIMENSION.values.len() == WALK_OPTIONS.len()
-        && NEIGHBOUR_DIMENSION.values.len() == NEIGHBOUR_OPTIONS.len(),
+    CENTRE_DIMENSION.values.len() == CENTRE_OPTIONS.as_slice().len()
+        && BATCHED_DIMENSION.values.len() == BATCHED_OPTIONS.as_slice().len()
+        && GROUPS_DIMENSION.values.len() == GROUP_OPTIONS.as_slice().len()
+        && WALK_DIMENSION.values.len() == WALK_OPTIONS.as_slice().len()
+        && NEIGHBOUR_DIMENSION.values.len() == NEIGHBOUR_OPTIONS.as_slice().len(),
     "every collab dimension must have one family per option"
 );
 
@@ -224,23 +227,23 @@ const fn listed_variants() -> [CollabVariant; VARIANT_COUNT] {
     let mut next = 0;
     let mut group_index = 0;
 
-    while group_index < GROUP_OPTIONS.len() {
+    while group_index < GROUP_OPTIONS.as_slice().len() {
         let mut walk_index = 0;
 
-        while walk_index < WALK_OPTIONS.len() {
+        while walk_index < WALK_OPTIONS.as_slice().len() {
             let mut centre_index = 0;
 
-            while centre_index < CENTRE_OPTIONS.len() {
+            while centre_index < CENTRE_OPTIONS.as_slice().len() {
                 let mut batched_index = 0;
 
-                while batched_index < BATCHED_OPTIONS.len() {
+                while batched_index < BATCHED_OPTIONS.as_slice().len() {
                     let centre = CENTRE_OPTIONS[centre_index];
                     let batched = BATCHED_OPTIONS[batched_index];
 
                     if builds(centre, batched) {
                         let mut neighbour_index = 0;
 
-                        while neighbour_index < NEIGHBOUR_OPTIONS.len() {
+                        while neighbour_index < NEIGHBOUR_OPTIONS.as_slice().len() {
                             variants[next] = CollabVariant {
                                 groups: GROUP_OPTIONS[group_index],
                                 walk: WALK_OPTIONS[walk_index],

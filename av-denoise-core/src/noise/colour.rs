@@ -36,7 +36,7 @@ pub(crate) const COLOUR_SATURATION_EDGES: [f32; 5] = [6.0, 12.0, 20.0, 30.0, 44.
 pub(crate) const COLOUR_HUE_BINS: u32 = 12;
 /// The cells of one brightness bin, one neutral cell then a hue sector at each saturation level.
 pub(crate) const COLOUR_CELLS_PER_BRIGHTNESS: u32 =
-    1 + COLOUR_SATURATION_EDGES.len() as u32 * COLOUR_HUE_BINS;
+    1 + COLOUR_SATURATION_EDGES.as_slice().len() as u32 * COLOUR_HUE_BINS;
 /// The colour cells of one plane.
 pub(crate) const COLOUR_CELLS: u32 = COLOUR_BRIGHTNESS_BINS * COLOUR_CELLS_PER_BRIGHTNESS;
 /// The calibration records of the luma plane, one per brightness bin.

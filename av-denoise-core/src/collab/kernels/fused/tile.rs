@@ -83,7 +83,7 @@ pub(crate) fn tile_partial<S: Float>(
     let mut partial = 0.0f32;
 
     if comptime!(f16_search && channels == 1) {
-        let mut sum = Vector::<S, Const<2>>::new(S::new(0.0f32));
+        let mut sum = Vector::<S, Const<2>>::new(S::new(0.0));
 
         #[unroll]
         for r in 0..comptime!(PATCH_SIZE / 2) {
@@ -97,7 +97,7 @@ pub(crate) fn tile_partial<S: Float>(
         partial = pair_sum_total(sum);
     } else if comptime!(f16_search) {
         let pairs_per_row = comptime!(channels / 2);
-        let mut sum = Vector::<S, Const<2>>::new(S::new(0.0f32));
+        let mut sum = Vector::<S, Const<2>>::new(S::new(0.0));
 
         #[unroll]
         for r in 0..PATCH_SIZE {

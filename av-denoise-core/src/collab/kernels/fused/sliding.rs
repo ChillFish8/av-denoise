@@ -49,7 +49,7 @@ fn window_packed_partial<S: Float, N: Size>(
     #[comptime] shape: SearchShape,
 ) -> f32 {
     let channels = comptime!(shape.channels);
-    let zero = S::new(0.0f32);
+    let zero = S::new(0.0);
     let mut sum = Vector::<S, Const<2>>::new(zero);
 
     if comptime!(channels == 1) {

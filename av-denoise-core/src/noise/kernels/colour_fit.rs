@@ -57,7 +57,7 @@ const LAST_KNOT: u32 = COLOUR_FIT_KNOTS - 1;
 /// The codes between two knots of the brightness base, which spans 0 to 255.
 const KNOT_STEP: f32 = 255.0 / LAST_KNOT as f32;
 const HUE_SECTORS: f32 = COLOUR_HUE_BINS as f32;
-const SATURATION_LEVELS: u32 = COLOUR_SATURATION_CENTRES.len() as u32;
+const SATURATION_LEVELS: u32 = COLOUR_SATURATION_CENTRES.as_slice().len() as u32;
 const LAST_BRIGHTNESS: f32 = (COLOUR_BRIGHTNESS_BINS - 1) as f32;
 const LAST_SATURATION: f32 = (SATURATION_LEVELS - 1) as f32;
 const SATURATION_CENTRE_0: f32 = COLOUR_SATURATION_CENTRES[0];

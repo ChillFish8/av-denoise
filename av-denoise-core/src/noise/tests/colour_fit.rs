@@ -58,7 +58,7 @@ const CELLS: usize = COLOUR_CELLS as usize;
 const PER_BRIGHTNESS: usize = COLOUR_CELLS_PER_BRIGHTNESS as usize;
 const HUES: usize = COLOUR_HUE_BINS as usize;
 const KNOTS: usize = COLOUR_FIT_KNOTS as usize;
-const LEVELS: usize = COLOUR_SATURATION_CENTRES.len();
+const LEVELS: usize = COLOUR_SATURATION_CENTRES.as_slice().len();
 
 /// One block's mean colour on the 8-bit scale, chroma centred on 0, and each channel's grain in
 /// codes.

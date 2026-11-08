@@ -21,6 +21,11 @@ const POISON: f32 = 1.0e6;
 const CENTRE_SLOT: u32 = 2;
 const NEIGHBOUR_SLOTS: [u32; 4] = [0, 1, 3, 4];
 const SHIFTS: [(i32, i32); 4] = [(2, -1), (-3, 0), (0, 2), (1, 1)];
+/// The driver may fuse the confidence arithmetic differently in each kernel.
+///
+/// The bound is absolute, because a confidence near zero comes from a near cancellation that
+/// magnifies a rounding difference relative to the result.
+const MAX_CONFIDENCE_ERROR: f32 = 4.0 * f32::EPSILON;
 
 fn textured(width: u32, height: u32) -> Vec<f32> {
     (0..width * height)
@@ -89,8 +94,17 @@ fn upload_u32(client: &Client, values: &[u32]) -> Handle {
     client.create_from_slice(bytes)
 }
 
-fn confidence_bits(values: &[f32]) -> Vec<u32> {
-    values.iter().map(|value| value.to_bits()).collect()
+/// Fails when any two confidences sit more than [MAX_CONFIDENCE_ERROR] apart.
+fn assert_confidence_close(actual: &[f32], expected: &[f32], label: &str) {
+    assert_eq!(actual.len(), expected.len(), "{label} confidence length");
+
+    for (block, (&left, &right)) in actual.iter().zip(expected).enumerate() {
+        let error = (left - right).abs();
+        assert!(
+            error <= MAX_CONFIDENCE_ERROR,
+            "{label} confidence block {block}: merged {left} reference {right}, {error} apart"
+        );
+    }
 }
 
 fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
@@ -221,19 +235,19 @@ fn run_fine_merged_against_reference(use_seed: u32, threads: u32) {
         let expected_conf_bytes = client.read_one(reference_conf).expect("confidence reads back");
         let expected_mv = &i32::from_bytes(&expected_mv_bytes)[..2 * blocks];
         let expected_conf_values = f32::from_bytes(&expected_conf_bytes);
-        let expected_conf = confidence_bits(&expected_conf_values[..blocks]);
+        let expected_conf = &expected_conf_values[..blocks];
 
         let mv_start = index * mv_stride;
         let conf_start = index * conf_stride;
         let actual_mv = &merged_mv[mv_start..mv_start + 2 * blocks];
-        let actual_conf = confidence_bits(&merged_conf[conf_start..conf_start + blocks]);
+        let actual_conf = &merged_conf[conf_start..conf_start + blocks];
         let mv_padding = &merged_mv[mv_start + 2 * blocks..mv_start + mv_stride];
         let conf_padding = &merged_conf[conf_start + blocks..conf_start + conf_stride];
 
         let label = format!("neighbour {index} on {threads} threads");
 
         assert_eq!(actual_mv, expected_mv, "{label} vectors");
-        assert_eq!(actual_conf, expected_conf, "{label} confidence");
+        assert_confidence_close(actual_conf, expected_conf, &label);
         assert!(
             mv_padding.iter().all(|&value| value == i32::MIN),
             "{label} field padding"
