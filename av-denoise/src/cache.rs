@@ -9,10 +9,6 @@
 //! Each build of the kernels gets its own subdirectory, and an install removes other builds'
 //! subdirectories once they have gone unused for a week.
 //!
-//! Each process works on a private copy of the cache and merges the kernels it compiles back into the
-//! shared cache. [finish_compilation_cache] does the last merge, and a process should call it before
-//! it exits.
-//!
 //! The cache has to be installed before the first [HostDenoiser](crate::HostDenoiser) is created,
 //! because building a CubeCL client locks the global config. Library callers can pick the directory
 //! themselves with [install_compilation_cache_at].
@@ -34,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Once, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use av_denoise_core::PrivateKernelCache;
+use cubecl::config::cache::CacheConfig;
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 use etcetera::base_strategy::{BaseStrategy, choose_base_strategy};
 
@@ -218,32 +214,16 @@ pub fn compilation_cache_dir() -> Option<&'static Path> {
     CACHE_DIR.get()?.as_deref()
 }
 
-/// Merges the kernels this process compiled into the shared cache and deletes its private copy.
-///
-/// Call it once, when the process is done denoising. It does nothing when no cache is installed.
-pub fn finish_compilation_cache() {
-    av_denoise_core::finish_kernel_cache();
-}
-
-/// Merges the kernels this process compiled so far into the shared cache, so other processes can
-/// load them.
-///
-/// The private copy stays in use, so it suits a process that may still compile more.
-pub fn merge_compilation_cache() {
-    av_denoise_core::merge_kernel_cache();
-}
-
 fn set_runtime_config(path: &Path) -> Result<(), CacheError> {
     let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
     config.compilation.cache = true;
-    let private_cache = PrivateKernelCache::configure(path, &mut config);
+    config.environment.path = CacheConfig::Directory(path.to_path_buf());
 
     let installed = CubeClRuntimeConfig::try_set(config);
     if !installed {
         return Err(CacheError::AlreadyInitialised);
     }
 
-    private_cache.start();
     Ok(())
 }
 
@@ -485,15 +465,14 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_install_merges_its_entries_and_deletes_its_private_file() {
+    fn kernels_reach_the_shared_file_without_a_finish() {
         let root = tempfile::tempdir().expect("temp dir");
 
         install_compilation_cache_at(root.path()).expect("the cache installs");
 
         let build_dir = build_cache_dir(root.path());
-        let private_dir = build_dir.join("private");
         let database = cubecl::environment::path();
-        assert_eq!(database.parent(), Some(private_dir.as_path()));
+        assert_eq!(database.parent(), Some(build_dir.as_path()));
 
         let options = StoreOptions::new()
             .storage(Namespace::new("cache-test"))
@@ -502,14 +481,8 @@ mod tests {
         store
             .insert("key".to_string(), "value".to_string())
             .expect("the entry is stored");
-        assert!(database.exists(), "{database:?} should hold the entry");
 
-        finish_compilation_cache();
-
-        assert!(!database.exists(), "{database:?} should be deleted once finished");
-
-        let shared_path = build_dir.join("default.db");
-        let shared = Database::open_at(&shared_path, Access::ReadOnly).expect("the shared file exists");
+        let shared = Database::open_at(&database, Access::ReadOnly).expect("the shared file exists");
         let namespace = Namespace::new("cache-test");
         let mut values = Vec::new();
         shared.scan(namespace.as_str(), &mut |_, value| {
@@ -519,11 +492,7 @@ mod tests {
 
         // The store writes values as CBOR, where a five byte text string starts with 0x65.
         let expected = b"\x65value".to_vec();
-        assert_eq!(
-            values,
-            vec![expected],
-            "the entry should be merged into {shared_path:?}"
-        );
+        assert_eq!(values, vec![expected], "the entry should be in {database:?}");
     }
 
     #[test]

@@ -101,9 +101,7 @@ fn main() -> anyhow::Result<()> {
         },
     }
 
-    let outcome = run_command(&args);
-    av_denoise::finish_compilation_cache();
-    outcome
+    run_command(&args)
 }
 
 /// Runs a command that denoises or tunes, once the kernel cache is installed.

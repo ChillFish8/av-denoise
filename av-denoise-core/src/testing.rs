@@ -4,7 +4,6 @@ use std::sync::OnceLock;
 use cubecl::prelude::Client;
 
 use crate::bench_api::Device;
-use crate::kernel_cache::atexit;
 
 const ACCELERATOR_ENV: &str = "AVD_TEST_ACCELERATOR";
 const DEVICE_ENV: &str = "AVD_TEST_DEVICE";
@@ -14,6 +13,10 @@ const ACCELERATORS: &[&str] = &["cuda", "vulkan", "metal", "rocm"];
 
 /// The test device's client, synced by [drain_exit_client] when the process exits.
 static EXIT_CLIENT: OnceLock<Client> = OnceLock::new();
+
+unsafe extern "C" {
+    fn atexit(callback: extern "C" fn()) -> std::ffi::c_int;
+}
 
 /// Opens a client on the backend and device the test environment names.
 ///

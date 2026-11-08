@@ -6,10 +6,9 @@
 //! most of the compilation cost again and writes its own copy of the same kernels.
 //!
 //! [WarmUp] holds a lock file next to the cache while the first process compiles, and the rest
-//! block on it. Each process works on a private copy of the cache, so the first process merges its
-//! kernels into the shared cache when it finishes, and leaves a stamp file behind. A waiting process
-//! then copies the merged kernels into its private copy and builds its client, so it loads every
-//! kernel rather than compiling it. Later processes see the stamp and skip the lock entirely.
+//! block on it. The first process leaves a stamp file behind when it finishes. A waiting process
+//! then builds its client, so it loads every kernel rather than compiling it.
+//! Later processes see the stamp and skip the lock entirely.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -21,7 +20,7 @@ use av_denoise_core::ChromaSiting;
 use av_denoise_core::lockfile::{open_lock_file, wait_for_lock};
 use cubecl::hash::StableHasher;
 
-use crate::cache::{compilation_cache_dir, merge_compilation_cache};
+use crate::cache::compilation_cache_dir;
 use crate::planar::{FrameLayout, PlaneOptions};
 
 /// How long a process waits for the one ahead of it before compiling for itself.
@@ -127,7 +126,6 @@ impl WarmUp {
         let stamp = dir.join(stamp_name);
 
         if stamp.exists() {
-            av_denoise_core::refill_kernel_cache();
             return None;
         }
 
@@ -143,7 +141,6 @@ impl WarmUp {
         // turns the queue into a single warm-up rather than one per waiting process.
         if stamp.exists() {
             let _ = lock.unlock();
-            av_denoise_core::refill_kernel_cache();
             return None;
         }
 
@@ -151,11 +148,8 @@ impl WarmUp {
         Some(Self { lock, stamp, key })
     }
 
-    /// Merges the compiled kernels into the shared cache, records that they are compiled and lets the
-    /// next process through.
+    /// Records that the kernels are compiled and lets the next process through.
     pub fn finish(self) {
-        merge_compilation_cache();
-
         if let Err(err) = std::fs::write(&self.stamp, b"") {
             // A missing stamp reads as a cold cache, which is slower but still correct.
             tracing::debug!(stamp = ?self.stamp, %err, "cannot write the kernel warm-up stamp");

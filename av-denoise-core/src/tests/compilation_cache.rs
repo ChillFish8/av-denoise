@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Once;
 
+use cubecl::config::cache::CacheConfig;
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 
-use crate::{KERNEL_HASH, PrivateKernelCache};
+use crate::KERNEL_HASH;
 
 const CACHE_DIR_NAME: &str = "test-kernel-cache";
 
@@ -11,8 +12,7 @@ const CACHE_DIR_NAME: &str = "test-kernel-cache";
 ///
 /// Each test runs in its own process, so without it every process recompiles every kernel it
 /// launches. The directory is named by [KERNEL_HASH](crate::KERNEL_HASH), so each build has its
-/// own. Each process works on a private copy of the shared cache and merges its new kernels back when
-/// it exits. It runs once per process, before the first client is made.
+/// own. It runs once per process, before the first client is made.
 pub(crate) fn install_test_compilation_cache() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(install);
@@ -24,18 +24,14 @@ fn install() {
 
     let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
     config.compilation.cache = true;
-    let private_cache = PrivateKernelCache::configure(&cache_dir, &mut config);
+    config.environment.path = CacheConfig::Directory(cache_dir);
 
     // `RuntimeConfig::set` panics once the config has been read. A test that reaches CubeCL
     // another way first keeps compiling without the cache, which is slower but still correct.
     let set = std::panic::AssertUnwindSafe(|| {
         CubeClRuntimeConfig::set(config);
     });
-    let installed = std::panic::catch_unwind(set);
-    if installed.is_ok() {
-        private_cache.start();
-        crate::finish_kernel_cache_at_exit();
-    }
+    let _ = std::panic::catch_unwind(set);
 }
 
 fn cache_dir() -> PathBuf {
