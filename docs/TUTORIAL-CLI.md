@@ -39,7 +39,7 @@ CUDA.
 This builds the binary with the default accelerators enabled (`vulkan`)
 
 ```bash
-cargo install --locked av-denoise --features binary
+cargo install --locked --git https://github.com/ChillFish8/av-denoise.git av-denoise --features binary
 ```
 
 ### From source
