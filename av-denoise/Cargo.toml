@@ -59,6 +59,7 @@ y4m = { version = "0.8", optional = true }
 # Binary dependencies
 bytesize = { workspace = true, optional = true }
 clap = { version = "4", optional = true, features = ["derive", "env"] }
+clap_complete = { version = "4.6.11", optional = true }
 crossbeam-channel = { workspace = true, optional = true }
 mimalloc = { version = "0.1", optional = true, default-features = false }
 indicatif = { version = "0.18", optional = true, default-features = false }
@@ -79,6 +80,7 @@ rocm = ["av-denoise-core/rocm", "cubecl/hip"]
 binary = [
     "bytesize",
     "clap",
+    "clap_complete",
     "crossbeam-channel",
     "mimalloc",
     "av-scenechange",
