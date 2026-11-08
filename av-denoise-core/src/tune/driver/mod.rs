@@ -8,7 +8,7 @@ use cubecl::prelude::*;
 
 use self::keep::{keep_result, summarise};
 use self::pass::{PassInputs, run_pass};
-use super::config::{CachePhase, TuningConfig, TuningMode};
+use super::config::{TuningConfig, TuningMode};
 use super::device::DeviceIdentity;
 use super::engine_set::EngineSet;
 use super::frame::{TuningFrame, check_frames};
@@ -201,8 +201,7 @@ pub(crate) fn tune_set(
     }
 
     let store = config.store.as_deref();
-    let hook = config.cache_hook.as_ref();
-    let lock = TuneLock::acquire(store, hook);
+    let lock = TuneLock::acquire(store);
     let budget_started = Instant::now();
     let identity = set.device().identity.clone();
     let table = device_priority(set.device());
@@ -260,15 +259,6 @@ pub(crate) fn tune_set(
             TuneReport::skipped_since(reason, started)
         },
     };
-
-    // Tuning compiles kernels nothing else has, so they reach the shared cache before the next
-    // process tunes.
-    let compiled = !ledger.compile_time().is_zero();
-    if let Some(hook) = hook
-        && compiled
-    {
-        hook(CachePhase::KernelsCompiled);
-    }
 
     drop(lock);
     report

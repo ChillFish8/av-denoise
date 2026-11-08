@@ -67,8 +67,6 @@ pub use self::nlmeans::{
 pub use self::options::{Preset, search_escalation_for};
 pub use self::tune::{
     BudgetRequest,
-    CacheHook,
-    CachePhase,
     SearchMode,
     TuneOutcome,
     TuneReport,

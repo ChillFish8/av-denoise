@@ -37,24 +37,20 @@ pub use self::mode::{TUNE_ENV, tuning_frame_count, tuning_mode_from_env};
 pub use self::store::default_store_dir;
 use crate::backend::selected_client;
 pub use crate::backend::selected_device;
-use crate::cache::kernel_cache_hook;
 use crate::planar::{FrameLayout, PlanarDenoiser, PlaneOptions, Planes, plane_spec};
 
 /// The tuning config for `options`, with the default budget.
 ///
-/// [TUNE_ENV] overrides the mode, results go in the [default_store_dir], and the kernel cache is
-/// kept in step with other processes.
+/// [TUNE_ENV] overrides the mode, and results go in the [default_store_dir].
 pub fn tuning_config(options: &PlaneOptions) -> TuningConfig {
     let mode = tuning_mode_from_env(options.tuning);
     let store = default_store_dir();
-    let cache_hook = kernel_cache_hook();
 
     TuningConfig {
         mode,
         store,
         budget: BudgetRequest::default(),
         deterministic: options.deterministic,
-        cache_hook: Some(cache_hook),
     }
 }
 

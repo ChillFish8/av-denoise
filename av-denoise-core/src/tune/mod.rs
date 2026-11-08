@@ -72,7 +72,7 @@ pub use self::budget::{
     tuning_budget,
     tuning_order,
 };
-pub use self::config::{CacheHook, CachePhase, TuningConfig, TuningMode};
+pub use self::config::{TuningConfig, TuningMode};
 pub use self::consts::*;
 pub use self::decide::{
     CandidateStats,

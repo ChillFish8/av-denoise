@@ -33,5 +33,4 @@ fn the_default_config_tunes_automatically_with_no_store() {
     assert_eq!(config.store, None);
     assert_eq!(config.budget, BudgetRequest::Automatic { frames: None });
     assert!(!config.deterministic);
-    assert!(config.cache_hook.is_none());
 }

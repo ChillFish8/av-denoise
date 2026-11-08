@@ -2,7 +2,6 @@ use std::fs::File;
 use std::path::Path;
 use std::time::Duration;
 
-use super::config::{CacheHook, CachePhase};
 use crate::lockfile::{open_lock_file, wait_for_lock};
 
 /// The lock file that keeps tuning to one process at a time.
@@ -34,17 +33,15 @@ pub(crate) enum TuneLockOutcome {
 
 impl TuneLock {
     /// Waits for the tune lock in the `store` directory, creating the directory if it is missing.
-    ///
-    /// Once the lock is held, `hook` is told [CachePhase::LockTaken].
-    pub(crate) fn acquire(store: Option<&Path>, hook: Option<&CacheHook>) -> TuneLockOutcome {
+    pub(crate) fn acquire(store: Option<&Path>) -> TuneLockOutcome {
         let Some(dir) = store else {
             return TuneLockOutcome::Unlocked;
         };
 
-        Self::acquire_in(dir, TUNE_WAIT_LIMIT, hook)
+        Self::acquire_in(dir, TUNE_WAIT_LIMIT)
     }
 
-    pub(crate) fn acquire_in(dir: &Path, wait_limit: Duration, hook: Option<&CacheHook>) -> TuneLockOutcome {
+    pub(crate) fn acquire_in(dir: &Path, wait_limit: Duration) -> TuneLockOutcome {
         if let Err(error) = std::fs::create_dir_all(dir) {
             tracing::debug!(?dir, %error, "cannot create the tuning store, carrying on without a lock");
             return TuneLockOutcome::Unlocked;
@@ -57,11 +54,6 @@ impl TuneLock {
 
         if !wait_for_lock(&lock, wait_limit) {
             return TuneLockOutcome::TimedOut;
-        }
-
-        // A process that tuned before this one merged its kernels before it let the lock go.
-        if let Some(hook) = hook {
-            hook(CachePhase::LockTaken);
         }
 
         TuneLockOutcome::Held(TuneLock { lock })

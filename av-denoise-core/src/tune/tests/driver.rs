@@ -1,6 +1,4 @@
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use cubecl::prelude::*;
@@ -18,8 +16,6 @@ use crate::tune::setup::{KernelSetup, device_priority};
 use crate::tune::{
     Budget,
     BudgetRequest,
-    CacheHook,
-    CachePhase,
     DeviceLimits,
     DeviceProfile,
     KeyValue,
@@ -354,49 +350,8 @@ fn no_frames_skips_tuning() {
 }
 
 #[test]
-fn a_pass_that_compiles_calls_the_kernels_compiled_hook() {
-    let store = tempfile::tempdir().unwrap();
-    let compiled = Arc::new(AtomicUsize::new(0));
-    let counter = compiled.clone();
-    let hook: CacheHook = Arc::new(move |phase| {
-        if phase == CachePhase::KernelsCompiled {
-            counter.fetch_add(1, Ordering::SeqCst);
-        }
-    });
-    let config = TuningConfig {
-        cache_hook: Some(hook),
-        ..auto_config(store.path(), BudgetRequest::Full)
-    };
-    let device = crate::testing::test_device();
-    let client = device.client();
-    let specs = nlmeans_specs();
-    let clip = frames(&client, &specs, 12);
-
-    let first = tune_frames(&device, &client, &specs, &clip, &config, &request());
-
-    assert_eq!(first.outcome, TuneOutcome::Tuned, "{first:?}");
-    assert!(first.compile > Duration::ZERO, "{first:?}");
-    assert_eq!(compiled.load(Ordering::SeqCst), 1);
-
-    let second = tune_frames(&device, &client, &specs, &clip, &config, &request());
-
-    assert_eq!(second.outcome, TuneOutcome::AlreadyTuned, "{second:?}");
-    assert_eq!(compiled.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn without_a_store_a_result_lasts_for_the_process_and_takes_no_lock() {
-    let locks = Arc::new(AtomicUsize::new(0));
-    let counter = locks.clone();
-    let hook: CacheHook = Arc::new(move |phase| {
-        if phase == CachePhase::LockTaken {
-            counter.fetch_add(1, Ordering::SeqCst);
-        }
-    });
-    let config = TuningConfig {
-        cache_hook: Some(hook),
-        ..no_store_config()
-    };
+fn without_a_store_a_result_lasts_for_the_process() {
+    let config = no_store_config();
     let device = crate::testing::test_device();
     let client = device.client();
     let specs = nlmeans_specs();
@@ -411,11 +366,6 @@ fn without_a_store_a_result_lasts_for_the_process_and_takes_no_lock() {
     let second = tune_frames(&device, &client, &specs, &clip, &config, &request());
 
     assert_eq!(second.outcome, TuneOutcome::AlreadyTuned, "{second:?}");
-    assert_eq!(
-        locks.load(Ordering::SeqCst),
-        0,
-        "no lock is taken without a store"
-    );
 }
 
 #[test]

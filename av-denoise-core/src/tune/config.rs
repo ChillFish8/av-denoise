@@ -1,7 +1,6 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
 
 use super::budget::BudgetRequest;
 
@@ -63,18 +62,6 @@ impl TuningMode {
     }
 }
 
-/// A point in a tuning pass where the kernel cache may need attention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CachePhase {
-    /// The tuning lock was just taken.
-    LockTaken,
-    /// The kernels a pass needs were just compiled.
-    KernelsCompiled,
-}
-
-/// Called at each [CachePhase] of a tuning pass.
-pub type CacheHook = Arc<dyn Fn(CachePhase) + Send + Sync>;
-
 /// Everything a tuning pass is told by its caller.
 #[derive(Clone, Default)]
 pub struct TuningConfig {
@@ -85,8 +72,6 @@ pub struct TuningConfig {
     pub budget: BudgetRequest,
     /// Picks only bit-identical candidates and the baseline profile.
     pub deterministic: bool,
-    /// Keeps the kernel cache in step with other processes during a pass.
-    pub cache_hook: Option<CacheHook>,
 }
 
 impl fmt::Debug for TuningConfig {
@@ -97,7 +82,6 @@ impl fmt::Debug for TuningConfig {
             .field("store", &self.store)
             .field("budget", &self.budget)
             .field("deterministic", &self.deterministic)
-            .field("cache_hook", &self.cache_hook.is_some())
             .finish()
     }
 }
