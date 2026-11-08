@@ -13,9 +13,7 @@ use crate::tune::{
     REWARM,
     SiteKey,
     SiteRanking,
-    TUNE_AUTO_CAP,
     TUNE_FULL,
-    TUNE_UNKNOWN,
     TuneResult,
     WarmUpState,
     WarmUpTracker,
@@ -28,49 +26,10 @@ use crate::tune::{
     tuning_order,
 };
 
-const FRAME_TIME: Duration = Duration::from_millis(40);
-
 #[test]
-fn a_twenty_minute_encode_gets_about_36_seconds() {
-    // 30000 frames at 40 ms is 1200 s, and 3% of that is 36 s.
-    let request = BudgetRequest::Automatic { frames: Some(30_000) };
-    let budget = tuning_budget(request, FRAME_TIME).expect("above the floor");
-    let seconds = budget.total.as_secs_f64();
-
-    assert!((seconds - 36.0).abs() < 0.01, "budget {seconds} s");
-    assert!(!budget.full);
-}
-
-#[test]
-fn a_two_hour_film_is_capped() {
-    let request = BudgetRequest::Automatic {
-        frames: Some(180_000),
-    };
-    let budget = tuning_budget(request, FRAME_TIME).expect("above the floor");
-
-    assert_eq!(budget.total, TUNE_AUTO_CAP);
-}
-
-#[test]
-fn a_short_clip_falls_below_the_floor_and_uses_stored_results() {
-    // 2000 frames at 40 ms is 80 s, and 3% of that is 2.4 s.
-    let request = BudgetRequest::Automatic { frames: Some(2_000) };
-    let budget = tuning_budget(request, FRAME_TIME);
-
-    assert_eq!(budget, None);
-}
-
-#[test]
-fn an_unknown_length_gets_the_fixed_budget() {
-    let request = BudgetRequest::Automatic { frames: None };
-    let budget = tuning_budget(request, FRAME_TIME).expect("unknown length always tunes");
-
-    assert_eq!(budget.total, TUNE_UNKNOWN);
-}
-
-#[test]
-fn explicit_tuning_gets_the_full_budget() {
-    let budget = tuning_budget(BudgetRequest::Full, FRAME_TIME).expect("full always tunes");
+fn the_default_request_is_the_full_budget() {
+    let request = BudgetRequest::default();
+    let budget = tuning_budget(request);
 
     assert_eq!(budget.total, TUNE_FULL);
     assert!(budget.full);
@@ -80,8 +39,8 @@ fn explicit_tuning_gets_the_full_budget() {
 fn an_override_sets_the_budget_for_any_run() {
     let small_request = BudgetRequest::Seconds(5.0);
     let large_request = BudgetRequest::Seconds(900.0);
-    let small = tuning_budget(small_request, FRAME_TIME).expect("an override always applies");
-    let large = tuning_budget(large_request, FRAME_TIME).expect("an override always applies");
+    let small = tuning_budget(small_request);
+    let large = tuning_budget(large_request);
 
     assert_eq!(small.total, Duration::from_secs(5));
     assert!(!small.full);

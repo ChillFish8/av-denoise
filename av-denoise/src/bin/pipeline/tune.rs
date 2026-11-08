@@ -26,15 +26,9 @@ pub fn budget_request(seconds: Option<f64>, fallback: BudgetRequest) -> BudgetRe
     }
 }
 
-/// The budget a denoising run asks for.
-///
-/// Without a budget from the user, it scales with the input's length, or uses the unknown-length
-/// budget when the input does not know its length.
-pub fn run_budget(tune_budget: Option<f64>, info: &SourceInfo) -> BudgetRequest {
-    let frame_count = info.estimated_frames.map(|count| count as u64);
-    let automatic = BudgetRequest::Automatic { frames: frame_count };
-
-    budget_request(tune_budget, automatic)
+/// The budget a denoising run asks for, which is the full budget unless the user set one.
+pub fn run_budget(tune_budget: Option<f64>) -> BudgetRequest {
+    budget_request(tune_budget, BudgetRequest::Full)
 }
 
 /// The options workers build with, which never tune because tuning runs before they start.
@@ -163,7 +157,7 @@ pub fn tune_before_workers(
         return prefix;
     }
 
-    let budget = run_budget(tune_budget, info);
+    let budget = run_budget(tune_budget);
     let request = TuneRequest {
         force: false,
         mode: SearchMode::Families,

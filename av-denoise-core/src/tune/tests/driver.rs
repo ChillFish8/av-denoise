@@ -465,10 +465,9 @@ fn forcing_tunes_again() {
 }
 
 #[test]
-fn a_clip_too_short_to_earn_back_tuning_is_skipped() {
+fn the_default_budget_tunes_a_short_clip_once() {
     let store = tempfile::tempdir().unwrap();
-    let budget = BudgetRequest::Automatic { frames: Some(12) };
-    let config = auto_config(store.path(), budget);
+    let config = auto_config(store.path(), BudgetRequest::default());
     let device = crate::testing::test_device();
     let client = device.client();
     let specs = nlmeans_specs();
@@ -476,9 +475,9 @@ fn a_clip_too_short_to_earn_back_tuning_is_skipped() {
 
     let report = tune_frames(&device, &client, &specs, &clip, &config, &request());
 
-    assert!(matches!(report.outcome, TuneOutcome::Skipped(_)), "{report:?}");
-    assert!(!report.saved);
-    assert!(!is_tuned(&device, &client, &specs, &config));
+    assert_eq!(report.outcome, TuneOutcome::Tuned, "{report:?}");
+    assert!(report.saved);
+    assert!(is_tuned(&device, &client, &specs, &config));
 }
 
 /// The first pass compiles the kernels, so the second pass is mostly warm-up.

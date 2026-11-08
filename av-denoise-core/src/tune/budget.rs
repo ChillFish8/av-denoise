@@ -6,11 +6,7 @@ use super::consts::{
     MIN_CANDIDATE_TIME,
     MIN_SITE_SHARE,
     REWARM,
-    TUNE_AUTO_CAP,
-    TUNE_FLOOR,
     TUNE_FULL,
-    TUNE_SHARE,
-    TUNE_UNKNOWN,
     WARM_MAX,
     WARM_MIN,
     WARM_TOLERANCE,
@@ -22,20 +18,13 @@ use super::ledger::CensusEntry;
 use super::result::{TuneResult, beats_baseline_profile};
 
 /// How a run asks for its tuning budget.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum BudgetRequest {
-    /// Scales with the encode, `frames` long when the length is known.
-    Automatic { frames: Option<u64> },
-    /// Explicit tuning, which gets [TUNE_FULL](crate::tune::TUNE_FULL).
+    /// A complete pass under [TUNE_FULL](crate::tune::TUNE_FULL), which tunes once and saves.
+    #[default]
     Full,
     /// A budget the caller set, in seconds.
     Seconds(f64),
-}
-
-impl Default for BudgetRequest {
-    fn default() -> Self {
-        BudgetRequest::Automatic { frames: None }
-    }
 }
 
 /// The time a tuning pass may spend, warm-up and profile comparison included.
@@ -46,38 +35,18 @@ pub struct Budget {
     pub full: bool,
 }
 
-/// The budget for `request`, given the warm-up's steady per-frame time.
-///
-/// An automatic budget is [TUNE_SHARE](crate::tune::TUNE_SHARE) of the estimated encode, capped at
-/// [TUNE_AUTO_CAP](crate::tune::TUNE_AUTO_CAP). One below [TUNE_FLOOR](crate::tune::TUNE_FLOOR)
-/// returns `None`, and the run uses stored results only.
-pub fn tuning_budget(request: BudgetRequest, frame_time: Duration) -> Option<Budget> {
+/// The budget for `request`.
+pub fn tuning_budget(request: BudgetRequest) -> Budget {
     match request {
-        BudgetRequest::Full => Some(Budget {
+        BudgetRequest::Full => Budget {
             total: TUNE_FULL,
             full: true,
-        }),
+        },
         BudgetRequest::Seconds(seconds) => {
             let total = Duration::from_secs_f64(seconds.max(0.0));
             let full = total >= TUNE_FULL;
 
-            Some(Budget { total, full })
-        },
-        BudgetRequest::Automatic { frames: None } => Some(Budget {
-            total: TUNE_UNKNOWN,
-            full: false,
-        }),
-        BudgetRequest::Automatic { frames: Some(frames) } => {
-            let encode_seconds = frame_time.as_secs_f64() * frames as f64;
-            let share_seconds = encode_seconds * TUNE_SHARE;
-            let share = Duration::from_secs_f64(share_seconds);
-            let total = share.min(TUNE_AUTO_CAP);
-
-            if total < TUNE_FLOOR {
-                return None;
-            }
-
-            Some(Budget { total, full: false })
+            Budget { total, full }
         },
     }
 }
@@ -198,11 +167,6 @@ impl WarmUpTracker {
         }
 
         WarmUpState::Warming
-    }
-
-    /// The median of the frames in the current window, zero before the first frame.
-    pub fn recent_median(&self) -> Duration {
-        median(&self.recent)
     }
 
     fn is_steady(&self) -> bool {

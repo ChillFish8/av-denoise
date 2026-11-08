@@ -19,7 +19,7 @@ use crate::tune::budget::{
     tuning_order,
 };
 use crate::tune::config::TuningConfig;
-use crate::tune::consts::{HARD_SITE_CAP, SITE_CAP, TUNE_EXHAUSTIVE, WARM_WINDOW};
+use crate::tune::consts::{HARD_SITE_CAP, SITE_CAP, TUNE_EXHAUSTIVE};
 use crate::tune::device::DeviceIdentity;
 use crate::tune::engine_set::EngineSet;
 use crate::tune::frame::TuningFrame;
@@ -99,15 +99,11 @@ pub(super) fn run_pass(set: &mut EngineSet, inputs: &PassInputs<'_>) -> Result<P
     let mut cycle = FrameCycle::new(inputs.frames);
     let warmed = warm_up(set, &mut cycle, inputs)?;
     let Some(reading) = warmed else {
-        anyhow::bail!("the clip is too short or the budget too small to earn back tuning");
+        anyhow::bail!("the tuning budget runs out during the warm-up");
     };
 
     let frame_time = reading.frame_time;
-
-    let budget = pass_budget(inputs.config.budget, inputs.request.mode, frame_time);
-    let Some(budget) = budget else {
-        anyhow::bail!("the clip is too short to earn back tuning");
-    };
+    let budget = pass_budget(inputs.config.budget, inputs.request.mode);
 
     let spent = inputs.started.elapsed();
     let one_site = site_min_cost(TYPICAL_CANDIDATES);
@@ -151,16 +147,16 @@ pub(super) fn run_pass(set: &mut EngineSet, inputs: &PassInputs<'_>) -> Result<P
     })
 }
 
-/// The budget `request` gets in `mode` once the warm-up reads `frame_time`.
+/// The budget `request` gets in `mode`.
 ///
 /// An exhaustive pass always gets [TUNE_EXHAUSTIVE](crate::tune::TUNE_EXHAUSTIVE).
-fn pass_budget(request: BudgetRequest, mode: SearchMode, frame_time: Duration) -> Option<Budget> {
+fn pass_budget(request: BudgetRequest, mode: SearchMode) -> Budget {
     match mode {
-        SearchMode::Families => tuning_budget(request, frame_time),
-        SearchMode::Exhaustive => Some(Budget {
+        SearchMode::Families => tuning_budget(request),
+        SearchMode::Exhaustive => Budget {
             total: TUNE_EXHAUSTIVE,
             full: true,
-        }),
+        },
     }
 }
 
@@ -199,9 +195,7 @@ fn prime(set: &mut EngineSet, cycle: &mut FrameCycle<'_>) -> Result<Duration, an
 
 /// Runs frames until per-frame time holds steady, and returns its median with the priming time.
 ///
-/// Returns `None` once a reading shows the clip is too short to earn back tuning. Frame time only
-/// falls as clocks rise, so a clip that is too short at the current time stays too short. Also
-/// returns `None` once the budget no longer covers the time spent plus one site.
+/// Returns `None` once the budget no longer covers the time spent plus one site.
 fn warm_up(
     set: &mut EngineSet,
     cycle: &mut FrameCycle<'_>,
@@ -212,7 +206,6 @@ fn warm_up(
 
     let started = Instant::now();
     let mut tracker = WarmUpTracker::new();
-    let mut timed_frames = 0usize;
 
     loop {
         let timed = timed_frame(set, cycle)?;
@@ -220,7 +213,6 @@ fn warm_up(
             anyhow::bail!("the engines stopped producing frames");
         };
 
-        timed_frames += 1;
         let elapsed = started.elapsed();
         let state = tracker.push(frame_time, elapsed);
 
@@ -235,30 +227,16 @@ fn warm_up(
             WarmUpState::Warming => {},
         }
 
-        let reading_ready = timed_frames > WARM_WINDOW;
-        let affordable = tuning_budget(budget, frame_time).is_some();
-        if reading_ready && !affordable {
-            return Ok(None);
-        }
-
-        let recent_median = tracker.recent_median();
         let spent = inputs.started.elapsed();
-        if warm_up_overruns(budget, recent_median, spent) {
-            tracing::info!("the tuning budget runs out during the warm-up");
+        if warm_up_overruns(budget, spent) {
             return Ok(None);
         }
     }
 }
 
 /// Whether the warm-up has spent so much of the budget that one site no longer fits after it.
-///
-/// An automatic budget is worked out from `frame_time`. A request that earns no budget at all is
-/// not an overrun here.
-pub(crate) fn warm_up_overruns(request: BudgetRequest, frame_time: Duration, spent: Duration) -> bool {
-    let budget = tuning_budget(request, frame_time);
-    let Some(budget) = budget else {
-        return false;
-    };
+pub(crate) fn warm_up_overruns(request: BudgetRequest, spent: Duration) -> bool {
+    let budget = tuning_budget(request);
 
     let one_site = site_min_cost(TYPICAL_CANDIDATES);
     !can_afford(&budget, spent, one_site)

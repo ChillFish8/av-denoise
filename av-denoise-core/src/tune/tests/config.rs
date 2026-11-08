@@ -31,6 +31,6 @@ fn the_default_config_tunes_automatically_with_no_store() {
 
     assert_eq!(config.mode, TuningMode::Auto);
     assert_eq!(config.store, None);
-    assert_eq!(config.budget, BudgetRequest::Automatic { frames: None });
+    assert_eq!(config.budget, BudgetRequest::Full);
     assert!(!config.deterministic);
 }

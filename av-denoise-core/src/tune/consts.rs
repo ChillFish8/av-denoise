@@ -83,23 +83,11 @@ pub const PROFILE_MIN_BLOCKS: usize = 3;
 /// How much faster a profile has to be to replace the baseline profile.
 pub const PROFILE_MARGIN: f64 = 0.03;
 
-/// The share of the estimated encode time an automatic budget allows.
-pub const TUNE_SHARE: f64 = 0.03;
-
-/// The largest automatic budget.
-pub const TUNE_AUTO_CAP: Duration = Duration::from_secs(120);
-
-/// The smallest automatic budget worth tuning with. Below it a run uses stored results only.
-pub const TUNE_FLOOR: Duration = Duration::from_secs(10);
-
-/// The budget for explicit tuning.
+/// The budget for a complete tuning pass.
 pub const TUNE_FULL: Duration = Duration::from_secs(600);
 
 /// The budget for an exhaustive tune, compile time left out.
 pub const TUNE_EXHAUSTIVE: Duration = Duration::from_secs(3600);
-
-/// The budget when the clip's length is unknown.
-pub const TUNE_UNKNOWN: Duration = Duration::from_secs(30);
 
 /// The share of frame time under which a site is only tuned with the full budget.
 pub const MIN_SITE_SHARE: f64 = 0.02;
