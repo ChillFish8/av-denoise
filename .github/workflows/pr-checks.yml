@@ -200,21 +200,32 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      # libsqlite3-sys compiles SQLite with the MSVC toolchain, which cargo-xwin
+      # provides on Linux through clang-cl, llvm-lib and a downloaded Windows SDK.
       # turso's build script compiles a Windows version resource with `rc.exe`.
       # `llvm-rc` takes the same arguments, so it stands in on the Linux host.
-      - name: Provide rc.exe
+      - name: Provide the MSVC tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm
-          mkdir -p "$RUNNER_TEMP/rc-bin"
-          ln -s "$(command -v llvm-rc)" "$RUNNER_TEMP/rc-bin/rc.exe"
-          echo "$RUNNER_TEMP/rc-bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y llvm clang lld
+          mkdir -p "$RUNNER_TEMP/tool-bin"
+          ln -s "$(command -v llvm-rc)" "$RUNNER_TEMP/tool-bin/rc.exe"
+          if ! command -v clang-cl > /dev/null; then
+            clang_cl="$(ls /usr/bin/clang-cl-* | sort -V | tail -n 1)"
+            ln -s "$clang_cl" "$RUNNER_TEMP/tool-bin/clang-cl"
+          fi
+          echo "$RUNNER_TEMP/tool-bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-xwin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
 
       # The VS plugin has a `#[cfg(windows)]` block that the Linux clippy job
       # never compiles. `cargo check` needs no linker, so this catches a broken
       # signature or flag before a release build does.
       - name: Check
-        run: cargo check -p av-denoise-vs --features vulkan --target x86_64-pc-windows-msvc
+        run: cargo xwin check -p av-denoise-vs --features vulkan --target x86_64-pc-windows-msvc
 
   python:
     name: ruff and mypy
