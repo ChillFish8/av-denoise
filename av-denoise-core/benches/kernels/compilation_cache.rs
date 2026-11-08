@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use av_denoise_core::prepare_kernel_cache;
 use cubecl::config::cache::CacheConfig;
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 
@@ -21,6 +22,9 @@ pub fn install_bench_compilation_cache() {
     config.compilation.cache = true;
     config.environment.path = CacheConfig::Directory(cache_dir);
     CubeClRuntimeConfig::set(config);
+
+    let database = cubecl::environment::path();
+    prepare_kernel_cache(&database);
 }
 
 fn cache_dir() -> PathBuf {

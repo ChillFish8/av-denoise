@@ -63,7 +63,7 @@ impl TuningMode {
 }
 
 /// Everything a tuning pass is told by its caller.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TuningConfig {
     pub mode: TuningMode,
     /// The directory results are stored in. With none, results last for the process only.
@@ -72,16 +72,4 @@ pub struct TuningConfig {
     pub budget: BudgetRequest,
     /// Picks only bit-identical candidates and the baseline profile.
     pub deterministic: bool,
-}
-
-impl fmt::Debug for TuningConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("TuningConfig")
-            .field("mode", &self.mode)
-            .field("store", &self.store)
-            .field("budget", &self.budget)
-            .field("deterministic", &self.deterministic)
-            .finish()
-    }
 }

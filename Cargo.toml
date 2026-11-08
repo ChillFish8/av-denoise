@@ -18,7 +18,7 @@ tracing = "0.1"
 strum = "0.28"
 strum_macros = "0.28"
 bon = "3"
-cubecl = { git = "https://github.com/tracel-ai/cubecl", rev = "d3d7282555db874e4ed02e60f068dcdc81d6163d", features = ["std"] }
+cubecl = { git = "https://github.com/tracel-ai/cubecl", rev = "d3d7282555db874e4ed02e60f068dcdc81d6163d", features = ["std", "rusqlite"] }
 cubecl-environment = { git = "https://github.com/tracel-ai/cubecl", rev = "d3d7282555db874e4ed02e60f068dcdc81d6163d", default-features = false, features = ["rusqlite"] }
 av-denoise-core = { path = "av-denoise-core", version = "0.6.0", default-features = false }
 av-denoise = { path = "av-denoise", version = "0.6.0", default-features = false }

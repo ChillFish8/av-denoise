@@ -6,9 +6,9 @@
 //! most of the compilation cost again and writes its own copy of the same kernels.
 //!
 //! [WarmUp] holds a lock file next to the cache while the first process compiles, and the rest
-//! block on it. The first process leaves a stamp file behind when it finishes. A waiting process
-//! then builds its client, so it loads every kernel rather than compiling it.
-//! Later processes see the stamp and skip the lock entirely.
+//! block on it. The first process leaves a stamp file behind when it finishes. A waiting process then
+//! builds its client, so it loads every kernel rather than compiling it. Later processes see the stamp
+//! and skip the lock entirely.
 
 use std::collections::HashSet;
 use std::fs::File;

@@ -4,7 +4,7 @@ use std::sync::Once;
 use cubecl::config::cache::CacheConfig;
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 
-use crate::KERNEL_HASH;
+use crate::{KERNEL_HASH, prepare_kernel_cache};
 
 const CACHE_DIR_NAME: &str = "test-kernel-cache";
 
@@ -31,7 +31,11 @@ fn install() {
     let set = std::panic::AssertUnwindSafe(|| {
         CubeClRuntimeConfig::set(config);
     });
-    let _ = std::panic::catch_unwind(set);
+    let installed = std::panic::catch_unwind(set);
+    if installed.is_ok() {
+        let database = cubecl::environment::path();
+        prepare_kernel_cache(&database);
+    }
 }
 
 fn cache_dir() -> PathBuf {

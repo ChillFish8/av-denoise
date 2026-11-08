@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Once, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use av_denoise_core::prepare_kernel_cache;
 use cubecl::config::cache::CacheConfig;
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 use etcetera::base_strategy::{BaseStrategy, choose_base_strategy};
@@ -223,6 +224,9 @@ fn set_runtime_config(path: &Path) -> Result<(), CacheError> {
     if !installed {
         return Err(CacheError::AlreadyInitialised);
     }
+
+    let database = cubecl::environment::path();
+    prepare_kernel_cache(&database);
 
     Ok(())
 }
