@@ -3,7 +3,7 @@ resolver = "3"
 members = ["av-denoise-core", "av-denoise", "av-denoise-vs"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/ChillFish8/av-denoise"
@@ -20,8 +20,8 @@ strum_macros = "0.28"
 bon = "3"
 cubecl = { git = "https://github.com/ChillFish8/cubecl", rev = "e3c9246de93b97e0f3355e18c86e3afbb7cbd2f5", features = ["std", "rusqlite"] }
 cubecl-environment = { git = "https://github.com/ChillFish8/cubecl", rev = "e3c9246de93b97e0f3355e18c86e3afbb7cbd2f5", default-features = false, features = ["rusqlite"] }
-av-denoise-core = { path = "av-denoise-core", version = "0.6.0", default-features = false }
-av-denoise = { path = "av-denoise", version = "0.6.0", default-features = false }
+av-denoise-core = { path = "av-denoise-core", version = "0.6.1", default-features = false }
+av-denoise = { path = "av-denoise", version = "0.6.1", default-features = false }
 
 [profile.test]
 opt-level = 3
