@@ -136,7 +136,7 @@ jobs:
             platform: windows
             cibw_archs: AMD64
             cibw_build: cp312-win_amd64
-          - os: macos-14
+          - os: macos-26
             platform: macos
             cibw_archs: arm64
             cibw_build: cp312-macosx_arm64

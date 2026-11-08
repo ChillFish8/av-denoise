@@ -115,7 +115,8 @@ jobs:
         # The `Accelerator` variants are additively feature-gated, and both cudarc
         # and ash load their driver libraries at runtime, so a vulkan+cuda binary
         # runs on a host that has only one of them and `--accelerators` still picks.
-        # Linux builds on 22.04 for the older glibc floor.
+        # Linux builds on 22.04 for the older glibc floor. macOS pins its deployment target
+        # to 15.0, because Apple's toolchain otherwise targets the runner's own release.
         # The CLI links BestSource and FFmpeg statically from vcpkg, so the host needs neither.
         #
         # The VapourSynth plugin ships from the same job, built from the same tree
@@ -141,8 +142,9 @@ jobs:
             plugin_features: vulkan,cuda
             plugin_library: av_denoise_vs.dll
             plugin_archive: av-denoise-vs-win64-x86.zip
-          - os: macos-14
+          - os: macos-26
             platform: macos-aarch64
+            macos_deployment_target: "15.0"
             features: metal,static-bestsource
             triplet: arm64-osx-release
             archive: av-denoise-macos-aarch64.tar.gz
@@ -153,6 +155,9 @@ jobs:
     concurrency:
       group: release-binaries-${{ matrix.platform }}-${{ github.event.release.tag_name || inputs.version || github.run_id }}
       cancel-in-progress: false
+    # Empty off macOS, where nothing reads it.
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
