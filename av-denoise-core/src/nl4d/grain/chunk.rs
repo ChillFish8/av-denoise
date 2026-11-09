@@ -13,6 +13,8 @@ pub struct GrainChunk {
     pub autocov: Vec<f64>,
     /// How many source pixels each strength group's sums cover.
     pub pixels: Vec<f64>,
+    /// Each frame's persistence sums, `FRAME_RECORD_LEN` per frame, in frame order.
+    pub frame_records: Vec<f64>,
 }
 
 impl GrainChunk {
@@ -23,6 +25,7 @@ impl GrainChunk {
             kept_hist: vec![0; HIST_LEN],
             autocov: vec![0.0; STRENGTH_GROUPS * LAG_COUNT],
             pixels: vec![0.0; STRENGTH_GROUPS],
+            frame_records: Vec::new(),
         }
     }
 
@@ -32,6 +35,7 @@ impl GrainChunk {
         add_counts(&mut self.kept_hist, &other.kept_hist);
         add_sums(&mut self.autocov, &other.autocov);
         add_sums(&mut self.pixels, &other.pixels);
+        self.frame_records.extend_from_slice(&other.frame_records);
     }
 
     pub fn source_blocks(&self) -> u64 {

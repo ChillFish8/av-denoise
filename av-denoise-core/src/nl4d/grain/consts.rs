@@ -40,6 +40,15 @@ pub(crate) const STD_MIN: f32 = 0.05 / 255.0;
 /// The top std bucket edge.
 pub(crate) const STD_MAX: f32 = 32.0 / 255.0;
 
+/// The furthest frame back a persistence reading compares. Every lag from 1 to this is measured.
+pub(crate) const PERSISTENCE_LAGS: usize = 8;
+/// Values in one lag's part of a frame record, the cell count, the auto sum and the cross sum.
+pub(crate) const LAG_RECORD_LEN: usize = 3;
+/// Values in one frame's record, one part per lag.
+pub(crate) const FRAME_RECORD_LEN: usize = LAG_RECORD_LEN * PERSISTENCE_LAGS;
+/// Fewest cells for a frame to give a reading.
+pub(crate) const MIN_FRAME_CELLS: f64 = 200.0;
+
 /// Fewest blocks for a luma bin to give a strength reading.
 ///
 /// A bin's kept reading counts as 0 below it.
