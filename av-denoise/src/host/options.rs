@@ -192,14 +192,13 @@ impl DenoiserOptions {
     /// `nl4d` with this run's temporal radius and the `lambda_ht` override of `group`.
     ///
     /// An unset `lambda_ht` stays `None`, so the engine resolves it to the plane's own default.
-    /// The grain table is only measured on luma, and the grain report on both plane groups.
+    /// The grain data reaches both plane groups.
     fn plane_nl4d(&self, nl4d: Nl4dOptions, group: PlaneGroup) -> Nl4dOptions {
         let plane_lambda_ht = Self::per_plane(group, self.luma_lambda_ht, self.chroma_lambda_ht);
 
         Nl4dOptions {
             temporal_radius: self.temporal_radius(),
             lambda_ht: plane_lambda_ht.or(nl4d.lambda_ht),
-            grain_export: nl4d.grain_export && group == PlaneGroup::Luma,
             ..nl4d
         }
     }

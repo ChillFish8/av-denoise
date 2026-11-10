@@ -58,6 +58,7 @@ const DIRECT_RING_FRAMES: u32 = 3;
 const TABLE_ONLY: GrainParts = GrainParts {
     table: true,
     persistence: None,
+    noise: false,
 };
 const BANDED_SIZE: u32 = 128;
 /// The height of each luma band, four cell rows.
@@ -83,11 +84,7 @@ fn make_client() -> Client {
     crate::testing::test_client()
 }
 
-fn params(grain_export: bool) -> Nl4dParams {
-    params_with(grain_export, false)
-}
-
-fn params_with(grain_export: bool, grain_report: bool) -> Nl4dParams {
+fn params(grain_data: bool) -> Nl4dParams {
     let motion_compensation = MotionCompensationMode::Mvtools {
         blksize: 16,
         overlap: 8,
@@ -112,8 +109,7 @@ fn params_with(grain_export: bool, grain_report: bool) -> Nl4dParams {
     Nl4dParams {
         nlm,
         temporal_radius: 2,
-        grain_export,
-        grain_report,
+        grain_data,
         ..Nl4dParams::default()
     }
 }
@@ -241,13 +237,15 @@ fn frames_counted(chunks: &[GrainChunk]) -> u32 {
 }
 
 #[test]
-fn export_off_allocates_nothing_and_drains_nothing() {
+fn grain_data_off_allocates_and_launches_nothing() {
     let frames = grain_frames(SIGMA, 9);
-    let export_off = params(false);
-    let (_, chunks, has_export) = run(export_off, &frames);
+    let grain_off = params(false);
+    let names = buffer_names(&grain_off);
+    let (_, chunks, has_export) = run(grain_off, &frames);
 
     assert!(!has_export);
     assert!(chunks.is_empty());
+    assert!(!names.iter().any(|name| name.starts_with("grain")));
 }
 
 #[test]
@@ -369,19 +367,8 @@ fn chroma_grain_frames(count: u32) -> Vec<Vec<f32>> {
 }
 
 #[test]
-fn chroma_denoisers_never_export() {
-    let mut chroma = params(true);
-    chroma.nlm.channels = ChannelMode::Chroma;
-    let frames = chroma_grain_frames(9);
-    let (_, chunks, has_export) = run(chroma, &frames);
-
-    assert!(!has_export);
-    assert!(chunks.is_empty());
-}
-
-#[test]
 fn a_chroma_denoiser_reports_chroma_persistence_without_the_table() {
-    let mut chroma = params_with(true, true);
+    let mut chroma = params(true);
     chroma.nlm.channels = ChannelMode::Chroma;
     let names = buffer_names(&chroma);
     let frames = chroma_grain_frames(9);
@@ -456,47 +443,12 @@ fn has_persistence_readings(chunk: &GrainChunk) -> bool {
 }
 
 #[test]
-fn a_table_only_export_measures_no_persistence() {
+fn grain_data_measures_the_table_and_persistence_on_luma() {
     let frames = grain_frames(SIGMA, 9);
-    let table_only = params_with(true, false);
-    let names = buffer_names(&table_only);
+    let grain_on = params(true);
+    let names = buffer_names(&grain_on);
 
-    let (_, chunks, _) = run(table_only, &frames);
-
-    let counted = frames_counted(&chunks);
-    assert_eq!(counted, 9);
-    assert!(chunks.iter().all(|chunk| chunk.frame_records.is_empty()));
-    assert!(chunks.iter().all(has_table_readings));
-    assert!(names.contains(&SAVED_VECTORS));
-    assert!(!names.contains(&PERSISTENCE_HISTORY));
-    assert!(!names.contains(&PERSISTENCE_PARTIALS));
-}
-
-#[test]
-fn a_report_only_export_skips_the_table_measurement() {
-    let frames = grain_frames(SIGMA, 9);
-    let report_only = params_with(false, true);
-    let names = buffer_names(&report_only);
-
-    let (_, chunks, has_export) = run(report_only, &frames);
-
-    let counted = frames_counted(&chunks);
-    assert!(has_export);
-    assert_eq!(counted, 9);
-    assert!(chunks.iter().all(has_no_table_readings));
-    assert!(chunks.iter().all(has_persistence_readings));
-    assert!(!names.contains(&SAVED_VECTORS));
-    assert!(names.contains(&PERSISTENCE_HISTORY));
-    assert!(names.contains(&PERSISTENCE_PARTIALS));
-}
-
-#[test]
-fn both_switches_measure_both_parts() {
-    let frames = grain_frames(SIGMA, 9);
-    let both = params_with(true, true);
-    let names = buffer_names(&both);
-
-    let (_, chunks, _) = run(both, &frames);
+    let (_, chunks, _) = run(grain_on, &frames);
 
     let counted = frames_counted(&chunks);
     assert_eq!(counted, 9);
@@ -505,22 +457,6 @@ fn both_switches_measure_both_parts() {
     assert!(names.contains(&SAVED_VECTORS));
     assert!(names.contains(&PERSISTENCE_HISTORY));
     assert!(names.contains(&PERSISTENCE_PARTIALS));
-}
-
-#[test]
-fn the_table_does_not_change_with_the_report_on() {
-    let frames = grain_frames(SIGMA, 9);
-    let table_only = params_with(true, false);
-    let both = params_with(true, true);
-
-    let (_, table_chunks, _) = run(table_only, &frames);
-    let (_, both_chunks, _) = run(both, &frames);
-
-    assert_eq!(table_chunks.len(), both_chunks.len());
-    for (table_chunk, both_chunk) in table_chunks.iter().zip(&both_chunks) {
-        assert_eq!(table_chunk.frames, both_chunk.frames);
-        assert_eq!(table_chunk.frame_tables, both_chunk.frame_tables);
-    }
 }
 
 fn upload(client: &Client, values: &[f32]) -> Handle {

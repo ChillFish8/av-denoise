@@ -10,7 +10,6 @@ use super::consts::{
     GROUPED_AUTOCOV_LEN,
     HIST_LEN,
     PARTIAL_LEN,
-    PERSIST_BLOCK_CELLS,
     REDUCE_THREADS,
     STD_BUCKETS,
 };
@@ -18,9 +17,11 @@ use super::fit::bucket_edges;
 use super::persistence::{
     MeasuredPlanes,
     PersistenceMeasure,
+    cell_count,
     persistence_history_len,
     persistence_partials_len,
 };
+use super::snapshot::{PassSources, SnapshotChunk, SnapshotMeasure};
 use crate::nl4d::kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
 use crate::nl4d::snapshot::LastFields;
 
@@ -41,6 +42,8 @@ pub(crate) struct GrainParts {
     pub table: bool,
     /// The planes the per-frame grain persistence measurement reads, `None` when it is off.
     pub persistence: Option<MeasuredPlanes>,
+    /// Whether each frame keeps the noise reading it was filtered with.
+    pub noise: bool,
 }
 
 /// The geometry a [GrainExport] is built for.
@@ -68,7 +71,8 @@ impl GrainGeometry {
     }
 
     pub(super) fn cells(&self) -> u32 {
-        self.cells_x() * self.cells_y()
+        let cells = cell_count(self.width, self.height);
+        cells as u32
     }
 
     pub(super) fn frame_len(&self) -> usize {
@@ -94,11 +98,6 @@ impl GrainGeometry {
     /// Values in one channel's persistence history.
     pub(super) fn history_len(&self) -> usize {
         persistence_history_len(self.width, self.height) as usize
-    }
-
-    /// Blocks of cells the persist kernel covers.
-    pub(super) fn persist_blocks(&self) -> u32 {
-        self.cells().div_ceil(PERSIST_BLOCK_CELLS)
     }
 
     /// Values in one channel's persistence partials over `lags` lags.
@@ -130,6 +129,8 @@ struct ChunkBuffers {
     table: Option<TableChunk>,
     /// Each frame's persistence sums, present when persistence is measured.
     frame_record: Option<Handle>,
+    /// Each frame's noise reading and colour fit, each present when it is kept.
+    snapshots: SnapshotChunk,
     frames: u32,
 }
 
@@ -324,10 +325,19 @@ pub(crate) struct GrainExport {
     table: Option<TableMeasure>,
     /// Present when persistence is measured.
     persistence: Option<PersistenceMeasure>,
+    /// The noise reading and colour fit each frame was filtered with.
+    snapshots: SnapshotMeasure,
     /// Each completed frame fills its own slot in the newest chunk, which stays on the GPU until
     /// [Self::drain] reads every chunk back.
     chunks: Vec<ChunkBuffers>,
     chunk_open: bool,
+}
+
+/// Values in one frame of each of a chunk's per-frame buffers.
+struct FrameLens {
+    record: usize,
+    noise: usize,
+    colour: usize,
 }
 
 impl GrainExport {
@@ -336,14 +346,26 @@ impl GrainExport {
         let persistence = parts
             .persistence
             .map(|planes| PersistenceMeasure::new(client, &geometry, planes));
+        let snapshots = SnapshotMeasure::new(client, geometry.ring_frames, parts.noise);
 
         Self {
             geometry,
             table,
             persistence,
+            snapshots,
             chunks: Vec::new(),
             chunk_open: false,
         }
+    }
+
+    /// Keeps each frame's colour fit of `planes` planes from the next pass on.
+    pub(crate) fn keep_colour(&mut self, client: &Client, planes: u32) {
+        self.snapshots.keep_colour(client, planes);
+    }
+
+    /// Copies what a pass filtered its centre frame with into the frame's ring slot `centre_slot`.
+    pub(crate) fn keep_snapshots(&self, client: &Client, sources: &PassSources, centre_slot: u32) {
+        self.snapshots.keep(client, sources, centre_slot);
     }
 
     /// Saves the centre frame's vectors to the next frame, or marks the entry empty.
@@ -396,6 +418,9 @@ impl GrainExport {
             persistence.measure(client, &self.geometry, &frame, frame_record, chunk.frames);
         }
 
+        self.snapshots
+            .measure(client, frame_slot, &chunk.snapshots, chunk.frames);
+
         let newest = self.chunks.last_mut().expect("open_chunk pushed a chunk");
         newest.frames += 1;
         if newest.frames == CHUNK_FRAMES {
@@ -413,9 +438,11 @@ impl GrainExport {
                 .persistence
                 .as_ref()
                 .map(|persistence| persistence.open_chunk(client));
+            let snapshots = self.snapshots.open_chunk(client);
             self.chunks.push(ChunkBuffers {
                 table,
                 frame_record,
+                snapshots,
                 frames: 0,
             });
             self.chunk_open = true;
@@ -449,14 +476,19 @@ impl GrainExport {
         let buffers = std::mem::take(&mut self.chunks);
         self.chunk_open = false;
 
-        let frame_record_len = self
+        let record = self
             .persistence
             .as_ref()
             .map_or(0, PersistenceMeasure::frame_record_len);
+        let lens = FrameLens {
+            record,
+            noise: self.snapshots.noise_len(),
+            colour: self.snapshots.colour_len(),
+        };
 
         let mut chunks = Vec::with_capacity(buffers.len());
         for buffer in buffers {
-            let chunk = read_chunk(client, buffer, frame_record_len)?;
+            let chunk = read_chunk(client, buffer, &lens)?;
             chunks.push(chunk);
         }
 
@@ -464,30 +496,48 @@ impl GrainExport {
     }
 }
 
-/// Reads one chunk back, with `frame_record_len` values in each frame's record.
-fn read_chunk(
-    client: &Client,
-    buffer: ChunkBuffers,
-    frame_record_len: usize,
-) -> Result<GrainChunk, anyhow::Error> {
+/// Reads one chunk back, with `lens` values in each frame of each buffer.
+fn read_chunk(client: &Client, buffer: ChunkBuffers, lens: &FrameLens) -> Result<GrainChunk, anyhow::Error> {
     let mut chunk = GrainChunk::empty();
-    chunk.frames = buffer.frames;
+    let frames = buffer.frames;
+    chunk.frames = frames;
 
     if let Some(table) = buffer.table {
-        chunk.frame_tables = read_table(client, table, buffer.frames)?;
+        chunk.frame_tables = read_table(client, table, frames)?;
     }
 
     if let Some(frame_record) = buffer.frame_record {
-        let record_bytes = client
-            .read_one(frame_record)
-            .map_err(|error| anyhow::anyhow!("grain frame record readback failed: {error}"))?;
-        let values = f32::from_bytes(&record_bytes);
-        let recorded_len = buffer.frames as usize * frame_record_len;
-        let recorded = values[..recorded_len].iter().map(|&value| value as f64);
+        let records = read_frames(client, frame_record, frames, lens.record, "frame record")?;
+        let recorded = records.iter().map(|&value| value as f64);
         chunk.frame_records = recorded.collect();
     }
 
+    if let Some(noise) = buffer.snapshots.noise {
+        chunk.frame_noise = read_frames(client, noise, frames, lens.noise, "noise snapshot")?;
+    }
+
+    if let Some(colour) = buffer.snapshots.colour {
+        chunk.frame_colour = read_frames(client, colour, frames, lens.colour, "colour snapshot")?;
+    }
+
     Ok(chunk)
+}
+
+/// Reads the first `frames` frames of `handle`, `frame_len` values per frame.
+fn read_frames(
+    client: &Client,
+    handle: Handle,
+    frames: u32,
+    frame_len: usize,
+    what: &str,
+) -> Result<Vec<f32>, anyhow::Error> {
+    let bytes = client
+        .read_one(handle)
+        .map_err(|error| anyhow::anyhow!("grain {what} readback failed: {error}"))?;
+    let values = f32::from_bytes(&bytes);
+    let kept_len = frames as usize * frame_len;
+
+    Ok(values[..kept_len].to_vec())
 }
 
 /// Reads the table slots of a chunk's first `frames` frames, `FRAME_TABLE_LEN` values per frame.

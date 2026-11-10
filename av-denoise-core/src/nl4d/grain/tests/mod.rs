@@ -5,6 +5,7 @@ mod mirror;
 mod persistence;
 mod report;
 mod segment;
+mod snapshot;
 mod synthetic;
 mod table;
 mod template;

@@ -11,9 +11,9 @@ use crate::pipeline::{RunSettings, run_with};
 
 const DIR_PREFIX: &str = "avd-grain";
 
-fn nl4d_opts(grain_export: bool) -> PlaneOptions {
+fn nl4d_opts(grain_data: bool) -> PlaneOptions {
     let algorithm = Nl4dOptions {
-        grain_export,
+        grain_data,
         ..Nl4dOptions::default()
     };
 
@@ -35,8 +35,8 @@ fn nl4d_opts(grain_export: bool) -> PlaneOptions {
 fn run(bytes: Vec<u8>, workers: usize, table: Option<PathBuf>) -> Result<Vec<u8>, anyhow::Error> {
     let output = SharedBuffer::default();
     let writer = output.clone();
-    let grain_export = table.is_some();
-    let options = nl4d_opts(grain_export);
+    let grain_data = table.is_some();
+    let options = nl4d_opts(grain_data);
     let opener = move || {
         let cursor = Cursor::new(bytes);
         let reader: Box<dyn Read> = Box::new(cursor);

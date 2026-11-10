@@ -164,7 +164,7 @@ mod runs {
 
     fn report_options(intent: ChannelIntent) -> PlaneOptions {
         let algorithm = Nl4dOptions {
-            grain_report: true,
+            grain_data: true,
             ..Nl4dOptions::default()
         };
 

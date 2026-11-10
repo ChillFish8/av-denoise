@@ -253,8 +253,7 @@ impl Nl4dArgs {
             field_lambda: self.field_lambda.unwrap_or(defaults.field_lambda),
             noise_map: defaults.noise_map && !self.no_noise_map,
             pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
-            grain_export: exports_grain,
-            grain_report: reports_grain,
+            grain_data: exports_grain || reports_grain,
         };
         let mode = DenoisingMode::Temporal {
             radius: temporal_radius,
@@ -855,14 +854,14 @@ mod tests {
     }
 
     #[test]
-    fn export_flag_sets_the_table_and_turns_export_on() {
+    fn export_flag_sets_the_table_and_turns_grain_data_on() {
         let (args, nl4d) = parse(&["--unstable-export-av1-fgs", "out.tbl"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         let nl4d_options = expect_nl4d(&opts);
         let expected = std::path::Path::new("out.tbl");
 
         assert_eq!(opts.grain_table.as_deref(), Some(expected));
-        assert!(nl4d_options.grain_export);
+        assert!(nl4d_options.grain_data);
     }
 
     #[test]
@@ -871,7 +870,7 @@ mod tests {
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
         let nl4d_options = expect_nl4d(&opts);
 
-        assert!(nl4d_options.grain_export);
+        assert!(nl4d_options.grain_data);
     }
 
     #[test]
@@ -881,7 +880,7 @@ mod tests {
         let nl4d_options = expect_nl4d(&opts);
 
         assert_eq!(opts.grain_table, None);
-        assert!(!nl4d_options.grain_export);
+        assert!(!nl4d_options.grain_data);
     }
 
     #[test]
@@ -906,8 +905,7 @@ mod tests {
 
         assert_eq!(opts.grain_report.as_deref(), Some(expected));
         assert_eq!(opts.grain_table, None);
-        assert!(nl4d_options.grain_report);
-        assert!(!nl4d_options.grain_export);
+        assert!(nl4d_options.grain_data);
     }
 
     #[test]
@@ -925,8 +923,7 @@ mod tests {
 
         assert_eq!(opts.grain_table.as_deref(), Some(expected_table));
         assert_eq!(opts.grain_report.as_deref(), Some(expected_report));
-        assert!(nl4d_options.grain_export);
-        assert!(nl4d_options.grain_report);
+        assert!(nl4d_options.grain_data);
     }
 
     #[test]
@@ -943,13 +940,11 @@ mod tests {
     }
 
     #[test]
-    fn the_table_flag_alone_leaves_the_report_measurement_off() {
+    fn the_table_flag_alone_writes_no_report() {
         let (args, nl4d) = parse(&["--unstable-export-av1-fgs", "t.tbl"]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
-        let nl4d_options = expect_nl4d(&opts);
 
         assert_eq!(opts.grain_report, None);
-        assert!(!nl4d_options.grain_report);
     }
 
     #[test]
@@ -960,7 +955,6 @@ mod tests {
 
         assert_eq!(opts.grain_table, None);
         assert_eq!(opts.grain_report, None);
-        assert!(!nl4d_options.grain_export);
-        assert!(!nl4d_options.grain_report);
+        assert!(!nl4d_options.grain_data);
     }
 }

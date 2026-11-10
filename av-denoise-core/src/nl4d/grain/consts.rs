@@ -48,8 +48,12 @@ pub(crate) const PERSISTENCE_LAGS: usize = 8;
 pub(crate) const LAG_RECORD_LEN: usize = 3;
 /// Values in one frame's record, one part per lag.
 pub(crate) const FRAME_RECORD_LEN: usize = LAG_RECORD_LEN * PERSISTENCE_LAGS;
-/// Values in one chroma frame's record, the lag-1 part of each chroma plane.
-pub(crate) const CHROMA_RECORD_LEN: usize = 2 * LAG_RECORD_LEN;
+/// The furthest frame back a chroma persistence reading compares, lag 1 only.
+pub(crate) const CHROMA_LAGS: usize = 1;
+/// The chroma planes a chroma record holds, Cb then Cr.
+pub(crate) const CHROMA_PLANES: usize = 2;
+/// Values in one chroma frame's record, each chroma plane's lag parts in turn.
+pub(crate) const CHROMA_RECORD_LEN: usize = CHROMA_PLANES * CHROMA_LAGS * LAG_RECORD_LEN;
 /// Fewest cells for a frame to give a reading.
 pub(crate) const MIN_FRAME_CELLS: f64 = 200.0;
 /// Projections kept of each cell's source pixels.

@@ -3,6 +3,8 @@ use cubecl::server::Handle;
 
 use super::consts::{
     CELL,
+    CHROMA_LAGS,
+    CHROMA_PLANES,
     CHROMA_RECORD_LEN,
     CHUNK_FRAMES,
     FRAME_RECORD_LEN,
@@ -21,10 +23,6 @@ use crate::nl4d::kernels::{grain_persist, grain_persist_reduce, grain_project};
 
 /// The pattern words the project kernel reads, two per projection.
 const PATTERN_WORDS_LEN: usize = 2 * PROJECTIONS;
-/// The lags each chroma plane measures, lag 1 only.
-const CHROMA_LAGS: usize = 1;
-/// The chroma planes measured, Cb then Cr.
-const CHROMA_CHANNELS: u32 = 2;
 
 /// The projection patterns split into words, the low 32 bits of each pattern first.
 pub(crate) fn pattern_words() -> Vec<u32> {
@@ -39,11 +37,13 @@ pub(crate) fn pattern_words() -> Vec<u32> {
     words
 }
 
-fn cell_count(width: u32, height: u32) -> u64 {
+/// The whole 8x8 cells of a `width` by `height` plane.
+pub(super) fn cell_count(width: u32, height: u32) -> u64 {
     u64::from(width / CELL) * u64::from(height / CELL)
 }
 
-fn persist_blocks(width: u32, height: u32) -> u64 {
+/// Blocks of cells the persist kernel covers.
+pub(super) fn persist_blocks(width: u32, height: u32) -> u64 {
     let cells = cell_count(width, height);
     cells.div_ceil(u64::from(PERSIST_BLOCK_CELLS))
 }
@@ -90,11 +90,11 @@ impl MeasuredPlanes {
                 vec![luma]
             },
             MeasuredPlanes::Chroma => {
-                let plans = (0..CHROMA_CHANNELS).map(|channel| ChannelPlan {
-                    channel,
+                let plans = (0..CHROMA_PLANES).map(|plane| ChannelPlan {
+                    channel: plane as u32,
                     lags: CHROMA_LAGS,
                     luma_band: false,
-                    record_offset: channel as usize * CHROMA_LAGS * LAG_RECORD_LEN,
+                    record_offset: plane * CHROMA_LAGS * LAG_RECORD_LEN,
                 });
                 plans.collect()
             },
@@ -270,7 +270,7 @@ impl PersistenceMeasure {
             return;
         }
 
-        let blocks = geometry.persist_blocks();
+        let blocks = persist_blocks(geometry.width, geometry.height) as u32;
         let partials_len = geometry.persist_partials_len(plan.lags);
         let record_offset = target.record_offset + plan.record_offset as u32;
         let chunk_record_len = self.chunk_record_len();

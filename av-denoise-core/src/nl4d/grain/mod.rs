@@ -6,6 +6,7 @@ mod gaussian;
 mod persistence;
 mod report;
 mod segment;
+pub(crate) mod snapshot;
 mod table;
 mod template;
 
@@ -17,4 +18,5 @@ pub(crate) use self::export::{GrainExport, GrainGeometry, GrainParts};
 pub(crate) use self::persistence::MeasuredPlanes;
 pub use self::report::{FrameGrain, frame_rows};
 pub use self::segment::SceneGrain;
+pub(crate) use self::snapshot::PassSources;
 pub use self::table::build_table;

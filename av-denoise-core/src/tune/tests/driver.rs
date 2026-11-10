@@ -618,13 +618,13 @@ fn a_tuned_set_matches_a_fresh_one_built_from_its_result() {
 }
 
 #[test]
-fn a_tuned_grain_export_set_drains_only_the_real_streams_grain() {
+fn a_tuned_grain_data_set_drains_only_the_real_streams_grain() {
     let store = tempfile::tempdir().unwrap();
     let config = auto_config(store.path(), BudgetRequest::Full);
     let device = crate::testing::test_device();
     let client = device.client();
     let nl4d = Nl4dOptions {
-        grain_export: true,
+        grain_data: true,
         ..Nl4dOptions::default()
     };
     let specs = nl4d_specs(nl4d);

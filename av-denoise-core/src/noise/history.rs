@@ -171,6 +171,12 @@ impl NoiseState {
         measurement.recorded.fetch_max(count, Ordering::Relaxed);
     }
 
+    /// The readings of the latest stream frames, `None` for a state that holds fixed values.
+    pub(crate) fn reading_history(&self) -> Option<&ReadingHistory> {
+        let measurement = self.measurement.as_ref();
+        measurement.map(|measurement| &measurement.history)
+    }
+
     /// The stream frames recorded since the last reset, 0 for a state that holds fixed values.
     pub(crate) fn stream_frame_count(&self) -> u32 {
         let Some(measurement) = self.measurement.as_ref() else {

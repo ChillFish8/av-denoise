@@ -1,11 +1,17 @@
 use super::chunk::GrainChunk;
-use super::consts::{CHROMA_RECORD_LEN, FRAME_RECORD_LEN, LAG_RECORD_LEN, MIN_FRAME_CELLS, PERSISTENCE_LAGS};
+use super::consts::{
+    CHROMA_LAGS,
+    CHROMA_PLANES,
+    CHROMA_RECORD_LEN,
+    FRAME_RECORD_LEN,
+    LAG_RECORD_LEN,
+    MIN_FRAME_CELLS,
+    PERSISTENCE_LAGS,
+};
 use super::segment::SceneGrain;
 
-/// The chroma planes in a chroma record, Cb then Cr.
-const CHROMA_PLANES: usize = CHROMA_RECORD_LEN / LAG_RECORD_LEN;
-/// The lag a chroma record holds.
-const CHROMA_LAG: usize = 1;
+/// The lag a chroma strength reads, the first part of each plane's record.
+const STRENGTH_LAG: usize = 1;
 
 /// One frame's grain strength and persistence.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -85,8 +91,14 @@ fn window_sums(records: &[f64], index: usize) -> [[f64; LAG_RECORD_LEN]; PERSIST
 fn chroma_strength(chroma_records: &[f64], index: usize) -> [Option<f64>; CHROMA_PLANES] {
     let mut strengths = [None; CHROMA_PLANES];
     for (plane, strength) in strengths.iter_mut().enumerate() {
-        let part_offset = plane * LAG_RECORD_LEN;
-        let sums = pooled_sums(chroma_records, CHROMA_RECORD_LEN, index, part_offset, CHROMA_LAG);
+        let part_offset = plane * CHROMA_LAGS * LAG_RECORD_LEN;
+        let sums = pooled_sums(
+            chroma_records,
+            CHROMA_RECORD_LEN,
+            index,
+            part_offset,
+            STRENGTH_LAG,
+        );
         *strength = strength_of(&sums);
     }
 

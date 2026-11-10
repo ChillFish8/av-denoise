@@ -10,9 +10,16 @@ pub struct GrainChunk {
     /// Counts are whole numbers and lag sums are the GPU's own f32 values. Empty when the table is
     /// not measured.
     pub frame_tables: Vec<f32>,
-    /// Each frame's persistence sums in frame order, `FRAME_RECORD_LEN` per luma frame and
-    /// `CHROMA_RECORD_LEN` per chroma frame.
+    /// Each frame's persistence sums in frame order, 24 values per luma frame and 6 per chroma
+    /// frame.
     pub frame_records: Vec<f64>,
+    /// Each frame's noise reading, 30 values per frame, empty when the reading is off.
+    pub frame_noise: Vec<f32>,
+    /// Each frame's colour fit, 1974 values per plane per frame, empty when the colour model is
+    /// off.
+    ///
+    /// Each plane holds its log grain table, its log gain table and its fit header in turn.
+    pub frame_colour: Vec<f32>,
 }
 
 /// Summed table statistics of one or more frames, the inputs the table fit reads.
@@ -43,6 +50,8 @@ impl GrainChunk {
             frames: 0,
             frame_tables: Vec::new(),
             frame_records: Vec::new(),
+            frame_noise: Vec::new(),
+            frame_colour: Vec::new(),
         }
     }
 

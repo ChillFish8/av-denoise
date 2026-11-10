@@ -15,7 +15,7 @@ use crate::noise::NoiseCurve;
 use crate::noise::NoiseSnapshot;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::noise::NoiseState;
-use crate::noise::colour::{ColourGainInputs, ColourSource};
+use crate::noise::colour::{ColourFit, ColourGainInputs, ColourSource};
 use crate::noise::{
     DerivedCoefficients,
     DerivedValues,
@@ -24,6 +24,7 @@ use crate::noise::{
     NoiseConsumer,
     NoiseSettings,
     NoiseShape,
+    ReadingHistory,
     ReadingSettings,
     WindowBounds,
 };
@@ -285,6 +286,16 @@ impl NlmDenoiser {
     /// Returns an error when the block means of `frame` are not held.
     pub(crate) fn colour_gain_inputs(&self, frame: u32) -> Result<Option<ColourGainInputs>, anyhow::Error> {
         self.noise.colour_gain_inputs(frame)
+    }
+
+    /// The readings of the latest stream frames, `None` unless the front measures the noise.
+    pub(crate) fn reading_history(&self) -> Option<&ReadingHistory> {
+        self.noise.reading_history()
+    }
+
+    /// The grain model the last window fitted, `None` for a front that pools no colour cells.
+    pub(crate) fn colour_fit(&self) -> Option<&ColourFit> {
+        self.noise.colour_fit()
     }
 
     /// The derived values buffer the kernels bind, the noise state's own.

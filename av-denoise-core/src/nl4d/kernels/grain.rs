@@ -76,7 +76,7 @@ const fn lag_lane(dy: u32, dx_index: u32) -> u32 {
 }
 
 #[cube]
-pub(super) fn luma_at<N: Size>(
+fn luma_at<N: Size>(
     input: &[Vector<f32, N>],
     x: u32,
     y: u32,

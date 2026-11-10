@@ -340,13 +340,13 @@ mod tests {
     }
 
     #[test]
-    fn grain_export_gives_a_different_key() {
-        let exporting_options = crate::Nl4dOptions {
-            grain_export: true,
+    fn grain_data_gives_a_different_key() {
+        let measuring_options = crate::Nl4dOptions {
+            grain_data: true,
             ..crate::Nl4dOptions::default()
         };
-        let exporting = PlaneOptions {
-            algorithm: crate::Algorithm::Nl4d(exporting_options),
+        let measuring = PlaneOptions {
+            algorithm: crate::Algorithm::Nl4d(measuring_options),
             ..options()
         };
 
@@ -358,37 +358,9 @@ mod tests {
 
         let test_layout = layout();
         let plain_key = kernel_key(&plain, test_layout);
-        let exporting_key = kernel_key(&exporting, test_layout);
+        let measuring_key = kernel_key(&measuring, test_layout);
 
-        assert_ne!(plain_key, exporting_key);
-    }
-
-    #[test]
-    fn grain_report_gives_a_different_key() {
-        let reporting_options = crate::Nl4dOptions {
-            grain_export: true,
-            grain_report: true,
-            ..crate::Nl4dOptions::default()
-        };
-        let reporting = PlaneOptions {
-            algorithm: crate::Algorithm::Nl4d(reporting_options),
-            ..options()
-        };
-
-        let table_only_options = crate::Nl4dOptions {
-            grain_export: true,
-            ..crate::Nl4dOptions::default()
-        };
-        let table_only = PlaneOptions {
-            algorithm: crate::Algorithm::Nl4d(table_only_options),
-            ..options()
-        };
-
-        let test_layout = layout();
-        let table_only_key = kernel_key(&table_only, test_layout);
-        let reporting_key = kernel_key(&reporting, test_layout);
-
-        assert_ne!(table_only_key, reporting_key);
+        assert_ne!(plain_key, measuring_key);
     }
 
     #[test]

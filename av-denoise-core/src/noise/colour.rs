@@ -591,15 +591,23 @@ impl ColourFit {
         }
     }
 
+    pub(crate) fn planes(&self) -> u32 {
+        self.planes
+    }
+
     /// Each plane's log gain table, plane after plane.
     pub(crate) fn gains(&self) -> &Handle {
         &self.gains
     }
 
     /// Each plane's log grain table, plane after plane.
-    #[cfg(test)]
     pub(crate) fn table(&self) -> &Handle {
         &self.table
+    }
+
+    /// Each plane's fit header, [COLOUR_FIT_PLANE_WORDS] values per plane, plane after plane.
+    pub(crate) fn fit_planes(&self) -> &Handle {
+        &self.fit_planes
     }
 
     /// Queues both fits of the window's sums `window` and the gain tables, in ten launches.
@@ -783,6 +791,12 @@ impl NoiseState {
     pub(crate) fn colour_cells(&self) -> Option<&ColourCells> {
         let colour = self.colour.as_ref();
         colour.map(|colour| &colour.cells)
+    }
+
+    /// The grain model fitted from the last window, `None` for a state that pools no colour cells.
+    pub(crate) fn colour_fit(&self) -> Option<&ColourFit> {
+        let colour = self.colour.as_ref();
+        colour.map(|colour| &colour.fit)
     }
 
     /// Each plane's log gain table from the last window, `None` for a state that pools no colour

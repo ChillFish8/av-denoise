@@ -79,7 +79,7 @@ pub fn all() -> Vec<ParityConfig> {
     let hq = Algorithm::NlmeansHq(NlmeansHqOptions::default());
     let nl4d = Algorithm::Nl4d(Nl4dOptions::default());
     let grain_options = Nl4dOptions {
-        grain_export: true,
+        grain_data: true,
         ..Nl4dOptions::default()
     };
     let nl4d_grain = Algorithm::Nl4d(grain_options);

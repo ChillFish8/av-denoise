@@ -55,6 +55,7 @@ const MOTION_STEP: u32 = 8;
 const REPORT_ONLY: GrainParts = GrainParts {
     table: false,
     persistence: Some(MeasuredPlanes::Luma),
+    noise: false,
 };
 const SQUARE: Plane = Plane {
     width: SIZE,
@@ -928,6 +929,7 @@ fn records_land_at_each_frames_offset_across_a_chunk_boundary() {
 const CHROMA_ONLY: GrainParts = GrainParts {
     table: false,
     persistence: Some(MeasuredPlanes::Chroma),
+    noise: false,
 };
 const CB_GRAIN_CODES: f64 = 2.0;
 const CR_GRAIN_CODES: f64 = 4.0;

@@ -28,12 +28,10 @@ fn geometry(channels: ChannelMode) -> PassGeometry {
     }
 }
 
-/// With `measures_grain`, both the grain table and the grain report are measured.
-fn options(radius: u32, measures_grain: bool) -> Nl4dOptions {
+fn options(radius: u32, grain_data: bool) -> Nl4dOptions {
     Nl4dOptions {
         temporal_radius: radius,
-        grain_export: measures_grain,
-        grain_report: measures_grain,
+        grain_data,
         ..Nl4dOptions::default()
     }
 }
