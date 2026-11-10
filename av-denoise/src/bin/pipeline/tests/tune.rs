@@ -40,6 +40,7 @@ fn run_clip(bytes: Vec<u8>, tuning: TuningMode, tune_budget: Option<f64>) -> Vec
         visible: false,
         grain_table: None,
         grain_report: None,
+        avds: None,
         tune_budget,
         timing_report: false,
         shared_device: false,

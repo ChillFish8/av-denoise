@@ -39,6 +39,11 @@ wgpu = { version = "30", optional = true }
 cudarc = { version = "0.19", optional = true, default-features = false, features = ["std", "driver"] }
 cubecl-hip-sys = { version = "7.1.5280200", optional = true }
 
+# The `.avds` grain data file
+arrow-array = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+
 [dev-dependencies]
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }
@@ -50,6 +55,8 @@ vulkan = ["cubecl/vulkan", "dep:wgpu"]
 metal = ["cubecl/metal"]
 cuda = ["cubecl/cuda", "dep:cudarc"]
 rocm = ["cubecl/hip", "dep:cubecl-hip-sys"]
+# Reading and writing `.avds` grain data files.
+avds = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet"]
 default = ["vulkan"]
 
 [[bench]]

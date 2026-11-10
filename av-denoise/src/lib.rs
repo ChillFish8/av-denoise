@@ -12,6 +12,8 @@ pub mod testing;
 pub mod tune;
 pub mod warmup;
 
+#[cfg(feature = "avds")]
+pub use av_denoise_core::avds;
 pub use av_denoise_core::{
     ChromaLayout,
     ChromaSiting,

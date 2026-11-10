@@ -172,6 +172,7 @@ fn run_clip(bytes: Vec<u8>, workers: usize, timing_report: bool) -> (Vec<u8>, Ru
         visible: false,
         grain_table: None,
         grain_report: None,
+        avds: None,
         tune_budget: None,
         timing_report,
         shared_device: false,

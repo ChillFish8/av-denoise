@@ -48,6 +48,7 @@ fn run(bytes: Vec<u8>, workers: usize, table: Option<PathBuf>) -> Result<Vec<u8>
         visible: false,
         grain_table: table,
         grain_report: None,
+        avds: None,
         tune_budget: None,
         timing_report: false,
         shared_device: false,

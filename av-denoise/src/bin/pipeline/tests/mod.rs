@@ -1,3 +1,4 @@
+mod avds;
 mod bestsource;
 mod convert;
 mod coordinator;

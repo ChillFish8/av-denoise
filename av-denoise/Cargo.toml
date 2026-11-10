@@ -76,7 +76,10 @@ vulkan = ["av-denoise-core/vulkan", "cubecl/vulkan", "dep:wgpu"]
 metal = ["av-denoise-core/metal", "cubecl/metal"]
 cuda = ["av-denoise-core/cuda", "cubecl/cuda"]
 rocm = ["av-denoise-core/rocm", "cubecl/hip"]
+# Reading and writing `.avds` grain data files.
+avds = ["av-denoise-core/avds"]
 binary = [
+    "avds",
     "bytesize",
     "clap",
     "crossbeam-channel",

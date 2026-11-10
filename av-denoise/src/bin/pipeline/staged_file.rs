@@ -35,14 +35,30 @@ impl StagedFile {
     }
 
     /// Writes `bytes` to the temporary file and moves it to the final path.
-    pub fn commit(mut self, bytes: &[u8]) -> Result<(), anyhow::Error> {
+    pub fn commit(self, bytes: &[u8]) -> Result<(), anyhow::Error> {
         let label = self.label;
         let shown_path = self.path.display();
 
-        let mut file = File::create(&self.temporary)
-            .with_context(|| format!("unable to write the {label} at {shown_path}"))?;
+        let mut file = self.writer()?;
         file.write_all(bytes)
             .with_context(|| format!("unable to write the {label} at {shown_path}"))?;
+
+        self.finish(&file)
+    }
+
+    /// Opens the temporary file empty, for writing from its start.
+    pub fn writer(&self) -> Result<File, anyhow::Error> {
+        let label = self.label;
+        let shown_path = self.path.display();
+
+        File::create(&self.temporary).with_context(|| format!("unable to write the {label} at {shown_path}"))
+    }
+
+    /// Syncs `file`, the fully written temporary file, and moves it to the final path.
+    pub fn finish(mut self, file: &File) -> Result<(), anyhow::Error> {
+        let label = self.label;
+        let shown_path = self.path.display();
+
         file.sync_all()
             .with_context(|| format!("unable to write the {label} at {shown_path}"))?;
         rename(&self.temporary, &self.path)

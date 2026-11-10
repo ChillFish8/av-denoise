@@ -1,8 +1,10 @@
+mod avds_file;
 mod bestsource;
 mod convert;
 mod coordinator;
 mod decode;
 mod grain_report;
+mod grain_sink;
 mod grain_table;
 pub mod report;
 mod scenes;
@@ -19,20 +21,23 @@ use std::io::{IsTerminal, stdout};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use av_denoise::{Depth, FrameLayout, PlaneOptions, SceneGrain};
+use av_denoise::avds::{AvdsMeta, PlanesMeasured};
+use av_denoise::{ChannelIntent, Depth, FrameLayout, PlaneOptions};
 use avtbx_bestsource::IndexCache;
 
+use self::avds_file::AvdsPath;
 use self::convert::SourcePixel;
 use self::coordinator::spawn_coordinator;
 use self::decode::{DecodeThread, FrameMsg};
 use self::grain_report::ReportPath;
+use self::grain_sink::{GrainSink, SinkOutput};
 use self::grain_table::TablePath;
 use self::report::{RunSummary, WorkerTiming};
 use self::scenes::{Decided, SceneSplitter};
 use self::source::{OpenedSource, SourceInfo};
 use self::stage::{SceneJob, Stager, checked_frame_permits, frame_permit_channel};
 pub use self::tune::{budget_request, tune_input};
-use self::worker::{WorkerJoin, WorkerOutput, WorkerSettings, spawn_workers};
+use self::worker::{WorkerJoin, WorkerSettings, spawn_workers};
 use crate::cli::{InputSource, RunOptions};
 use crate::progress::denoise_bar_visible;
 
@@ -46,6 +51,8 @@ pub struct RunSettings {
     pub grain_table: Option<PathBuf>,
     /// Where to write the per-frame grain report, when one was asked for.
     pub grain_report: Option<PathBuf>,
+    /// Where to write the grain data file, when one was asked for.
+    pub avds: Option<PathBuf>,
     /// Seconds tuning may take, when the user set a budget.
     pub tune_budget: Option<f64>,
     /// Whether the workers sample device time for the timing report.
@@ -69,12 +76,14 @@ pub fn run(
     let output = stdout();
     let grain_table = opts.grain_table.clone();
     let grain_report = opts.grain_report.clone();
+    let avds = opts.avds.clone();
     let settings = RunSettings {
         workers,
         frame_budget_bytes,
         visible,
         grain_table,
         grain_report,
+        avds,
         tune_budget: opts.tune_budget,
         timing_report: opts.timing_report,
         shared_device: opts.shared_device,
@@ -100,8 +109,9 @@ pub fn run(
 
 /// Denoises the source `opener` returns scene by scene, writing y4m into `output`.
 ///
-/// Blocks until every thread in the pipeline has finished. The grain table and report are written
-/// only when every stage succeeds. When the options ask for `auto` tuning and nothing is stored for
+/// Blocks until every thread in the pipeline has finished. The grain data file is written scene by
+/// scene as workers finish them. It and the grain table and report land at their paths only when
+/// every stage succeeds. When the options ask for `auto` tuning and nothing is stored for
 /// this configuration, the first frames are tuned on before the workers start, then denoised as
 /// usual. Returns where the run's time went.
 pub fn run_with<W, F>(
@@ -120,6 +130,7 @@ where
         visible,
         grain_table,
         grain_report,
+        avds,
         tune_budget,
         timing_report,
         shared_device,
@@ -133,9 +144,16 @@ where
 
     let table = grain_table.as_deref().map(TablePath::create).transpose()?;
     let report = grain_report.as_deref().map(ReportPath::create).transpose()?;
+    let avds = avds.as_deref().map(AvdsPath::create).transpose()?;
 
     let (decode_thread, info) = DecodeThread::spawn(opener)?;
     let layout = info.layout;
+
+    let meta = avds_meta(&info, planes);
+    let avds = avds.map(|path| path.stream(&meta)).transpose()?;
+    let keeps_scenes = table.is_some() || report.is_some();
+    let measures_grain = avds.is_some() || keeps_scenes;
+    let sink = measures_grain.then(|| GrainSink::spawn(avds, keeps_scenes));
 
     tracing::info!(
         width = layout.width,
@@ -165,7 +183,9 @@ where
     let (staged_tx, staged_rx) = crossbeam_channel::bounded::<u64>(1);
     let worker_planes = tune::worker_options(planes);
     let worker_settings = WorkerSettings::for_run(workers, timing_report, shared_device);
-    let (job_tx, worker_handles, output_rx) = spawn_workers(&worker_planes, layout, workers, worker_settings);
+    let grain_tx = sink.as_ref().map(|sink| &sink.sender);
+    let (job_tx, worker_handles, output_rx) =
+        spawn_workers(&worker_planes, layout, workers, worker_settings, grain_tx);
     let coordinator_info = info.clone();
     let coordinator = spawn_coordinator(coordinator_info, output_rx, staged_rx, visible, give, output);
 
@@ -190,6 +210,9 @@ where
     drop(staged_tx);
 
     let workers_joined = join_workers(worker_handles);
+
+    // Every worker has dropped its grain sender, so the sink ends once it has taken every scene.
+    let sink_joined = sink.map(GrainSink::join).transpose();
     let coordinator_joined = coordinator
         .join()
         .map_err(|panic| anyhow::anyhow!("coordinator panicked: {panic:?}"))
@@ -199,15 +222,25 @@ where
     // giving end, so it joins last.
     let decoder_joined = decode_thread.join();
 
-    // Root causes come first. A coordinator error is a failed write. A worker error only shows
-    // elsewhere as the dispatcher's disconnect. Dispatch errors carry decode failures, which
-    // never make a worker fail.
+    // Root causes come first. A sink error is a failed grain write, which fails the workers'
+    // next send. A coordinator error is a failed write. A worker error only shows elsewhere as
+    // the dispatcher's disconnect. Dispatch errors carry decode failures, which never make a
+    // worker fail.
     //
-    // Returning early drops `table` and `report`, which removes their temporary files.
-    let (scenes, worker_timings) = coordinator_joined
-        .and(workers_joined)
+    // Returning early drops the grain data file, `table` and `report`, which removes their
+    // temporary files.
+    let (sink_output, worker_timings) = sink_joined
+        .and_then(|output| coordinator_joined.map(|_| output))
+        .and_then(|output| workers_joined.map(|timings| (output, timings)))
         .and_then(|joined| dispatched.map(|_| joined))
         .and_then(|joined| decoder_joined.map(|_| joined))?;
+
+    let SinkOutput { avds, scenes } = sink_output.unwrap_or_else(SinkOutput::empty);
+
+    if let Some(avds) = avds {
+        let frames = staged.unwrap_or_default();
+        avds.finish(frames)?;
+    }
 
     if let Some(table) = table {
         let rate = info.details.frame_rate;
@@ -275,12 +308,35 @@ fn stage_decided<T: SourcePixel>(
     Ok(())
 }
 
-/// Joins every worker and gathers the grain and timing they measured.
+/// What the grain data file says about a run of `planes` over the source `info` describes.
+fn avds_meta(info: &SourceInfo, planes: &PlaneOptions) -> AvdsMeta {
+    let layout = info.layout;
+    let rate = info.details.frame_rate;
+    let frame_rate = (*rate.numer() as u64, *rate.denom() as u64);
+    let planes_measured = match planes.intent {
+        ChannelIntent::LumaChroma => PlanesMeasured::LumaChroma,
+        ChannelIntent::Luma | ChannelIntent::Chroma => PlanesMeasured::Luma,
+    };
+    let writer = format!("av-denoise {}", env!("CARGO_PKG_VERSION"));
+
+    AvdsMeta {
+        writer,
+        frame_rate,
+        width: layout.width,
+        height: layout.height,
+        bit_depth: layout.depth.bits() as u32,
+        subsampling: layout.subsampling.chroma_layout(),
+        chroma_siting: layout.chroma_siting,
+        frames: 0,
+        planes_measured,
+    }
+}
+
+/// Joins every worker and gathers the timing they measured.
 ///
 /// Logs each error or panic and returns the first.
-fn join_workers(handles: Vec<WorkerJoin>) -> Result<(Vec<SceneGrain>, Vec<WorkerTiming>), anyhow::Error> {
+fn join_workers(handles: Vec<WorkerJoin>) -> Result<Vec<WorkerTiming>, anyhow::Error> {
     let mut first_error = None;
-    let mut scenes = Vec::new();
     let mut timings = Vec::new();
 
     for (worker_id, handle) in handles.into_iter().enumerate() {
@@ -290,11 +346,7 @@ fn join_workers(handles: Vec<WorkerJoin>) -> Result<(Vec<SceneGrain>, Vec<Worker
             .and_then(|result| result);
 
         let err = match result {
-            Ok(WorkerOutput {
-                scenes: worker_scenes,
-                timing,
-            }) => {
-                scenes.extend(worker_scenes);
+            Ok(timing) => {
                 timings.push(timing);
                 continue;
             },
@@ -308,5 +360,5 @@ fn join_workers(handles: Vec<WorkerJoin>) -> Result<(Vec<SceneGrain>, Vec<Worker
         }
     }
 
-    first_error.map_or(Ok((scenes, timings)), Err)
+    first_error.map_or(Ok(timings), Err)
 }

@@ -176,6 +176,13 @@ pub struct Nl4dArgs {
     #[arg(long, value_name = "PATH")]
     pub unstable_grain_report: Option<PathBuf>,
 
+    /// Writes every grain measurement of the run to a grain data file.
+    ///
+    /// The file is Parquet with one row per output frame, and any Parquet reader can open it. It
+    /// needs luma to be denoised.
+    #[arg(long, value_name = "PATH")]
+    pub export_avds: Option<PathBuf>,
+
     #[command(flatten)]
     pub motion: MotionArgs,
 }
@@ -213,8 +220,10 @@ impl Nl4dArgs {
 
         let exports_grain = self.unstable_export_av1_fgs.is_some();
         let reports_grain = self.unstable_grain_report.is_some();
+        let exports_avds = self.export_avds.is_some();
         check_grain_flag("--unstable-export-av1-fgs", exports_grain, intent)?;
         check_grain_flag("--unstable-grain-report", reports_grain, intent)?;
+        check_luma_flag("--export-avds", exports_avds, intent)?;
 
         // Checked in 8-bit units so the error reports the number the user typed. The library's
         // own check runs after the /255 normalisation, in 0..=1 units.
@@ -253,7 +262,7 @@ impl Nl4dArgs {
             field_lambda: self.field_lambda.unwrap_or(defaults.field_lambda),
             noise_map: defaults.noise_map && !self.no_noise_map,
             pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
-            grain_data: exports_grain || reports_grain,
+            grain_data: exports_grain || reports_grain || exports_avds,
         };
         let mode = DenoisingMode::Temporal {
             radius: temporal_radius,
@@ -279,6 +288,7 @@ impl Nl4dArgs {
             progress: globals.progress,
             grain_table: self.unstable_export_av1_fgs.clone(),
             grain_report: self.unstable_grain_report.clone(),
+            avds: self.export_avds.clone(),
             tune_budget: self.common.checked_tune_budget()?,
             timing_report: self.common.timing_report,
             shared_device: self.common.shared_device,
@@ -302,15 +312,20 @@ impl Nl4dArgs {
 
 /// Rejects a given grain flag in chroma-only runs and warns that it is unstable.
 fn check_grain_flag(flag: &str, given: bool, intent: ChannelIntent) -> Result<(), anyhow::Error> {
-    if !given {
-        return Ok(());
+    check_luma_flag(flag, given, intent)?;
+
+    if given {
+        tracing::warn!("{flag} is unstable, its output and the flag itself may change between releases");
     }
 
-    if intent == ChannelIntent::Chroma {
+    Ok(())
+}
+
+/// Refuses a grain flag in a run that does not denoise luma.
+fn check_luma_flag(flag: &str, given: bool, intent: ChannelIntent) -> Result<(), anyhow::Error> {
+    if given && intent == ChannelIntent::Chroma {
         anyhow::bail!("{flag} measures luma grain, so it needs luma to be denoised");
     }
-
-    tracing::warn!("{flag} is unstable, its output and the flag itself may change between releases");
 
     Ok(())
 }
@@ -948,6 +963,29 @@ mod tests {
     }
 
     #[test]
+    fn export_avds_sets_the_path_and_turns_grain_data_on() {
+        let (args, nl4d) = parse(&["--export-avds", "run.avds"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
+        let expected = std::path::Path::new("run.avds");
+
+        assert_eq!(opts.avds.as_deref(), Some(expected));
+        assert_eq!(opts.grain_table, None);
+        assert_eq!(opts.grain_report, None);
+        assert!(nl4d_options.grain_data);
+    }
+
+    #[test]
+    fn export_avds_is_rejected_in_chroma_only_runs() {
+        let (args, nl4d) = parse(&["--channel-mode", "chroma", "--export-avds", "run.avds"]);
+        let error = nl4d
+            .build_options(&args)
+            .expect_err("chroma only cannot measure luma grain");
+
+        assert!(error.to_string().contains("--export-avds"), "got {error}");
+    }
+
+    #[test]
     fn neither_grain_flag_leaves_grain_measurement_off() {
         let (args, nl4d) = parse(&[]);
         let opts = nl4d.build_options(&args).expect("build_options should succeed");
@@ -955,6 +993,7 @@ mod tests {
 
         assert_eq!(opts.grain_table, None);
         assert_eq!(opts.grain_report, None);
+        assert_eq!(opts.avds, None);
         assert!(!nl4d_options.grain_data);
     }
 }

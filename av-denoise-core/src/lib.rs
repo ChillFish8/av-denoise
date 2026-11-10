@@ -2,6 +2,8 @@
 #![cfg_attr(docsrs, doc(auto_cfg))]
 #![doc = include_str!("../README.md")]
 
+#[cfg(feature = "avds")]
+pub mod avds;
 #[doc(hidden)]
 pub mod bench_api;
 mod collab;

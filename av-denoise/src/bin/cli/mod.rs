@@ -31,6 +31,8 @@ pub struct RunOptions {
     pub grain_table: Option<PathBuf>,
     /// Where to write the per-frame grain report, when one was asked for.
     pub grain_report: Option<PathBuf>,
+    /// Where to write the grain data file, when one was asked for.
+    pub avds: Option<PathBuf>,
     /// Seconds tuning may take, when the user set a budget.
     pub tune_budget: Option<f64>,
     /// Whether to print the timing report at the end of the run.

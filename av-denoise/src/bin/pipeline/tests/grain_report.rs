@@ -198,6 +198,7 @@ mod runs {
             visible: false,
             grain_table: None,
             grain_report: Some(report.to_path_buf()),
+            avds: None,
             tune_budget: None,
             timing_report: false,
             shared_device: false,

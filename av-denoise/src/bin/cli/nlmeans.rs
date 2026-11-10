@@ -388,6 +388,7 @@ impl NlmeansArgs {
             progress: globals.progress,
             grain_table: None,
             grain_report: None,
+            avds: None,
             tune_budget: self.common.checked_tune_budget()?,
             timing_report: self.common.timing_report,
             shared_device: self.common.shared_device,

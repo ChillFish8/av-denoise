@@ -9,13 +9,7 @@ use super::report::{DEVICE_SAMPLE_EVERY, WorkerTiming};
 use super::stage::SceneJob;
 use crate::warm_start::{create_denoiser, finish_warm_up};
 
-/// What one worker returns once the scene queue closes.
-pub struct WorkerOutput {
-    pub scenes: Vec<SceneGrain>,
-    pub timing: WorkerTiming,
-}
-
-pub type WorkerJoin = thread::JoinHandle<Result<WorkerOutput, anyhow::Error>>;
+pub type WorkerJoin = thread::JoinHandle<Result<WorkerTiming, anyhow::Error>>;
 
 /// How each worker builds and measures its denoiser.
 #[derive(Debug, Clone, Copy)]
@@ -41,13 +35,15 @@ impl WorkerSettings {
 /// Spawns `workers` worker threads over one shared scene queue.
 ///
 /// The queue is a rendezvous, so a scene is only offered when a worker is free and at most
-/// `workers` scenes are ever in flight. Returns the queue's sender, the join handles and the
-/// shared output channel the workers emit denoised frames on.
+/// `workers` scenes are ever in flight. Each worker sends a scene's grain on `grain` once the
+/// scene is done. Returns the queue's sender, the join handles and the shared output channel the
+/// workers emit denoised frames on.
 pub fn spawn_workers(
     opts: &PlaneOptions,
     layout: FrameLayout,
     workers: usize,
     settings: WorkerSettings,
+    grain: Option<&crossbeam_channel::Sender<SceneGrain>>,
 ) -> (
     crossbeam_channel::Sender<SceneJob>,
     Vec<WorkerJoin>,
@@ -61,8 +57,13 @@ pub fn spawn_workers(
         let opts = opts.clone();
         let output_tx = output_tx.clone();
         let job_rx = job_rx.clone();
+        let channels = WorkerChannels {
+            jobs: job_rx,
+            output: output_tx,
+            grain: grain.cloned(),
+        };
 
-        let handle = thread::spawn(move || run_worker(worker_id, opts, layout, job_rx, output_tx, settings));
+        let handle = thread::spawn(move || run_worker(worker_id, opts, layout, channels, settings));
         worker_handles.push(handle);
     }
 
@@ -72,21 +73,36 @@ pub fn spawn_workers(
     (job_tx, worker_handles, output_rx)
 }
 
-/// Denoises every scene this worker claims and returns the grain it measured and where its time
-/// went.
+/// The channels one worker reads scenes from and writes results to.
+pub struct WorkerChannels {
+    /// The shared scene queue.
+    pub jobs: crossbeam_channel::Receiver<SceneJob>,
+    /// Where denoised frames go.
+    pub output: crossbeam_channel::Sender<OutputMsg>,
+    /// Where each scene's grain goes, `None` when the run keeps no grain.
+    pub grain: Option<crossbeam_channel::Sender<SceneGrain>>,
+}
+
+/// Denoises every scene this worker claims, sending each scene's grain as the scene finishes.
+///
+/// Returns where the worker's time went.
 pub fn run_worker(
     worker_id: usize,
     opts: PlaneOptions,
     layout: FrameLayout,
-    jobs: crossbeam_channel::Receiver<SceneJob>,
-    output_tx: crossbeam_channel::Sender<OutputMsg>,
+    channels: WorkerChannels,
     settings: WorkerSettings,
-) -> Result<WorkerOutput, anyhow::Error> {
+) -> Result<WorkerTiming, anyhow::Error> {
+    let WorkerChannels {
+        jobs,
+        output: output_tx,
+        grain,
+    } = channels;
+
     let started = Instant::now();
     let mut setup = Duration::ZERO;
     let mut idle = Duration::ZERO;
 
-    let mut scenes = Vec::new();
     let mut denoiser_slot: Option<PlanarDenoiser> = None;
 
     // Held until the denoiser's first output frame proves its kernels are compiled and cached.
@@ -145,7 +161,7 @@ pub fn run_worker(
 
         let drained = denoiser.drain_grain_chunks()?;
         let measured = !drained.luma.is_empty() || !drained.chroma.is_empty();
-        if let Some(first_frame) = first_frame
+        if let (Some(first_frame), Some(grain)) = (first_frame, grain.as_ref())
             && measured
         {
             let scene = SceneGrain {
@@ -153,7 +169,9 @@ pub fn run_worker(
                 chunks: drained.luma,
                 chroma_chunks: drained.chroma,
             };
-            scenes.push(scene);
+            grain
+                .send(scene)
+                .map_err(|_| anyhow::anyhow!("grain writer disconnected"))?;
         }
     }
 
@@ -170,7 +188,7 @@ pub fn run_worker(
         accelerator,
     };
 
-    Ok(WorkerOutput { scenes, timing })
+    Ok(timing)
 }
 
 /// Pushes one frame, emitting the oldest pending output and retrying when the queue is full.
