@@ -52,9 +52,8 @@ const TOLERANCE: f64 = 1e-4;
 /// The size of a typical projection, the floor under the projection tolerance.
 const PROJECTION_SCALE: f64 = 0.1;
 const MOTION_STEP: u32 = 8;
-const REPORT_ONLY: GrainParts = GrainParts {
-    table: false,
-    persistence: Some(MeasuredPlanes::Luma),
+const LUMA_PASS: GrainParts = GrainParts {
+    planes: MeasuredPlanes::Luma,
     noise: false,
 };
 const SQUARE: Plane = Plane {
@@ -412,7 +411,7 @@ fn chunks_of(frames: &[Vec<f32>]) -> Vec<GrainChunk> {
 fn chunks_with_outputs(frames: &[Vec<f32>], outputs: &[Vec<f32>]) -> Vec<GrainChunk> {
     let client = make_client();
     let geometry = geometry();
-    let mut export = GrainExport::new(&client, geometry, REPORT_ONLY);
+    let mut export = GrainExport::new(&client, geometry, LUMA_PASS);
 
     measure_stream(&client, &mut export, frames, outputs);
 
@@ -884,7 +883,7 @@ fn each_lag_starts_once_the_stream_is_long_enough() {
 fn a_new_stream_never_compares_with_the_old_one() {
     let client = make_client();
     let geometry = geometry();
-    let mut export = GrainExport::new(&client, geometry, REPORT_ONLY);
+    let mut export = GrainExport::new(&client, geometry, LUMA_PASS);
     let first_stream = static_frames(5);
     let second_stream = static_frames(3);
     let flat = flat_output();
@@ -926,9 +925,8 @@ fn records_land_at_each_frames_offset_across_a_chunk_boundary() {
     }
 }
 
-const CHROMA_ONLY: GrainParts = GrainParts {
-    table: false,
-    persistence: Some(MeasuredPlanes::Chroma),
+const CHROMA_PASS: GrainParts = GrainParts {
+    planes: MeasuredPlanes::Chroma,
     noise: false,
 };
 const CB_GRAIN_CODES: f64 = 2.0;
@@ -998,7 +996,7 @@ fn chroma_chunks_of(frames: &[Vec<f32>], cb_level: f32) -> Vec<GrainChunk> {
     let geometry = two_channel_geometry();
     let output = chroma_output(cb_level);
 
-    export_chunks(geometry, CHROMA_ONLY, frames, &output)
+    export_chunks(geometry, CHROMA_PASS, frames, &output)
 }
 
 /// Rows over chroma chunks, with empty luma records for the same frames.
@@ -1071,7 +1069,7 @@ fn chroma_gates_reject_cells_on_their_own_channel_only() {
     let output = interleaved(&cb_output, &cr_output);
     let geometry = two_channel_geometry();
 
-    let chunks = export_chunks(geometry, CHROMA_ONLY, &clipped_frames, &output);
+    let chunks = export_chunks(geometry, CHROMA_PASS, &clipped_frames, &output);
 
     let records = all_records(&chunks);
     let (frame_records, _) = records.as_chunks::<CHROMA_RECORD_LEN>();
@@ -1116,8 +1114,8 @@ fn the_luma_measurement_is_unchanged_by_the_channel_argument() {
     let luma_geometry = geometry();
     let paired_geometry = two_channel_geometry();
 
-    let luma_chunks = export_chunks(luma_geometry, REPORT_ONLY, &luma_frames, &luma_output);
-    let paired_chunks = export_chunks(paired_geometry, REPORT_ONLY, &paired_frames, &paired_output);
+    let luma_chunks = export_chunks(luma_geometry, LUMA_PASS, &luma_frames, &luma_output);
+    let paired_chunks = export_chunks(paired_geometry, LUMA_PASS, &paired_frames, &paired_output);
 
     let luma_records = all_records(&luma_chunks);
     let paired_records = all_records(&paired_chunks);

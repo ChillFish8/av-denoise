@@ -12,7 +12,7 @@ use super::{Measured, file_of, sample_meta, scenes_of, written_file};
 use crate::avds::meta::{FRAMES_KEY, VERSION_KEY, metadata_pairs};
 use crate::avds::schema::{arrow_schema, columns, writer_properties};
 use crate::avds::write::record_batch;
-use crate::avds::{AvdsFrame, read_avds, rows_from_scenes, scenes_from_rows};
+use crate::avds::{AvdsFrame, AvdsGroup, read_avds, read_avds_groups, rows_from_scenes, scenes_from_rows};
 
 /// A file of `batch` with `pairs` as its metadata, written without the grain data writer.
 fn raw_file(batch: &RecordBatch, pairs: Vec<KeyValue>) -> File {
@@ -57,6 +57,27 @@ fn rows_round_trip_through_a_file() {
     assert_eq!(rows.len(), 36);
     assert_eq!(read_meta, meta);
     assert_eq!(read_rows, rows);
+}
+
+#[test]
+fn a_group_read_holds_only_those_groups() {
+    let scenes = scenes_of(&[30, 5], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let meta = sample_meta(rows.len() as u64);
+    let file = written_file(&meta, &rows);
+    let groups = [AvdsGroup::Persistence, AvdsGroup::ChromaColour];
+
+    let (read_meta, read_rows) = read_avds_groups(file, &groups).expect("the file reads");
+
+    assert_eq!(read_meta, meta);
+    assert_eq!(read_rows.len(), rows.len());
+    for (read_row, row) in read_rows.iter().zip(&rows) {
+        let mut expected = AvdsFrame::unmeasured(row.frame, row.scene, row.first_of_scene);
+        expected.persistence = row.persistence.clone();
+        expected.chroma_colour = row.chroma_colour.clone();
+
+        assert_eq!(read_row, &expected);
+    }
 }
 
 #[test]
@@ -121,7 +142,7 @@ fn rows_regroup_into_the_exports_chunks() {
     let scenes = scenes_of(&[1, 23, 24, 25, 60], Measured::ALL);
     let rows = rows_from_scenes(&scenes);
 
-    let regrouped = scenes_from_rows(&rows);
+    let regrouped = scenes_from_rows(rows);
 
     let chunk_frames: Vec<u32> = regrouped[3].chunks.iter().map(|chunk| chunk.frames).collect();
 
@@ -134,7 +155,7 @@ fn table_only_scenes_regroup_without_chroma_chunks() {
     let scenes = scenes_of(&[5, 40], Measured::TABLE_ONLY);
     let rows = rows_from_scenes(&scenes);
 
-    let regrouped = scenes_from_rows(&rows);
+    let regrouped = scenes_from_rows(rows);
 
     assert!(regrouped.iter().all(|scene| scene.chroma_chunks.is_empty()));
     assert_eq!(regrouped, scenes);

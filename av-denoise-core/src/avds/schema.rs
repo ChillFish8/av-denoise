@@ -50,13 +50,22 @@ const ZSTD_LEVEL: i32 = 3;
 
 /// A group of columns that is measured or not as a whole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Group {
+#[non_exhaustive]
+pub enum AvdsGroup {
+    /// The luma table statistics, [AvdsFrame::table](crate::avds::AvdsFrame::table).
     Table,
+    /// The luma persistence sums, [AvdsFrame::persistence](crate::avds::AvdsFrame::persistence).
     Persistence,
+    /// The chroma persistence sums,
+    /// [AvdsFrame::chroma_persistence](crate::avds::AvdsFrame::chroma_persistence).
     ChromaPersistence,
+    /// The luma noise reading, [AvdsFrame::noise](crate::avds::AvdsFrame::noise).
     Noise,
+    /// The chroma noise reading, [AvdsFrame::chroma_noise](crate::avds::AvdsFrame::chroma_noise).
     ChromaNoise,
+    /// The luma colour fit, [AvdsFrame::colour](crate::avds::AvdsFrame::colour).
     Colour,
+    /// The chroma colour fit, [AvdsFrame::chroma_colour](crate::avds::AvdsFrame::chroma_colour).
     ChromaColour,
 }
 
@@ -73,7 +82,7 @@ pub(super) enum Value {
 #[derive(Debug, Clone)]
 pub(super) struct Column {
     pub name: String,
-    pub group: Group,
+    pub group: AvdsGroup,
     pub value: Value,
     /// The positions in the group's values of each of the column's values, in order.
     pub indices: Vec<usize>,
@@ -81,44 +90,45 @@ pub(super) struct Column {
     pub list: bool,
 }
 
-impl Group {
-    pub(super) const ALL: [Group; 7] = [
-        Group::Table,
-        Group::Persistence,
-        Group::ChromaPersistence,
-        Group::Noise,
-        Group::ChromaNoise,
-        Group::Colour,
-        Group::ChromaColour,
+impl AvdsGroup {
+    /// Every group, in file order.
+    pub const ALL: [AvdsGroup; 7] = [
+        AvdsGroup::Table,
+        AvdsGroup::Persistence,
+        AvdsGroup::ChromaPersistence,
+        AvdsGroup::Noise,
+        AvdsGroup::ChromaNoise,
+        AvdsGroup::Colour,
+        AvdsGroup::ChromaColour,
     ];
 
     /// Values in one frame of the group.
     pub(super) fn len(self) -> usize {
         match self {
-            Group::Table => FRAME_TABLE_LEN,
-            Group::Persistence => FRAME_RECORD_LEN,
-            Group::ChromaPersistence => CHROMA_RECORD_LEN,
-            Group::Noise | Group::ChromaNoise => READING_WORDS as usize,
-            Group::Colour => colour_frame_len(1),
-            Group::ChromaColour => colour_frame_len(CHROMA_PLANES as u32),
+            AvdsGroup::Table => FRAME_TABLE_LEN,
+            AvdsGroup::Persistence => FRAME_RECORD_LEN,
+            AvdsGroup::ChromaPersistence => CHROMA_RECORD_LEN,
+            AvdsGroup::Noise | AvdsGroup::ChromaNoise => READING_WORDS as usize,
+            AvdsGroup::Colour => colour_frame_len(1),
+            AvdsGroup::ChromaColour => colour_frame_len(CHROMA_PLANES as u32),
         }
     }
 
     pub(super) fn name(self) -> &'static str {
         match self {
-            Group::Table => "table statistics",
-            Group::Persistence => "persistence",
-            Group::ChromaPersistence => "chroma persistence",
-            Group::Noise => "noise reading",
-            Group::ChromaNoise => "chroma noise reading",
-            Group::Colour => "colour fit",
-            Group::ChromaColour => "chroma colour fit",
+            AvdsGroup::Table => "table statistics",
+            AvdsGroup::Persistence => "persistence",
+            AvdsGroup::ChromaPersistence => "chroma persistence",
+            AvdsGroup::Noise => "noise reading",
+            AvdsGroup::ChromaNoise => "chroma noise reading",
+            AvdsGroup::Colour => "colour fit",
+            AvdsGroup::ChromaColour => "chroma colour fit",
         }
     }
 }
 
 impl Column {
-    fn new(name: impl Into<String>, group: Group, value: Value, indices: Vec<usize>) -> Self {
+    fn new(name: impl Into<String>, group: AvdsGroup, value: Value, indices: Vec<usize>) -> Self {
         let name = name.into();
         let list = indices.len() > 1;
 
@@ -132,7 +142,7 @@ impl Column {
     }
 
     /// A column of `len` values in a row from `start` of the group's values.
-    fn span(name: impl Into<String>, group: Group, value: Value, start: usize, len: usize) -> Self {
+    fn span(name: impl Into<String>, group: AvdsGroup, value: Value, start: usize, len: usize) -> Self {
         let indices = (start..start + len).collect();
 
         Self::new(name, group, value, indices)
@@ -186,16 +196,16 @@ pub(super) fn columns() -> Vec<Column> {
     columns.extend(persistence_columns());
     columns.extend(chroma_persistence_columns());
 
-    let noise = noise_columns(Group::Noise, "noise");
+    let noise = noise_columns(AvdsGroup::Noise, "noise");
     columns.extend(noise);
 
-    let chroma_noise = noise_columns(Group::ChromaNoise, "chroma_noise");
+    let chroma_noise = noise_columns(AvdsGroup::ChromaNoise, "chroma_noise");
     columns.extend(chroma_noise);
 
-    let colour = colour_columns(Group::Colour, &["luma"]);
+    let colour = colour_columns(AvdsGroup::Colour, &["luma"]);
     columns.extend(colour);
 
-    let chroma_colour = colour_columns(Group::ChromaColour, &["cb", "cr"]);
+    let chroma_colour = colour_columns(AvdsGroup::ChromaColour, &["cb", "cr"]);
     columns.extend(chroma_colour);
 
     columns
@@ -212,10 +222,16 @@ fn table_columns() -> Vec<Column> {
         pixels.push(record_start + LAG_COUNT);
     }
 
-    let source = Column::span("table_source_hist", Group::Table, Value::Count, 0, HIST_LEN);
-    let kept = Column::span("table_kept_hist", Group::Table, Value::Count, HIST_LEN, HIST_LEN);
-    let lag_sums = Column::new("table_lag_sums", Group::Table, Value::Float, lag_sums);
-    let pixels = Column::new("table_pixels", Group::Table, Value::Float, pixels);
+    let source = Column::span("table_source_hist", AvdsGroup::Table, Value::Count, 0, HIST_LEN);
+    let kept = Column::span(
+        "table_kept_hist",
+        AvdsGroup::Table,
+        Value::Count,
+        HIST_LEN,
+        HIST_LEN,
+    );
+    let lag_sums = Column::new("table_lag_sums", AvdsGroup::Table, Value::Float, lag_sums);
+    let pixels = Column::new("table_pixels", AvdsGroup::Table, Value::Float, pixels);
 
     vec![source, kept, lag_sums, pixels]
 }
@@ -230,7 +246,7 @@ fn persistence_columns() -> Vec<Column> {
             .map(|lag_index| lag_index * LAG_RECORD_LEN + part_index)
             .collect();
         let name = format!("persistence_{part}");
-        let column = Column::new(name, Group::Persistence, Value::Double, indices);
+        let column = Column::new(name, AvdsGroup::Persistence, Value::Double, indices);
         columns.push(column);
     }
 
@@ -248,7 +264,7 @@ fn chroma_persistence_columns() -> Vec<Column> {
         for (part_index, part) in parts.into_iter().enumerate() {
             let name = format!("persistence_{plane}_{part}");
             let start = plane_index * plane_len + part_index;
-            let column = Column::span(name, Group::ChromaPersistence, Value::Double, start, 1);
+            let column = Column::span(name, AvdsGroup::ChromaPersistence, Value::Double, start, 1);
             columns.push(column);
         }
     }
@@ -256,7 +272,7 @@ fn chroma_persistence_columns() -> Vec<Column> {
     columns
 }
 
-fn noise_columns(group: Group, prefix: &str) -> Vec<Column> {
+fn noise_columns(group: AvdsGroup, prefix: &str) -> Vec<Column> {
     let channels = NOISE_CHANNELS as usize;
     let parts = [
         ("immerkaer_low", READING_IMMERKAER_LOW, channels),
@@ -283,7 +299,7 @@ fn noise_columns(group: Group, prefix: &str) -> Vec<Column> {
 }
 
 /// Each plane's log grain table, log gain table and fit header.
-fn colour_columns(group: Group, planes: &[&str]) -> Vec<Column> {
+fn colour_columns(group: AvdsGroup, planes: &[&str]) -> Vec<Column> {
     let cells = COLOUR_CELLS as usize;
     let header_len = COLOUR_FIT_PLANE_WORDS as usize;
     let plane_len = 2 * cells + header_len;

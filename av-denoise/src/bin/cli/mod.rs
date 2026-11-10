@@ -78,6 +78,9 @@ pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<ChannelIntent,
     Ok(intent)
 }
 
+/// The help heading of the global options that set up denoising.
+const DENOISE_OPTIONS: &str = "Denoise options";
+
 #[derive(Debug, Parser)]
 #[command(about = "Fast and efficient video denoising", long_about = None, version)]
 pub struct Args {
@@ -94,7 +97,13 @@ pub struct Args {
     /// `nl4d` runs `base`, the default, and `slow`. `slow` raises the
     /// motion search escalation ceiling to 8, so badly matched motion
     /// blocks search again with a wider window.
-    #[arg(long, env = "AVD_PRESET", default_value = "base", global = true)]
+    #[arg(
+        long,
+        env = "AVD_PRESET",
+        default_value = "base",
+        global = true,
+        help_heading = DENOISE_OPTIONS
+    )]
     pub preset: Preset,
 
     /// Which hardware backends to try, in order of preference.
@@ -109,7 +118,8 @@ pub struct Args {
         env = "AVD_ACCELERATORS",
         value_delimiter = ',',
         default_values_t = get_default_accelerators(),
-        global = true
+        global = true,
+        help_heading = DENOISE_OPTIONS
     )]
     pub accelerators: Vec<Accelerator>,
 
@@ -127,7 +137,14 @@ pub struct Args {
     /// `cpu` picks a software device where the platform offers one,
     /// such as lavapipe under Vulkan. It is for testing the pipeline,
     /// not for real encodes.
-    #[arg(short, long, env = "AVD_DEVICE", default_value = "default", global = true)]
+    #[arg(
+        short,
+        long,
+        env = "AVD_DEVICE",
+        default_value = "default",
+        global = true,
+        help_heading = DENOISE_OPTIONS
+    )]
     pub device: Device,
 
     /// Which planes of the video to clean (comma-separated).
@@ -145,7 +162,8 @@ pub struct Args {
         value_enum,
         value_delimiter = ',',
         default_value = "luma,chroma",
-        global = true
+        global = true,
+        help_heading = DENOISE_OPTIONS
     )]
     pub channel_mode: Vec<CliChannelMode>,
 
@@ -156,7 +174,7 @@ pub struct Args {
     /// output is usually piped into, scrambles it.
     ///
     /// The bar is only drawn when stderr is a terminal.
-    #[arg(long, env = "AVD_PROGRESS", global = true)]
+    #[arg(long, env = "AVD_PROGRESS", global = true, help_heading = DENOISE_OPTIONS)]
     pub progress: bool,
 
     #[command(subcommand)]
@@ -196,7 +214,8 @@ pub enum Command {
     /// Build grain outputs from a grain data file written by `--export-avds`.
     ///
     /// Each output is its own subcommand. `synthesize` reads only the file, so it runs without a
-    /// GPU and can be run again with other options without denoising again.
+    /// GPU and can be run again with other options without denoising again. The denoise options
+    /// have no effect here.
     Synthesize(SynthesizeArgs),
 
     /// List the devices each backend can see on this machine.

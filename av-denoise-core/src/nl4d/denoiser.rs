@@ -146,7 +146,7 @@ pub(crate) fn buffer_sizes(
         buffers.push(("grain saved vectors", saved_mv));
     }
 
-    if let Some(planes) = persistence_planes(params, nlm_params.channels) {
+    if let Some(planes) = grain_planes(params, nlm_params.channels) {
         let (history, partials) = planes.buffer_lens(width, height);
         buffers.push(("grain persistence history", Some(history)));
         buffers.push(("grain persistence partials", Some(partials)));
@@ -155,8 +155,8 @@ pub(crate) fn buffer_sizes(
     buffers
 }
 
-/// The planes the grain persistence reads on a pass over `channels`, `None` without grain data.
-fn persistence_planes(params: &Nl4dParams, channels: ChannelMode) -> Option<MeasuredPlanes> {
+/// The planes a pass over `channels` measures grain on, `None` without grain data.
+fn grain_planes(params: &Nl4dParams, channels: ChannelMode) -> Option<MeasuredPlanes> {
     if !params.grain_data {
         return None;
     }
@@ -298,16 +298,13 @@ impl Nl4dDenoiser {
         let wsum = client.empty(wsum_bytes);
         let outputs = [client.empty(output_bytes), client.empty(output_bytes)];
 
-        let measures_grain = params.grain_data && !guides_only;
-        let measures_table = measures_grain && channels == ChannelMode::Luma;
-        let persistence = persistence_planes(&params, channels).filter(|_| measures_grain);
+        let measured_planes = grain_planes(&params, channels).filter(|_| !guides_only);
         let reads_noise = front.reading_history().is_some();
-        let parts = GrainParts {
-            table: measures_table,
-            persistence,
-            noise: reads_noise,
-        };
-        let grain = if measures_grain {
+        let grain = if let Some(planes) = measured_planes {
+            let parts = GrainParts {
+                planes,
+                noise: reads_noise,
+            };
             let motion_ctx = front.motion_ctx();
             let geometry = GrainGeometry {
                 width,
@@ -656,7 +653,7 @@ impl Nl4dDenoiser {
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn has_grain_export(&self) -> bool {
+    pub(crate) fn has_grain_data(&self) -> bool {
         self.grain.is_some()
     }
 

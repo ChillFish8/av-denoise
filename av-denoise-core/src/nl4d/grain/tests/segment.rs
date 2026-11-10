@@ -21,8 +21,9 @@ const EDGE_BUCKET: usize = 37;
 /// Fits the scenes with every measured part of the grain kept.
 fn fit_measured(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
     let options = FitOptions::default();
+    let scenes: Vec<&SceneGrain> = scenes.iter().collect();
 
-    fit_scenes(scenes, &options)
+    fit_scenes(&scenes, &options)
 }
 
 /// A chunk with an AR record and 1500 blocks at `std_codes` in only two luma bins.

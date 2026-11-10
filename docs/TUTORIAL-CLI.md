@@ -22,6 +22,7 @@ The following (non-accelerator) features are available:
     * This pulls in BestSource as a hard dependency. You must install FFmpeg (libavcodec and libavformat 63.1 or
       newer, libavutil 61.1 or newer) and xxHash 0.8 or newer, and `pkg-config` must be able to find them.
     * BestSource saves an index beside each source file so later runs open faster. Use `--no-index-cache` to disable it.
+- `avds` - Reads and writes `.avds` grain data files. `binary` turns it on.
 - `static-bestsource` - Enables `binary` and links BestSource statically. It reads the library from
   `BESTSOURCE_LIB_DIR` and FFmpeg from `PKG_CONFIG_PATH`. `just static-deps` builds both with vcpkg and
   `just build-static` builds the binary against them.

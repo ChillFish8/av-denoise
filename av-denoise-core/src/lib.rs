@@ -41,7 +41,16 @@ pub use self::engine::{
 pub use self::error::Error;
 pub use self::kernel_cache::prepare_kernel_cache;
 pub use self::nl4d::Nl4dOptions;
-pub use self::nl4d::grain::{FitOptions, FrameGrain, GrainChunk, GrainChunks, SceneGrain, build_table, frame_rows};
+pub use self::nl4d::grain::{
+    DEFAULT_FINE_NOISE,
+    FitOptions,
+    FrameGrain,
+    GrainChunk,
+    GrainChunks,
+    SceneGrain,
+    build_table,
+    frame_rows,
+};
 pub use self::nlmeans::{
     DEFAULT_PILOT_STRENGTH_SCALE,
     DenoisingMode,

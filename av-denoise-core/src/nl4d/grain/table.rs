@@ -81,17 +81,25 @@ pub(crate) fn format_table(entries: &[FittedEntry], frame_rate: (u64, u64)) -> S
     text
 }
 
+/// The recommended share of the fine, fresh scan noise taken out of a grain table.
+pub const DEFAULT_FINE_NOISE: f64 = 0.5;
+
 /// How a grain table is fitted.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct FitOptions {
     /// The share of the fine, fresh scan noise's variance taken out, between 0 and 1.
     ///
-    /// 0 keeps everything measured.
+    /// The default of 0 keeps everything measured. [DEFAULT_FINE_NOISE] is the recommended share.
     pub fine_noise: f64,
 }
 
 impl FitOptions {
+    /// The options with `share` of the fine noise taken out.
+    pub fn with_fine_noise(share: f64) -> Self {
+        Self { fine_noise: share }
+    }
+
     /// The options with the fine noise share clamped to 0..=1, NaN read as 0.
     fn clamped(&self) -> Self {
         let share = self.fine_noise;
@@ -110,7 +118,7 @@ impl FitOptions {
 /// `frame_rate` is `(numerator, denominator)` frames per second. Entries follow the output's frame
 /// timeline from 0. The fine noise share is clamped to 0..=1, and NaN reads as 0.
 pub fn build_table(scenes: &[SceneGrain], frame_rate: (u64, u64), options: &FitOptions) -> String {
-    let mut sorted = scenes.to_vec();
+    let mut sorted: Vec<&SceneGrain> = scenes.iter().collect();
     sorted.sort_by_key(|scene| scene.first_frame);
 
     let clamped = options.clamped();

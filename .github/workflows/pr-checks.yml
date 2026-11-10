@@ -104,7 +104,7 @@ jobs:
       - name: Clippy
         run: |
           set -euo pipefail
-          cargo clippy -p av-denoise-core --features vulkan --all-targets -- -D warnings
+          cargo clippy -p av-denoise-core --features vulkan,avds --all-targets -- -D warnings
           cargo clippy -p av-denoise --features vulkan,static-bestsource --all-targets -- -D warnings
           cargo clippy -p av-denoise-vs --features vulkan --all-targets -- -D warnings
 
@@ -174,14 +174,14 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          cargo build -p av-denoise-core --no-default-features --features metal
+          cargo build -p av-denoise-core --no-default-features --features metal,avds
           cargo build -p av-denoise --no-default-features --features metal,static-bestsource
           cargo build -p av-denoise-vs --no-default-features --features metal
 
       - name: Clippy
         run: |
           set -euo pipefail
-          cargo clippy -p av-denoise-core --no-default-features --features metal --all-targets -- -D warnings
+          cargo clippy -p av-denoise-core --no-default-features --features metal,avds --all-targets -- -D warnings
           cargo clippy -p av-denoise --no-default-features --features metal,static-bestsource --all-targets -- -D warnings
           cargo clippy -p av-denoise-vs --no-default-features --features metal --all-targets -- -D warnings
 

@@ -22,7 +22,7 @@ use crate::nl4d::grain::consts::{
 };
 use crate::nl4d::grain::fit::{bucket_edges, hist_median};
 use crate::nl4d::grain::segment::SceneGrain;
-use crate::nl4d::grain::{FitOptions, GrainExport, GrainGeometry, GrainParts, build_table};
+use crate::nl4d::grain::{FitOptions, GrainExport, GrainGeometry, GrainParts, MeasuredPlanes, build_table};
 use crate::nl4d::snapshot::LastFields;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{
@@ -55,9 +55,8 @@ const PERSISTENCE_PARTIALS: &str = "grain persistence partials";
 const DIRECT_STEP: u32 = 8;
 /// Ring slots a stream fed straight to a [GrainExport] cycles through.
 const DIRECT_RING_FRAMES: u32 = 3;
-const TABLE_ONLY: GrainParts = GrainParts {
-    table: true,
-    persistence: None,
+const LUMA_PASS: GrainParts = GrainParts {
+    planes: MeasuredPlanes::Luma,
     noise: false,
 };
 const BANDED_SIZE: u32 = 128;
@@ -182,7 +181,7 @@ fn run_sized(
 ) -> (Vec<Vec<f32>>, Vec<GrainChunk>, bool) {
     let client = make_client();
     let mut denoiser = Nl4dDenoiser::new(&client, params, width, height).expect("construction");
-    let has_export = denoiser.has_grain_export();
+    let has_export = denoiser.has_grain_data();
     let mut outputs = Vec::new();
 
     denoise_stream(&mut denoiser, frames, &mut outputs);
@@ -491,7 +490,7 @@ fn write_slot(ring: &mut [f32], slot: u32, frame: &[f32]) {
     ring[start..start + frame.len()].copy_from_slice(frame);
 }
 
-/// Feeds `stream` straight to a table-only [GrainExport], as the denoiser does, and drains it.
+/// Feeds `stream` straight to a luma [GrainExport], as the denoiser does, and drains it.
 fn export_stream(stream: &StillStream) -> Vec<GrainChunk> {
     let client = make_client();
     let geometry = GrainGeometry {
@@ -508,7 +507,7 @@ fn export_stream(stream: &StillStream) -> Vec<GrainChunk> {
     let frame_len = (stream.width * stream.height) as usize;
     let frame_count = stream.sources.len();
     let mut ring = vec![0.0f32; frame_len * DIRECT_RING_FRAMES as usize];
-    let mut export = GrainExport::new(&client, geometry, TABLE_ONLY);
+    let mut export = GrainExport::new(&client, geometry, LUMA_PASS);
 
     for index in 0..frame_count {
         let slot = ring_slot(index);

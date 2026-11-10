@@ -1,11 +1,11 @@
 use super::consts::{AUTOCOV_LEN, FRAME_TABLE_LEN, HIST_LEN, LAG_COUNT, STRENGTH_GROUPS};
 
-/// The grain statistics of up to `CHUNK_FRAMES` consecutive completed frames of one scene.
+/// The grain statistics of up to 24 consecutive completed frames of one scene.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GrainChunk {
     /// How many completed frames the chunk covers.
     pub frames: u32,
-    /// Each frame's table statistics, `FRAME_TABLE_LEN` per frame, in frame order.
+    /// Each frame's table statistics, 2800 values per frame, in frame order.
     ///
     /// Counts are whole numbers and lag sums are the GPU's own f32 values. Empty when the table is
     /// not measured.

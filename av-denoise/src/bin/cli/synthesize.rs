@@ -3,7 +3,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use av_denoise::FrameGrain;
-use av_denoise::avds::{AvdsFrame, AvdsMeta, FitOptions, av1_table, read_avds, report_rows};
+use av_denoise::avds::{
+    AV1_TABLE_GROUPS,
+    AvdsFrame,
+    AvdsGroup,
+    AvdsMeta,
+    DEFAULT_FINE_NOISE,
+    FitOptions,
+    REPORT_GROUPS,
+    av1_table,
+    read_avds_groups,
+    report_rows,
+};
 
 use crate::pipeline::StagedFile;
 
@@ -18,6 +29,9 @@ pub struct SynthesizeArgs {
 #[derive(Debug, clap::Subcommand)]
 pub enum SynthesizeKind {
     /// Write an AV1 film grain table.
+    ///
+    /// Apply it with `regrain apply`, since SVT-AV1 and grav1synth apply only its first entry. Its
+    /// timestamps suit constant frame rate video.
     Av1Fgs(Av1FgsArgs),
     /// Write the per-frame grain report as JSON lines.
     Report(ReportArgs),
@@ -46,7 +60,7 @@ pub struct Av1FgsArgs {
     #[arg(
         long,
         value_name = "AMOUNT",
-        default_value_t = 0.5,
+        default_value_t = DEFAULT_FINE_NOISE,
         value_parser = parse_fine_noise,
         allow_negative_numbers = true
     )]
@@ -82,8 +96,7 @@ impl Av1FgsArgs {
             anyhow::bail!("--planes accepts luma only, chroma grain is not synthesised yet");
         }
 
-        let mut options = FitOptions::default();
-        options.fine_noise = self.fine_noise;
+        let options = FitOptions::with_fine_noise(self.fine_noise);
 
         Ok(options)
     }
@@ -100,9 +113,9 @@ pub fn run_synthesize(args: &SynthesizeArgs) -> Result<(), anyhow::Error> {
 fn write_av1_table(args: &Av1FgsArgs) -> Result<(), anyhow::Error> {
     let options = args.fit_options()?;
     let output = StagedFile::create(&args.output, "grain table")?;
-    let (meta, rows) = read_file(&args.input)?;
+    let (meta, rows) = read_file(&args.input, &AV1_TABLE_GROUPS)?;
 
-    let table = av1_table(&meta, &rows, &options)?;
+    let table = av1_table(&meta, rows, &options)?;
     warn_on_empty_table(&table);
 
     output.commit(table.as_bytes())
@@ -110,9 +123,9 @@ fn write_av1_table(args: &Av1FgsArgs) -> Result<(), anyhow::Error> {
 
 fn write_report(args: &ReportArgs) -> Result<(), anyhow::Error> {
     let output = StagedFile::create(&args.output, "grain report")?;
-    let (_, rows) = read_file(&args.input)?;
+    let (_, rows) = read_file(&args.input, &REPORT_GROUPS)?;
 
-    let report = report_rows(&rows);
+    let report = report_rows(rows);
     let text = report_text(&report)?;
 
     output.commit(text.as_bytes())
@@ -137,12 +150,14 @@ pub fn report_text(rows: &[FrameGrain]) -> Result<String, anyhow::Error> {
     Ok(text)
 }
 
-fn read_file(path: &Path) -> Result<(AvdsMeta, Vec<AvdsFrame>), anyhow::Error> {
+/// The file's metadata and rows, with only the columns of `groups`.
+fn read_file(path: &Path, groups: &[AvdsGroup]) -> Result<(AvdsMeta, Vec<AvdsFrame>), anyhow::Error> {
     let shown_path = path.display();
     let file =
         File::open(path).with_context(|| format!("unable to open the grain data file at {shown_path}"))?;
 
-    read_avds(file).with_context(|| format!("unable to read the grain data file at {shown_path}"))
+    read_avds_groups(file, groups)
+        .with_context(|| format!("unable to read the grain data file at {shown_path}"))
 }
 
 fn parse_fine_noise(text: &str) -> Result<f64, String> {

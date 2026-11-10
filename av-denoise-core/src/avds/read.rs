@@ -3,11 +3,13 @@ use arrow_array::cast::AsArray;
 use arrow_array::types::{ArrowPrimitiveType, Float32Type, Float64Type, UInt32Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, FixedSizeListArray, PrimitiveArray, RecordBatch};
 use arrow_schema::{DataType, Schema};
+use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::ChunkReader;
+use parquet::schema::types::SchemaDescriptor;
 
 use super::meta::meta_from_pairs;
-use super::schema::{Column, FIRST_OF_SCENE_COLUMN, FRAME_COLUMN, Group, SCENE_COLUMN, Value, columns};
+use super::schema::{AvdsGroup, Column, FIRST_OF_SCENE_COLUMN, FRAME_COLUMN, SCENE_COLUMN, Value, columns};
 use super::{AvdsFrame, AvdsMeta};
 
 /// Rows read per batch.
@@ -18,6 +20,16 @@ const BATCH_FRAMES: usize = 1024;
 /// Fails on a major version this crate does not know, a missing column, a row count that differs
 /// from the metadata's `frames`, or rows whose frames do not run from 0 in order.
 pub fn read_avds<R: ChunkReader + 'static>(reader: R) -> Result<(AvdsMeta, Vec<AvdsFrame>), anyhow::Error> {
+    read_avds_groups(reader, &AvdsGroup::ALL)
+}
+
+/// Reads a grain data file's metadata and every row, with only the columns of `groups`.
+///
+/// Every other group is `None` in each row. It fails in the same cases as [read_avds].
+pub fn read_avds_groups<R: ChunkReader + 'static>(
+    reader: R,
+    groups: &[AvdsGroup],
+) -> Result<(AvdsMeta, Vec<AvdsFrame>), anyhow::Error> {
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(reader).context("unable to open the grain data file")?;
 
@@ -31,11 +43,19 @@ pub fn read_avds<R: ChunkReader + 'static>(reader: R) -> Result<(AvdsMeta, Vec<A
         anyhow::bail!("the grain data file holds {row_count} rows but its metadata says {frames} frames");
     }
 
-    let columns = columns();
+    let all_columns = columns();
     let schema = builder.schema();
-    check_columns(schema, &columns)?;
+    check_columns(schema, &all_columns)?;
+
+    let columns: Vec<Column> = all_columns
+        .into_iter()
+        .filter(|column| groups.contains(&column.group))
+        .collect();
+    let parquet_schema = builder.parquet_schema();
+    let projection = projection_of(parquet_schema, &columns);
 
     let batches = builder
+        .with_projection(projection)
         .with_batch_size(BATCH_FRAMES)
         .build()
         .context("unable to read the grain data file")?;
@@ -84,6 +104,22 @@ fn check_columns(schema: &Schema, columns: &[Column]) -> Result<(), anyhow::Erro
     Ok(())
 }
 
+/// The frame, scene and first-of-scene columns plus `columns`, as top-level Parquet fields.
+fn projection_of(parquet_schema: &SchemaDescriptor, columns: &[Column]) -> ProjectionMask {
+    let mut names = vec![FRAME_COLUMN, SCENE_COLUMN, FIRST_OF_SCENE_COLUMN];
+    let column_names = columns.iter().map(|column| column.name.as_str());
+    names.extend(column_names);
+
+    let roots = parquet_schema.root_schema().get_fields();
+    let indices = roots
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| names.contains(&field.name()))
+        .map(|(index, _)| index);
+
+    ProjectionMask::roots(parquet_schema, indices)
+}
+
 fn column_type<'a>(schema: &'a Schema, name: &str) -> Result<&'a DataType, anyhow::Error> {
     let field = schema.field_with_name(name).ok();
     let field = field.with_context(|| format!("the grain data file has no {name} column"))?;
@@ -125,7 +161,7 @@ fn rows_of(batch: &RecordBatch, columns: &[Column]) -> Result<Vec<AvdsFrame>, an
         rows.push(row);
     }
 
-    let mut seen_groups: Vec<Group> = Vec::new();
+    let mut seen_groups: Vec<AvdsGroup> = Vec::new();
     for column in columns {
         let array = batch
             .column_by_name(&column.name)

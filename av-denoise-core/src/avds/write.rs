@@ -10,7 +10,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::metadata::KeyValue;
 
 use super::meta::{FRAMES_KEY, metadata_pairs};
-use super::schema::{Column, Group, Value, arrow_schema, columns, list_item, writer_properties};
+use super::schema::{AvdsGroup, Column, Value, arrow_schema, columns, list_item, writer_properties};
 use super::{AvdsFrame, AvdsMeta};
 
 /// Writes a grain data file row by row, in frame order.
@@ -100,7 +100,7 @@ pub fn write_avds<W: Write + Send>(
 
 /// Refuses a row whose measured groups hold the wrong number of values.
 fn check_lengths(row: &AvdsFrame) -> Result<(), anyhow::Error> {
-    for group in Group::ALL {
+    for group in AvdsGroup::ALL {
         let float_len = row.floats(group).map(<[f32]>::len);
         let double_len = row.doubles(group).map(<[f64]>::len);
         let Some(len) = float_len.or(double_len) else {

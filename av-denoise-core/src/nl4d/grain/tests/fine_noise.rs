@@ -207,6 +207,7 @@ fn fit_with(field: &[f64], fine_noise: f64) -> FittedEntry {
 fn fit_with_kept(field: &[f64], fine_noise: f64, kept_ratio: Option<f64>) -> FittedEntry {
     let scenes = scenes_with_kept(field, kept_ratio);
     let options = FitOptions { fine_noise };
+    let scenes: Vec<&SceneGrain> = scenes.iter().collect();
     let mut entries = fit_scenes(&scenes, &options);
 
     assert_eq!(entries.len(), 1);

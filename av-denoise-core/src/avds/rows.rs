@@ -1,5 +1,5 @@
 use super::AvdsFrame;
-use super::schema::Group;
+use super::schema::AvdsGroup;
 use crate::nl4d::grain::consts::CHUNK_FRAMES;
 use crate::{GrainChunk, SceneGrain};
 
@@ -34,15 +34,25 @@ pub(super) fn scene_rows(scene: &SceneGrain, scene_index: u64) -> Vec<AvdsFrame>
     }
 
     for chunk in &scene.chunks {
-        check_field("frame_tables", &chunk.frame_tables, chunk.frames, Group::Table);
+        check_field(
+            "frame_tables",
+            &chunk.frame_tables,
+            chunk.frames,
+            AvdsGroup::Table,
+        );
         check_field(
             "frame_records",
             &chunk.frame_records,
             chunk.frames,
-            Group::Persistence,
+            AvdsGroup::Persistence,
         );
-        check_field("frame_noise", &chunk.frame_noise, chunk.frames, Group::Noise);
-        check_field("frame_colour", &chunk.frame_colour, chunk.frames, Group::Colour);
+        check_field("frame_noise", &chunk.frame_noise, chunk.frames, AvdsGroup::Noise);
+        check_field(
+            "frame_colour",
+            &chunk.frame_colour,
+            chunk.frames,
+            AvdsGroup::Colour,
+        );
     }
 
     for chunk in &scene.chroma_chunks {
@@ -50,19 +60,19 @@ pub(super) fn scene_rows(scene: &SceneGrain, scene_index: u64) -> Vec<AvdsFrame>
             "chroma frame_records",
             &chunk.frame_records,
             chunk.frames,
-            Group::ChromaPersistence,
+            AvdsGroup::ChromaPersistence,
         );
         check_field(
             "chroma frame_noise",
             &chunk.frame_noise,
             chunk.frames,
-            Group::ChromaNoise,
+            AvdsGroup::ChromaNoise,
         );
         check_field(
             "chroma frame_colour",
             &chunk.frame_colour,
             chunk.frames,
-            Group::ChromaColour,
+            AvdsGroup::ChromaColour,
         );
     }
 
@@ -71,10 +81,10 @@ pub(super) fn scene_rows(scene: &SceneGrain, scene_index: u64) -> Vec<AvdsFrame>
         for slot in 0..chunk.frames as usize {
             let frame = scene.first_frame + rows.len() as u64;
             let first_of_scene = rows.is_empty();
-            let table = frame_values(&chunk.frame_tables, slot, Group::Table);
-            let persistence = frame_values(&chunk.frame_records, slot, Group::Persistence);
-            let noise = frame_values(&chunk.frame_noise, slot, Group::Noise);
-            let colour = frame_values(&chunk.frame_colour, slot, Group::Colour);
+            let table = frame_values(&chunk.frame_tables, slot, AvdsGroup::Table);
+            let persistence = frame_values(&chunk.frame_records, slot, AvdsGroup::Persistence);
+            let noise = frame_values(&chunk.frame_noise, slot, AvdsGroup::Noise);
+            let colour = frame_values(&chunk.frame_colour, slot, AvdsGroup::Colour);
 
             let row = AvdsFrame {
                 frame,
@@ -97,16 +107,16 @@ pub(super) fn scene_rows(scene: &SceneGrain, scene_index: u64) -> Vec<AvdsFrame>
         .iter()
         .flat_map(|chunk| (0..chunk.frames as usize).map(move |slot| (chunk, slot)));
     for (row, (chunk, slot)) in rows.iter_mut().zip(chroma_slots) {
-        row.chroma_persistence = frame_values(&chunk.frame_records, slot, Group::ChromaPersistence);
-        row.chroma_noise = frame_values(&chunk.frame_noise, slot, Group::ChromaNoise);
-        row.chroma_colour = frame_values(&chunk.frame_colour, slot, Group::ChromaColour);
+        row.chroma_persistence = frame_values(&chunk.frame_records, slot, AvdsGroup::ChromaPersistence);
+        row.chroma_noise = frame_values(&chunk.frame_noise, slot, AvdsGroup::ChromaNoise);
+        row.chroma_colour = frame_values(&chunk.frame_colour, slot, AvdsGroup::ChromaColour);
     }
 
     rows
 }
 
 /// Panics unless the chunk field `name` is empty or holds `frames` frames of `group`.
-fn check_field<T>(name: &str, values: &[T], frames: u32, group: Group) {
+fn check_field<T>(name: &str, values: &[T], frames: u32, group: AvdsGroup) {
     if values.is_empty() {
         return;
     }
@@ -119,7 +129,7 @@ fn check_field<T>(name: &str, values: &[T], frames: u32, group: Group) {
 }
 
 /// Slot `slot` of a chunk field of `group`, `None` when the field is empty.
-fn frame_values<T: Copy>(values: &[T], slot: usize, group: Group) -> Option<Vec<T>> {
+fn frame_values<T: Copy>(values: &[T], slot: usize, group: AvdsGroup) -> Option<Vec<T>> {
     if values.is_empty() {
         return None;
     }
@@ -136,20 +146,24 @@ fn frame_values<T: Copy>(values: &[T], slot: usize, group: Group) -> Option<Vec<
 /// A scene starts at each row marked as the first of its scene. Each scene is cut into chunks of
 /// up to 24 frames from its first frame. A chunk keeps a group when any of its rows has it, and
 /// rows without it hold zeros there.
-pub fn scenes_from_rows(rows: &[AvdsFrame]) -> Vec<SceneGrain> {
+///
+/// Each scene's rows are dropped once its chunks are built.
+pub fn scenes_from_rows(rows: Vec<AvdsFrame>) -> Vec<SceneGrain> {
     let mut scenes = Vec::new();
-    let mut start = 0;
-    while start < rows.len() {
-        let remaining = &rows[start + 1..];
-        let scene_len = remaining
-            .iter()
-            .position(|row| row.first_of_scene)
-            .map_or(rows.len() - start, |offset| offset + 1);
+    let mut scene_rows = Vec::new();
+    for row in rows {
+        if row.first_of_scene && !scene_rows.is_empty() {
+            let scene = scene_of(&scene_rows);
+            scenes.push(scene);
+            scene_rows.clear();
+        }
 
-        let scene_rows = &rows[start..start + scene_len];
-        let scene = scene_of(scene_rows);
+        scene_rows.push(row);
+    }
+
+    if !scene_rows.is_empty() {
+        let scene = scene_of(&scene_rows);
         scenes.push(scene);
-        start += scene_len;
     }
 
     scenes
@@ -180,10 +194,10 @@ fn scene_of(rows: &[AvdsFrame]) -> SceneGrain {
 }
 
 fn luma_chunk(rows: &[AvdsFrame]) -> GrainChunk {
-    let frame_tables = joined(rows, Group::Table, AvdsFrame::floats);
-    let frame_records = joined(rows, Group::Persistence, AvdsFrame::doubles);
-    let frame_noise = joined(rows, Group::Noise, AvdsFrame::floats);
-    let frame_colour = joined(rows, Group::Colour, AvdsFrame::floats);
+    let frame_tables = joined(rows, AvdsGroup::Table, AvdsFrame::floats);
+    let frame_records = joined(rows, AvdsGroup::Persistence, AvdsFrame::doubles);
+    let frame_noise = joined(rows, AvdsGroup::Noise, AvdsFrame::floats);
+    let frame_colour = joined(rows, AvdsGroup::Colour, AvdsFrame::floats);
 
     GrainChunk {
         frames: rows.len() as u32,
@@ -195,9 +209,9 @@ fn luma_chunk(rows: &[AvdsFrame]) -> GrainChunk {
 }
 
 fn chroma_chunk(rows: &[AvdsFrame]) -> GrainChunk {
-    let frame_records = joined(rows, Group::ChromaPersistence, AvdsFrame::doubles);
-    let frame_noise = joined(rows, Group::ChromaNoise, AvdsFrame::floats);
-    let frame_colour = joined(rows, Group::ChromaColour, AvdsFrame::floats);
+    let frame_records = joined(rows, AvdsGroup::ChromaPersistence, AvdsFrame::doubles);
+    let frame_noise = joined(rows, AvdsGroup::ChromaNoise, AvdsFrame::floats);
+    let frame_colour = joined(rows, AvdsGroup::ChromaColour, AvdsFrame::floats);
 
     GrainChunk {
         frames: rows.len() as u32,
@@ -211,8 +225,8 @@ fn chroma_chunk(rows: &[AvdsFrame]) -> GrainChunk {
 /// Every row's values of `group` in turn, empty when no row has the group.
 fn joined<T: Copy + Default>(
     rows: &[AvdsFrame],
-    group: Group,
-    values_of: impl Fn(&AvdsFrame, Group) -> Option<&[T]>,
+    group: AvdsGroup,
+    values_of: impl Fn(&AvdsFrame, AvdsGroup) -> Option<&[T]>,
 ) -> Vec<T> {
     let measured = rows.iter().any(|row| values_of(row, group).is_some());
     if !measured {

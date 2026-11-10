@@ -201,7 +201,9 @@ impl Nl4dArgs {
         let intent = resolve_channel_intent(&globals.channel_mode)?;
 
         let exports_avds = self.export_avds.is_some();
-        check_luma_flag("--export-avds", exports_avds, intent)?;
+        if exports_avds && intent == ChannelIntent::Chroma {
+            anyhow::bail!("--export-avds measures luma grain, so it needs luma to be denoised");
+        }
 
         // Checked in 8-bit units so the error reports the number the user typed. The library's
         // own check runs after the /255 normalisation, in 0..=1 units.
@@ -284,15 +286,6 @@ impl Nl4dArgs {
             _ => {},
         }
     }
-}
-
-/// Refuses a grain flag in a run that does not denoise luma.
-fn check_luma_flag(flag: &str, given: bool, intent: ChannelIntent) -> Result<(), anyhow::Error> {
-    if given && intent == ChannelIntent::Chroma {
-        anyhow::bail!("{flag} measures luma grain, so it needs luma to be denoised");
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

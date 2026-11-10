@@ -38,10 +38,10 @@ const CHUNK_AUTOCOV_LEN: usize = CHUNK_FRAMES as usize * GROUPED_AUTOCOV_LEN;
 /// Which measurements a [GrainExport] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GrainParts {
-    /// The source grain table measurement, histograms and autocovariance, on luma only.
-    pub table: bool,
-    /// The planes the per-frame grain persistence measurement reads, `None` when it is off.
-    pub persistence: Option<MeasuredPlanes>,
+    /// The planes the pass measures.
+    ///
+    /// Luma also measures the source grain table, histograms and autocovariance.
+    pub planes: MeasuredPlanes,
     /// Whether each frame keeps the noise reading it was filtered with.
     pub noise: bool,
 }
@@ -127,8 +127,8 @@ struct TableChunk {
 struct ChunkBuffers {
     /// Present when the table is measured.
     table: Option<TableChunk>,
-    /// Each frame's persistence sums, present when persistence is measured.
-    frame_record: Option<Handle>,
+    /// Each frame's persistence sums.
+    frame_record: Handle,
     /// Each frame's noise reading and colour fit, each present when it is kept.
     snapshots: SnapshotChunk,
     frames: u32,
@@ -323,8 +323,8 @@ pub(crate) struct GrainExport {
     geometry: GrainGeometry,
     /// Present when the table is measured.
     table: Option<TableMeasure>,
-    /// Present when persistence is measured.
-    persistence: Option<PersistenceMeasure>,
+    /// The persistence sums each frame adds to its chunk.
+    persistence: PersistenceMeasure,
     /// The noise reading and colour fit each frame was filtered with.
     snapshots: SnapshotMeasure,
     /// Each completed frame fills its own slot in the newest chunk, which stays on the GPU until
@@ -342,10 +342,9 @@ struct FrameLens {
 
 impl GrainExport {
     pub(crate) fn new(client: &Client, geometry: GrainGeometry, parts: GrainParts) -> Self {
-        let table = parts.table.then(|| TableMeasure::new(client, &geometry));
-        let persistence = parts
-            .persistence
-            .map(|planes| PersistenceMeasure::new(client, &geometry, planes));
+        let measures_table = parts.planes == MeasuredPlanes::Luma;
+        let table = measures_table.then(|| TableMeasure::new(client, &geometry));
+        let persistence = PersistenceMeasure::new(client, &geometry, parts.planes);
         let snapshots = SnapshotMeasure::new(client, geometry.ring_frames, parts.noise);
 
         Self {
@@ -413,10 +412,8 @@ impl GrainExport {
             table.measure(client, &self.geometry, &frame, table_chunk, chunk.frames);
         }
 
-        let persistence = self.persistence.as_mut();
-        if let (Some(persistence), Some(frame_record)) = (persistence, &chunk.frame_record) {
-            persistence.measure(client, &self.geometry, &frame, frame_record, chunk.frames);
-        }
+        self.persistence
+            .measure(client, &self.geometry, &frame, &chunk.frame_record, chunk.frames);
 
         self.snapshots
             .measure(client, frame_slot, &chunk.snapshots, chunk.frames);
@@ -434,10 +431,7 @@ impl GrainExport {
     fn open_chunk(&mut self, client: &Client) -> ChunkBuffers {
         if !self.chunk_open {
             let table = self.table.as_ref().map(|_| TableMeasure::open_chunk(client));
-            let frame_record = self
-                .persistence
-                .as_ref()
-                .map(|persistence| persistence.open_chunk(client));
+            let frame_record = self.persistence.open_chunk(client);
             let snapshots = self.snapshots.open_chunk(client);
             self.chunks.push(ChunkBuffers {
                 table,
@@ -464,10 +458,7 @@ impl GrainExport {
             table.reset_stream();
         }
 
-        if let Some(persistence) = self.persistence.as_mut() {
-            persistence.reset_stream();
-        }
-
+        self.persistence.reset_stream();
         self.chunk_open = false;
     }
 
@@ -476,12 +467,8 @@ impl GrainExport {
         let buffers = std::mem::take(&mut self.chunks);
         self.chunk_open = false;
 
-        let record = self
-            .persistence
-            .as_ref()
-            .map_or(0, PersistenceMeasure::frame_record_len);
         let lens = FrameLens {
-            record,
+            record: self.persistence.frame_record_len(),
             noise: self.snapshots.noise_len(),
             colour: self.snapshots.colour_len(),
         };
@@ -506,11 +493,9 @@ fn read_chunk(client: &Client, buffer: ChunkBuffers, lens: &FrameLens) -> Result
         chunk.frame_tables = read_table(client, table, frames)?;
     }
 
-    if let Some(frame_record) = buffer.frame_record {
-        let records = read_frames(client, frame_record, frames, lens.record, "frame record")?;
-        let recorded = records.iter().map(|&value| value as f64);
-        chunk.frame_records = recorded.collect();
-    }
+    let records = read_frames(client, buffer.frame_record, frames, lens.record, "frame record")?;
+    let recorded = records.iter().map(|&value| value as f64);
+    chunk.frame_records = recorded.collect();
 
     if let Some(noise) = buffer.snapshots.noise {
         chunk.frame_noise = read_frames(client, noise, frames, lens.noise, "noise snapshot")?;

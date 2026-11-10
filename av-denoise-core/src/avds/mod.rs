@@ -7,6 +7,7 @@
 //! - [AvdsWriter] writes rows in frame order as they arrive.
 //! - [AvdsSceneWriter] takes scenes in any order and writes them in frame order.
 //! - [write_avds] writes a whole file at once and [read_avds] reads one back.
+//! - [read_avds_groups] reads only some groups of columns.
 //! - [av1_table] and [report_rows] build grain outputs from the rows of a file.
 
 mod meta;
@@ -21,13 +22,13 @@ mod write;
 mod tests;
 
 pub use self::order::AvdsSceneWriter;
-pub use self::read::read_avds;
+pub use self::read::{read_avds, read_avds_groups};
 pub use self::rows::{rows_from_scenes, scenes_from_rows};
-use self::schema::Group;
-pub use self::synthesize::{av1_table, report_rows};
+pub use self::schema::AvdsGroup;
+pub use self::synthesize::{AV1_TABLE_GROUPS, REPORT_GROUPS, av1_table, report_rows};
 pub use self::write::{AvdsWriter, write_avds};
-pub use crate::FitOptions;
 use crate::{ChromaLayout, ChromaSiting};
+pub use crate::{DEFAULT_FINE_NOISE, FitOptions};
 
 /// The file format version a writer stamps on every file.
 pub const AVDS_VERSION: &str = "1";
@@ -77,25 +78,29 @@ impl AvdsFrame {
     }
 
     /// The values of a group stored as `f32`, `None` for a group stored as `f64`.
-    fn floats(&self, group: Group) -> Option<&[f32]> {
+    fn floats(&self, group: AvdsGroup) -> Option<&[f32]> {
         let values = match group {
-            Group::Table => &self.table,
-            Group::Noise => &self.noise,
-            Group::ChromaNoise => &self.chroma_noise,
-            Group::Colour => &self.colour,
-            Group::ChromaColour => &self.chroma_colour,
-            Group::Persistence | Group::ChromaPersistence => return None,
+            AvdsGroup::Table => &self.table,
+            AvdsGroup::Noise => &self.noise,
+            AvdsGroup::ChromaNoise => &self.chroma_noise,
+            AvdsGroup::Colour => &self.colour,
+            AvdsGroup::ChromaColour => &self.chroma_colour,
+            AvdsGroup::Persistence | AvdsGroup::ChromaPersistence => return None,
         };
 
         values.as_deref()
     }
 
     /// The values of a group stored as `f64`, `None` for a group stored as `f32`.
-    fn doubles(&self, group: Group) -> Option<&[f64]> {
+    fn doubles(&self, group: AvdsGroup) -> Option<&[f64]> {
         let values = match group {
-            Group::Persistence => &self.persistence,
-            Group::ChromaPersistence => &self.chroma_persistence,
-            Group::Table | Group::Noise | Group::ChromaNoise | Group::Colour | Group::ChromaColour => {
+            AvdsGroup::Persistence => &self.persistence,
+            AvdsGroup::ChromaPersistence => &self.chroma_persistence,
+            AvdsGroup::Table
+            | AvdsGroup::Noise
+            | AvdsGroup::ChromaNoise
+            | AvdsGroup::Colour
+            | AvdsGroup::ChromaColour => {
                 return None;
             },
         };
@@ -103,22 +108,26 @@ impl AvdsFrame {
         values.as_deref()
     }
 
-    fn floats_mut(&mut self, group: Group) -> Option<&mut Option<Vec<f32>>> {
+    fn floats_mut(&mut self, group: AvdsGroup) -> Option<&mut Option<Vec<f32>>> {
         match group {
-            Group::Table => Some(&mut self.table),
-            Group::Noise => Some(&mut self.noise),
-            Group::ChromaNoise => Some(&mut self.chroma_noise),
-            Group::Colour => Some(&mut self.colour),
-            Group::ChromaColour => Some(&mut self.chroma_colour),
-            Group::Persistence | Group::ChromaPersistence => None,
+            AvdsGroup::Table => Some(&mut self.table),
+            AvdsGroup::Noise => Some(&mut self.noise),
+            AvdsGroup::ChromaNoise => Some(&mut self.chroma_noise),
+            AvdsGroup::Colour => Some(&mut self.colour),
+            AvdsGroup::ChromaColour => Some(&mut self.chroma_colour),
+            AvdsGroup::Persistence | AvdsGroup::ChromaPersistence => None,
         }
     }
 
-    fn doubles_mut(&mut self, group: Group) -> Option<&mut Option<Vec<f64>>> {
+    fn doubles_mut(&mut self, group: AvdsGroup) -> Option<&mut Option<Vec<f64>>> {
         match group {
-            Group::Persistence => Some(&mut self.persistence),
-            Group::ChromaPersistence => Some(&mut self.chroma_persistence),
-            Group::Table | Group::Noise | Group::ChromaNoise | Group::Colour | Group::ChromaColour => None,
+            AvdsGroup::Persistence => Some(&mut self.persistence),
+            AvdsGroup::ChromaPersistence => Some(&mut self.chroma_persistence),
+            AvdsGroup::Table
+            | AvdsGroup::Noise
+            | AvdsGroup::ChromaNoise
+            | AvdsGroup::Colour
+            | AvdsGroup::ChromaColour => None,
         }
     }
 }

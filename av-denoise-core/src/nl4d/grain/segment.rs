@@ -262,7 +262,7 @@ fn reduced_weights(corrected: &[f64], measured: Weights, measured_sigma: f64) ->
 }
 
 /// Fits every scene's segments, borrowing missing strength or texture, and drops what has no donor.
-pub(crate) fn fit_scenes(scenes: &[SceneGrain], options: &FitOptions) -> Vec<FittedEntry> {
+pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<FittedEntry> {
     let edges = bucket_edges();
     let mut parts = Vec::new();
     for (scene_index, scene) in scenes.iter().enumerate() {

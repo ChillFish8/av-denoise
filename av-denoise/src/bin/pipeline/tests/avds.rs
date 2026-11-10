@@ -20,7 +20,7 @@ use av_denoise::{
     frame_rows,
 };
 
-use super::{SharedBuffer, TestDir, grainy_clip, multi_scene_clip, pattern, y4m_decoder, y4m_reader};
+use super::{SharedBuffer, grainy_clip, multi_scene_clip, pattern, y4m_decoder, y4m_reader};
 use crate::cli::{
     Av1FgsArgs,
     GrainPlane,
@@ -36,7 +36,6 @@ use crate::pipeline::source::open_y4m;
 use crate::pipeline::worker::{WorkerSettings, spawn_workers};
 use crate::pipeline::{RunSettings, dispatch, run_with};
 
-const DIR_PREFIX: &str = "avd-avds";
 const CLIP_FRAMES: usize = 60;
 /// The frame rate of every test clip.
 const FRAME_RATE: (u64, u64) = (25, 1);
@@ -190,7 +189,7 @@ fn synthesize_report(input: PathBuf, output: PathBuf) {
 
 #[test]
 fn a_run_with_export_avds_writes_one_row_per_frame() {
-    let dir = TestDir::new(DIR_PREFIX, "rows");
+    let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("run.avds");
     let clip = grainy_clip(CLIP_FRAMES);
 
@@ -218,7 +217,7 @@ fn a_run_with_export_avds_writes_one_row_per_frame() {
 
 #[test]
 fn a_luma_only_run_leaves_the_chroma_columns_null() {
-    let dir = TestDir::new(DIR_PREFIX, "luma-only");
+    let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("run.avds");
     let clip = grainy_clip(30);
 
@@ -236,7 +235,7 @@ fn a_luma_only_run_leaves_the_chroma_columns_null() {
 
 #[test]
 fn export_avds_does_not_change_the_output() {
-    let dir = TestDir::new(DIR_PREFIX, "output");
+    let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("run.avds");
     let plain_clip = grainy_clip(40);
     let export_clip = grainy_clip(40);
@@ -249,7 +248,7 @@ fn export_avds_does_not_change_the_output() {
 
 #[test]
 fn synthesize_av1_fgs_matches_the_measured_table() {
-    let dir = TestDir::new(DIR_PREFIX, "synthesize-table");
+    let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("run.avds");
     let synthesized_path = dir.path().join("synthesized.tbl");
     let run_clip = grainy_clip(CLIP_FRAMES);
@@ -279,7 +278,7 @@ fn synthesize_av1_fgs_matches_the_measured_table() {
 
 #[test]
 fn synthesize_report_matches_the_measured_report() {
-    let dir = TestDir::new(DIR_PREFIX, "synthesize-report");
+    let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("run.avds");
     let synthesized_path = dir.path().join("synthesized.jsonl");
     let run_clip = grainy_clip(CLIP_FRAMES);
@@ -300,7 +299,7 @@ fn synthesize_report_matches_the_measured_report() {
 
 #[test]
 fn synthesize_report_of_a_luma_only_run_has_null_chroma() {
-    let dir = TestDir::new(DIR_PREFIX, "synthesize-luma-only");
+    let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("run.avds");
     let synthesized_path = dir.path().join("synthesized.jsonl");
     let clip = chroma_grainy_clip(12);
@@ -322,7 +321,7 @@ fn synthesize_report_of_a_luma_only_run_has_null_chroma() {
 
 #[test]
 fn synthesize_report_of_a_run_denoising_both_has_chroma_strength() {
-    let dir = TestDir::new(DIR_PREFIX, "synthesize-both");
+    let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("run.avds");
     let synthesized_path = dir.path().join("synthesized.jsonl");
     let clip = chroma_grainy_clip(12);
@@ -343,7 +342,7 @@ fn synthesize_report_of_a_run_denoising_both_has_chroma_strength() {
 
 #[test]
 fn a_failed_run_leaves_no_avds_file() {
-    let dir = TestDir::new(DIR_PREFIX, "failed");
+    let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("run.avds");
     let clip = multi_scene_clip(0);
 

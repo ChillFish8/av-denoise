@@ -134,10 +134,6 @@ where
     let (decode_thread, info) = DecodeThread::spawn(opener)?;
     let layout = info.layout;
 
-    let meta = avds_meta(&info, planes);
-    let avds = avds.map(|path| path.stream(&meta)).transpose()?;
-    let sink = avds.map(GrainSink::spawn);
-
     tracing::info!(
         width = layout.width,
         height = layout.height,
@@ -159,6 +155,16 @@ where
         ceiling_mib = (permits * frame_bytes) / (1 << 20),
         "frame buffer budget",
     );
+
+    let sink = match avds {
+        Some(path) => {
+            let meta = avds_meta(&info, planes);
+            let stream = path.stream(&meta)?;
+            let sink = GrainSink::spawn(stream);
+            Some(sink)
+        },
+        None => None,
+    };
 
     let frames = decode_thread.start(take);
     let prefix = tune::tune_before_workers(planes, &info, &frames, permits, tune_budget);
