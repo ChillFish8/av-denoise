@@ -1,5 +1,6 @@
 mod order;
 mod roundtrip;
+mod synthesize;
 
 use std::fs::File;
 use std::io::Write;

@@ -17,6 +17,7 @@ use av_denoise::{
 };
 
 use super::{SharedBuffer, TestDir, grainy_clip, multi_scene_clip};
+use crate::cli::{Av1FgsArgs, GrainPlane, ReportArgs, SynthesizeArgs, SynthesizeKind, run_synthesize};
 use crate::pipeline::source::open_y4m;
 use crate::pipeline::{RunSettings, run_with};
 
@@ -48,6 +49,7 @@ fn nl4d_opts(intent: ChannelIntent) -> PlaneOptions {
 struct Outputs {
     avds: PathBuf,
     table: Option<PathBuf>,
+    report: Option<PathBuf>,
 }
 
 fn run(clip: Vec<u8>, workers: usize, intent: ChannelIntent, outputs: Outputs) -> Result<(), anyhow::Error> {
@@ -62,7 +64,7 @@ fn run(clip: Vec<u8>, workers: usize, intent: ChannelIntent, outputs: Outputs) -
         frame_budget_bytes: 1 << 30,
         visible: false,
         grain_table: outputs.table,
-        grain_report: None,
+        grain_report: outputs.report,
         avds: Some(outputs.avds),
         tune_budget: None,
         timing_report: false,
@@ -89,6 +91,7 @@ fn a_run_with_export_avds_writes_one_row_per_frame() {
     let outputs = Outputs {
         avds: path.clone(),
         table: None,
+        report: None,
     };
 
     run(clip, 3, ChannelIntent::LumaChroma, outputs).expect("the run succeeds");
@@ -121,6 +124,7 @@ fn a_luma_only_run_leaves_the_chroma_columns_null() {
     let outputs = Outputs {
         avds: path.clone(),
         table: None,
+        report: None,
     };
 
     run(clip, 1, ChannelIntent::Luma, outputs).expect("the run succeeds");
@@ -144,6 +148,7 @@ fn the_file_rebuilds_the_runs_grain_table() {
     let outputs = Outputs {
         avds: path.clone(),
         table: Some(table_path.clone()),
+        report: None,
     };
 
     run(clip, 2, ChannelIntent::LumaChroma, outputs).expect("the run succeeds");
@@ -158,6 +163,103 @@ fn the_file_rebuilds_the_runs_grain_table() {
 }
 
 #[test]
+fn synthesize_av1_fgs_matches_the_runs_table() {
+    let dir = TestDir::new(DIR_PREFIX, "synthesize-table");
+    let path = dir.path().join("run.avds");
+    let table_path = dir.path().join("grain.tbl");
+    let synthesized_path = dir.path().join("synthesized.tbl");
+    let clip = grainy_clip(CLIP_FRAMES);
+    let outputs = Outputs {
+        avds: path.clone(),
+        table: Some(table_path.clone()),
+        report: None,
+    };
+
+    run(clip, 2, ChannelIntent::LumaChroma, outputs).expect("the run succeeds");
+
+    let av1_fgs = Av1FgsArgs {
+        input: path,
+        output: synthesized_path.clone(),
+        planes: vec![GrainPlane::Luma],
+        fine_noise: 0.0,
+    };
+    let kind = SynthesizeKind::Av1Fgs(av1_fgs);
+    let args = SynthesizeArgs { kind };
+    run_synthesize(&args).expect("the table is synthesized");
+
+    let written = std::fs::read(&table_path).expect("the run's table exists");
+    let synthesized = std::fs::read(&synthesized_path).expect("the synthesized table exists");
+    let text = String::from_utf8_lossy(&written);
+
+    assert!(text.contains("\nE "), "no entry was fitted, got {text}");
+    assert_eq!(synthesized, written);
+}
+
+#[test]
+fn synthesize_report_matches_the_runs_report() {
+    let dir = TestDir::new(DIR_PREFIX, "synthesize-report");
+    let path = dir.path().join("run.avds");
+    let report_path = dir.path().join("report.jsonl");
+    let synthesized_path = dir.path().join("synthesized.jsonl");
+    let clip = grainy_clip(CLIP_FRAMES);
+    let outputs = Outputs {
+        avds: path.clone(),
+        table: None,
+        report: Some(report_path.clone()),
+    };
+
+    run(clip, 3, ChannelIntent::LumaChroma, outputs).expect("the run succeeds");
+
+    let report = ReportArgs {
+        input: path,
+        output: synthesized_path.clone(),
+    };
+    let kind = SynthesizeKind::Report(report);
+    let args = SynthesizeArgs { kind };
+    run_synthesize(&args).expect("the report is synthesized");
+
+    let written = std::fs::read(&report_path).expect("the run's report exists");
+    let synthesized = std::fs::read(&synthesized_path).expect("the synthesized report exists");
+    let lines = written.iter().filter(|&&byte| byte == b'\n').count();
+
+    assert_eq!(lines, CLIP_FRAMES);
+    assert_eq!(synthesized, written);
+}
+
+#[test]
+fn synthesize_report_of_a_luma_only_run_has_null_chroma() {
+    let dir = TestDir::new(DIR_PREFIX, "synthesize-luma-only");
+    let path = dir.path().join("run.avds");
+    let report_path = dir.path().join("report.jsonl");
+    let synthesized_path = dir.path().join("synthesized.jsonl");
+    let clip = grainy_clip(30);
+    let outputs = Outputs {
+        avds: path.clone(),
+        table: None,
+        report: Some(report_path.clone()),
+    };
+
+    run(clip, 1, ChannelIntent::Luma, outputs).expect("the run succeeds");
+
+    let report = ReportArgs {
+        input: path,
+        output: synthesized_path.clone(),
+    };
+    let kind = SynthesizeKind::Report(report);
+    let args = SynthesizeArgs { kind };
+    run_synthesize(&args).expect("the report is synthesized");
+
+    let written = std::fs::read_to_string(&report_path).expect("the run's report exists");
+    let synthesized = std::fs::read_to_string(&synthesized_path).expect("the synthesized report exists");
+    let null_chroma = synthesized
+        .lines()
+        .all(|line| line.contains("\"strength_cb\":null") && line.contains("\"strength_cr\":null"));
+
+    assert_eq!(synthesized, written);
+    assert!(null_chroma, "got {synthesized}");
+}
+
+#[test]
 fn a_failed_run_leaves_no_avds_file() {
     let dir = TestDir::new(DIR_PREFIX, "failed");
     let path = dir.path().join("run.avds");
@@ -165,6 +267,7 @@ fn a_failed_run_leaves_no_avds_file() {
     let outputs = Outputs {
         avds: path.clone(),
         table: None,
+        report: None,
     };
 
     let result = run(clip, 1, ChannelIntent::LumaChroma, outputs);
@@ -182,6 +285,7 @@ fn an_unwritable_avds_path_fails_before_decoding() {
     let outputs = Outputs {
         avds: path,
         table: None,
+        report: None,
     };
 
     let error = run(clip, 1, ChannelIntent::LumaChroma, outputs).expect_err("cannot write there");

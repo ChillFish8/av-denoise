@@ -12,7 +12,7 @@ use avtbx_bestsource::IndexCache;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use self::cli::{Args, Command, InputSource, RunOptions, run_list_devices, run_tune};
+use self::cli::{Args, Command, InputSource, RunOptions, run_list_devices, run_synthesize, run_tune};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -87,6 +87,11 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Synthesizing reads only the grain data file and opens no device.
+    if let Command::Synthesize(synthesize) = &args.command {
+        return run_synthesize(synthesize);
+    }
+
     // The first CubeCL client locks the global config, so the cache must be installed before
     // any denoiser is created.
     match av_denoise::install_compilation_cache() {
@@ -129,6 +134,8 @@ fn run_command(args: &Args) -> anyhow::Result<()> {
         Command::ListDevices => unreachable!(),
         // Handled above, before any denoising options are built.
         Command::Tune(_) => unreachable!(),
+        // Handled before the kernel cache is installed.
+        Command::Synthesize(_) => unreachable!(),
     };
 
     run_input(&opts, input, cache, workers, frame_budget)

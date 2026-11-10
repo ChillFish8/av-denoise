@@ -4,6 +4,7 @@ mod list_devices;
 mod motion;
 mod nl4d;
 mod nlmeans;
+mod synthesize;
 mod tune;
 
 use std::path::PathBuf;
@@ -19,6 +20,9 @@ pub use self::list_devices::run_list_devices;
 pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
+#[cfg(test)]
+pub use self::synthesize::{Av1FgsArgs, GrainPlane, ReportArgs, SynthesizeKind};
+pub use self::synthesize::{SynthesizeArgs, run_synthesize};
 pub use self::tune::{TuneArgs, run_tune};
 
 /// The options a denoising run takes.
@@ -192,6 +196,12 @@ pub enum Command {
     /// start. Running this once beforehand, with the same options and a representative clip,
     /// moves that cost out of the encode. `--show` prints what is stored and `--clear` deletes it.
     Tune(TuneArgs),
+
+    /// Build grain outputs from a grain data file written by `--export-avds`.
+    ///
+    /// Each output is its own subcommand. `synthesize` reads only the file, so it runs without a
+    /// GPU and can be run again with other options without denoising again.
+    Synthesize(SynthesizeArgs),
 
     /// List the devices each backend can see on this machine.
     ///

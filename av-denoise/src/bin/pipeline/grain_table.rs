@@ -21,10 +21,15 @@ impl TablePath {
     /// Writes the table and moves it into place.
     pub fn write(self, scenes: &[SceneGrain], frame_rate: (u64, u64)) -> Result<(), anyhow::Error> {
         let text = build_table(scenes, frame_rate);
-        if text == "filmgrn1\n" {
-            tracing::warn!("no grain could be measured, writing an empty grain table");
-        }
+        warn_on_empty_table(&text);
 
         self.file.commit(text.as_bytes())
+    }
+}
+
+/// Warns when `table` is a `filmgrn1` table with no entries.
+pub fn warn_on_empty_table(table: &str) {
+    if table == "filmgrn1\n" {
+        tracing::warn!("no grain could be measured, writing an empty grain table");
     }
 }

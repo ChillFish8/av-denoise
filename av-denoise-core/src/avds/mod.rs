@@ -7,12 +7,14 @@
 //! - [AvdsWriter] writes rows in frame order as they arrive.
 //! - [AvdsSceneWriter] takes scenes in any order and writes them in frame order.
 //! - [write_avds] writes a whole file at once and [read_avds] reads one back.
+//! - [av1_table] and [report_rows] build grain outputs from the rows of a file.
 
 mod meta;
 mod order;
 mod read;
 mod rows;
 mod schema;
+mod synthesize;
 mod write;
 
 #[cfg(test)]
@@ -22,6 +24,7 @@ pub use self::order::AvdsSceneWriter;
 pub use self::read::read_avds;
 pub use self::rows::{rows_from_scenes, scenes_from_rows};
 use self::schema::Group;
+pub use self::synthesize::{FitOptions, av1_table, report_rows};
 pub use self::write::{AvdsWriter, write_avds};
 use crate::{ChromaLayout, ChromaSiting};
 

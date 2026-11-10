@@ -372,6 +372,8 @@ name = "av-denoise"
 version = "0.6.1"
 dependencies = [
  "anyhow",
+ "arrow-array",
+ "arrow-schema",
  "av-decoders",
  "av-denoise-core",
  "av-scenechange",
@@ -385,6 +387,7 @@ dependencies = [
  "etcetera",
  "indicatif",
  "mimalloc",
+ "parquet",
  "serde",
  "serde_json",
  "strum 0.28.0",
