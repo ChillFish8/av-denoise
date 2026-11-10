@@ -253,6 +253,7 @@ impl Nl4dArgs {
             noise_map: defaults.noise_map && !self.no_noise_map,
             pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
             grain_export: exports_grain,
+            grain_report: defaults.grain_report,
         };
         let mode = DenoisingMode::Temporal {
             radius: temporal_radius,

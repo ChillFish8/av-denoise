@@ -71,6 +71,7 @@ pub(super) fn static_clip_params(temporal_radius: u32) -> Nl4dParams {
         // recorded against.
         pooled_threshold: false,
         grain_export: false,
+        grain_report: false,
     }
 }
 

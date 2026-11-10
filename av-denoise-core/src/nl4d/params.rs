@@ -78,6 +78,12 @@ pub struct Nl4dParams {
     /// Off by default. Only a denoiser that filters luma measures. It never changes the output.
     /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
     pub grain_export: bool,
+    /// Whether the denoiser measures how long the source's grain persists, for a per-frame grain
+    /// report.
+    ///
+    /// Off by default. Only a denoiser that filters luma measures. It never changes the output.
+    /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
+    pub grain_report: bool,
 }
 
 impl Default for Nl4dParams {
@@ -107,6 +113,7 @@ impl Default for Nl4dParams {
             noise_map: true,
             pooled_threshold: true,
             grain_export: false,
+            grain_report: false,
         }
     }
 }

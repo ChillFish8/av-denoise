@@ -5,6 +5,7 @@ use super::grain::{
     GrainChunk,
     GrainExport,
     GrainGeometry,
+    GrainParts,
     persistence_history_len,
     persistence_partials_len,
 };
@@ -118,7 +119,7 @@ pub struct Nl4dDenoiser {
     stream_start: StreamStart,
     /// The field buffers the last pass handed the fused kernel.
     pub(super) last_fields: Option<LastFields>,
-    /// Present only when grain export is on.
+    /// Present only when grain export or the grain report is on.
     grain: Option<GrainExport>,
     /// Whether the passes run only the front's motion and noise machinery and scatter nothing.
     pub(super) guides_only: bool,
@@ -144,14 +145,16 @@ pub(crate) fn buffer_sizes(
     let front = front_buffer_sizes(client, &nlm_params, width, height, reads_luma_motion);
     let mut buffers = front.buffers;
 
-    let exports_grain = params.grain_export && nlm_params.channels != ChannelMode::Chroma;
-    if let (true, Some(blocks)) = (exports_grain, front.motion_blocks) {
+    let measures_luma = nlm_params.channels != ChannelMode::Chroma;
+    let measures_table = params.grain_export && measures_luma;
+    let measures_persistence = params.grain_report && measures_luma;
+    if let (true, Some(blocks)) = (measures_table, front.motion_blocks) {
         let ring_frames = 1 + 2 * u64::from(params.temporal_radius);
         let saved_mv = blocks.checked_mul(2 * ring_frames);
         buffers.push(("grain saved vectors", saved_mv));
     }
 
-    if exports_grain {
+    if measures_persistence {
         let history = persistence_history_len(width, height);
         let partials = persistence_partials_len(width, height);
         buffers.push(("grain persistence history", Some(history)));
@@ -290,8 +293,12 @@ impl Nl4dDenoiser {
         let wsum = client.empty(wsum_bytes);
         let outputs = [client.empty(output_bytes), client.empty(output_bytes)];
 
-        let exports_grain = params.grain_export && channels != ChannelMode::Chroma && !guides_only;
-        let grain = if exports_grain {
+        let measures_grain = channels != ChannelMode::Chroma && !guides_only;
+        let parts = GrainParts {
+            table: params.grain_export && measures_grain,
+            persistence: params.grain_report && measures_grain,
+        };
+        let grain = if parts.table || parts.persistence {
             let motion_ctx = front.motion_ctx();
             let geometry = GrainGeometry {
                 width,
@@ -302,7 +309,7 @@ impl Nl4dDenoiser {
                 step: motion_ctx.step,
                 ring_frames,
             };
-            let export = GrainExport::new(client, geometry);
+            let export = GrainExport::new(client, geometry, parts);
             Some(export)
         } else {
             None
@@ -626,7 +633,8 @@ impl Nl4dDenoiser {
         self.front.noise_snapshot()
     }
 
-    /// Reads back the grain chunks measured since the last call. Empty when export is off.
+    /// Reads back the grain chunks measured since the last call. Empty when grain export and the
+    /// grain report are both off.
     ///
     /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
     pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, anyhow::Error> {

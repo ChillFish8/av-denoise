@@ -28,10 +28,12 @@ fn geometry(channels: ChannelMode) -> PassGeometry {
     }
 }
 
-fn options(radius: u32, grain_export: bool) -> Nl4dOptions {
+/// With `measures_grain`, both the grain table and the grain report are measured.
+fn options(radius: u32, measures_grain: bool) -> Nl4dOptions {
     Nl4dOptions {
         temporal_radius: radius,
-        grain_export,
+        grain_export: measures_grain,
+        grain_report: measures_grain,
         ..Nl4dOptions::default()
     }
 }
@@ -277,7 +279,9 @@ fn grain_chunks_match_the_oracle() {
     let actual = run_engine(actual_options, ChannelMode::Luma, &frames, 0);
     let expected_options = options(2, true);
     let expected = run_oracle(expected_options, ChannelMode::Luma, &frames, 0);
+    let has_records = actual.grain.iter().any(|chunk| !chunk.frame_records.is_empty());
     assert!(!actual.grain.is_empty());
+    assert!(has_records);
     assert_eq!(actual.grain, expected.grain);
 }
 

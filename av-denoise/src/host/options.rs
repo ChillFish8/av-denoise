@@ -200,6 +200,7 @@ impl DenoiserOptions {
             temporal_radius: self.temporal_radius(),
             lambda_ht: plane_lambda_ht.or(nl4d.lambda_ht),
             grain_export: nl4d.grain_export && group == PlaneGroup::Luma,
+            grain_report: nl4d.grain_report && group == PlaneGroup::Luma,
             ..nl4d
         }
     }

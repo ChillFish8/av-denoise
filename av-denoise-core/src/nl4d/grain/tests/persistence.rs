@@ -27,7 +27,7 @@ use crate::nl4d::grain::consts::{
 use crate::nl4d::grain::export::pattern_words;
 use crate::nl4d::grain::report::{FrameGrain, frame_rows};
 use crate::nl4d::grain::segment::SceneGrain;
-use crate::nl4d::grain::{GrainExport, GrainGeometry, persistence_partials_len};
+use crate::nl4d::grain::{GrainExport, GrainGeometry, GrainParts, persistence_partials_len};
 use crate::nl4d::kernels::{grain_persist, grain_persist_reduce, grain_project};
 
 const SIZE: u32 = 128;
@@ -51,6 +51,10 @@ const TOLERANCE: f64 = 1e-4;
 /// The size of a typical projection, the floor under the projection tolerance.
 const PROJECTION_SCALE: f64 = 0.1;
 const MOTION_STEP: u32 = 8;
+const REPORT_ONLY: GrainParts = GrainParts {
+    table: false,
+    persistence: true,
+};
 const SQUARE: Plane = Plane {
     width: SIZE,
     height: SIZE,
@@ -406,7 +410,7 @@ fn chunks_of(frames: &[Vec<f32>]) -> Vec<GrainChunk> {
 fn chunks_with_outputs(frames: &[Vec<f32>], outputs: &[Vec<f32>]) -> Vec<GrainChunk> {
     let client = make_client();
     let geometry = geometry();
-    let mut export = GrainExport::new(&client, geometry);
+    let mut export = GrainExport::new(&client, geometry, REPORT_ONLY);
 
     measure_stream(&client, &mut export, frames, outputs);
 
@@ -875,7 +879,7 @@ fn each_lag_starts_once_the_stream_is_long_enough() {
 fn a_new_stream_never_compares_with_the_old_one() {
     let client = make_client();
     let geometry = geometry();
-    let mut export = GrainExport::new(&client, geometry);
+    let mut export = GrainExport::new(&client, geometry, REPORT_ONLY);
     let first_stream = static_frames(5);
     let second_stream = static_frames(3);
     let flat = flat_output();

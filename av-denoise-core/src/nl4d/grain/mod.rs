@@ -15,6 +15,7 @@ pub use self::chunk::GrainChunk;
 pub(crate) use self::export::{
     GrainExport,
     GrainGeometry,
+    GrainParts,
     persistence_history_len,
     persistence_partials_len,
 };

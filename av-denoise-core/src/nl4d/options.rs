@@ -58,6 +58,11 @@ pub struct Nl4dOptions {
     ///
     /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
     pub grain_export: bool,
+    /// Whether the denoiser measures how long the source's grain persists, for a per-frame grain
+    /// report.
+    ///
+    /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
+    pub grain_report: bool,
     /// How many frames on each side of the centre frame the temporal window reaches, in `1..=8`.
     pub temporal_radius: u32,
 }
@@ -83,6 +88,7 @@ impl Default for Nl4dOptions {
             noise_map: defaults.noise_map,
             pooled_threshold: defaults.pooled_threshold,
             grain_export: defaults.grain_export,
+            grain_report: defaults.grain_report,
             temporal_radius: 2,
         }
     }
@@ -178,5 +184,6 @@ pub(crate) fn resolve_params(options: &Nl4dOptions, channels: ChannelMode) -> Re
         noise_map: options.noise_map,
         pooled_threshold: options.pooled_threshold,
         grain_export: options.grain_export,
+        grain_report: options.grain_report,
     })
 }

@@ -364,6 +364,34 @@ mod tests {
     }
 
     #[test]
+    fn grain_report_gives_a_different_key() {
+        let reporting_options = crate::Nl4dOptions {
+            grain_export: true,
+            grain_report: true,
+            ..crate::Nl4dOptions::default()
+        };
+        let reporting = PlaneOptions {
+            algorithm: crate::Algorithm::Nl4d(reporting_options),
+            ..options()
+        };
+
+        let table_only_options = crate::Nl4dOptions {
+            grain_export: true,
+            ..crate::Nl4dOptions::default()
+        };
+        let table_only = PlaneOptions {
+            algorithm: crate::Algorithm::Nl4d(table_only_options),
+            ..options()
+        };
+
+        let test_layout = layout();
+        let table_only_key = kernel_key(&table_only, test_layout);
+        let reporting_key = kernel_key(&reporting, test_layout);
+
+        assert_ne!(table_only_key, reporting_key);
+    }
+
+    #[test]
     fn different_kernels_do_not_wait_for_each_other() {
         let dir = tempfile::tempdir().unwrap();
         let first_key = key(4);

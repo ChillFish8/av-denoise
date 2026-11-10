@@ -4,8 +4,16 @@ use cubecl::prelude::*;
 
 use super::synthetic::gaussian_field;
 use crate::bench_api::HostIo;
+use crate::nl4d::denoiser::buffer_sizes;
 use crate::nl4d::grain::chunk::GrainChunk;
-use crate::nl4d::grain::consts::{CHUNK_FRAMES, HIST_LEN, LUMA_BINS, STD_BUCKETS, STRENGTH_GROUPS};
+use crate::nl4d::grain::consts::{
+    CHUNK_FRAMES,
+    FRAME_RECORD_LEN,
+    HIST_LEN,
+    LUMA_BINS,
+    STD_BUCKETS,
+    STRENGTH_GROUPS,
+};
 use crate::nl4d::grain::fit::{bucket_edges, hist_median};
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{
@@ -31,6 +39,9 @@ const SIGMA: f32 = 3.0 / 255.0;
 const FLICKER: f32 = 2.0 / 255.0;
 /// The lane of lag `(0, 3)` in a record.
 const LAG_RIGHT_3: usize = 3;
+const SAVED_VECTORS: &str = "grain saved vectors";
+const PERSISTENCE_HISTORY: &str = "grain persistence history";
+const PERSISTENCE_PARTIALS: &str = "grain persistence partials";
 
 fn make_client() -> Client {
     crate::tests::compilation_cache::install_test_compilation_cache();
@@ -38,6 +49,10 @@ fn make_client() -> Client {
 }
 
 fn params(grain_export: bool) -> Nl4dParams {
+    params_with(grain_export, false)
+}
+
+fn params_with(grain_export: bool, grain_report: bool) -> Nl4dParams {
     let motion_compensation = MotionCompensationMode::Mvtools {
         blksize: 16,
         overlap: 8,
@@ -63,6 +78,7 @@ fn params(grain_export: bool) -> Nl4dParams {
         nlm,
         temporal_radius: 2,
         grain_export,
+        grain_report,
         ..Nl4dParams::default()
     }
 }
@@ -339,4 +355,108 @@ fn chunks_close_when_full_and_at_each_stream_end() {
 
     assert_eq!(frames, vec![CHUNK_FRAMES, 30 - CHUNK_FRAMES, 5]);
     assert!(drained_again.is_empty());
+}
+
+/// The names of the buffers a denoiser with `params` counts.
+fn buffer_names(params: &Nl4dParams) -> Vec<&'static str> {
+    let client = make_client();
+    let sizes = buffer_sizes(&client, params, WIDTH, HEIGHT, false);
+
+    sizes.into_iter().map(|(name, _)| name).collect()
+}
+
+fn has_table_readings(chunk: &GrainChunk) -> bool {
+    let any_source = chunk.source_hist.iter().any(|&count| count > 0);
+    let any_autocov = chunk.autocov.iter().any(|&sum| sum != 0.0);
+    any_source && any_autocov
+}
+
+fn has_no_table_readings(chunk: &GrainChunk) -> bool {
+    let empty = GrainChunk::empty();
+    chunk.source_hist == empty.source_hist
+        && chunk.kept_hist == empty.kept_hist
+        && chunk.autocov == empty.autocov
+        && chunk.pixels == empty.pixels
+}
+
+/// Whether every frame has a record, and frame 1 compared some cells with frame 0.
+fn has_persistence_readings(chunk: &GrainChunk) -> bool {
+    let full_length = chunk.frames as usize * FRAME_RECORD_LEN;
+    if chunk.frames < 2 || chunk.frame_records.len() != full_length {
+        return false;
+    }
+
+    let second_frame_cells = chunk.frame_records[FRAME_RECORD_LEN];
+    second_frame_cells > 0.0
+}
+
+#[test]
+fn a_table_only_export_measures_no_persistence() {
+    let frames = grain_frames(SIGMA, 9);
+    let table_only = params_with(true, false);
+    let names = buffer_names(&table_only);
+
+    let (_, chunks, _) = run(table_only, &frames);
+
+    let counted = frames_counted(&chunks);
+    assert_eq!(counted, 9);
+    assert!(chunks.iter().all(|chunk| chunk.frame_records.is_empty()));
+    assert!(chunks.iter().all(has_table_readings));
+    assert!(names.contains(&SAVED_VECTORS));
+    assert!(!names.contains(&PERSISTENCE_HISTORY));
+    assert!(!names.contains(&PERSISTENCE_PARTIALS));
+}
+
+#[test]
+fn a_report_only_export_skips_the_table_measurement() {
+    let frames = grain_frames(SIGMA, 9);
+    let report_only = params_with(false, true);
+    let names = buffer_names(&report_only);
+
+    let (_, chunks, has_export) = run(report_only, &frames);
+
+    let counted = frames_counted(&chunks);
+    assert!(has_export);
+    assert_eq!(counted, 9);
+    assert!(chunks.iter().all(has_no_table_readings));
+    assert!(chunks.iter().all(has_persistence_readings));
+    assert!(!names.contains(&SAVED_VECTORS));
+    assert!(names.contains(&PERSISTENCE_HISTORY));
+    assert!(names.contains(&PERSISTENCE_PARTIALS));
+}
+
+#[test]
+fn both_switches_measure_both_parts() {
+    let frames = grain_frames(SIGMA, 9);
+    let both = params_with(true, true);
+    let names = buffer_names(&both);
+
+    let (_, chunks, _) = run(both, &frames);
+
+    let counted = frames_counted(&chunks);
+    assert_eq!(counted, 9);
+    assert!(chunks.iter().all(has_table_readings));
+    assert!(chunks.iter().all(has_persistence_readings));
+    assert!(names.contains(&SAVED_VECTORS));
+    assert!(names.contains(&PERSISTENCE_HISTORY));
+    assert!(names.contains(&PERSISTENCE_PARTIALS));
+}
+
+#[test]
+fn the_table_does_not_change_with_the_report_on() {
+    let frames = grain_frames(SIGMA, 9);
+    let table_only = params_with(true, false);
+    let both = params_with(true, true);
+
+    let (_, table_chunks, _) = run(table_only, &frames);
+    let (_, both_chunks, _) = run(both, &frames);
+
+    assert_eq!(table_chunks.len(), both_chunks.len());
+    for (table_chunk, both_chunk) in table_chunks.iter().zip(&both_chunks) {
+        assert_eq!(table_chunk.frames, both_chunk.frames);
+        assert_eq!(table_chunk.source_hist, both_chunk.source_hist);
+        assert_eq!(table_chunk.kept_hist, both_chunk.kept_hist);
+        assert_eq!(table_chunk.autocov, both_chunk.autocov);
+        assert_eq!(table_chunk.pixels, both_chunk.pixels);
+    }
 }
