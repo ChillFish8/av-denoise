@@ -386,8 +386,6 @@ impl NlmeansArgs {
         Ok(RunOptions {
             planes,
             progress: globals.progress,
-            grain_table: None,
-            grain_report: None,
             avds: None,
             tune_budget: self.common.checked_tune_budget()?,
             timing_report: self.common.timing_report,
@@ -1009,35 +1007,18 @@ mod tests {
     }
 
     #[test]
-    fn nlmeans_has_no_export_flag() {
-        let error = Args::try_parse_from([
-            "av-denoise",
-            "nlmeans",
-            "-i",
-            "-",
-            "--unstable-export-av1-fgs",
-            "x",
-        ])
-        .expect_err("only nl4d exports grain");
+    fn nlmeans_has_no_export_avds_flag() {
+        let argv = ["av-denoise", "nlmeans", "-i", "-", "--export-avds", "x"];
+        let error = Args::try_parse_from(argv).expect_err("only nl4d measures grain");
 
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn nlmeans_has_no_report_flag() {
-        let error =
-            Args::try_parse_from(["av-denoise", "nlmeans", "-i", "-", "--unstable-grain-report", "x"])
-                .expect_err("only nl4d reports grain");
-
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn nlmeans_never_asks_for_a_grain_table() {
+    fn nlmeans_never_asks_for_grain_data() {
         let (args, nlm) = parse(&[]);
         let opts = nlm.build_options(&args).expect("build_options should succeed");
 
-        assert_eq!(opts.grain_table, None);
-        assert_eq!(opts.grain_report, None);
+        assert_eq!(opts.avds, None);
     }
 }

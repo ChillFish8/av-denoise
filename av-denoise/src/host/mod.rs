@@ -396,7 +396,7 @@ impl HostDenoiser {
 
     /// Reads back each plane group's grain chunks measured since the last call, in frame order.
     ///
-    /// Empty unless grain export or the grain report is on.
+    /// Empty unless grain data is on.
     pub fn drain_grain_chunks(&mut self) -> Result<GrainChunks, DenoiserError> {
         if self.poisoned {
             return Err(DenoiserError::Poisoned);

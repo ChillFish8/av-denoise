@@ -3,7 +3,7 @@
 Welcome to the tutorial for using av-denoise in CLI form! This is the primary way we recommend using av-denoise
 as it has full control over the input stream allowing us to make use of more optimisations and algorithms to
 bring you a better denoising experience.
- 
+
 ## Installation
 
 By default, when compiling only the `vulkan` feature is enabled, since that is typically the default accelerators
@@ -30,7 +30,7 @@ The following (non-accelerator) features are available:
 
 Each [GitHub release](https://github.com/ChillFish8/av-denoise/releases) carries a prebuilt CLI for
 Linux x86, Windows x86 and macOS on Apple Silicon. BestSource and FFmpeg are linked statically, so
-it is not required to have FFmpeg installed on your host system, however, the JIT will still 
+it is not required to have FFmpeg installed on your host system, however, the JIT will still
 attempt to dynamically load the CUDA headers and compiler system from your system if you attempt to use
 CUDA.
 
@@ -167,11 +167,10 @@ with `--temporal-radius` and `--spatial-radius`.
 | `--lambda-ht-scale <f>`            | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                                                                                      | `1.0`                    |
 | `--spatial-radius <N>`             | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                                                                                       | `9`                      |
 | `--sigma-scale <f>`                | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                                                                                    | `1.0`                    |
-| `--unstable-export-av1-fgs <PATH>` | Unstable, and may change between releases. Writes an AV1 film grain table to add with `regrain apply`, which applies each scene's entry. SVT-AV1 `--fgs-table` and `grav1synth apply` apply only its first entry, so they suit a single-scene table only. Needs luma to be denoised. | off                      |
-| `--unstable-grain-report <PATH>`   | Unstable, and may change between releases. Writes a report of the source's grain, with one JSON line per frame. See [Reading the grain report](#reading-the-grain-report). Needs luma to be denoised.                                                                                | off                      |
+| `--export-avds <PATH>`             | Writes every grain measurement of the run to a grain data file, one row per output frame. See [Grain data and `av-denoise synthesize`](#grain-data-and-av-denoise-synthesize). Needs luma to be denoised.                                                                            | off                      |
 
 <details>
-<summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
+<summary><b>Expert flags</b>. For calibration and debugging, not everyday tuning.</summary>
 
 | Flag                                                                 | What it does                                                                                                                                                                                                                                                      | Default             |
 |----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
@@ -215,7 +214,7 @@ which runs slower.
 | `--prefilter <mode>`    | Compares patches against a cleaned reference instead of the noisy input. `nlm[:<scale>]` or `bilateral:<sigma_s>,<sigma_r>`. Costs one extra GPU pass per frame.                               | `none`          |
 
 <details>
-<summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
+<summary><b>Expert flags</b>. For calibration and debugging, not everyday tuning.</summary>
 
 | Flag                                                                 | What it does                                                                                                                                                                       | Default             |
 |----------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
@@ -231,6 +230,7 @@ which runs slower.
 | `--mc-max-search-escalation <N>`                                     | Widest radius a badly matched motion block searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns it off. Only used with `--motion-compensation`.          | from `--preset`     |
 
 </details>
+
 ---
 
 ## Piped input and high bit depth
@@ -256,17 +256,61 @@ ffmpeg -i noisy.mkv -pix_fmt yuv420p10le -strict -1 -f yuv4mpegpipe - \
 ```
 
 File input via `--input noisy.mkv` needs no such flag.
+
 ---
 
-## Exporting & reading the grain report
+## Grain data and `av-denoise synthesize`
 
-`--unstable-grain-report` writes one JSON object per output frame, one per line, in frame order.
-It describes the grain in the source, not what the denoiser removed. 
-`--unstable-export-av1-fgs` is _not_ required to use this option.
+`--export-avds` on `nl4d` measures the source's grain while it denoises, and writes every
+measurement to a grain data file with one row per output frame. The file is Parquet, so any
+Parquet reader can open it.
 
 ```bash
-av-denoise nl4d --input noisy.mkv --unstable-grain-report grain.jsonl > /dev/null
+av-denoise nl4d --input noisy.mkv --export-avds run.avds > /dev/null
 ```
+
+`av-denoise synthesize` builds grain outputs from that file. It needs no GPU and no source, so you
+can try different options without denoising again.
+
+### `synthesize av1-fgs`
+
+Writes an AV1 film grain table for the grain the run removed. Add it to a finished AV1 encode with
+`regrain apply`, which applies each scene's entry. SVT-AV1 `--fgs-table` and `grav1synth apply`
+apply only its first entry, so they suit a single-scene table only.
+
+The table's timestamps count the run's output frames from 0 at the source frame rate. It fits
+constant frame rate sources and encodes of the run's output.
+
+| Flag                    | What it does                                                                                                                                  | Default  |
+|-------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|----------|
+| `--input <PATH>`        | The grain data file written by `--export-avds`.                                                                                               | required |
+| `--output <PATH>`       | Where to write the table.                                                                                                                     | required |
+| `--planes <PLANES>`     | Which planes get grain, comma-separated. Only `luma` is accepted.                                                                             | `luma`   |
+| `--fine-noise <AMOUNT>` | The share of the fine, fresh scan noise taken out of the table, between 0 and 1. Textured grain stays. `0` keeps everything the run measured. | `0.5`    |
+
+```bash
+av-denoise synthesize av1-fgs --input run.avds --output grain.tbl --fine-noise 0.25
+```
+
+### `synthesize report`
+
+Writes the per-frame grain report. See [Reading the grain report](#reading-the-grain-report).
+
+| Flag              | What it does                                    | Default  |
+|-------------------|-------------------------------------------------|----------|
+| `--input <PATH>`  | The grain data file written by `--export-avds`. | required |
+| `--output <PATH>` | Where to write the report.                      | required |
+
+```bash
+av-denoise synthesize report --input run.avds --output grain.jsonl
+```
+
+---
+
+## Reading the grain report
+
+`synthesize report` writes one JSON object per output frame, one per line, in frame order.
+It describes the grain in the source, not what the denoiser removed.
 
 ```json
 {"frame":120,"scene":3,"cells":19804,"strength":0.93,"strength_cb":0.41,"strength_cr":0.38,"persistence":[0.62,0.46,0.34,0.27,0.23,0.21,0.2,0.2]}
@@ -305,6 +349,7 @@ residue, adds a little persistence to moving grain, and part of a flat area's gr
 To summarise a scene, take the median of each `persistence` entry over its rows, skipping `null`.
 As a starting point, a first entry under 0.4 suggests moving grain. Otherwise, a last entry under
 0.34 suggests slow grain, and anything higher suggests static grain.
+
 ---
 
 ## [Tuning guide](TUNING-CLI.md)
@@ -398,12 +443,12 @@ av-denoise --accelerators vulkan --device discrete:1 nl4d --input noisy.mkv \
 ```
 
 <details>
-<summary><b>Advanced examples</b> — fixed variant, manual per-plane strength, explicit backends</summary>
+<summary><b>Advanced examples</b>. Fixed variant, manual per-plane strength and explicit backends.</summary>
 
 These pin `--preset veryfast` to select the `fast` variant, which makes `--strength` an absolute
 value rather than the noise multiplier NLMeans-HQ applies. That trades away the per-scene
 measurement, so treat them as calibration and debugging recipes rather than a starting point. If
-your goal is a better-looking result, the dials above are the ones to reach for first — see
+your goal is a better-looking result, the dials above are the ones to reach for first. See
 [What not to touch in NLMeans](TUNING-CLI.md#what-not-to-touch-in-nlmeans).
 
 **Y/UV Denoise - ROCm/Vulkan - On GPU 1 - Light Denoise - Spatial - strength=luma:0.3,choma:0.6**

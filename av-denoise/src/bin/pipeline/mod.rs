@@ -3,9 +3,7 @@ mod bestsource;
 mod convert;
 mod coordinator;
 mod decode;
-mod grain_report;
 mod grain_sink;
-mod grain_table;
 pub mod report;
 mod scenes;
 mod source;
@@ -29,11 +27,7 @@ use self::avds_file::AvdsPath;
 use self::convert::SourcePixel;
 use self::coordinator::spawn_coordinator;
 use self::decode::{DecodeThread, FrameMsg};
-use self::grain_report::ReportPath;
-pub use self::grain_report::report_text;
-use self::grain_sink::{GrainSink, SinkOutput};
-use self::grain_table::TablePath;
-pub use self::grain_table::warn_on_empty_table;
+use self::grain_sink::GrainSink;
 use self::report::{RunSummary, WorkerTiming};
 use self::scenes::{Decided, SceneSplitter};
 use self::source::{OpenedSource, SourceInfo};
@@ -50,10 +44,6 @@ pub struct RunSettings {
     pub frame_budget_bytes: u64,
     /// Whether to draw the denoising progress bar.
     pub visible: bool,
-    /// Where to write the AV1 film grain table, when one was asked for.
-    pub grain_table: Option<PathBuf>,
-    /// Where to write the per-frame grain report, when one was asked for.
-    pub grain_report: Option<PathBuf>,
     /// Where to write the grain data file, when one was asked for.
     pub avds: Option<PathBuf>,
     /// Seconds tuning may take, when the user set a budget.
@@ -77,15 +67,11 @@ pub fn run(
     let owned_input = input.clone();
     let opener = move || source::open_source(&owned_input, cache);
     let output = stdout();
-    let grain_table = opts.grain_table.clone();
-    let grain_report = opts.grain_report.clone();
     let avds = opts.avds.clone();
     let settings = RunSettings {
         workers,
         frame_budget_bytes,
         visible,
-        grain_table,
-        grain_report,
         avds,
         tune_budget: opts.tune_budget,
         timing_report: opts.timing_report,
@@ -113,10 +99,10 @@ pub fn run(
 /// Denoises the source `opener` returns scene by scene, writing y4m into `output`.
 ///
 /// Blocks until every thread in the pipeline has finished. The grain data file is written scene by
-/// scene as workers finish them. It and the grain table and report land at their paths only when
-/// every stage succeeds. When the options ask for `auto` tuning and nothing is stored for
-/// this configuration, the first frames are tuned on before the workers start, then denoised as
-/// usual. Returns where the run's time went.
+/// scene as workers finish them, and lands at its path only when every stage succeeds. When the
+/// options ask for `auto` tuning and nothing is stored for this configuration, the first frames
+/// are tuned on before the workers start, then denoised as usual. Returns where the run's time
+/// went.
 pub fn run_with<W, F>(
     planes: &PlaneOptions,
     opener: F,
@@ -131,8 +117,6 @@ where
         workers,
         frame_budget_bytes,
         visible,
-        grain_table,
-        grain_report,
         avds,
         tune_budget,
         timing_report,
@@ -145,8 +129,6 @@ where
         anyhow::bail!("--workers must be at least 1");
     }
 
-    let table = grain_table.as_deref().map(TablePath::create).transpose()?;
-    let report = grain_report.as_deref().map(ReportPath::create).transpose()?;
     let avds = avds.as_deref().map(AvdsPath::create).transpose()?;
 
     let (decode_thread, info) = DecodeThread::spawn(opener)?;
@@ -154,9 +136,7 @@ where
 
     let meta = avds_meta(&info, planes);
     let avds = avds.map(|path| path.stream(&meta)).transpose()?;
-    let keeps_scenes = table.is_some() || report.is_some();
-    let measures_grain = avds.is_some() || keeps_scenes;
-    let sink = measures_grain.then(|| GrainSink::spawn(avds, keeps_scenes));
+    let sink = avds.map(GrainSink::spawn);
 
     tracing::info!(
         width = layout.width,
@@ -230,29 +210,16 @@ where
     // the dispatcher's disconnect. Dispatch errors carry decode failures, which never make a
     // worker fail.
     //
-    // Returning early drops the grain data file, `table` and `report`, which removes their
-    // temporary files.
-    let (sink_output, worker_timings) = sink_joined
+    // Returning early drops the grain data file, which removes its temporary file.
+    let (avds, worker_timings) = sink_joined
         .and_then(|output| coordinator_joined.map(|_| output))
         .and_then(|output| workers_joined.map(|timings| (output, timings)))
         .and_then(|joined| dispatched.map(|_| joined))
         .and_then(|joined| decoder_joined.map(|_| joined))?;
 
-    let SinkOutput { avds, scenes } = sink_output.unwrap_or_else(SinkOutput::empty);
-
     if let Some(avds) = avds {
         let frames = staged.unwrap_or_default();
         avds.finish(frames)?;
-    }
-
-    if let Some(table) = table {
-        let rate = info.details.frame_rate;
-        let frame_rate = (*rate.numer() as u64, *rate.denom() as u64);
-        table.write(&scenes, frame_rate)?;
-    }
-
-    if let Some(report) = report {
-        report.write(&scenes)?;
     }
 
     let summary = RunSummary {

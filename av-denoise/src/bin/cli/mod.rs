@@ -21,7 +21,7 @@ pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
 #[cfg(test)]
-pub use self::synthesize::{Av1FgsArgs, GrainPlane, ReportArgs, SynthesizeKind};
+pub use self::synthesize::{Av1FgsArgs, GrainPlane, ReportArgs, SynthesizeKind, report_text};
 pub use self::synthesize::{SynthesizeArgs, run_synthesize};
 pub use self::tune::{TuneArgs, run_tune};
 
@@ -31,10 +31,6 @@ pub struct RunOptions {
     pub planes: PlaneOptions,
     /// Whether to draw the denoising progress bar.
     pub progress: bool,
-    /// Where to write the AV1 film grain table, when one was asked for.
-    pub grain_table: Option<PathBuf>,
-    /// Where to write the per-frame grain report, when one was asked for.
-    pub grain_report: Option<PathBuf>,
     /// Where to write the grain data file, when one was asked for.
     pub avds: Option<PathBuf>,
     /// Seconds tuning may take, when the user set a budget.

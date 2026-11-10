@@ -8,14 +8,14 @@ Each algorithm wants you to use a slightly different set of options for tuning, 
 you're following the guide for the algorithm you're using specifically.
 
 > [!CAUTION]
-> Tuning guides for other algorithms like BM3D, etc... Will **not** transfer over. 
+> Tuning guides for other algorithms like BM3D, etc... Will **not** transfer over.
 
 > [!IMPORTANT]
 > Each algorithm has limitations, NLMeans can only ever really do a very light denoise without producing perceptible
 > detail loss. Often it is better to just go up to NLMeans-HQ, or from NLMeans-HQ to NL4D rather than spending
 > lots of additional time trying to tune an algorithm that has hit is fundamental limitations.
-> 
-> For more info consider reading the "How it works" sections of our 
+>
+> For more info consider reading the "How it works" sections of our
 > **[Choosing an algorithm](CHOOSING_AN_ALGORITHM.md)** docs.
 
 ## Nl4d
@@ -59,16 +59,22 @@ always follow each plane's colour grain.
 is judged together with its neighbours rather than alone, so faint lines and fine texture
 survive where each frequency on its own would fall under the threshold.
 
-**`--unstable-export-av1-fgs <PATH>` keeps the look of film grain.** It writes an AV1 film grain
-table to PATH. The flag is unstable, so its name and output may change between releases. The table describes the source's luma grain, minus whatever the output
+**`--export-avds <PATH>` keeps the look of film grain.** It writes the source's grain, measured
+during the run, to a grain data file at PATH. `av-denoise synthesize av1-fgs` then turns the file
+into an AV1 film grain table, which describes the source's luma grain minus whatever the output
 still keeps. Add it to a finished AV1 encode with `regrain apply`, which applies each scene's
 entry. The decoder then adds matching grain back, so the encode stays clean while the picture
 keeps its grain. SVT-AV1's `--fgs-table` and `grav1synth apply` apply only the table's first entry
-to every frame, so they suit a single-scene table only. The y4m output is the same with or without the flag. It is rejected with
-`--channel-mode chroma`, and a failed run leaves no table.
+to every frame, so they suit a single-scene table only. The y4m output is the same with or without
+the flag. It is rejected with `--channel-mode chroma`, and a failed run leaves no file.
 
-The table's timestamps count this run's output frames from 0 at the source frame rate. It fits
-constant frame rate sources, and encodes of this run's output. It does not fit variable frame rate
+`--fine-noise` on `synthesize av1-fgs` takes a share of the fine, fresh scan noise out of the
+table and keeps the textured grain. It defaults to 0.5, and 0 keeps everything the run measured.
+See [Grain data and `av-denoise synthesize`](TUTORIAL-CLI.md#grain-data-and-av-denoise-synthesize)
+for every option.
+
+The table's timestamps count the run's output frames from 0 at the source frame rate. It fits
+constant frame rate sources, and encodes of the run's output. It does not fit variable frame rate
 sources, or an encode of the original file when av-denoise dropped frames that carried no picture.
 
 ### What not to touch in NL4D

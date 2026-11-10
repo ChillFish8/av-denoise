@@ -2,9 +2,10 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use av_denoise::FrameGrain;
 use av_denoise::avds::{AvdsFrame, AvdsMeta, FitOptions, av1_table, read_avds, report_rows};
 
-use crate::pipeline::{StagedFile, report_text, warn_on_empty_table};
+use crate::pipeline::StagedFile;
 
 /// Builds grain outputs from a grain data file.
 #[derive(Debug, clap::Args)]
@@ -60,6 +61,9 @@ pub struct ReportArgs {
     pub input: PathBuf,
 
     /// Where to write the report, one JSON line per frame.
+    ///
+    /// Each line holds the source's luma grain strength, the Cb and Cr strengths when chroma was
+    /// denoised, and how much grain stays unchanged from 1 to 8 frames either side of the frame.
     #[arg(long, value_name = "PATH")]
     pub output: PathBuf,
 }
@@ -112,6 +116,25 @@ fn write_report(args: &ReportArgs) -> Result<(), anyhow::Error> {
     let text = report_text(&report)?;
 
     output.commit(text.as_bytes())
+}
+
+/// Warns when `table` is a `filmgrn1` table with no entries.
+fn warn_on_empty_table(table: &str) {
+    if table == "filmgrn1\n" {
+        tracing::warn!("no grain could be measured, writing an empty grain table");
+    }
+}
+
+/// The report text, one JSON line per row.
+pub fn report_text(rows: &[FrameGrain]) -> Result<String, anyhow::Error> {
+    let mut text = String::new();
+    for row in rows {
+        let line = serde_json::to_string(row).context("unable to encode a grain report row")?;
+        text.push_str(&line);
+        text.push('\n');
+    }
+
+    Ok(text)
 }
 
 fn read_file(path: &Path) -> Result<(AvdsMeta, Vec<AvdsFrame>), anyhow::Error> {
@@ -234,6 +257,48 @@ mod tests {
 
         assert_eq!(av1_fgs.planes, [GrainPlane::Luma, GrainPlane::Chroma]);
         assert_eq!(av1_fgs.fine_noise, 0.75);
+    }
+
+    #[test]
+    fn report_text_has_one_line_per_row_in_order() {
+        let rows: Vec<FrameGrain> = (0..3)
+            .map(|frame| FrameGrain {
+                frame,
+                scene: 0,
+                cells: 0,
+                strength: None,
+                strength_cb: None,
+                strength_cr: None,
+                persistence: [None; 8],
+            })
+            .collect();
+
+        let text = report_text(&rows).expect("the rows encode");
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert!(text.ends_with('\n'));
+        assert_eq!(lines.len(), 3);
+
+        for (index, line) in lines.iter().enumerate() {
+            let value: serde_json::Value = serde_json::from_str(line).expect("each line is JSON");
+            let object = value.as_object().expect("each line is an object");
+            let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            let persistence = object["persistence"].as_array().expect("persistence is a list");
+
+            let expected_keys = [
+                "cells",
+                "frame",
+                "persistence",
+                "scene",
+                "strength",
+                "strength_cb",
+                "strength_cr",
+            ];
+            assert_eq!(keys, expected_keys);
+            assert_eq!(object["frame"], index as u64);
+            assert_eq!(persistence.len(), 8);
+        }
     }
 
     #[test]
