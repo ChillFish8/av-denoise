@@ -12,7 +12,12 @@ mod template;
 mod tests;
 
 pub use self::chunk::GrainChunk;
-pub(crate) use self::export::{GrainExport, GrainGeometry};
+pub(crate) use self::export::{
+    GrainExport,
+    GrainGeometry,
+    persistence_history_len,
+    persistence_partials_len,
+};
 pub use self::report::{FrameGrain, frame_rows};
 pub use self::segment::SceneGrain;
 pub use self::table::build_table;

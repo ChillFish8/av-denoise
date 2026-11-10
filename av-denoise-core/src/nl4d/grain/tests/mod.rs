@@ -2,6 +2,7 @@ mod export;
 mod fit;
 mod kernels;
 mod mirror;
+mod persistence;
 mod report;
 mod segment;
 mod synthetic;

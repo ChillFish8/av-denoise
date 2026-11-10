@@ -48,6 +48,32 @@ pub(crate) const LAG_RECORD_LEN: usize = 3;
 pub(crate) const FRAME_RECORD_LEN: usize = LAG_RECORD_LEN * PERSISTENCE_LAGS;
 /// Fewest cells for a frame to give a reading.
 pub(crate) const MIN_FRAME_CELLS: f64 = 200.0;
+/// Projections kept of each cell's source pixels.
+pub(crate) const PROJECTIONS: usize = 8;
+/// Completed frames the persistence history holds.
+pub(crate) const HISTORY_FRAMES: u32 = 9;
+/// Values kept of each cell per history frame, the projections and then the flat flag.
+pub(crate) const HISTORY_ENTRY_LEN: usize = PROJECTIONS + 1;
+/// Threads per cube that add one block of cells at one lag.
+pub(crate) const PERSIST_THREADS: u32 = 256;
+/// Cells each persisting thread adds.
+pub(crate) const PERSIST_CELLS_PER_THREAD: u32 = 4;
+/// Cells one persisting cube adds.
+pub(crate) const PERSIST_BLOCK_CELLS: u32 = PERSIST_CELLS_PER_THREAD * PERSIST_THREADS;
+/// The sign of each pixel in each projection, bit `y * 8 + x` set where the pixel counts plus one.
+///
+/// Each pattern has 32 set bits, and no two are equal or complementary. Each pattern ignores a
+/// cell's mean and its horizontal and vertical slope.
+pub(crate) const PATTERNS: [u64; PROJECTIONS] = [
+    0x7866_974C_A28F_35D2,
+    0x235B_8DA5_D0DE_5C91,
+    0xC95E_0BA4_E0DF_D207,
+    0xDC58_6702_1D7D_FA18,
+    0x3E14_CCEC_2BB9_13D1,
+    0xC379_12DD_286E_55C6,
+    0x1277_D975_0989_CEE4,
+    0x56D2_61D7_728A_23AD,
+];
 
 /// Fewest blocks for a luma bin to give a strength reading.
 ///

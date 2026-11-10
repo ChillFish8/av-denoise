@@ -1,7 +1,13 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::grain::{GrainChunk, GrainExport, GrainGeometry};
+use super::grain::{
+    GrainChunk,
+    GrainExport,
+    GrainGeometry,
+    persistence_history_len,
+    persistence_partials_len,
+};
 use super::params::Nl4dParams;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
 use crate::collab::geometry::ref_count;
@@ -122,8 +128,9 @@ pub struct Nl4dDenoiser {
 ///
 /// The front end is sized at the grouping radius, as `new` sets it. `accum` holds as many elements
 /// as the frame ring, and `wsum`, `outputs` and `group_weight` hold fewer. The grain's saved vectors
-/// span one more frame than the motion field, so they are counted here. With `reads_luma_motion`,
-/// the front end is sized as one that refines luma motion.
+/// span one more frame than the motion field, so they are counted here, as are the grain's
+/// persistence history and partials. With `reads_luma_motion`, the front end is sized as one that
+/// refines luma motion.
 pub(crate) fn buffer_sizes(
     client: &Client,
     params: &Nl4dParams,
@@ -142,6 +149,13 @@ pub(crate) fn buffer_sizes(
         let ring_frames = 1 + 2 * u64::from(params.temporal_radius);
         let saved_mv = blocks.checked_mul(2 * ring_frames);
         buffers.push(("grain saved vectors", saved_mv));
+    }
+
+    if exports_grain {
+        let history = persistence_history_len(width, height);
+        let partials = persistence_partials_len(width, height);
+        buffers.push(("grain persistence history", Some(history)));
+        buffers.push(("grain persistence partials", Some(partials)));
     }
 
     buffers

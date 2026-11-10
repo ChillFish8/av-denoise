@@ -1,4 +1,11 @@
-use av_denoise_core::bench_api::nl4d_kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
+use av_denoise_core::bench_api::nl4d_kernels::{
+    grain_measure,
+    grain_persist,
+    grain_persist_reduce,
+    grain_project,
+    grain_reduce_partials,
+    grain_save_vectors,
+};
 use cubecl::benchmark::Benchmark;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -19,6 +26,18 @@ const PARTIAL_LANES: usize = RECORD_LANES + 1;
 const STRENGTH_GROUPS: usize = 16;
 const REDUCE_THREADS: u32 = 128;
 const EDGE_COUNT: usize = 65;
+const PROJECTIONS: usize = 8;
+/// Two words per projection pattern.
+const PATTERN_WORDS: usize = 2 * PROJECTIONS;
+/// The projections and the flat flag of one cell in one history frame.
+const HISTORY_ENTRY_LEN: usize = PROJECTIONS + 1;
+const HISTORY_FRAMES: u32 = 9;
+const PERSISTENCE_LAGS: u32 = 8;
+/// A cell count, auto sum and cross sum per lag.
+const FRAME_RECORD_LEN: usize = 3 * PERSISTENCE_LAGS as usize;
+const PERSIST_THREADS: u32 = 256;
+/// Cells one persisting cube adds, four per thread.
+const PERSIST_BLOCK_CELLS: u32 = 4 * PERSIST_THREADS;
 
 /// A frame size the grain benches run at.
 #[derive(Clone, Copy)]
@@ -39,6 +58,15 @@ impl GrainSize {
 
     fn cells(&self) -> usize {
         ((self.width / CELL) * (self.height / CELL)) as usize
+    }
+
+    fn persist_blocks(&self) -> u32 {
+        let cells = self.cells() as u32;
+        cells.div_ceil(PERSIST_BLOCK_CELLS)
+    }
+
+    fn persist_partials_len(&self) -> usize {
+        self.persist_blocks() as usize * FRAME_RECORD_LEN
     }
 }
 
@@ -300,6 +328,171 @@ impl Benchmark for GrainReducePartialsBench {
 
     fn name(&self) -> String {
         format!("grain_reduce_partials_{}", self.size.label)
+    }
+
+    fn sync(&self) {
+        block_sync(&self.client);
+    }
+}
+
+/// Projects every cell of one luma frame into a persistence history slot.
+pub struct GrainProjectBench {
+    pub client: Client,
+    pub size: GrainSize,
+}
+
+#[derive(Clone)]
+pub struct GrainProjectInput {
+    pub input: Handle,
+    pub output: Handle,
+    pub patterns: Handle,
+    pub history: Handle,
+}
+
+impl Benchmark for GrainProjectBench {
+    type Input = GrainProjectInput;
+    type Output = ();
+
+    fn prepare(&self) -> Self::Input {
+        let pixels = self.size.pixels();
+        let history_len = HISTORY_FRAMES as usize * self.size.cells() * HISTORY_ENTRY_LEN;
+        let frame = make_synthetic_frame(self.size.width, self.size.height, 1);
+        let output_host = vec![0.5f32; pixels];
+        let patterns_host: Vec<u32> = (0..PATTERN_WORDS as u32)
+            .map(|index| 0x5A5A_5A5Au32.rotate_left(index))
+            .collect();
+
+        let frame_bytes = f32::as_bytes(&frame);
+        let input = self.client.create_from_slice(frame_bytes);
+        let output_bytes = f32::as_bytes(&output_host);
+        let output = self.client.create_from_slice(output_bytes);
+        let patterns_bytes = u32::as_bytes(&patterns_host);
+        let patterns = self.client.create_from_slice(patterns_bytes);
+        let history = self.client.empty(history_len * size_of::<f32>());
+
+        GrainProjectInput {
+            input,
+            output,
+            patterns,
+            history,
+        }
+    }
+
+    fn execute(&self, args: Self::Input) -> Result<(), String> {
+        let width = self.size.width;
+        let height = self.size.height;
+        let pixels = self.size.pixels();
+        let history_len = HISTORY_FRAMES as usize * self.size.cells() * HISTORY_ENTRY_LEN;
+
+        unsafe {
+            grain_project::launch_unchecked(
+                &self.client,
+                CubeCount::new_2d(width / CELL, height / CELL),
+                CubeDim::new_2d(CELL, CELL),
+                1usize,
+                BufferArg::from_raw_parts(args.input, pixels),
+                BufferArg::from_raw_parts(args.output, pixels),
+                BufferArg::from_raw_parts(args.patterns, PATTERN_WORDS),
+                BufferArg::from_raw_parts(args.history, history_len),
+                0u32,
+                1u32,
+                width,
+                height,
+                1u32,
+            );
+        }
+
+        Ok(())
+    }
+
+    fn name(&self) -> String {
+        format!("grain_project_{}", self.size.label)
+    }
+
+    fn sync(&self) {
+        block_sync(&self.client);
+    }
+}
+
+/// Adds every lag's persistence sums of one frame from a full history, block partials then the
+/// final reduce.
+pub struct GrainPersistBench {
+    pub client: Client,
+    pub size: GrainSize,
+}
+
+#[derive(Clone)]
+pub struct GrainPersistInput {
+    pub history: Handle,
+    pub partials: Handle,
+    pub record: Handle,
+}
+
+impl Benchmark for GrainPersistBench {
+    type Input = GrainPersistInput;
+    type Output = ();
+
+    fn prepare(&self) -> Self::Input {
+        // Every cell flagged flat, so each lag sums every cell.
+        let entries = HISTORY_FRAMES as usize * self.size.cells();
+        let mut history_host = Vec::with_capacity(entries * HISTORY_ENTRY_LEN);
+        for entry in 0..entries {
+            let projections = (0..PROJECTIONS).map(|projection| ((entry + projection) % 5) as f32 * 0.01);
+            history_host.extend(projections);
+            history_host.push(1.0);
+        }
+
+        let record_host = vec![0.0f32; FRAME_RECORD_LEN];
+
+        let history_bytes = f32::as_bytes(&history_host);
+        let history = self.client.create_from_slice(history_bytes);
+        let record_bytes = f32::as_bytes(&record_host);
+        let record = self.client.create_from_slice(record_bytes);
+
+        let partials_len = self.size.persist_partials_len();
+        let partials = self.client.empty(partials_len * size_of::<f32>());
+
+        GrainPersistInput {
+            history,
+            partials,
+            record,
+        }
+    }
+
+    fn execute(&self, args: Self::Input) -> Result<(), String> {
+        let cells = self.size.cells();
+        let history_len = HISTORY_FRAMES as usize * cells * HISTORY_ENTRY_LEN;
+        let blocks = self.size.persist_blocks();
+        let partials_len = self.size.persist_partials_len();
+
+        unsafe {
+            grain_persist::launch_unchecked(
+                &self.client,
+                CubeCount::new_2d(blocks, PERSISTENCE_LAGS),
+                CubeDim::new_1d(PERSIST_THREADS),
+                BufferArg::from_raw_parts(args.history, history_len),
+                BufferArg::from_raw_parts(args.partials.clone(), partials_len),
+                HISTORY_FRAMES - 1,
+                cells as u32,
+                blocks,
+            );
+
+            grain_persist_reduce::launch_unchecked(
+                &self.client,
+                CubeCount::new_1d(PERSISTENCE_LAGS),
+                CubeDim::new_1d(REDUCE_THREADS),
+                BufferArg::from_raw_parts(args.partials, partials_len),
+                BufferArg::from_raw_parts(args.record, FRAME_RECORD_LEN),
+                0u32,
+                blocks,
+            );
+        }
+
+        Ok(())
+    }
+
+    fn name(&self) -> String {
+        format!("grain_persist_{}", self.size.label)
     }
 
     fn sync(&self) {

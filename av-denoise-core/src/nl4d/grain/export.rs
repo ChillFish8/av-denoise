@@ -6,20 +6,74 @@ use super::consts::{
     AUTOCOV_LEN,
     CELL,
     CHUNK_FRAMES,
+    FRAME_RECORD_LEN,
     GROUPED_AUTOCOV_LEN,
     HIST_LEN,
+    HISTORY_ENTRY_LEN,
+    HISTORY_FRAMES,
     LAG_COUNT,
+    LAG_RECORD_LEN,
     PARTIAL_LEN,
+    PATTERNS,
+    PERSIST_BLOCK_CELLS,
+    PERSIST_THREADS,
+    PERSISTENCE_LAGS,
+    PROJECTIONS,
     REDUCE_THREADS,
     STD_BUCKETS,
 };
 use super::fit::bucket_edges;
-use crate::nl4d::kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
+use crate::nl4d::kernels::{
+    grain_measure,
+    grain_persist,
+    grain_persist_reduce,
+    grain_project,
+    grain_reduce_partials,
+    grain_save_vectors,
+};
 use crate::nl4d::snapshot::LastFields;
 
 const SAVE_THREADS: u32 = 256;
 /// The std bucket edges, one more than the bucket count.
 const EDGES_LEN: usize = STD_BUCKETS + 1;
+/// Values in one chunk's frame records.
+const CHUNK_RECORD_LEN: usize = CHUNK_FRAMES as usize * FRAME_RECORD_LEN;
+/// The pattern words the project kernel reads, two per projection.
+const PATTERN_WORDS_LEN: usize = 2 * PROJECTIONS;
+
+/// The projection patterns split into words, the low 32 bits of each pattern first.
+pub(crate) fn pattern_words() -> Vec<u32> {
+    let mut words = Vec::with_capacity(PATTERN_WORDS_LEN);
+    for pattern in PATTERNS {
+        let low_word = pattern as u32;
+        let high_word = (pattern >> 32) as u32;
+        words.push(low_word);
+        words.push(high_word);
+    }
+
+    words
+}
+
+fn cell_count(width: u32, height: u32) -> u64 {
+    u64::from(width / CELL) * u64::from(height / CELL)
+}
+
+fn persist_blocks(width: u32, height: u32) -> u64 {
+    let cells = cell_count(width, height);
+    cells.div_ceil(u64::from(PERSIST_BLOCK_CELLS))
+}
+
+/// Values in the persistence history of a frame size, an entry per cell for each history frame.
+pub(crate) fn persistence_history_len(width: u32, height: u32) -> u64 {
+    let cells = cell_count(width, height);
+    cells * u64::from(HISTORY_FRAMES) * HISTORY_ENTRY_LEN as u64
+}
+
+/// Values in the persistence partials of a frame size, one lag record part per block and lag.
+pub(crate) fn persistence_partials_len(width: u32, height: u32) -> u64 {
+    let blocks = persist_blocks(width, height);
+    blocks * (PERSISTENCE_LAGS * LAG_RECORD_LEN) as u64
+}
 
 /// The geometry a [GrainExport] is built for.
 pub(crate) struct GrainGeometry {
@@ -60,11 +114,25 @@ impl GrainGeometry {
     fn partials_len(&self) -> usize {
         self.cells() as usize * PARTIAL_LEN
     }
+
+    fn history_len(&self) -> usize {
+        persistence_history_len(self.width, self.height) as usize
+    }
+
+    fn persist_blocks(&self) -> u32 {
+        persist_blocks(self.width, self.height) as u32
+    }
+
+    fn persist_partials_len(&self) -> usize {
+        persistence_partials_len(self.width, self.height) as usize
+    }
 }
 
+#[derive(Clone)]
 struct ChunkBuffers {
     hist: Handle,
     autocov: Handle,
+    frame_record: Handle,
     frames: u32,
 }
 
@@ -86,6 +154,14 @@ pub(crate) struct GrainExport {
     saved_valid: Vec<bool>,
     edges: Handle,
     partials: Handle,
+    /// The projection patterns as words, two per projection.
+    patterns: Handle,
+    /// Each cell's projections and flat flag for the last [HISTORY_FRAMES] completed frames.
+    history: Handle,
+    /// Each lag's persistence sums per block of cells, before they add into a frame record.
+    persist_partials: Handle,
+    /// Completed frames measured since the stream started.
+    frames_in_stream: u32,
     chunks: Vec<ChunkBuffers>,
     chunk_open: bool,
     last_completed: Option<Completed>,
@@ -108,6 +184,13 @@ impl GrainExport {
         let edges = client.create_from_slice(edges_bytes);
         let partials_bytes = geometry.partials_len().max(1) * size_of::<f32>();
         let partials = client.empty(partials_bytes);
+        let words = pattern_words();
+        let patterns_bytes = u32::as_bytes(&words);
+        let patterns = client.create_from_slice(patterns_bytes);
+        let history_bytes = geometry.history_len().max(1) * size_of::<f32>();
+        let history = client.empty(history_bytes);
+        let persist_partials_bytes = geometry.persist_partials_len().max(1) * size_of::<f32>();
+        let persist_partials = client.empty(persist_partials_bytes);
 
         Self {
             saved_valid: vec![false; geometry.ring_frames as usize],
@@ -116,6 +199,10 @@ impl GrainExport {
             saved_conf,
             edges,
             partials,
+            patterns,
+            history,
+            persist_partials,
+            frames_in_stream: 0,
             chunks: Vec::new(),
             chunk_open: false,
             last_completed: None,
@@ -192,7 +279,7 @@ impl GrainExport {
         let kept_entry = kept_from.map_or(frame_slot, |previous| previous.ring_slot);
         let prev_output = kept_from.map_or(output_slot, |previous| previous.output_slot);
 
-        let (chunk_hist, chunk_autocov) = self.open_chunk(client);
+        let chunk = self.open_chunk(client);
         let geometry = &self.geometry;
         let frame_len = (geometry.width * geometry.height * geometry.channels) as usize;
         let ring_len = frame_len * geometry.ring_frames as usize;
@@ -211,7 +298,7 @@ impl GrainExport {
                 BufferArg::from_raw_parts(self.saved_mv.clone(), geometry.saved_mv_len()),
                 BufferArg::from_raw_parts(self.saved_conf.clone(), geometry.saved_conf_len()),
                 BufferArg::from_raw_parts(self.edges.clone(), EDGES_LEN),
-                BufferArg::from_raw_parts(chunk_hist, 2 * HIST_LEN),
+                BufferArg::from_raw_parts(chunk.hist.clone(), 2 * HIST_LEN),
                 BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
                 frame_slot,
                 next_or_own_slot,
@@ -232,10 +319,14 @@ impl GrainExport {
                 CubeCount::new_1d(AUTOCOV_LEN as u32),
                 CubeDim::new_1d(REDUCE_THREADS),
                 BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
-                BufferArg::from_raw_parts(chunk_autocov, GROUPED_AUTOCOV_LEN),
+                BufferArg::from_raw_parts(chunk.autocov.clone(), GROUPED_AUTOCOV_LEN),
                 geometry.cells(),
             );
         }
+
+        let output = &outputs[output_slot];
+        self.measure_persistence(client, input, output, frame_slot, &chunk);
+        self.frames_in_stream += 1;
 
         let newest = self.chunks.last_mut().expect("open_chunk pushed a chunk");
         newest.frames += 1;
@@ -249,25 +340,100 @@ impl GrainExport {
         });
     }
 
-    /// The newest chunk's histogram and autocovariance handles, opening a chunk when none is open.
-    fn open_chunk(&mut self, client: &Client) -> (Handle, Handle) {
+    /// Projects the completed frame into the history and adds its pairs into the frame's record.
+    ///
+    /// Each lag whose earlier frame is in this stream adds its sums.
+    fn measure_persistence(
+        &self,
+        client: &Client,
+        input: &Handle,
+        output: &Handle,
+        frame_slot: u32,
+        chunk: &ChunkBuffers,
+    ) {
+        let geometry = &self.geometry;
+        let frame_len = (geometry.width * geometry.height * geometry.channels) as usize;
+        let ring_len = frame_len * geometry.ring_frames as usize;
+        let history_len = geometry.history_len();
+        let history_slot = self.frames_in_stream % HISTORY_FRAMES;
+        let earlier_frames = self.frames_in_stream.min(PERSISTENCE_LAGS as u32);
+        let record_offset = chunk.frames * FRAME_RECORD_LEN as u32;
+
+        unsafe {
+            grain_project::launch_unchecked(
+                client,
+                CubeCount::new_2d(geometry.cells_x(), geometry.cells_y()),
+                CubeDim::new_2d(CELL, CELL),
+                geometry.channels as usize,
+                BufferArg::from_raw_parts(input.clone(), ring_len),
+                BufferArg::from_raw_parts(output.clone(), frame_len),
+                BufferArg::from_raw_parts(self.patterns.clone(), PATTERN_WORDS_LEN),
+                BufferArg::from_raw_parts(self.history.clone(), history_len),
+                frame_slot,
+                history_slot,
+                geometry.width,
+                geometry.height,
+                geometry.channels,
+            );
+        }
+
+        if earlier_frames == 0 {
+            return;
+        }
+
+        let blocks = geometry.persist_blocks();
+        let partials_len = geometry.persist_partials_len();
+
+        unsafe {
+            grain_persist::launch_unchecked(
+                client,
+                CubeCount::new_2d(blocks, earlier_frames),
+                CubeDim::new_1d(PERSIST_THREADS),
+                BufferArg::from_raw_parts(self.history.clone(), history_len),
+                BufferArg::from_raw_parts(self.persist_partials.clone(), partials_len),
+                history_slot,
+                geometry.cells(),
+                blocks,
+            );
+
+            grain_persist_reduce::launch_unchecked(
+                client,
+                CubeCount::new_1d(earlier_frames),
+                CubeDim::new_1d(REDUCE_THREADS),
+                BufferArg::from_raw_parts(self.persist_partials.clone(), partials_len),
+                BufferArg::from_raw_parts(chunk.frame_record.clone(), CHUNK_RECORD_LEN),
+                record_offset,
+                blocks,
+            );
+        }
+    }
+
+    /// A copy of the newest chunk's buffers, opening a chunk when none is open.
+    ///
+    /// The copy's frame count is taken before the frame being measured.
+    fn open_chunk(&mut self, client: &Client) -> ChunkBuffers {
         if !self.chunk_open {
             let hist_host = vec![0i32; 2 * HIST_LEN];
             let autocov_host = vec![0.0f32; GROUPED_AUTOCOV_LEN];
+            let record_host = vec![0.0f32; CHUNK_RECORD_LEN];
             let hist_bytes = i32::as_bytes(&hist_host);
             let hist = client.create_from_slice(hist_bytes);
             let autocov_bytes = f32::as_bytes(&autocov_host);
             let autocov = client.create_from_slice(autocov_bytes);
+            let record_bytes = f32::as_bytes(&record_host);
+            let frame_record = client.create_from_slice(record_bytes);
             self.chunks.push(ChunkBuffers {
                 hist,
                 autocov,
+                frame_record,
                 frames: 0,
             });
             self.chunk_open = true;
         }
 
         let chunk = self.chunks.last().expect("a chunk is open");
-        (chunk.hist.clone(), chunk.autocov.clone())
+
+        chunk.clone()
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
@@ -275,10 +441,11 @@ impl GrainExport {
         self.measured_with_entry
     }
 
-    /// Forgets the stream's saved vectors and closes the open chunk.
+    /// Forgets the stream's saved vectors and history, and closes the open chunk.
     pub(crate) fn reset_stream(&mut self) {
         self.saved_valid.fill(false);
         self.last_completed = None;
+        self.frames_in_stream = 0;
         self.chunk_open = false;
     }
 
@@ -304,12 +471,20 @@ fn read_chunk(client: &Client, buffer: ChunkBuffers) -> Result<GrainChunk, anyho
     let autocov_bytes = client
         .read_one(buffer.autocov)
         .map_err(|error| anyhow::anyhow!("grain autocovariance readback failed: {error}"))?;
+    let record_bytes = client
+        .read_one(buffer.frame_record)
+        .map_err(|error| anyhow::anyhow!("grain frame record readback failed: {error}"))?;
     let hist = i32::from_bytes(&hist_bytes);
     let autocov = f32::from_bytes(&autocov_bytes);
+    let frame_record = f32::from_bytes(&record_bytes);
     let (source_counts, kept_counts) = hist.split_at(HIST_LEN);
+    let recorded_len = buffer.frames as usize * FRAME_RECORD_LEN;
 
     let mut chunk = GrainChunk::empty();
     chunk.frames = buffer.frames;
+
+    let recorded = frame_record[..recorded_len].iter().map(|&value| value as f64);
+    chunk.frame_records = recorded.collect();
 
     for (target, &count) in chunk.source_hist.iter_mut().zip(source_counts) {
         *target = count as u32;
