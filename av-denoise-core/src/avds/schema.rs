@@ -67,6 +67,9 @@ pub enum AvdsGroup {
     Colour,
     /// The chroma colour fit, [AvdsFrame::chroma_colour](crate::avds::AvdsFrame::chroma_colour).
     ChromaColour,
+    /// The chroma table statistics,
+    /// [AvdsFrame::chroma_table](crate::avds::AvdsFrame::chroma_table).
+    ChromaTable,
 }
 
 /// How a column stores its values.
@@ -92,7 +95,7 @@ pub(super) struct Column {
 
 impl AvdsGroup {
     /// Every group, in file order.
-    pub const ALL: [AvdsGroup; 7] = [
+    pub const ALL: [AvdsGroup; 8] = [
         AvdsGroup::Table,
         AvdsGroup::Persistence,
         AvdsGroup::ChromaPersistence,
@@ -100,6 +103,7 @@ impl AvdsGroup {
         AvdsGroup::ChromaNoise,
         AvdsGroup::Colour,
         AvdsGroup::ChromaColour,
+        AvdsGroup::ChromaTable,
     ];
 
     /// Values in one frame of the group.
@@ -111,6 +115,7 @@ impl AvdsGroup {
             AvdsGroup::Noise | AvdsGroup::ChromaNoise => READING_WORDS as usize,
             AvdsGroup::Colour => colour_frame_len(1),
             AvdsGroup::ChromaColour => colour_frame_len(CHROMA_PLANES as u32),
+            AvdsGroup::ChromaTable => CHROMA_PLANES * FRAME_TABLE_LEN,
         }
     }
 
@@ -123,6 +128,7 @@ impl AvdsGroup {
             AvdsGroup::ChromaNoise => "chroma noise reading",
             AvdsGroup::Colour => "colour fit",
             AvdsGroup::ChromaColour => "chroma colour fit",
+            AvdsGroup::ChromaTable => "chroma table statistics",
         }
     }
 }
@@ -208,30 +214,54 @@ pub(super) fn columns() -> Vec<Column> {
     let chroma_colour = colour_columns(AvdsGroup::ChromaColour, &["cb", "cr"]);
     columns.extend(chroma_colour);
 
+    let chroma_table = chroma_table_columns();
+    columns.extend(chroma_table);
+
+    columns
+}
+
+/// The table columns of luma.
+fn table_columns() -> Vec<Column> {
+    table_plane_columns(AvdsGroup::Table, "table", 0)
+}
+
+/// The table columns of Cb then Cr.
+fn chroma_table_columns() -> Vec<Column> {
+    let planes = ["cb", "cr"];
+    let mut columns = Vec::new();
+    for (plane_index, plane) in planes.into_iter().enumerate() {
+        let prefix = format!("chroma_table_{plane}");
+        let plane_columns =
+            table_plane_columns(AvdsGroup::ChromaTable, &prefix, plane_index * FRAME_TABLE_LEN);
+        columns.extend(plane_columns);
+    }
+
     columns
 }
 
 /// The two histograms, then each strength group's lag sums and pixel count.
-fn table_columns() -> Vec<Column> {
-    let grouped_start = 2 * HIST_LEN;
+///
+/// The plane's table starts `table_start` values into the group's values.
+fn table_plane_columns(group: AvdsGroup, prefix: &str, table_start: usize) -> Vec<Column> {
+    let hist_start = table_start;
+    let grouped_start = table_start + 2 * HIST_LEN;
     let mut lag_sums = Vec::with_capacity(STRENGTH_GROUPS * LAG_COUNT);
     let mut pixels = Vec::with_capacity(STRENGTH_GROUPS);
-    for group in 0..STRENGTH_GROUPS {
-        let record_start = grouped_start + group * AUTOCOV_LEN;
+    for strength_group in 0..STRENGTH_GROUPS {
+        let record_start = grouped_start + strength_group * AUTOCOV_LEN;
         lag_sums.extend(record_start..record_start + LAG_COUNT);
         pixels.push(record_start + LAG_COUNT);
     }
 
-    let source = Column::span("table_source_hist", AvdsGroup::Table, Value::Count, 0, HIST_LEN);
-    let kept = Column::span(
-        "table_kept_hist",
-        AvdsGroup::Table,
-        Value::Count,
-        HIST_LEN,
-        HIST_LEN,
-    );
-    let lag_sums = Column::new("table_lag_sums", AvdsGroup::Table, Value::Float, lag_sums);
-    let pixels = Column::new("table_pixels", AvdsGroup::Table, Value::Float, pixels);
+    let source_name = format!("{prefix}_source_hist");
+    let kept_name = format!("{prefix}_kept_hist");
+    let lag_sums_name = format!("{prefix}_lag_sums");
+    let pixels_name = format!("{prefix}_pixels");
+
+    let source = Column::span(source_name, group, Value::Count, hist_start, HIST_LEN);
+    let kept = Column::span(kept_name, group, Value::Count, hist_start + HIST_LEN, HIST_LEN);
+    let lag_sums = Column::new(lag_sums_name, group, Value::Float, lag_sums);
+    let pixels = Column::new(pixels_name, group, Value::Float, pixels);
 
     vec![source, kept, lag_sums, pixels]
 }

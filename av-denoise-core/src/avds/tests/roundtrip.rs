@@ -13,6 +13,7 @@ use crate::avds::meta::{FRAMES_KEY, VERSION_KEY, metadata_pairs};
 use crate::avds::schema::{arrow_schema, columns, writer_properties};
 use crate::avds::write::record_batch;
 use crate::avds::{AvdsFrame, AvdsGroup, read_avds, read_avds_groups, rows_from_scenes, scenes_from_rows};
+use crate::nl4d::grain::consts::FRAME_TABLE_LEN;
 
 /// A file of `batch` with `pairs` as its metadata, written without the grain data writer.
 fn raw_file(batch: &RecordBatch, pairs: Vec<KeyValue>) -> File {
@@ -31,6 +32,20 @@ fn sample_batch(rows: &[AvdsFrame]) -> RecordBatch {
     let schema = Arc::new(schema);
 
     record_batch(&schema, &columns, rows).expect("the batch builds")
+}
+
+/// `batch` without the chroma table columns.
+fn without_chroma_table_columns(batch: &RecordBatch) -> RecordBatch {
+    let schema = batch.schema();
+    let kept: Vec<usize> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| !field.name().starts_with("chroma_table_"))
+        .map(|(index, _)| index)
+        .collect();
+
+    batch.project(&kept).expect("the batch projects")
 }
 
 /// The metadata pairs of a file with `frames` rows.
@@ -110,6 +125,7 @@ fn unmeasured_groups_read_back_as_null() {
         assert_eq!(row.chroma_noise, None);
         assert_eq!(row.colour, None);
         assert_eq!(row.chroma_colour, None);
+        assert_eq!(row.chroma_table, None);
     }
 
     let mut reader = ParquetRecordBatchReaderBuilder::try_new(raw)
@@ -280,7 +296,12 @@ fn integer_and_float_columns_use_their_encodings() {
         let expected = match path.as_str() {
             "frame" | "scene" => Encoding::DELTA_BINARY_PACKED,
             "first_of_scene" => Encoding::RLE,
-            "table_source_hist.list.item" | "table_kept_hist.list.item" => Encoding::RLE_DICTIONARY,
+            "table_source_hist.list.item"
+            | "table_kept_hist.list.item"
+            | "chroma_table_cb_source_hist.list.item"
+            | "chroma_table_cb_kept_hist.list.item"
+            | "chroma_table_cr_source_hist.list.item"
+            | "chroma_table_cr_kept_hist.list.item" => Encoding::RLE_DICTIONARY,
             _ => Encoding::BYTE_STREAM_SPLIT,
         };
 
@@ -292,4 +313,58 @@ fn integer_and_float_columns_use_their_encodings() {
     }
 
     assert_eq!(checked, 3 + columns().len());
+}
+
+#[test]
+fn chroma_table_round_trips() {
+    let scenes = scenes_of(&[30, 5], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let meta = sample_meta(rows.len() as u64);
+    let file = written_file(&meta, &rows);
+
+    let (_, read_rows) = read_avds(file).expect("the file reads");
+
+    assert_eq!(read_rows, rows);
+    for row in &read_rows {
+        let chroma_table = row.chroma_table.as_ref().expect("the chroma table is measured");
+
+        assert_eq!(chroma_table.len(), 2 * FRAME_TABLE_LEN);
+    }
+}
+
+#[test]
+fn a_file_without_chroma_table_columns_is_refused() {
+    let scenes = scenes_of(&[4], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let batch = sample_batch(&rows);
+    let projected = without_chroma_table_columns(&batch);
+
+    let pairs = pairs_with_frames(4);
+    let file = raw_file(&projected, pairs);
+    let error = read_avds(file).expect_err("a missing column is refused");
+
+    assert!(
+        error.to_string().contains("chroma_table_cb_source_hist"),
+        "got {error}"
+    );
+}
+
+#[test]
+fn scenes_from_rows_restore_chroma_frame_tables() {
+    let scenes = scenes_of(&[30], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+
+    let regrouped = scenes_from_rows(rows);
+
+    let regrouped_chunks = regrouped[0].chroma_chunks.len();
+
+    assert_ne!(regrouped_chunks, 0);
+    assert_eq!(regrouped_chunks, scenes[0].chroma_chunks.len());
+    for (chunk, original) in regrouped[0].chroma_chunks.iter().zip(&scenes[0].chroma_chunks) {
+        assert_eq!(
+            chunk.frame_tables.len(),
+            chunk.frames as usize * 2 * FRAME_TABLE_LEN
+        );
+        assert_eq!(chunk.frame_tables, original.frame_tables);
+    }
 }

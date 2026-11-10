@@ -57,6 +57,12 @@ pub(super) fn scene_rows(scene: &SceneGrain, scene_index: u64) -> Vec<AvdsFrame>
 
     for chunk in &scene.chroma_chunks {
         check_field(
+            "chroma frame_tables",
+            &chunk.frame_tables,
+            chunk.frames,
+            AvdsGroup::ChromaTable,
+        );
+        check_field(
             "chroma frame_records",
             &chunk.frame_records,
             chunk.frames,
@@ -91,6 +97,7 @@ pub(super) fn scene_rows(scene: &SceneGrain, scene_index: u64) -> Vec<AvdsFrame>
                 scene: scene_index,
                 first_of_scene,
                 table,
+                chroma_table: None,
                 persistence,
                 chroma_persistence: None,
                 noise,
@@ -107,6 +114,7 @@ pub(super) fn scene_rows(scene: &SceneGrain, scene_index: u64) -> Vec<AvdsFrame>
         .iter()
         .flat_map(|chunk| (0..chunk.frames as usize).map(move |slot| (chunk, slot)));
     for (row, (chunk, slot)) in rows.iter_mut().zip(chroma_slots) {
+        row.chroma_table = frame_values(&chunk.frame_tables, slot, AvdsGroup::ChromaTable);
         row.chroma_persistence = frame_values(&chunk.frame_records, slot, AvdsGroup::ChromaPersistence);
         row.chroma_noise = frame_values(&chunk.frame_noise, slot, AvdsGroup::ChromaNoise);
         row.chroma_colour = frame_values(&chunk.frame_colour, slot, AvdsGroup::ChromaColour);
@@ -171,7 +179,10 @@ pub fn scenes_from_rows(rows: Vec<AvdsFrame>) -> Vec<SceneGrain> {
 
 fn scene_of(rows: &[AvdsFrame]) -> SceneGrain {
     let has_chroma = rows.iter().any(|row| {
-        row.chroma_persistence.is_some() || row.chroma_noise.is_some() || row.chroma_colour.is_some()
+        row.chroma_table.is_some()
+            || row.chroma_persistence.is_some()
+            || row.chroma_noise.is_some()
+            || row.chroma_colour.is_some()
     });
 
     let mut chunks = Vec::new();
@@ -209,13 +220,14 @@ fn luma_chunk(rows: &[AvdsFrame]) -> GrainChunk {
 }
 
 fn chroma_chunk(rows: &[AvdsFrame]) -> GrainChunk {
+    let frame_tables = joined(rows, AvdsGroup::ChromaTable, AvdsFrame::floats);
     let frame_records = joined(rows, AvdsGroup::ChromaPersistence, AvdsFrame::doubles);
     let frame_noise = joined(rows, AvdsGroup::ChromaNoise, AvdsFrame::floats);
     let frame_colour = joined(rows, AvdsGroup::ChromaColour, AvdsFrame::floats);
 
     GrainChunk {
         frames: rows.len() as u32,
-        frame_tables: Vec::new(),
+        frame_tables,
         frame_records,
         frame_noise,
         frame_colour,

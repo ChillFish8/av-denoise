@@ -212,6 +212,7 @@ fn a_run_with_export_avds_writes_one_row_per_frame() {
     assert!(rows.iter().all(|row| row.table.is_some()));
     assert!(rows.iter().all(|row| row.persistence.is_some()));
     assert!(rows.iter().all(|row| row.chroma_persistence.is_some()));
+    assert!(rows.iter().all(|row| row.chroma_table.is_some()));
     assert!(!temporary.exists());
 }
 
@@ -228,6 +229,7 @@ fn a_luma_only_run_leaves_the_chroma_columns_null() {
     assert_eq!(rows.len(), 30);
     assert_eq!(meta.planes_measured, PlanesMeasured::Luma);
     assert!(rows.iter().all(|row| row.table.is_some()));
+    assert!(rows.iter().all(|row| row.chroma_table.is_none()));
     assert!(rows.iter().all(|row| row.chroma_persistence.is_none()));
     assert!(rows.iter().all(|row| row.chroma_noise.is_none()));
     assert!(rows.iter().all(|row| row.chroma_colour.is_none()));

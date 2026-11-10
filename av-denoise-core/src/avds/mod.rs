@@ -45,6 +45,10 @@ pub struct AvdsFrame {
     /// The luma table statistics, one frame of
     /// [GrainChunk::frame_tables](crate::GrainChunk::frame_tables), `None` when not measured.
     pub table: Option<Vec<f32>>,
+    /// The chroma table statistics, one frame of chroma
+    /// [GrainChunk::frame_tables](crate::GrainChunk::frame_tables), Cb then Cr, `None` when not
+    /// measured.
+    pub chroma_table: Option<Vec<f32>>,
     /// The luma persistence sums, one frame of
     /// [GrainChunk::frame_records](crate::GrainChunk::frame_records), `None` when not measured.
     pub persistence: Option<Vec<f64>>,
@@ -68,6 +72,7 @@ impl AvdsFrame {
             scene,
             first_of_scene,
             table: None,
+            chroma_table: None,
             persistence: None,
             chroma_persistence: None,
             noise: None,
@@ -81,6 +86,7 @@ impl AvdsFrame {
     fn floats(&self, group: AvdsGroup) -> Option<&[f32]> {
         let values = match group {
             AvdsGroup::Table => &self.table,
+            AvdsGroup::ChromaTable => &self.chroma_table,
             AvdsGroup::Noise => &self.noise,
             AvdsGroup::ChromaNoise => &self.chroma_noise,
             AvdsGroup::Colour => &self.colour,
@@ -97,6 +103,7 @@ impl AvdsFrame {
             AvdsGroup::Persistence => &self.persistence,
             AvdsGroup::ChromaPersistence => &self.chroma_persistence,
             AvdsGroup::Table
+            | AvdsGroup::ChromaTable
             | AvdsGroup::Noise
             | AvdsGroup::ChromaNoise
             | AvdsGroup::Colour
@@ -111,6 +118,7 @@ impl AvdsFrame {
     fn floats_mut(&mut self, group: AvdsGroup) -> Option<&mut Option<Vec<f32>>> {
         match group {
             AvdsGroup::Table => Some(&mut self.table),
+            AvdsGroup::ChromaTable => Some(&mut self.chroma_table),
             AvdsGroup::Noise => Some(&mut self.noise),
             AvdsGroup::ChromaNoise => Some(&mut self.chroma_noise),
             AvdsGroup::Colour => Some(&mut self.colour),
@@ -124,6 +132,7 @@ impl AvdsFrame {
             AvdsGroup::Persistence => Some(&mut self.persistence),
             AvdsGroup::ChromaPersistence => Some(&mut self.chroma_persistence),
             AvdsGroup::Table
+            | AvdsGroup::ChromaTable
             | AvdsGroup::Noise
             | AvdsGroup::ChromaNoise
             | AvdsGroup::Colour

@@ -101,7 +101,7 @@ pub(super) fn scenes_of(lengths: &[u32], measured: Measured) -> Vec<SceneGrain> 
 fn luma_chunk(first_frame: u64, frames: u32, measured: Measured) -> GrainChunk {
     let mut chunk = GrainChunk::empty();
     chunk.frames = frames;
-    chunk.frame_tables = table_values(first_frame, frames);
+    chunk.frame_tables = table_values(first_frame, frames, 1);
 
     if measured.persistence {
         chunk.frame_records = double_values(first_frame, frames, FRAME_RECORD_LEN, 1.0);
@@ -121,6 +121,7 @@ fn luma_chunk(first_frame: u64, frames: u32, measured: Measured) -> GrainChunk {
 fn chroma_chunk(first_frame: u64, frames: u32) -> GrainChunk {
     let mut chunk = GrainChunk::empty();
     chunk.frames = frames;
+    chunk.frame_tables = table_values(first_frame, frames, 2);
     chunk.frame_records = double_values(first_frame, frames, CHROMA_RECORD_LEN, 4.0);
     chunk.frame_noise = float_values(first_frame, frames, READING_WORDS as usize, 5.0);
     chunk.frame_colour = float_values(first_frame, frames, colour_frame_len(2), 6.0);
@@ -128,11 +129,13 @@ fn chroma_chunk(first_frame: u64, frames: u32) -> GrainChunk {
     chunk
 }
 
-fn table_values(first_frame: u64, frames: u32) -> Vec<f32> {
-    let mut values = Vec::with_capacity(frames as usize * FRAME_TABLE_LEN);
+/// `planes` tables per frame, each plane's values differing from the others'.
+fn table_values(first_frame: u64, frames: u32, planes: usize) -> Vec<f32> {
+    let mut values = Vec::with_capacity(frames as usize * planes * FRAME_TABLE_LEN);
     for frame in first_frame..first_frame + frames as u64 {
-        for index in 0..FRAME_TABLE_LEN {
-            let value = if index < 2 * HIST_LEN {
+        for index in 0..planes * FRAME_TABLE_LEN {
+            let within_table = index % FRAME_TABLE_LEN;
+            let value = if within_table < 2 * HIST_LEN {
                 ((frame as usize * 7 + index) % 23) as f32
             } else {
                 frame as f32 * 0.375 + index as f32 * 0.001
