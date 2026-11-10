@@ -303,6 +303,8 @@ Real readings never reach exactly 0 or 1. Anything fixed in a held shot, such as
 residue, adds a little persistence to moving grain, and part of a flat area's grain is always fresh.
 
 To summarise a scene, take the median of each `persistence` entry over its rows, skipping `null`.
+As a starting point, a first entry under 0.4 suggests moving grain. Otherwise, a last entry under
+0.34 suggests slow grain, and anything higher suggests static grain.
 ---
 
 ## [Tuning guide](TUNING-CLI.md)
