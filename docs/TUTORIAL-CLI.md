@@ -160,14 +160,15 @@ NL4D runs the `base` and `slow` presets. `slow` widens the search for motion blo
 fails, up to `--mc-max-search-escalation` (8), and runs slower. Otherwise, trade speed for quality
 with `--temporal-radius` and `--spatial-radius`.
 
-| Flag                               | What it does                                                                                                                                                                                                                    | Default                  |
-|------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
-| `--temporal-radius <N>`            | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                                  | `2`                      |
-| `--lambda-ht <f>`                  | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                           | 4.158 luma, 3.234 chroma |
-| `--lambda-ht-scale <f>`            | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                                 | `1.0`                    |
-| `--spatial-radius <N>`             | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                                  | `9`                      |
-| `--sigma-scale <f>`                | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                               | `1.0`                    |
+| Flag                               | What it does                                                                                                                                                                                                                                                                         | Default                  |
+|------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
+| `--temporal-radius <N>`            | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                                                                                       | `2`                      |
+| `--lambda-ht <f>`                  | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                                                                                | 4.158 luma, 3.234 chroma |
+| `--lambda-ht-scale <f>`            | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                                                                                      | `1.0`                    |
+| `--spatial-radius <N>`             | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                                                                                       | `9`                      |
+| `--sigma-scale <f>`                | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                                                                                    | `1.0`                    |
 | `--unstable-export-av1-fgs <PATH>` | Unstable, and may change between releases. Writes an AV1 film grain table to add with `regrain apply`, which applies each scene's entry. SVT-AV1 `--fgs-table` and `grav1synth apply` apply only its first entry, so they suit a single-scene table only. Needs luma to be denoised. | off                      |
+| `--unstable-grain-report <PATH>`   | Unstable, and may change between releases. Writes a report of the source's grain, with one JSON line per frame. See [Reading the grain report](#reading-the-grain-report). Needs luma to be denoised.                                                                                | off                      |
 
 <details>
 <summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
@@ -255,6 +256,50 @@ ffmpeg -i noisy.mkv -pix_fmt yuv420p10le -strict -1 -f yuv4mpegpipe - \
 ```
 
 File input via `--input noisy.mkv` needs no such flag.
+---
+
+## Exporting & reading the grain report
+
+`--unstable-grain-report` writes one JSON object per output frame, one per line, in frame order.
+It describes the grain in the source, not what the denoiser removed. 
+`--unstable-export-av1-fgs` is _not_ required to use this option.
+
+```bash
+av-denoise nl4d --input noisy.mkv --unstable-grain-report grain.jsonl > /dev/null
+```
+
+```json
+{"frame":120,"scene":3,"cells":19804,"strength":0.93,"persistence":[0.62,0.46,0.34,0.27,0.23,0.21,0.2,0.2]}
+```
+
+| Key           | Meaning                                                                                                                           |
+|---------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| `frame`       | Output frame index, starting at 0.                                                                                                |
+| `scene`       | Index of the scene av-denoise cut, in frame order. Encoders may cut their own scenes, so treat it as a hint.                      |
+| `cells`       | How many 8x8 cells the reading rests on, counting the frame before and after.                                                     |
+| `strength`    | The grain standard deviation in 8-bit code values, whatever the bit depth.                                                        |
+| `persistence` | Eight entries, for 1 to 8 frames away. Each is the share of grain unchanged that far before and after the frame, between 0 and 1. |
+
+Grain is measured in flat areas of luma, at the same screen position with no motion compensation.
+Grain fixed to the screen reads as persistent, and texture carried by a pan reads as moving.
+
+A reading is `null` when fewer than 200 flat cells back it at that distance. A side of the window
+counts only when that frame is in the same scene. A scene shorter than 9 frames never fills the
+last entries, and a single-frame scene is all `null`. Very busy, black or blown-out frames can also
+be `null`.
+
+The level and fall of the curve tell the grain apart:
+
+- Moving grain is already near 0 at the first entry.
+- Slow grain starts high and falls over a few frames.
+- Static grain stays high to the last entry.
+- Grain held for N frames then replaced reads about `(N - 1) / N` at the first entry and falls to near 0 by entry N.
+
+A source that repeats a whole frame, grain included, reads as persistent for that pair.
+Real readings never reach exactly 0 or 1. Anything fixed in a held shot, such as compression
+residue, adds a little persistence to moving grain, and part of a flat area's grain is always fresh.
+
+To summarise a scene, take the median of each `persistence` entry over its rows, skipping `null`.
 ---
 
 ## [Tuning guide](TUNING-CLI.md)
