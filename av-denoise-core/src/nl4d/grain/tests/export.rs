@@ -22,7 +22,7 @@ use crate::nl4d::grain::consts::{
 };
 use crate::nl4d::grain::fit::{bucket_edges, hist_median};
 use crate::nl4d::grain::segment::SceneGrain;
-use crate::nl4d::grain::{GrainExport, GrainGeometry, GrainParts, build_table};
+use crate::nl4d::grain::{FitOptions, GrainExport, GrainGeometry, GrainParts, build_table};
 use crate::nl4d::snapshot::LastFields;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
 use crate::nlmeans::{
@@ -690,7 +690,8 @@ fn a_table_from_frame_tables_matches_the_chunk_table() {
         chroma_chunks: Vec::new(),
     };
 
-    let table = build_table(&[scene], FRAME_RATE);
+    let options = FitOptions::default();
+    let table = build_table(&[scene], FRAME_RATE, &options);
 
     assert_eq!(table, BANDED_TABLE);
 }

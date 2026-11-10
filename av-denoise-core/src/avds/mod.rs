@@ -24,8 +24,9 @@ pub use self::order::AvdsSceneWriter;
 pub use self::read::read_avds;
 pub use self::rows::{rows_from_scenes, scenes_from_rows};
 use self::schema::Group;
-pub use self::synthesize::{FitOptions, av1_table, report_rows};
+pub use self::synthesize::{av1_table, report_rows};
 pub use self::write::{AvdsWriter, write_avds};
+pub use crate::FitOptions;
 use crate::{ChromaLayout, ChromaSiting};
 
 /// The file format version a writer stamps on every file.

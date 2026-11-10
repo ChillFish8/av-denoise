@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use av_denoise::{SceneGrain, build_table};
+use av_denoise::{FitOptions, SceneGrain, build_table};
 
 use super::staged_file::StagedFile;
 
@@ -20,7 +20,8 @@ impl TablePath {
 
     /// Writes the table and moves it into place.
     pub fn write(self, scenes: &[SceneGrain], frame_rate: (u64, u64)) -> Result<(), anyhow::Error> {
-        let text = build_table(scenes, frame_rate);
+        let options = FitOptions::default();
+        let text = build_table(scenes, frame_rate, &options);
         warn_on_empty_table(&text);
 
         self.file.commit(text.as_bytes())

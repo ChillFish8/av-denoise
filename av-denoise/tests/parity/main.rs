@@ -13,6 +13,7 @@ use av_denoise::{
     ChromaLayout,
     DenoiserError,
     DenoiserOptions,
+    FitOptions,
     HostDenoiser,
     PlanarDenoiser,
     Planes,
@@ -92,7 +93,8 @@ fn run(config: &ParityConfig, entries: &mut Entries) {
             chunks: grain.luma,
             chroma_chunks: grain.chroma,
         };
-        let table = build_table(&[scene], (24, 1));
+        let options = FitOptions::default();
+        let table = build_table(&[scene], (24, 1), &options);
         let config_name = config.name.to_string();
         let label = "grain".to_string();
         let key = (config_name, label);

@@ -22,6 +22,7 @@ pub use av_denoise_core::{
     DevicePlane,
     EdgePadding,
     Error as EngineError,
+    FitOptions,
     FrameGrain,
     GrainChunk,
     GrainChunks,

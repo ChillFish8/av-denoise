@@ -12,10 +12,18 @@ use super::synthetic::{
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{BUCKETS_PER_GROUP, CHUNK_FRAMES, LUMA_BINS, MAX_POINTS, STD_BUCKETS};
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of, hist_median};
-use crate::nl4d::grain::segment::{SceneGrain, fit_scenes, segment_scene};
+use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes, segment_scene};
+use crate::nl4d::grain::table::FitOptions;
 
 /// A source bucket whose median doubled lands in the first bucket of a strength group.
 const EDGE_BUCKET: usize = 37;
+
+/// Fits the scenes with every measured part of the grain kept.
+fn fit_measured(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
+    let options = FitOptions::default();
+
+    fit_scenes(scenes, &options)
+}
 
 /// A chunk with an AR record and 1500 blocks at `std_codes` in only two luma bins.
 ///
@@ -138,7 +146,7 @@ fn a_fitted_entry_has_points_and_weights() {
     let scene = scene_of(0, vec![chunk]);
     let scenes = vec![scene];
 
-    let entries = fit_scenes(&scenes);
+    let entries = fit_measured(&scenes);
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].points.len(), 8);
@@ -151,7 +159,7 @@ fn kept_equal_to_source_gives_zero_strength() {
     let scene = scene_of(0, vec![chunk]);
     let scenes = vec![scene];
 
-    let entries = fit_scenes(&scenes);
+    let entries = fit_measured(&scenes);
 
     assert!(entries[0].points.iter().all(|&(_, scale)| scale == 0));
 }
@@ -162,7 +170,7 @@ fn kept_above_source_clamps_to_zero() {
     let scene = scene_of(0, vec![chunk]);
     let scenes = vec![scene];
 
-    let entries = fit_scenes(&scenes);
+    let entries = fit_measured(&scenes);
 
     assert!(entries[0].points.iter().all(|&(_, scale)| scale == 0));
 }
@@ -178,7 +186,7 @@ fn a_thin_chunk_never_gets_its_own_entry() {
     let second_scene = scene_of(24, second_chunks);
     let scenes = vec![first_scene, second_scene];
 
-    let entries = fit_scenes(&scenes);
+    let entries = fit_measured(&scenes);
 
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].first_frame, 24);
@@ -194,7 +202,7 @@ fn missing_texture_borrows_from_the_nearest_segment() {
     let second_scene = scene_of(24, vec![no_texture]);
     let scenes = vec![first_scene, second_scene];
 
-    let entries = fit_scenes(&scenes);
+    let entries = fit_measured(&scenes);
 
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].ar_coeffs, entries[0].ar_coeffs);
@@ -208,7 +216,7 @@ fn sparse_scene_borrows_from_a_neighbouring_scene() {
     let second_scene = scene_of(24, vec![sparse]);
     let scenes = vec![first_scene, second_scene];
 
-    let entries = fit_scenes(&scenes);
+    let entries = fit_measured(&scenes);
 
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].points, entries[0].points);
@@ -220,7 +228,7 @@ fn sparse_segment_with_no_donor_gets_no_entry() {
     let scene = scene_of(0, vec![sparse]);
     let scenes = vec![scene];
 
-    let entries = fit_scenes(&scenes);
+    let entries = fit_measured(&scenes);
 
     assert!(entries.is_empty());
 }
@@ -243,9 +251,9 @@ fn an_outlier_group_leaves_the_texture_unchanged() {
     let clean_scene = scene_of(0, vec![grain_only]);
     let outlier_scene = scene_of(0, vec![with_outlier]);
     let mixed_scene = scene_of(0, vec![mixed]);
-    let clean_entries = fit_scenes(&[clean_scene]);
-    let outlier_entries = fit_scenes(&[outlier_scene]);
-    let mixed_entries = fit_scenes(&[mixed_scene]);
+    let clean_entries = fit_measured(&[clean_scene]);
+    let outlier_entries = fit_measured(&[outlier_scene]);
+    let mixed_entries = fit_measured(&[mixed_scene]);
     let grain = grain_record();
 
     assert!(coarse[0] > 10.0 * grain[0]);
@@ -261,7 +269,7 @@ fn a_group_overlapping_the_band_edge_gives_the_texture() {
     add_group_record(&mut chunk, edge_group, &record);
 
     let scene = scene_of(0, vec![chunk]);
-    let entries = fit_scenes(&[scene]);
+    let entries = fit_measured(&[scene]);
 
     assert_eq!(entries.len(), 1);
     assert!(entries[0].ar_coeffs.iter().any(|&coeff| coeff != 0));
@@ -274,7 +282,7 @@ fn a_group_past_the_band_gives_no_texture() {
     add_group_record(&mut chunk, edge_group + 1, &record);
 
     let scene = scene_of(0, vec![chunk]);
-    let entries = fit_scenes(&[scene]);
+    let entries = fit_measured(&[scene]);
 
     assert!(entries.is_empty());
 }
@@ -290,7 +298,7 @@ fn a_sparse_segment_borrows_from_its_own_scene_first() {
     let second_scene = scene_of(3 * CHUNK_FRAMES as u64, vec![next_scene_chunk]);
     let scenes = vec![first_scene, second_scene];
 
-    let entries = fit_scenes(&scenes);
+    let entries = fit_measured(&scenes);
 
     assert_eq!(entries.len(), 4);
     assert_eq!(entries[2].first_frame, 2 * CHUNK_FRAMES as u64);
@@ -308,7 +316,7 @@ fn a_chunk_in_every_luma_bin_thins_to_the_point_limit() {
     }
 
     let scene = scene_of(0, vec![chunk]);
-    let entries = fit_scenes(&[scene]);
+    let entries = fit_measured(&[scene]);
     let points = &entries[0].points;
     let first_luma = points.first().expect("points").0;
     let last_luma = points.last().expect("points").0;

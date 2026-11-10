@@ -15,6 +15,8 @@ use super::consts::{
 const MEAN_REMOVAL_ROUNDS: usize = 20;
 /// The largest offset between two pixels of one cell, on either axis.
 const CELL_SPAN: i32 = CELL as i32 - 1;
+/// Frequencies on each axis of the grid [floor_fraction] reads.
+const SPECTRUM_STEPS: usize = 64;
 
 /// The 65 std bucket edges, log-spaced between `STD_MIN` and `STD_MAX`.
 pub(crate) fn bucket_edges() -> [f32; STD_BUCKETS + 1] {
@@ -204,6 +206,58 @@ fn solve(mut matrix: Vec<[f64; AR_COEFFS + 1]>) -> Option<[f64; AR_COEFFS]> {
 
     let finite = solution.iter().all(|value| value.is_finite());
     finite.then_some(solution)
+}
+
+/// The share of a texture's variance a flat, white floor accounts for, between 0 and 1.
+///
+/// White noise adds the same power at every frequency, so the floor is the lowest point of the
+/// weights' [ar_spectrum]. The share is that floor over the spectrum's mean. Coarse grain has almost
+/// no power at the finest frequencies, so its lowest point and share are close to 0.
+pub(crate) fn floor_fraction(coeffs: &[f64; AR_COEFFS]) -> f64 {
+    let spectrum = ar_spectrum(coeffs);
+    let lowest = spectrum.iter().copied().fold(f64::INFINITY, f64::min);
+    let total: f64 = spectrum.iter().sum();
+
+    let mean = total / spectrum.len() as f64;
+    let fraction = lowest / mean;
+    if !fraction.is_finite() {
+        return 0.0;
+    }
+
+    fraction.clamp(0.0, 1.0)
+}
+
+/// The power of unit noise through the AR filter on a grid of [SPECTRUM_STEPS] by
+/// [SPECTRUM_STEPS] frequencies, row by row.
+pub(crate) fn ar_spectrum(coeffs: &[f64; AR_COEFFS]) -> Vec<f64> {
+    let step = std::f64::consts::TAU / SPECTRUM_STEPS as f64;
+    let mut spectrum = Vec::with_capacity(SPECTRUM_STEPS * SPECTRUM_STEPS);
+
+    for row in 0..SPECTRUM_STEPS {
+        for col in 0..SPECTRUM_STEPS {
+            let frequency_y = row as f64 * step;
+            let frequency_x = col as f64 * step;
+            let power = ar_power(coeffs, frequency_y, frequency_x);
+            spectrum.push(power);
+        }
+    }
+
+    spectrum
+}
+
+/// The power of unit noise through the AR filter at one spatial frequency.
+fn ar_power(coeffs: &[f64; AR_COEFFS], frequency_y: f64, frequency_x: f64) -> f64 {
+    let mut real = 1.0;
+    let mut imaginary = 0.0;
+    for (&(dy, dx), &coeff) in AR_OFFSETS.iter().zip(coeffs) {
+        let phase = frequency_y * dy as f64 + frequency_x * dx as f64;
+        real -= coeff * phase.cos();
+        imaginary -= coeff * phase.sin();
+    }
+
+    let gain = real * real + imaginary * imaginary;
+
+    1.0 / gain
 }
 
 /// Rounds the weights to AV1 integers with the finest shift that keeps each in a signed byte.

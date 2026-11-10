@@ -1,4 +1,5 @@
 mod export;
+mod fine_noise;
 mod fit;
 mod kernels;
 mod mirror;

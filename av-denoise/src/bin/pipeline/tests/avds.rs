@@ -10,6 +10,7 @@ use av_denoise::{
     ChannelIntent,
     ChromaLayout,
     DenoisingMode,
+    FitOptions,
     Nl4dOptions,
     PlaneOptions,
     TuningMode,
@@ -155,7 +156,8 @@ fn the_file_rebuilds_the_runs_grain_table() {
 
     let (meta, rows) = read_file(&path);
     let scenes = scenes_from_rows(&rows);
-    let rebuilt = build_table(&scenes, meta.frame_rate);
+    let options = FitOptions::default();
+    let rebuilt = build_table(&scenes, meta.frame_rate, &options);
     let written = std::fs::read_to_string(&table_path).expect("the table exists");
 
     assert!(written.contains("\nE "), "no entry was fitted, got {written}");

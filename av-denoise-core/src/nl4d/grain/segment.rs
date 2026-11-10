@@ -13,7 +13,16 @@ use super::consts::{
     STD_BUCKETS,
     STRENGTH_GROUPS,
 };
-use super::fit::{bucket_edges, hist_median, quantise_ar, scaling_points, undo_mean_removal, yule_walker};
+use super::fit::{
+    bucket_edges,
+    floor_fraction,
+    hist_median,
+    quantise_ar,
+    scaling_points,
+    undo_mean_removal,
+    yule_walker,
+};
+use super::table::FitOptions;
 use super::template::template_stats;
 
 /// The grain chunks of one scene, in frame order.
@@ -55,12 +64,29 @@ struct BinStrength {
 }
 
 /// Quantised AR weights and their shift.
-type Texture = ([i32; AR_COEFFS], u32);
+type Weights = ([i32; AR_COEFFS], u32);
+
+/// A segment's fitted texture.
+#[derive(Debug, Clone, Copy)]
+struct Texture {
+    /// The weights the table carries, with the chosen share of the fine noise taken out.
+    table: Weights,
+    /// The template std of the table's weights, in 8-bit units.
+    table_sigma: f64,
+    /// The measured template's ratio of its whole-field std to its 8x8 block median std.
+    ///
+    /// The block stds were measured on all the grain, so this converts them to whole-field stds.
+    block_to_field: f64,
+    /// The share of the measured variance in the fine noise floor, between 0 and 1.
+    floor: f64,
+}
 
 /// The texture band's lower edge, as a multiple of the median source std.
 const BAND_LOW: f64 = 0.5;
 /// The texture band's upper edge, as a multiple of the median source std.
 const BAND_HIGH: f64 = 2.0;
+/// The largest share of the floor taken out of a texture's zero lag.
+pub(crate) const MAX_FLOOR_TAKEN: f64 = 0.95;
 
 /// A segment's own measurements, either of which may be missing.
 struct Parts {
@@ -164,8 +190,9 @@ fn strength_of(stats: &TableSums, edges: &[f32]) -> Option<Vec<BinStrength>> {
 ///
 /// A group joins when its std range overlaps the band between [BAND_LOW] and [BAND_HIGH] times the
 /// median, so blocks far from the typical grain strength never shape the texture. The summed record
-/// has its cell-mean bias undone before the solve.
-fn texture_of(stats: &TableSums, edges: &[f32]) -> Option<Texture> {
+/// has its cell-mean bias undone before the solve. The table's weights are solved again after
+/// `fine_noise` times the floor's variance comes off the zero lag.
+fn texture_of(stats: &TableSums, edges: &[f32], fine_noise: f64) -> Option<Texture> {
     let median = overall_median(&stats.source_hist, edges)?;
     let band_low = BAND_LOW * median;
     let band_high = BAND_HIGH * median;
@@ -189,20 +216,59 @@ fn texture_of(stats: &TableSums, edges: &[f32]) -> Option<Texture> {
         return None;
     }
 
-    let corrected = undo_mean_removal(&record);
-    let weights = yule_walker(&corrected)?;
-    let quantised = quantise_ar(&weights);
-    Some(quantised)
+    let mut corrected = undo_mean_removal(&record);
+    let measured_weights = yule_walker(&corrected)?;
+    let floor = floor_fraction(&measured_weights);
+    let (measured_coeffs, measured_shift) = quantise_ar(&measured_weights);
+    let (measured_sigma, measured_median) = template_stats(&measured_coeffs, measured_shift);
+    let block_to_field = measured_sigma / measured_median;
+
+    take_out_fine_noise(&mut corrected, floor, fine_noise);
+    let measured = (measured_coeffs, measured_shift);
+    let (table, table_sigma) = reduced_weights(&corrected, measured, measured_sigma);
+
+    Some(Texture {
+        table,
+        table_sigma,
+        block_to_field,
+        floor,
+    })
+}
+
+/// Takes `fine_noise` times the floor's share of the zero lag off a corrected record.
+pub(crate) fn take_out_fine_noise(corrected: &mut [f64], floor: f64, fine_noise: f64) {
+    // At most [MAX_FLOOR_TAKEN] of the floor comes out, so the reduced system stays well conditioned.
+    let share = fine_noise.min(MAX_FLOOR_TAKEN) * floor;
+    corrected[0] -= share * corrected[0];
+}
+
+/// The quantised weights solved from the reduced record and their template std.
+///
+/// When the reduced record has no system to solve, the measured weights and std stay.
+fn reduced_weights(corrected: &[f64], measured: Weights, measured_sigma: f64) -> (Weights, f64) {
+    let Some(solved) = yule_walker(corrected) else {
+        return (measured, measured_sigma);
+    };
+
+    let reduced = quantise_ar(&solved);
+    if reduced == measured {
+        return (measured, measured_sigma);
+    }
+
+    let (coeffs, shift) = reduced;
+    let (sigma, _) = template_stats(&coeffs, shift);
+
+    (reduced, sigma)
 }
 
 /// Fits every scene's segments, borrowing missing strength or texture, and drops what has no donor.
-pub(crate) fn fit_scenes(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
+pub(crate) fn fit_scenes(scenes: &[SceneGrain], options: &FitOptions) -> Vec<FittedEntry> {
     let edges = bucket_edges();
     let mut parts = Vec::new();
     for (scene_index, scene) in scenes.iter().enumerate() {
         for segment in segment_scene(scene) {
             let strength = strength_of(&segment.table, &edges);
-            let texture = texture_of(&segment.table, &edges);
+            let texture = texture_of(&segment.table, &edges, options.fine_noise);
             parts.push(Parts {
                 first_frame: segment.first_frame,
                 last_frame: segment.last_frame,
@@ -221,7 +287,7 @@ pub(crate) fn fit_scenes(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
             continue;
         };
 
-        let entry = build_entry(&parts[index], &strength, texture);
+        let entry = build_entry(&parts[index], &strength, texture, options.fine_noise);
         entries.push(entry);
     }
 
@@ -259,12 +325,14 @@ fn borrow<T>(parts: &[Parts], index: usize, value: impl Fn(&Parts) -> Option<T>)
     None
 }
 
-fn build_entry(part: &Parts, strength: &[BinStrength], texture: Texture) -> FittedEntry {
-    let (coeffs, ar_shift) = texture;
-    let (sigma_template, template_median) = template_stats(&coeffs, ar_shift);
-    // The measured stds are medians of mean-removed 8x8 blocks. The template's ratio of its
-    // whole-field std to its block median converts them to a whole-field std.
-    let factor = sigma_template / template_median;
+/// The entry for one part.
+///
+/// Each bin's synthesised variance loses `fine_noise` times the texture's floor share of itself.
+fn build_entry(part: &Parts, strength: &[BinStrength], texture: Texture, fine_noise: f64) -> FittedEntry {
+    let (coeffs, ar_shift) = texture.table;
+    let factor = texture.block_to_field;
+    let sigma_template = texture.table_sigma;
+    let fine_share = fine_noise * texture.floor;
 
     let mut chosen: Vec<BinStrength> = strength.to_vec();
     if chosen.len() > MAX_POINTS {
@@ -281,8 +349,11 @@ fn build_entry(part: &Parts, strength: &[BinStrength], texture: Texture) -> Fitt
         .map(|entry| {
             let sigma_source = entry.source * factor;
             let sigma_kept = entry.kept * factor;
+            let source_variance = sigma_source * sigma_source;
+            let kept_variance = sigma_kept * sigma_kept;
             // Only the grain the denoiser removed is synthesised, so the kept grain comes off.
-            let variance = (sigma_source * sigma_source - sigma_kept * sigma_kept).max(0.0);
+            let removed_variance = (source_variance - kept_variance).max(0.0);
+            let variance = removed_variance * (1.0 - fine_share);
             let centre = (entry.bin as f64 + 0.5) * 256.0 / LUMA_BINS as f64;
             (centre.round() as u8, variance.sqrt())
         })

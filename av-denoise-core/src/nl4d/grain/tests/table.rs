@@ -1,7 +1,7 @@
 use super::synthetic::chunk_at;
 use crate::nl4d::grain::consts::AR_COEFFS;
 use crate::nl4d::grain::segment::{FittedEntry, SceneGrain};
-use crate::nl4d::grain::table::{boundary_ticks, build_table, format_table};
+use crate::nl4d::grain::table::{FitOptions, boundary_ticks, build_table, format_table};
 
 const NTSC: (u64, u64) = (24_000, 1_001);
 
@@ -92,7 +92,8 @@ fn the_54th_entry_seed_wraps_at_16_bits() {
 
 #[test]
 fn no_entries_writes_header_only() {
-    let text = build_table(&[], NTSC);
+    let options = FitOptions::default();
+    let text = build_table(&[], NTSC, &options);
 
     assert_eq!(text, "filmgrn1\n");
 }
@@ -122,8 +123,9 @@ fn scenes_are_sorted_before_fitting() {
         chroma_chunks: Vec::new(),
     };
     let scenes = vec![later, earlier];
+    let options = FitOptions::default();
 
-    let text = build_table(&scenes, NTSC);
+    let text = build_table(&scenes, NTSC, &options);
     let starts = entry_lines(&text);
 
     assert_eq!(starts.len(), 2);

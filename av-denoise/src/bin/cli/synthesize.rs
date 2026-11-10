@@ -45,7 +45,7 @@ pub struct Av1FgsArgs {
     #[arg(
         long,
         value_name = "AMOUNT",
-        default_value_t = 0.0,
+        default_value_t = 0.5,
         value_parser = parse_fine_noise,
         allow_negative_numbers = true
     )]
@@ -78,9 +78,10 @@ impl Av1FgsArgs {
             anyhow::bail!("--planes accepts luma only, chroma grain is not synthesised yet");
         }
 
-        tracing::debug!(fine_noise = self.fine_noise, "fitting the grain table");
+        let mut options = FitOptions::default();
+        options.fine_noise = self.fine_noise;
 
-        Ok(FitOptions::default())
+        Ok(options)
     }
 }
 
@@ -197,13 +198,23 @@ mod tests {
     }
 
     #[test]
-    fn av1_fgs_defaults_to_luma_and_no_fine_noise() {
+    fn av1_fgs_defaults_to_luma_and_half_the_fine_noise() {
         let av1_fgs = parsed_av1_fgs(&["av1-fgs", "--input", "run.avds", "--output", "grain.tbl"]);
 
         assert_eq!(av1_fgs.input, PathBuf::from("run.avds"));
         assert_eq!(av1_fgs.output, PathBuf::from("grain.tbl"));
         assert_eq!(av1_fgs.planes, [GrainPlane::Luma]);
-        assert_eq!(av1_fgs.fine_noise, 0.0);
+        assert_eq!(av1_fgs.fine_noise, 0.5);
+    }
+
+    #[test]
+    fn fine_noise_reaches_the_fit_options() {
+        let extra = ["av1-fgs", "--input", "a", "--output", "b", "--fine-noise", "0.6"];
+        let av1_fgs = parsed_av1_fgs(&extra);
+
+        let options = av1_fgs.fit_options().expect("luma is accepted");
+
+        assert_eq!(options.fine_noise, 0.6);
     }
 
     #[test]
@@ -217,12 +228,12 @@ mod tests {
             "--planes",
             "luma,chroma",
             "--fine-noise",
-            "0.25",
+            "0.75",
         ];
         let av1_fgs = parsed_av1_fgs(&extra);
 
         assert_eq!(av1_fgs.planes, [GrainPlane::Luma, GrainPlane::Chroma]);
-        assert_eq!(av1_fgs.fine_noise, 0.25);
+        assert_eq!(av1_fgs.fine_noise, 0.75);
     }
 
     #[test]
@@ -242,7 +253,7 @@ mod tests {
 
     #[test]
     fn fine_noise_outside_zero_to_one_is_refused() {
-        for amount in ["-0.1", "1.5", "lots"] {
+        for amount in ["-0.1", "1.5", "lots", "NaN"] {
             let extra = ["av1-fgs", "--input", "a", "--output", "b", "--fine-noise", amount];
             let error = parse(&extra).expect_err("the amount is refused");
             let message = error.to_string();

@@ -25,7 +25,7 @@ fn av1_fgs_from_the_file_matches_the_direct_table() {
     let options = FitOptions::default();
 
     let table = av1_table(&meta, &rows, &options).expect("the table builds");
-    let direct = build_table(&scenes, meta.frame_rate);
+    let direct = build_table(&scenes, meta.frame_rate, &options);
 
     assert_eq!(table, direct);
 }
@@ -63,7 +63,7 @@ fn short_scenes_synthesize_like_the_direct_path() {
     let options = FitOptions::default();
 
     let table = av1_table(&meta, &rows, &options).expect("the table builds");
-    let direct_table = build_table(&scenes, meta.frame_rate);
+    let direct_table = build_table(&scenes, meta.frame_rate, &options);
     let report = report_rows(&rows);
     let direct_report = frame_rows(&scenes);
 
@@ -82,6 +82,21 @@ fn a_zero_frame_rate_is_refused() {
     let error = av1_table(&meta, &rows, &options).expect_err("a zero denominator is refused");
 
     assert!(error.to_string().contains("24/0"), "got {error}");
+}
+
+#[test]
+fn a_fine_noise_share_outside_zero_to_one_is_refused() {
+    let scenes = scenes_of(&[4], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let meta = sample_meta(rows.len() as u64);
+
+    for share in [-0.1, 1.5, f64::NAN] {
+        let options = FitOptions { fine_noise: share };
+
+        let error = av1_table(&meta, &rows, &options).expect_err("the share is refused");
+
+        assert!(error.to_string().contains("not between 0 and 1"), "got {error}");
+    }
 }
 
 #[test]
