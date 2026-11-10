@@ -13,8 +13,18 @@ pub struct GrainChunk {
     pub autocov: Vec<f64>,
     /// How many source pixels each strength group's sums cover.
     pub pixels: Vec<f64>,
-    /// Each frame's persistence sums, `FRAME_RECORD_LEN` per frame, in frame order.
+    /// Each frame's persistence sums in frame order, `FRAME_RECORD_LEN` per luma frame and
+    /// `CHROMA_RECORD_LEN` per chroma frame.
     pub frame_records: Vec<f64>,
+}
+
+/// The grain chunks drained from each plane group, in frame order.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GrainChunks {
+    /// Chunks measured on luma.
+    pub luma: Vec<GrainChunk>,
+    /// Chunks measured on the two chroma planes.
+    pub chroma: Vec<GrainChunk>,
 }
 
 impl GrainChunk {

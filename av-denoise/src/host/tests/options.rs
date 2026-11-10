@@ -206,3 +206,29 @@ fn grain_is_only_exported_from_luma() {
     assert!(luma.grain_export);
     assert!(!chroma.grain_export);
 }
+
+#[test]
+fn the_grain_report_reaches_both_plane_groups() {
+    let nl4d = Nl4dOptions {
+        grain_report: true,
+        ..Nl4dOptions::default()
+    };
+    let options = DenoiserOptions::builder()
+        .intent(ChannelIntent::LumaChroma)
+        .chroma(ChromaLayout::Yuv420)
+        .mode(DenoisingMode::Temporal { radius: 2 })
+        .algorithm(Algorithm::Nl4d(nl4d))
+        .build();
+
+    let EngineSpec::Nl4d {
+        luma: Some(luma),
+        chroma: Some(chroma),
+        ..
+    } = spec_for(&options)
+    else {
+        panic!("expected an nl4d spec cleaning both plane groups");
+    };
+
+    assert!(luma.grain_report);
+    assert!(chroma.grain_report);
+}

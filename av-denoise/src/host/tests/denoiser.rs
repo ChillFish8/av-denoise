@@ -8,7 +8,7 @@ use av_denoise_core::{
     EdgePadding,
     Engine,
     EngineTiming,
-    GrainChunk,
+    GrainChunks,
     Nl4dOptions,
     NlmTuning,
     NlmeansHqOptions,
@@ -367,8 +367,8 @@ impl Engine for ScriptedEngine {
         0
     }
 
-    fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, av_denoise_core::Error> {
-        Ok(Vec::new())
+    fn drain_grain_chunks(&mut self) -> Result<GrainChunks, av_denoise_core::Error> {
+        Ok(GrainChunks::default())
     }
 
     fn timing(&mut self) -> PassTimings {

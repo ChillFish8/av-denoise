@@ -36,6 +36,14 @@ const PERSISTENCE_LAGS: u32 = 8;
 /// A cell count, auto sum and cross sum per lag.
 const FRAME_RECORD_LEN: usize = 3 * PERSISTENCE_LAGS as usize;
 const PERSIST_THREADS: u32 = 256;
+/// How many luma pixels span one chroma pixel each way in 4:2:0.
+const CHROMA_SUBSAMPLING: u32 = 2;
+/// The Cb and Cr channels of a chroma frame.
+const CHROMA_CHANNELS: u32 = 2;
+/// The channel a luma frame is read on.
+const LUMA_CHANNEL: u32 = 0;
+/// The Cr channel of a chroma frame, after Cb.
+const CR_CHANNEL: u32 = 1;
 /// Cells one persisting cube adds, four per thread.
 const PERSIST_BLOCK_CELLS: u32 = 4 * PERSIST_THREADS;
 
@@ -335,10 +343,33 @@ impl Benchmark for GrainReducePartialsBench {
     }
 }
 
-/// Projects every cell of one luma frame into a persistence history slot.
+/// Projects every cell of one frame into a persistence history slot.
 pub struct GrainProjectBench {
     pub client: Client,
+    /// The size of the luma plane.
     pub size: GrainSize,
+    /// Whether the frame is a half-resolution chroma frame of two channels, read on Cr without
+    /// the luma band.
+    pub chroma: bool,
+}
+
+impl GrainProjectBench {
+    /// The size of the projected plane.
+    fn plane(&self) -> GrainSize {
+        if !self.chroma {
+            return self.size;
+        }
+
+        GrainSize {
+            width: self.size.width / CHROMA_SUBSAMPLING,
+            height: self.size.height / CHROMA_SUBSAMPLING,
+            label: self.size.label,
+        }
+    }
+
+    fn channels(&self) -> u32 {
+        if self.chroma { CHROMA_CHANNELS } else { 1 }
+    }
 }
 
 #[derive(Clone)]
@@ -354,10 +385,12 @@ impl Benchmark for GrainProjectBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let pixels = self.size.pixels();
-        let history_len = HISTORY_FRAMES as usize * self.size.cells() * HISTORY_ENTRY_LEN;
-        let frame = make_synthetic_frame(self.size.width, self.size.height, 1);
-        let output_host = vec![0.5f32; pixels];
+        let plane = self.plane();
+        let channels = self.channels();
+        let samples = plane.pixels() * channels as usize;
+        let history_len = HISTORY_FRAMES as usize * plane.cells() * HISTORY_ENTRY_LEN;
+        let frame = make_synthetic_frame(plane.width, plane.height, channels);
+        let output_host = vec![0.5f32; samples];
         let patterns_host: Vec<u32> = (0..PATTERN_WORDS as u32)
             .map(|index| 0x5A5A_5A5Au32.rotate_left(index))
             .collect();
@@ -379,26 +412,30 @@ impl Benchmark for GrainProjectBench {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let width = self.size.width;
-        let height = self.size.height;
-        let pixels = self.size.pixels();
-        let history_len = HISTORY_FRAMES as usize * self.size.cells() * HISTORY_ENTRY_LEN;
+        let plane = self.plane();
+        let channels = self.channels();
+        let samples = plane.pixels() * channels as usize;
+        let history_len = HISTORY_FRAMES as usize * plane.cells() * HISTORY_ENTRY_LEN;
+        let channel = if self.chroma { CR_CHANNEL } else { LUMA_CHANNEL };
+        let luma_band = !self.chroma;
 
         unsafe {
             grain_project::launch_unchecked(
                 &self.client,
-                CubeCount::new_2d(width / CELL, height / CELL),
+                CubeCount::new_2d(plane.width / CELL, plane.height / CELL),
                 CubeDim::new_2d(CELL, CELL),
-                1usize,
-                BufferArg::from_raw_parts(args.input, pixels),
-                BufferArg::from_raw_parts(args.output, pixels),
+                channels as usize,
+                BufferArg::from_raw_parts(args.input, samples),
+                BufferArg::from_raw_parts(args.output, samples),
                 BufferArg::from_raw_parts(args.patterns, PATTERN_WORDS),
                 BufferArg::from_raw_parts(args.history, history_len),
                 0u32,
                 1u32,
-                width,
-                height,
-                1u32,
+                plane.width,
+                plane.height,
+                channels,
+                channel,
+                luma_band,
             );
         }
 
@@ -406,6 +443,10 @@ impl Benchmark for GrainProjectBench {
     }
 
     fn name(&self) -> String {
+        if self.chroma {
+            return format!("grain_project_chroma_{}", self.size.label);
+        }
+
         format!("grain_project_{}", self.size.label)
     }
 

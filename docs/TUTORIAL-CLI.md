@@ -269,7 +269,7 @@ av-denoise nl4d --input noisy.mkv --unstable-grain-report grain.jsonl > /dev/nul
 ```
 
 ```json
-{"frame":120,"scene":3,"cells":19804,"strength":0.93,"persistence":[0.62,0.46,0.34,0.27,0.23,0.21,0.2,0.2]}
+{"frame":120,"scene":3,"cells":19804,"strength":0.93,"strength_cb":0.41,"strength_cr":0.38,"persistence":[0.62,0.46,0.34,0.27,0.23,0.21,0.2,0.2]}
 ```
 
 | Key           | Meaning                                                                                                                           |
@@ -278,9 +278,12 @@ av-denoise nl4d --input noisy.mkv --unstable-grain-report grain.jsonl > /dev/nul
 | `scene`       | Index of the scene av-denoise cut, in frame order. Encoders may cut their own scenes, so treat it as a hint.                      |
 | `cells`       | How many 8x8 cells the reading rests on, counting the frame before and after.                                                     |
 | `strength`    | The grain standard deviation in 8-bit code values, whatever the bit depth.                                                        |
+| `strength_cb` | The same for the Cb plane. `null` when chroma is not denoised, such as with `--channel-mode luma`.                                |
+| `strength_cr` | The same for the Cr plane. `null` when chroma is not denoised.                                                                    |
 | `persistence` | Eight entries, for 1 to 8 frames away. Each is the share of grain unchanged that far before and after the frame, between 0 and 1. |
 
 Grain is measured in flat areas of luma, at the same screen position with no motion compensation.
+The chroma strengths come from flat areas of each chroma plane, between each frame and its neighbours.
 Grain fixed to the screen reads as persistent, and texture carried by a pan reads as moving.
 
 A reading is `null` when fewer than 200 flat cells back it at that distance. A side of the window

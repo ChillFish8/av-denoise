@@ -114,10 +114,12 @@ fn scenes_are_sorted_before_fitting() {
     let later = SceneGrain {
         first_frame: 24,
         chunks: vec![later_chunk],
+        chroma_chunks: Vec::new(),
     };
     let earlier = SceneGrain {
         first_frame: 0,
         chunks: vec![earlier_chunk],
+        chroma_chunks: Vec::new(),
     };
     let scenes = vec![later, earlier];
 

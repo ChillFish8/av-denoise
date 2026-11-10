@@ -29,7 +29,7 @@ pub(crate) const AR_OFFSETS: [(i32, i32); AR_COEFFS] = ar_offset_table();
 
 // A measured block needs a motion confidence of at least CONF_MIN, a denoised range below
 // FLAT_RANGE, a denoised mean between LUMA_LOW and LUMA_HIGH, no pixel past CLIP_LOW or CLIP_HIGH,
-// and a grain std above STD_MIN.
+// and a grain std above STD_MIN. A chroma persistence cell skips the luma band.
 pub(crate) const FLAT_RANGE: f32 = 5.0 / 255.0;
 pub(crate) const LUMA_LOW: f32 = 20.0 / 255.0;
 pub(crate) const LUMA_HIGH: f32 = 235.0 / 255.0;
@@ -46,6 +46,8 @@ pub(crate) const PERSISTENCE_LAGS: usize = 8;
 pub(crate) const LAG_RECORD_LEN: usize = 3;
 /// Values in one frame's record, one part per lag.
 pub(crate) const FRAME_RECORD_LEN: usize = LAG_RECORD_LEN * PERSISTENCE_LAGS;
+/// Values in one chroma frame's record, the lag-1 part of each chroma plane.
+pub(crate) const CHROMA_RECORD_LEN: usize = 2 * LAG_RECORD_LEN;
 /// Fewest cells for a frame to give a reading.
 pub(crate) const MIN_FRAME_CELLS: f64 = 200.0;
 /// Projections kept of each cell's source pixels.

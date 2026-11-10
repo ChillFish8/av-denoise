@@ -7,6 +7,7 @@ use super::synthetic::gaussian_field;
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{
     CELL,
+    CHROMA_RECORD_LEN,
     CHUNK_FRAMES,
     CLIP_HIGH,
     CLIP_LOW,
@@ -24,10 +25,10 @@ use crate::nl4d::grain::consts::{
     PROJECTIONS,
     REDUCE_THREADS,
 };
-use crate::nl4d::grain::export::pattern_words;
+use crate::nl4d::grain::persistence::{pattern_words, persistence_partials_len};
 use crate::nl4d::grain::report::{FrameGrain, frame_rows};
 use crate::nl4d::grain::segment::SceneGrain;
-use crate::nl4d::grain::{GrainExport, GrainGeometry, GrainParts, persistence_partials_len};
+use crate::nl4d::grain::{GrainExport, GrainGeometry, GrainParts, MeasuredPlanes};
 use crate::nl4d::kernels::{grain_persist, grain_persist_reduce, grain_project};
 
 const SIZE: u32 = 128;
@@ -53,7 +54,7 @@ const PROJECTION_SCALE: f64 = 0.1;
 const MOTION_STEP: u32 = 8;
 const REPORT_ONLY: GrainParts = GrainParts {
     table: false,
-    persistence: true,
+    persistence: Some(MeasuredPlanes::Luma),
 };
 const SQUARE: Plane = Plane {
     width: SIZE,
@@ -427,6 +428,7 @@ fn rows_from(chunks: Vec<GrainChunk>) -> Vec<FrameGrain> {
     let scene = SceneGrain {
         first_frame: 0,
         chunks,
+        chroma_chunks: Vec::new(),
     };
 
     frame_rows(&[scene])
@@ -517,6 +519,8 @@ fn launch_project(
             plane.width,
             plane.height,
             1u32,
+            0u32,
+            true,
         );
     }
 }
@@ -656,7 +660,7 @@ fn sums_match_the_mirror_at_every_lag() {
     let record = upload(&client, &zeros);
     let cells = WIDE.cells() as u32;
     let blocks = cells.div_ceil(PERSIST_BLOCK_CELLS);
-    let partials_len = persistence_partials_len(WIDE.width, WIDE.height) as usize;
+    let partials_len = persistence_partials_len(WIDE.width, WIDE.height, PERSISTENCE_LAGS) as usize;
     let partials = client.empty(partials_len * size_of::<f32>());
     let lags = PERSISTENCE_LAGS as u32;
 
@@ -919,4 +923,202 @@ fn records_land_at_each_frames_offset_across_a_chunk_boundary() {
             assert_eq!(cells, wanted, "frame {frame} lag {lag}");
         }
     }
+}
+
+const CHROMA_ONLY: GrainParts = GrainParts {
+    table: false,
+    persistence: Some(MeasuredPlanes::Chroma),
+};
+const CB_GRAIN_CODES: f64 = 2.0;
+const CR_GRAIN_CODES: f64 = 4.0;
+/// The share either way a chroma strength may sit from its grain.
+const CHROMA_STRENGTH_TOLERANCE: f64 = 0.05;
+/// A Cb level under the luma gate and above the clip gate.
+const SATURATED_CB: f32 = 18.0 / 255.0;
+
+fn two_channel_geometry() -> GrainGeometry {
+    GrainGeometry {
+        channels: 2,
+        ..geometry()
+    }
+}
+
+/// Two planes interleaved per pixel, `first` in channel 0.
+fn interleaved(first: &[f32], second: &[f32]) -> Vec<f32> {
+    let pairs = first.iter().zip(second);
+
+    pairs.flat_map(|(&first, &second)| [first, second]).collect()
+}
+
+/// Fresh grain on both chroma planes every frame, Cb at `cb_level`.
+fn chroma_frames(count: u32, cb_level: f32) -> Vec<Vec<f32>> {
+    let cb_sigma = (CB_GRAIN_CODES / 255.0) as f32;
+    let cr_sigma = (CR_GRAIN_CODES / 255.0) as f32;
+
+    (0..count)
+        .map(|index| {
+            let cb_grain = unit_grain(5000 + index as u64);
+            let cr_grain = unit_grain(6000 + index as u64);
+            let cb_plane: Vec<f32> = cb_grain
+                .iter()
+                .map(|&sample| cb_level + cb_sigma * sample)
+                .collect();
+            let cr_plane = frame_of(&[(&cr_grain, cr_sigma)]);
+            interleaved(&cb_plane, &cr_plane)
+        })
+        .collect()
+}
+
+/// A flat two-channel output, Cb at `cb_level` and Cr at [FLAT].
+fn chroma_output(cb_level: f32) -> Vec<f32> {
+    let cb_plane = vec![cb_level; PIXELS];
+    let cr_plane = flat_output();
+
+    interleaved(&cb_plane, &cr_plane)
+}
+
+fn export_chunks(
+    geometry: GrainGeometry,
+    parts: GrainParts,
+    frames: &[Vec<f32>],
+    output: &[f32],
+) -> Vec<GrainChunk> {
+    let client = make_client();
+    let mut export = GrainExport::new(&client, geometry, parts);
+    let outputs = vec![output.to_vec(); frames.len()];
+
+    measure_stream(&client, &mut export, frames, &outputs);
+
+    export.drain(&client).expect("drain")
+}
+
+fn chroma_chunks_of(frames: &[Vec<f32>], cb_level: f32) -> Vec<GrainChunk> {
+    let geometry = two_channel_geometry();
+    let output = chroma_output(cb_level);
+
+    export_chunks(geometry, CHROMA_ONLY, frames, &output)
+}
+
+/// Rows over chroma chunks, with empty luma records for the same frames.
+fn chroma_rows(chroma_chunks: Vec<GrainChunk>) -> Vec<FrameGrain> {
+    let mut luma_chunk = GrainChunk::empty();
+    luma_chunk.frames = chroma_chunks.iter().map(|chunk| chunk.frames).sum();
+    let scene = SceneGrain {
+        first_frame: 0,
+        chunks: vec![luma_chunk],
+        chroma_chunks,
+    };
+
+    frame_rows(&[scene])
+}
+
+fn assert_strength_near(reading: Option<f64>, expected: f64) {
+    let strength = reading.expect("the plane should have a strength");
+    let limit = CHROMA_STRENGTH_TOLERANCE * expected;
+    assert!(
+        (strength - expected).abs() <= limit,
+        "{strength} is not within {limit} of {expected}"
+    );
+}
+
+#[test]
+fn chroma_planes_are_measured_separately() {
+    let frames = chroma_frames(SCENE_FRAMES, FLAT);
+    let chunks = chroma_chunks_of(&frames, FLAT);
+
+    let rows = chroma_rows(chunks);
+
+    assert_strength_near(rows[MID_ROW].strength_cb, CB_GRAIN_CODES);
+    assert_strength_near(rows[MID_ROW].strength_cr, CR_GRAIN_CODES);
+}
+
+#[test]
+fn a_chroma_export_measures_only_the_first_lag() {
+    let frames = chroma_frames(CHUNK_FRAMES + 2, FLAT);
+
+    let chunks = chroma_chunks_of(&frames, FLAT);
+
+    assert_eq!(chunks.len(), 2);
+    for chunk in &chunks {
+        let expected_len = chunk.frames as usize * CHROMA_RECORD_LEN;
+        assert_eq!(chunk.frame_records.len(), expected_len);
+    }
+}
+
+/// Sets the Cr sample of the first pixel of `cell` in an interleaved chroma frame to `value`.
+fn with_cr_pixel_set(frame: &[f32], cell: (u32, u32), value: f32) -> Vec<f32> {
+    let (cell_x, cell_y) = cell;
+    let pixel = (cell_y * CELL * SIZE + cell_x * CELL) as usize;
+    let mut changed = frame.to_vec();
+    changed[2 * pixel + 1] = value;
+
+    changed
+}
+
+#[test]
+fn chroma_gates_reject_cells_on_their_own_channel_only() {
+    let edged_cell = (1, 1);
+    let clipped_cell = (5, 5);
+    let frames = chroma_frames(3, FLAT);
+    let clipped_frames: Vec<Vec<f32>> = frames
+        .iter()
+        .map(|frame| with_cr_pixel_set(frame, clipped_cell, CLIP_HIGH + EDGE_STEP))
+        .collect();
+    let cb_output = edged_output(&[edged_cell]);
+    let cr_output = flat_output();
+    let output = interleaved(&cb_output, &cr_output);
+    let geometry = two_channel_geometry();
+
+    let chunks = export_chunks(geometry, CHROMA_ONLY, &clipped_frames, &output);
+
+    let records = all_records(&chunks);
+    let (frame_records, _) = records.as_chunks::<CHROMA_RECORD_LEN>();
+    let kept_cells = (CELLS - 1) as f64;
+    for record in &frame_records[1..] {
+        let cb_cells = record[0];
+        let cr_cells = record[LAG_RECORD_LEN];
+        assert_eq!(cb_cells, kept_cells);
+        assert_eq!(cr_cells, kept_cells);
+    }
+}
+
+#[test]
+fn saturated_chroma_still_counts() {
+    let frames = chroma_frames(3, SATURATED_CB);
+
+    let chunks = chroma_chunks_of(&frames, SATURATED_CB);
+
+    let records = all_records(&chunks);
+    let (frame_records, _) = records.as_chunks::<CHROMA_RECORD_LEN>();
+    for record in &frame_records[1..] {
+        let cb_cells = record[0];
+        let cr_cells = record[LAG_RECORD_LEN];
+        assert_eq!(cb_cells, CELLS as f64);
+        assert_eq!(cr_cells, CELLS as f64);
+    }
+}
+
+#[test]
+fn the_luma_measurement_is_unchanged_by_the_channel_argument() {
+    let luma_frames = half_fixed_frames(SCENE_FRAMES);
+    let other_frames = fresh_frames(SCENE_FRAMES);
+    let paired_frames: Vec<Vec<f32>> = luma_frames
+        .iter()
+        .zip(&other_frames)
+        .map(|(luma, other)| interleaved(luma, other))
+        .collect();
+    let edged = edged_output(&[(1, 1), (4, 6)]);
+    let luma_output = with_cells_filled(&edged, &[(2, 3)], DARK_LUMA);
+    let other_output = flat_output();
+    let paired_output = interleaved(&luma_output, &other_output);
+    let luma_geometry = geometry();
+    let paired_geometry = two_channel_geometry();
+
+    let luma_chunks = export_chunks(luma_geometry, REPORT_ONLY, &luma_frames, &luma_output);
+    let paired_chunks = export_chunks(paired_geometry, REPORT_ONLY, &paired_frames, &paired_output);
+
+    let luma_records = all_records(&luma_chunks);
+    let paired_records = all_records(&paired_chunks);
+    assert_eq!(luma_records.len(), SCENE_FRAMES as usize * FRAME_RECORD_LEN);
+    assert_eq!(luma_records, paired_records);
 }

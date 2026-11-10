@@ -41,7 +41,11 @@ fn narrow_chunk(std_codes: f32) -> GrainChunk {
 }
 
 fn scene_of(first_frame: u64, chunks: Vec<GrainChunk>) -> SceneGrain {
-    SceneGrain { first_frame, chunks }
+    SceneGrain {
+        first_frame,
+        chunks,
+        chroma_chunks: Vec::new(),
+    }
 }
 
 /// The record of noise box-blurred over 9x9 pixels and scaled by `gain`, correlated past lag 3.

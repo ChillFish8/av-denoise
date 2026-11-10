@@ -453,6 +453,12 @@ fn run_all(backend: &str, client: Client) {
         run(GrainProjectBench {
             client: client.clone(),
             size,
+            chroma: false,
+        });
+        run(GrainProjectBench {
+            client: client.clone(),
+            size,
+            chroma: true,
         });
         run(GrainPersistBench {
             client: client.clone(),

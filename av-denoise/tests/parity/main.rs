@@ -85,11 +85,12 @@ fn run(config: &ParityConfig, entries: &mut Entries) {
         record_planes(entries, config.name, &label, planes);
     }
 
-    let chunks = denoiser.drain_grain_chunks().expect("grain");
-    if !chunks.is_empty() {
+    let grain = denoiser.drain_grain_chunks().expect("grain");
+    if !grain.luma.is_empty() {
         let scene = SceneGrain {
             first_frame: 0,
-            chunks,
+            chunks: grain.luma,
+            chroma_chunks: grain.chroma,
         };
         let table = build_table(&[scene], (24, 1));
         let config_name = config.name.to_string();

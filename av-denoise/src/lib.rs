@@ -22,6 +22,7 @@ pub use av_denoise_core::{
     Error as EngineError,
     FrameGrain,
     GrainChunk,
+    GrainChunks,
     HqParams,
     KERNEL_HASH,
     MotionCompensationMode,

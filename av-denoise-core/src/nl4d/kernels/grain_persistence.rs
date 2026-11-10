@@ -1,6 +1,6 @@
 use cubecl::prelude::*;
 
-use super::grain::luma_at;
+use super::grain::channel_at;
 use crate::nl4d::grain::consts::{
     CELL,
     CLIP_HIGH,
@@ -30,9 +30,9 @@ const REDUCE_ROUNDS: u32 = REDUCE_THREADS.ilog2();
 const WORD_BITS: u32 = 32;
 /// Pattern words per projection.
 const WORDS_PER_PATTERN: u32 = 2;
-/// Shared sum lanes, one per projection and one for the denoised luma.
+/// Shared sum lanes, one per projection and one for the denoised channel.
 const SUM_LANES: u32 = PROJECTIONS as u32 + 1;
-/// Shared range lanes, one for the denoised luma and one for the source luma.
+/// Shared range lanes, one for the denoised channel and one for the source channel.
 const RANGE_LANES: u32 = 2;
 /// Scales a cell's summed squared projections of both frames to one pixel's variance.
 const AUTO_SCALE: f32 = 1.0 / (2 * PROJECTIONS as u32 * THREADS) as f32;
@@ -50,11 +50,12 @@ fn pattern_sign(patterns: &[u32], projection: u32, bit: u32) -> f32 {
 
 /// Writes one completed frame's cell projections and flat flags into history slot `history_slot`.
 ///
-/// Launch one `CELL x CELL` cube per cell. Each projection sums the cell's source luma from ring
-/// slot `frame_slot`, adding pixel `y * 8 + x` where that bit of the pattern is set and taking it
-/// away where it is clear. `patterns` holds two words per pattern, the low bits first. The flag is
-/// 1 when the denoised cell in `output` is flat and mid-luma and no source pixel is near clipping,
-/// otherwise 0. Every cell writes its entry.
+/// Launch one `CELL x CELL` cube per cell. Each projection sums channel `channel` of the cell's
+/// source from ring slot `frame_slot`, adding pixel `y * 8 + x` where that bit of the pattern is
+/// set and taking it away where it is clear. `patterns` holds two words per pattern, the low bits
+/// first. The flag is 1 when that channel of the denoised cell in `output` is flat and no source
+/// sample of it is near clipping, otherwise 0. With `luma_band`, the denoised mean must also sit
+/// inside the luma band. Every cell writes its entry.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -70,6 +71,8 @@ pub fn grain_project<N: Size>(
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
+    #[comptime] channel: u32,
+    #[comptime] luma_band: bool,
 ) {
     let mut sums = Shared::<[f32]>::new_slice((SUM_LANES * THREADS) as usize);
     let mut lows = Shared::<[f32]>::new_slice((RANGE_LANES * THREADS) as usize);
@@ -80,20 +83,20 @@ pub fn grain_project<N: Size>(
     let thread_id = UNIT_POS_Y * CELL + UNIT_POS_X;
     let x = CUBE_POS_X * CELL + UNIT_POS_X;
     let y = CUBE_POS_Y * CELL + UNIT_POS_Y;
-    let luma = luma_at(input, x, y, frame_slot, width, height);
-    let clean = output[((y * width + x) * channels) as usize];
+    let sample = channel_at(input, x, y, frame_slot, channel, width, height);
+    let clean = output[((y * width + x) * channels + channel) as usize];
 
     #[unroll]
     for projection in 0..PROJECTIONS as u32 {
         let sign = pattern_sign(patterns, projection, thread_id);
-        sums[(projection * THREADS + thread_id) as usize] = sign * luma;
+        sums[(projection * THREADS + thread_id) as usize] = sign * sample;
     }
 
     sums[(PROJECTIONS as u32 * THREADS + thread_id) as usize] = clean;
     lows[thread_id as usize] = clean;
-    lows[(THREADS + thread_id) as usize] = luma;
+    lows[(THREADS + thread_id) as usize] = sample;
     highs[thread_id as usize] = clean;
-    highs[(THREADS + thread_id) as usize] = luma;
+    highs[(THREADS + thread_id) as usize] = sample;
     sync_cube();
 
     #[unroll]
@@ -130,9 +133,13 @@ pub fn grain_project<N: Size>(
 
         let mean = sums[(PROJECTIONS as u32 * THREADS) as usize] / THREADS as f32;
         let range = highs[0] - lows[0];
+        let mut in_band = true;
+        if luma_band {
+            in_band = mean > LUMA_LOW && mean < LUMA_HIGH;
+        }
+
         let flat = range < FLAT_RANGE
-            && mean > LUMA_LOW
-            && mean < LUMA_HIGH
+            && in_band
             && lows[THREADS as usize] >= CLIP_LOW
             && highs[THREADS as usize] <= CLIP_HIGH;
         let mut flag = 0.0f32;

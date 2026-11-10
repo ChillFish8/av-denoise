@@ -6,82 +6,35 @@ use super::consts::{
     AUTOCOV_LEN,
     CELL,
     CHUNK_FRAMES,
-    FRAME_RECORD_LEN,
     GROUPED_AUTOCOV_LEN,
     HIST_LEN,
-    HISTORY_ENTRY_LEN,
-    HISTORY_FRAMES,
     LAG_COUNT,
-    LAG_RECORD_LEN,
     PARTIAL_LEN,
-    PATTERNS,
     PERSIST_BLOCK_CELLS,
-    PERSIST_THREADS,
-    PERSISTENCE_LAGS,
-    PROJECTIONS,
     REDUCE_THREADS,
     STD_BUCKETS,
 };
 use super::fit::bucket_edges;
-use crate::nl4d::kernels::{
-    grain_measure,
-    grain_persist,
-    grain_persist_reduce,
-    grain_project,
-    grain_reduce_partials,
-    grain_save_vectors,
+use super::persistence::{
+    MeasuredPlanes,
+    PersistenceMeasure,
+    persistence_history_len,
+    persistence_partials_len,
 };
+use crate::nl4d::kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
 use crate::nl4d::snapshot::LastFields;
 
 const SAVE_THREADS: u32 = 256;
 /// The std bucket edges, one more than the bucket count.
 const EDGES_LEN: usize = STD_BUCKETS + 1;
-/// Values in one chunk's frame records.
-const CHUNK_RECORD_LEN: usize = CHUNK_FRAMES as usize * FRAME_RECORD_LEN;
-/// The pattern words the project kernel reads, two per projection.
-const PATTERN_WORDS_LEN: usize = 2 * PROJECTIONS;
-
-/// The projection patterns split into words, the low 32 bits of each pattern first.
-pub(crate) fn pattern_words() -> Vec<u32> {
-    let mut words = Vec::with_capacity(PATTERN_WORDS_LEN);
-    for pattern in PATTERNS {
-        let low_word = pattern as u32;
-        let high_word = (pattern >> 32) as u32;
-        words.push(low_word);
-        words.push(high_word);
-    }
-
-    words
-}
-
-fn cell_count(width: u32, height: u32) -> u64 {
-    u64::from(width / CELL) * u64::from(height / CELL)
-}
-
-fn persist_blocks(width: u32, height: u32) -> u64 {
-    let cells = cell_count(width, height);
-    cells.div_ceil(u64::from(PERSIST_BLOCK_CELLS))
-}
-
-/// Values in the persistence history of a frame size, an entry per cell for each history frame.
-pub(crate) fn persistence_history_len(width: u32, height: u32) -> u64 {
-    let cells = cell_count(width, height);
-    cells * u64::from(HISTORY_FRAMES) * HISTORY_ENTRY_LEN as u64
-}
-
-/// Values in the persistence partials of a frame size, one lag record part per block and lag.
-pub(crate) fn persistence_partials_len(width: u32, height: u32) -> u64 {
-    let blocks = persist_blocks(width, height);
-    blocks * (PERSISTENCE_LAGS * LAG_RECORD_LEN) as u64
-}
 
 /// Which measurements a [GrainExport] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GrainParts {
-    /// The source grain table measurement, histograms and autocovariance.
+    /// The source grain table measurement, histograms and autocovariance, on luma only.
     pub table: bool,
-    /// The per-frame grain persistence measurement.
-    pub persistence: bool,
+    /// The planes the per-frame grain persistence measurement reads, `None` when it is off.
+    pub persistence: Option<MeasuredPlanes>,
 }
 
 /// The geometry a [GrainExport] is built for.
@@ -100,23 +53,23 @@ impl GrainGeometry {
         self.blocks_x * self.blocks_y
     }
 
-    fn cells_x(&self) -> u32 {
+    pub(super) fn cells_x(&self) -> u32 {
         self.width / CELL
     }
 
-    fn cells_y(&self) -> u32 {
+    pub(super) fn cells_y(&self) -> u32 {
         self.height / CELL
     }
 
-    fn cells(&self) -> u32 {
+    pub(super) fn cells(&self) -> u32 {
         self.cells_x() * self.cells_y()
     }
 
-    fn frame_len(&self) -> usize {
+    pub(super) fn frame_len(&self) -> usize {
         (self.width * self.height * self.channels) as usize
     }
 
-    fn ring_len(&self) -> usize {
+    pub(super) fn ring_len(&self) -> usize {
         self.frame_len() * self.ring_frames as usize
     }
 
@@ -132,27 +85,30 @@ impl GrainGeometry {
         self.cells() as usize * PARTIAL_LEN
     }
 
-    fn history_len(&self) -> usize {
+    /// Values in one channel's persistence history.
+    pub(super) fn history_len(&self) -> usize {
         persistence_history_len(self.width, self.height) as usize
     }
 
-    fn persist_blocks(&self) -> u32 {
-        persist_blocks(self.width, self.height) as u32
+    /// Blocks of cells the persist kernel covers.
+    pub(super) fn persist_blocks(&self) -> u32 {
+        self.cells().div_ceil(PERSIST_BLOCK_CELLS)
     }
 
-    fn persist_partials_len(&self) -> usize {
-        persistence_partials_len(self.width, self.height) as usize
+    /// Values in one channel's persistence partials over `lags` lags.
+    pub(super) fn persist_partials_len(&self, lags: usize) -> usize {
+        persistence_partials_len(self.width, self.height, lags) as usize
     }
 }
 
 /// One completed frame's buffers and ring positions.
-struct CompletedFrame<'a> {
-    input: &'a Handle,
-    outputs: &'a [Handle; 2],
-    frame_slot: u32,
+pub(super) struct CompletedFrame<'a> {
+    pub input: &'a Handle,
+    pub outputs: &'a [Handle; 2],
+    pub frame_slot: u32,
     /// The ring slot of the next real frame, `None` for a stream's last frame.
-    next_slot: Option<u32>,
-    output_slot: usize,
+    pub next_slot: Option<u32>,
+    pub output_slot: usize,
 }
 
 /// One chunk's table histograms and autocovariance.
@@ -346,127 +302,6 @@ impl TableMeasure {
     }
 }
 
-/// The grain persistence measurement.
-struct PersistenceMeasure {
-    /// The projection patterns as words, two per projection.
-    patterns: Handle,
-    /// Each cell's projections and flat flag for the last [HISTORY_FRAMES] completed frames.
-    history: Handle,
-    /// Each lag's persistence sums per block of cells, before they add into a frame record.
-    partials: Handle,
-    /// Completed frames measured since the stream started.
-    frames_in_stream: u32,
-}
-
-impl PersistenceMeasure {
-    fn new(client: &Client, geometry: &GrainGeometry) -> Self {
-        let words = pattern_words();
-        let patterns_bytes = u32::as_bytes(&words);
-        let patterns = client.create_from_slice(patterns_bytes);
-        let history_bytes = geometry.history_len().max(1) * size_of::<f32>();
-        let history = client.empty(history_bytes);
-        let partials_bytes = geometry.persist_partials_len().max(1) * size_of::<f32>();
-        let partials = client.empty(partials_bytes);
-
-        Self {
-            patterns,
-            history,
-            partials,
-            frames_in_stream: 0,
-        }
-    }
-
-    /// Projects the completed frame into the history and adds its pairs into the frame's record.
-    ///
-    /// `chunk_frames` is how many frames the chunk held before this one.
-    fn measure(
-        &mut self,
-        client: &Client,
-        geometry: &GrainGeometry,
-        frame: &CompletedFrame,
-        frame_record: &Handle,
-        chunk_frames: u32,
-    ) {
-        self.launch(client, geometry, frame, frame_record, chunk_frames);
-        self.frames_in_stream += 1;
-    }
-
-    /// Launches the frame's projection, then each lag whose earlier frame is in this stream.
-    fn launch(
-        &self,
-        client: &Client,
-        geometry: &GrainGeometry,
-        frame: &CompletedFrame,
-        frame_record: &Handle,
-        chunk_frames: u32,
-    ) {
-        let history_len = geometry.history_len();
-        let history_slot = self.frames_in_stream % HISTORY_FRAMES;
-        let earlier_frames = self.frames_in_stream.min(PERSISTENCE_LAGS as u32);
-        let record_offset = chunk_frames * FRAME_RECORD_LEN as u32;
-        let output = &frame.outputs[frame.output_slot];
-
-        unsafe {
-            grain_project::launch_unchecked(
-                client,
-                CubeCount::new_2d(geometry.cells_x(), geometry.cells_y()),
-                CubeDim::new_2d(CELL, CELL),
-                geometry.channels as usize,
-                BufferArg::from_raw_parts(frame.input.clone(), geometry.ring_len()),
-                BufferArg::from_raw_parts(output.clone(), geometry.frame_len()),
-                BufferArg::from_raw_parts(self.patterns.clone(), PATTERN_WORDS_LEN),
-                BufferArg::from_raw_parts(self.history.clone(), history_len),
-                frame.frame_slot,
-                history_slot,
-                geometry.width,
-                geometry.height,
-                geometry.channels,
-            );
-        }
-
-        if earlier_frames == 0 {
-            return;
-        }
-
-        let blocks = geometry.persist_blocks();
-        let partials_len = geometry.persist_partials_len();
-
-        unsafe {
-            grain_persist::launch_unchecked(
-                client,
-                CubeCount::new_2d(blocks, earlier_frames),
-                CubeDim::new_1d(PERSIST_THREADS),
-                BufferArg::from_raw_parts(self.history.clone(), history_len),
-                BufferArg::from_raw_parts(self.partials.clone(), partials_len),
-                history_slot,
-                geometry.cells(),
-                blocks,
-            );
-
-            grain_persist_reduce::launch_unchecked(
-                client,
-                CubeCount::new_1d(earlier_frames),
-                CubeDim::new_1d(REDUCE_THREADS),
-                BufferArg::from_raw_parts(self.partials.clone(), partials_len),
-                BufferArg::from_raw_parts(frame_record.clone(), CHUNK_RECORD_LEN),
-                record_offset,
-                blocks,
-            );
-        }
-    }
-
-    fn reset_stream(&mut self) {
-        self.frames_in_stream = 0;
-    }
-
-    fn open_chunk(client: &Client) -> Handle {
-        let record_host = vec![0.0f32; CHUNK_RECORD_LEN];
-        let record_bytes = f32::as_bytes(&record_host);
-
-        client.create_from_slice(record_bytes)
-    }
-}
-
 /// The grain measurement state of one nl4d denoiser.
 pub(crate) struct GrainExport {
     geometry: GrainGeometry,
@@ -485,7 +320,7 @@ impl GrainExport {
         let table = parts.table.then(|| TableMeasure::new(client, &geometry));
         let persistence = parts
             .persistence
-            .then(|| PersistenceMeasure::new(client, &geometry));
+            .map(|planes| PersistenceMeasure::new(client, &geometry, planes));
 
         Self {
             geometry,
@@ -562,7 +397,7 @@ impl GrainExport {
             let frame_record = self
                 .persistence
                 .as_ref()
-                .map(|_| PersistenceMeasure::open_chunk(client));
+                .map(|persistence| persistence.open_chunk(client));
             self.chunks.push(ChunkBuffers {
                 table,
                 frame_record,
@@ -599,9 +434,14 @@ impl GrainExport {
         let buffers = std::mem::take(&mut self.chunks);
         self.chunk_open = false;
 
+        let frame_record_len = self
+            .persistence
+            .as_ref()
+            .map_or(0, PersistenceMeasure::frame_record_len);
+
         let mut chunks = Vec::with_capacity(buffers.len());
         for buffer in buffers {
-            let chunk = read_chunk(client, buffer)?;
+            let chunk = read_chunk(client, buffer, frame_record_len)?;
             chunks.push(chunk);
         }
 
@@ -609,7 +449,12 @@ impl GrainExport {
     }
 }
 
-fn read_chunk(client: &Client, buffer: ChunkBuffers) -> Result<GrainChunk, anyhow::Error> {
+/// Reads one chunk back, with `frame_record_len` values in each frame's record.
+fn read_chunk(
+    client: &Client,
+    buffer: ChunkBuffers,
+    frame_record_len: usize,
+) -> Result<GrainChunk, anyhow::Error> {
     let mut chunk = GrainChunk::empty();
     chunk.frames = buffer.frames;
 
@@ -622,7 +467,7 @@ fn read_chunk(client: &Client, buffer: ChunkBuffers) -> Result<GrainChunk, anyho
             .read_one(frame_record)
             .map_err(|error| anyhow::anyhow!("grain frame record readback failed: {error}"))?;
         let values = f32::from_bytes(&record_bytes);
-        let recorded_len = buffer.frames as usize * FRAME_RECORD_LEN;
+        let recorded_len = buffer.frames as usize * frame_record_len;
         let recorded = values[..recorded_len].iter().map(|&value| value as f64);
         chunk.frame_records = recorded.collect();
     }

@@ -84,9 +84,23 @@ pub(super) fn luma_at<N: Size>(
     #[comptime] width: u32,
     #[comptime] height: u32,
 ) -> f32 {
+    channel_at(input, x, y, slot, 0u32, width, height)
+}
+
+/// The sample of channel `channel` at pixel `(x, y)` of ring slot `slot`.
+#[cube]
+pub(super) fn channel_at<N: Size>(
+    input: &[Vector<f32, N>],
+    x: u32,
+    y: u32,
+    slot: u32,
+    #[comptime] channel: u32,
+    #[comptime] width: u32,
+    #[comptime] height: u32,
+) -> f32 {
     let index = (slot * height + y) * width + x;
     let value = input[index as usize];
-    value.extract(0usize)
+    value.extract(channel as usize)
 }
 
 /// Moves `value` by `shift` and clamps it into `0..limit`.

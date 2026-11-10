@@ -7,6 +7,7 @@ use crate::bench_api::HostIo;
 use crate::nl4d::denoiser::buffer_sizes;
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{
+    CHROMA_RECORD_LEN,
     CHUNK_FRAMES,
     FRAME_RECORD_LEN,
     HIST_LEN,
@@ -322,19 +323,47 @@ fn short_scene_measures_only_real_pairs() {
     assert_eq!(denoiser.grain_measured_with_entry(), 2);
 }
 
+/// [grain_frames] with each sample copied into both chroma channels.
+fn chroma_grain_frames(count: u32) -> Vec<Vec<f32>> {
+    let plane_frames = grain_frames(SIGMA, count);
+
+    plane_frames
+        .into_iter()
+        .map(|frame| frame.iter().flat_map(|&sample| [sample, sample]).collect())
+        .collect()
+}
+
 #[test]
 fn chroma_denoisers_never_export() {
     let mut chroma = params(true);
     chroma.nlm.channels = ChannelMode::Chroma;
-    let plane_frames = grain_frames(SIGMA, 9);
-    let frames: Vec<Vec<f32>> = plane_frames
-        .into_iter()
-        .map(|frame| frame.iter().flat_map(|&sample| [sample, sample]).collect())
-        .collect();
+    let frames = chroma_grain_frames(9);
     let (_, chunks, has_export) = run(chroma, &frames);
 
     assert!(!has_export);
     assert!(chunks.is_empty());
+}
+
+#[test]
+fn a_chroma_denoiser_reports_chroma_persistence_without_the_table() {
+    let mut chroma = params_with(true, true);
+    chroma.nlm.channels = ChannelMode::Chroma;
+    let names = buffer_names(&chroma);
+    let frames = chroma_grain_frames(9);
+
+    let (_, chunks, has_export) = run(chroma, &frames);
+
+    assert!(has_export);
+    assert!(!chunks.is_empty());
+    assert!(chunks.iter().all(has_no_table_readings));
+    for chunk in &chunks {
+        let expected_len = chunk.frames as usize * CHROMA_RECORD_LEN;
+        assert_eq!(chunk.frame_records.len(), expected_len);
+    }
+
+    assert!(!names.contains(&SAVED_VECTORS));
+    assert!(names.contains(&PERSISTENCE_HISTORY));
+    assert!(names.contains(&PERSISTENCE_PARTIALS));
 }
 
 #[test]

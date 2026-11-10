@@ -1,9 +1,9 @@
 use crate::nl4d::grain::chunk::GrainChunk;
-use crate::nl4d::grain::consts::{FRAME_RECORD_LEN, LAG_RECORD_LEN, PERSISTENCE_LAGS};
+use crate::nl4d::grain::consts::{CHROMA_RECORD_LEN, FRAME_RECORD_LEN, LAG_RECORD_LEN, PERSISTENCE_LAGS};
 use crate::nl4d::grain::report::{FrameGrain, frame_rows};
 use crate::nl4d::grain::segment::SceneGrain;
 
-fn chunk_with(records: &[[f64; FRAME_RECORD_LEN]]) -> GrainChunk {
+fn chunk_with<const LEN: usize>(records: &[[f64; LEN]]) -> GrainChunk {
     let mut chunk = GrainChunk::empty();
     chunk.frames = records.len() as u32;
     chunk.frame_records = records.iter().flatten().copied().collect();
@@ -12,7 +12,27 @@ fn chunk_with(records: &[[f64; FRAME_RECORD_LEN]]) -> GrainChunk {
 }
 
 fn scene_of(first_frame: u64, chunks: Vec<GrainChunk>) -> SceneGrain {
-    SceneGrain { first_frame, chunks }
+    SceneGrain {
+        first_frame,
+        chunks,
+        chroma_chunks: Vec::new(),
+    }
+}
+
+fn chroma_scene(luma_chunks: Vec<GrainChunk>, chroma_chunks: Vec<GrainChunk>) -> SceneGrain {
+    SceneGrain {
+        first_frame: 0,
+        chunks: luma_chunks,
+        chroma_chunks,
+    }
+}
+
+/// A chroma record with `cells` cells in each plane, Cb at `cb_codes` and Cr at `cr_codes` std.
+fn chroma_record(cells: f64, cb_codes: f64, cr_codes: f64) -> [f64; CHROMA_RECORD_LEN] {
+    let cb_variance = (cb_codes / 255.0) * (cb_codes / 255.0);
+    let cr_variance = (cr_codes / 255.0) * (cr_codes / 255.0);
+
+    [cells, cells * cb_variance, 0.0, cells, cells * cr_variance, 0.0]
 }
 
 fn scene_with(first_frame: u64, records: &[[f64; FRAME_RECORD_LEN]]) -> SceneGrain {
@@ -65,6 +85,8 @@ fn expected_null_row(frame: u64) -> FrameGrain {
         scene: 0,
         cells: 0,
         strength: None,
+        strength_cb: None,
+        strength_cr: None,
         persistence: [None; PERSISTENCE_LAGS],
     }
 }
@@ -250,12 +272,16 @@ fn a_row_serialises_with_the_report_keys() {
         scene: 0,
         cells: 500,
         strength: Some(1.5),
+        strength_cb: Some(0.75),
+        strength_cr: Some(1.25),
         persistence: [Some(0.5), Some(0.25), None, None, None, None, None, None],
     };
     let null_row = FrameGrain {
         frame: 0,
         cells: 0,
         strength: None,
+        strength_cb: None,
+        strength_cr: None,
         persistence: [None; PERSISTENCE_LAGS],
         ..third_frame
     };
@@ -264,13 +290,67 @@ fn a_row_serialises_with_the_report_keys() {
     let null_json = serde_json::to_string(&null_row).unwrap();
 
     let expected = concat!(
-        r#"{"frame":2,"scene":0,"cells":500,"strength":1.5,"#,
+        r#"{"frame":2,"scene":0,"cells":500,"strength":1.5,"strength_cb":0.75,"strength_cr":1.25,"#,
         r#""persistence":[0.5,0.25,null,null,null,null,null,null]}"#,
     );
     let null_expected = concat!(
-        r#"{"frame":0,"scene":0,"cells":0,"strength":null,"#,
+        r#"{"frame":0,"scene":0,"cells":0,"strength":null,"strength_cb":null,"strength_cr":null,"#,
         r#""persistence":[null,null,null,null,null,null,null,null]}"#,
     );
     assert_eq!(json, expected);
     assert_eq!(null_json, null_expected);
+}
+
+#[test]
+fn chroma_strength_pools_the_pair_behind_and_ahead() {
+    let luma_chunk = chunk_with(&[empty_record(); 3]);
+    let chroma_records = [
+        [0.0; CHROMA_RECORD_LEN],
+        chroma_record(150.0, 2.0, 4.0),
+        chroma_record(150.0, 2.0, 4.0),
+    ];
+    let chroma_chunk = chunk_with(&chroma_records);
+    let scene = chroma_scene(vec![luma_chunk], vec![chroma_chunk]);
+
+    let rows = frame_rows(&[scene]);
+
+    assert_near(rows[1].strength_cb, 2.0);
+    assert_near(rows[1].strength_cr, 4.0);
+    assert_eq!(rows[0].strength_cb, None);
+    assert_eq!(rows[2].strength_cr, None);
+}
+
+#[test]
+fn a_scene_without_chroma_records_has_no_chroma_strength() {
+    let records = [lag_one_record(1000.0, 0.5); 3];
+    let scene = scene_with(0, &records);
+
+    let rows = frame_rows(&[scene]);
+
+    assert!(rows.iter().all(|row| row.strength.is_some()));
+    assert!(rows.iter().all(|row| row.strength_cb.is_none()));
+    assert!(rows.iter().all(|row| row.strength_cr.is_none()));
+}
+
+#[test]
+fn chroma_rows_ignore_luma_chunk_boundaries() {
+    let first_luma = chunk_with(&[empty_record(); 24]);
+    let second_luma = chunk_with(&[empty_record(); 3]);
+    let mut first_chroma_records = [[0.0; CHROMA_RECORD_LEN]; 10];
+    let mut second_chroma_records = [[0.0; CHROMA_RECORD_LEN]; 17];
+    first_chroma_records[9] = chroma_record(150.0, 2.0, 4.0);
+    second_chroma_records[0] = chroma_record(150.0, 2.0, 4.0);
+    second_chroma_records[14] = chroma_record(150.0, 3.0, 1.0);
+    second_chroma_records[15] = chroma_record(150.0, 3.0, 1.0);
+    let first_chroma = chunk_with(&first_chroma_records);
+    let second_chroma = chunk_with(&second_chroma_records);
+    let scene = chroma_scene(vec![first_luma, second_luma], vec![first_chroma, second_chroma]);
+
+    let rows = frame_rows(&[scene]);
+
+    assert_eq!(rows.len(), 27);
+    assert_near(rows[9].strength_cb, 2.0);
+    assert_near(rows[9].strength_cr, 4.0);
+    assert_near(rows[24].strength_cb, 3.0);
+    assert_near(rows[24].strength_cr, 1.0);
 }

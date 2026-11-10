@@ -13,7 +13,7 @@ use super::search::SearchMode;
 use super::setup::{KernelSetup, engine_kernels};
 use crate::engine::{DevicePlane, Engine, EngineSpec, PassTimings, WindowSpan, copy_words_into};
 use crate::error::Error;
-use crate::nl4d::grain::GrainChunk;
+use crate::nl4d::grain::GrainChunks;
 
 /// Where a [TunedGroup] is in its stream.
 enum State {
@@ -208,12 +208,12 @@ impl TunedGroup {
         }
     }
 
-    /// Reads back the film grain measured since the last call, one list per engine.
+    /// Reads back the film grain measured since the last call, one entry per engine.
     ///
     /// The grain of the frames a group tunes on is dropped, and only the stream's own grain is kept.
-    pub fn drain_grain_chunks(&mut self) -> Result<Vec<Vec<GrainChunk>>, Error> {
+    pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunks>, Error> {
         if self.is_buffering() {
-            let empty = vec![Vec::new(); self.specs.len()];
+            let empty = vec![GrainChunks::default(); self.specs.len()];
             return Ok(empty);
         }
 

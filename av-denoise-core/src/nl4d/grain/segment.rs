@@ -21,7 +21,10 @@ use super::template::template_stats;
 pub struct SceneGrain {
     /// The output index of the scene's first frame.
     pub first_frame: u64,
+    /// The luma grain chunks in frame order.
     pub chunks: Vec<GrainChunk>,
+    /// The chroma planes' grain chunks in frame order, empty when chroma is not measured.
+    pub chroma_chunks: Vec<GrainChunk>,
 }
 
 /// A run of chunks in one scene with steady grain.

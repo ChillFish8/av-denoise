@@ -143,11 +143,17 @@ pub fn run_worker(
         // spanning two of them.
         flush_worker(denoiser, &mut warm_up, &mut pending, &output_tx)?;
 
-        let chunks = denoiser.drain_grain_chunks()?;
+        let drained = denoiser.drain_grain_chunks()?;
+        let measured = !drained.luma.is_empty() || !drained.chroma.is_empty();
         if let Some(first_frame) = first_frame
-            && !chunks.is_empty()
+            && measured
         {
-            scenes.push(SceneGrain { first_frame, chunks });
+            let scene = SceneGrain {
+                first_frame,
+                chunks: drained.luma,
+                chroma_chunks: drained.chroma,
+            };
+            scenes.push(scene);
         }
     }
 

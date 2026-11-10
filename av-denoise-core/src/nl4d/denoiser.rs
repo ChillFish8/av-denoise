@@ -1,14 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::grain::{
-    GrainChunk,
-    GrainExport,
-    GrainGeometry,
-    GrainParts,
-    persistence_history_len,
-    persistence_partials_len,
-};
+use super::grain::{GrainChunk, GrainExport, GrainGeometry, GrainParts, MeasuredPlanes};
 use super::params::Nl4dParams;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
 use crate::collab::geometry::ref_count;
@@ -147,21 +140,33 @@ pub(crate) fn buffer_sizes(
 
     let measures_luma = nlm_params.channels != ChannelMode::Chroma;
     let measures_table = params.grain_export && measures_luma;
-    let measures_persistence = params.grain_report && measures_luma;
     if let (true, Some(blocks)) = (measures_table, front.motion_blocks) {
         let ring_frames = 1 + 2 * u64::from(params.temporal_radius);
         let saved_mv = blocks.checked_mul(2 * ring_frames);
         buffers.push(("grain saved vectors", saved_mv));
     }
 
-    if measures_persistence {
-        let history = persistence_history_len(width, height);
-        let partials = persistence_partials_len(width, height);
+    if let Some(planes) = persistence_planes(params, nlm_params.channels) {
+        let (history, partials) = planes.buffer_lens(width, height);
         buffers.push(("grain persistence history", Some(history)));
         buffers.push(("grain persistence partials", Some(partials)));
     }
 
     buffers
+}
+
+/// The planes the grain report measures on a pass over `channels`, `None` when it is off.
+fn persistence_planes(params: &Nl4dParams, channels: ChannelMode) -> Option<MeasuredPlanes> {
+    if !params.grain_report {
+        return None;
+    }
+
+    let planes = match channels {
+        ChannelMode::Luma => MeasuredPlanes::Luma,
+        ChannelMode::Chroma => MeasuredPlanes::Chroma,
+    };
+
+    Some(planes)
 }
 
 impl DeviceTimed for Nl4dDenoiser {
@@ -293,12 +298,13 @@ impl Nl4dDenoiser {
         let wsum = client.empty(wsum_bytes);
         let outputs = [client.empty(output_bytes), client.empty(output_bytes)];
 
-        let measures_grain = channels != ChannelMode::Chroma && !guides_only;
+        let measures_table = params.grain_export && channels == ChannelMode::Luma && !guides_only;
+        let persistence = persistence_planes(&params, channels).filter(|_| !guides_only);
         let parts = GrainParts {
-            table: params.grain_export && measures_grain,
-            persistence: params.grain_report && measures_grain,
+            table: measures_table,
+            persistence,
         };
-        let grain = if parts.table || parts.persistence {
+        let grain = if parts.table || parts.persistence.is_some() {
             let motion_ctx = front.motion_ctx();
             let geometry = GrainGeometry {
                 width,
