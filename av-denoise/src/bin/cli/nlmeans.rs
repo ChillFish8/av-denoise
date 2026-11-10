@@ -387,6 +387,7 @@ impl NlmeansArgs {
             planes,
             progress: globals.progress,
             grain_table: None,
+            grain_report: None,
             tune_budget: self.common.checked_tune_budget()?,
             timing_report: self.common.timing_report,
             shared_device: self.common.shared_device,
@@ -1022,10 +1023,20 @@ mod tests {
     }
 
     #[test]
+    fn nlmeans_has_no_report_flag() {
+        let error =
+            Args::try_parse_from(["av-denoise", "nlmeans", "-i", "-", "--unstable-grain-report", "x"])
+                .expect_err("only nl4d reports grain");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
     fn nlmeans_never_asks_for_a_grain_table() {
         let (args, nlm) = parse(&[]);
         let opts = nlm.build_options(&args).expect("build_options should succeed");
 
         assert_eq!(opts.grain_table, None);
+        assert_eq!(opts.grain_report, None);
     }
 }

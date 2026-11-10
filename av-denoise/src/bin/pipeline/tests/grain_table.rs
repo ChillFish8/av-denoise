@@ -1,36 +1,15 @@
 #![cfg(feature = "vulkan")]
 
 use std::io::{Cursor, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, Nl4dOptions, PlaneOptions, TuningMode};
 
-use super::{SharedBuffer, grainy_clip, multi_scene_clip};
+use super::{SharedBuffer, TestDir, grainy_clip, multi_scene_clip};
 use crate::pipeline::source::open_y4m;
 use crate::pipeline::{RunSettings, run_with};
 
-/// A directory unique to one test, removed when it drops.
-struct TestDir(PathBuf);
-
-impl TestDir {
-    fn new(test_name: &str) -> Self {
-        let name = format!("avd-grain-{}-{test_name}", std::process::id());
-        let path = std::env::temp_dir().join(name);
-        std::fs::create_dir_all(&path).expect("the test directory is created");
-
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+const DIR_PREFIX: &str = "avd-grain";
 
 fn nl4d_opts(grain_export: bool) -> PlaneOptions {
     let algorithm = Nl4dOptions {
@@ -68,6 +47,7 @@ fn run(bytes: Vec<u8>, workers: usize, table: Option<PathBuf>) -> Result<Vec<u8>
         frame_budget_bytes: 1 << 30,
         visible: false,
         grain_table: table,
+        grain_report: None,
         tune_budget: None,
         timing_report: false,
         shared_device: false,
@@ -82,7 +62,7 @@ fn run(bytes: Vec<u8>, workers: usize, table: Option<PathBuf>) -> Result<Vec<u8>
 
 #[test]
 fn a_run_with_the_flag_writes_a_table() {
-    let dir = TestDir::new("writes");
+    let dir = TestDir::new(DIR_PREFIX, "writes");
     let path = dir.path().join("grain.tbl");
     let clip = grainy_clip(40);
 
@@ -98,7 +78,7 @@ fn a_run_with_the_flag_writes_a_table() {
 
 #[test]
 fn the_flag_does_not_change_the_output() {
-    let dir = TestDir::new("output");
+    let dir = TestDir::new(DIR_PREFIX, "output");
     let path = dir.path().join("grain.tbl");
     let plain_clip = grainy_clip(40);
     let export_clip = grainy_clip(40);
@@ -111,7 +91,7 @@ fn the_flag_does_not_change_the_output() {
 
 #[test]
 fn worker_count_does_not_change_the_table() {
-    let dir = TestDir::new("workers");
+    let dir = TestDir::new(DIR_PREFIX, "workers");
     let single = dir.path().join("single.tbl");
     let multi = dir.path().join("multi.tbl");
     let single_clip = grainy_clip(60);
@@ -130,7 +110,7 @@ fn worker_count_does_not_change_the_table() {
 
 #[test]
 fn failed_run_leaves_no_table() {
-    let dir = TestDir::new("failed");
+    let dir = TestDir::new(DIR_PREFIX, "failed");
     let path = dir.path().join("grain.tbl");
     let clip = multi_scene_clip(0);
 

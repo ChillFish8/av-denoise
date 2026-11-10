@@ -29,6 +29,8 @@ pub struct RunOptions {
     pub progress: bool,
     /// Where to write the AV1 film grain table, when one was asked for.
     pub grain_table: Option<PathBuf>,
+    /// Where to write the per-frame grain report, when one was asked for.
+    pub grain_report: Option<PathBuf>,
     /// Seconds tuning may take, when the user set a budget.
     pub tune_budget: Option<f64>,
     /// Whether to print the timing report at the end of the run.

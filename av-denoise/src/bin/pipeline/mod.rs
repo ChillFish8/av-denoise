@@ -2,11 +2,13 @@ mod bestsource;
 mod convert;
 mod coordinator;
 mod decode;
+mod grain_report;
 mod grain_table;
 pub mod report;
 mod scenes;
 mod source;
 mod stage;
+mod staged_file;
 mod tune;
 mod worker;
 
@@ -23,6 +25,7 @@ use avtbx_bestsource::IndexCache;
 use self::convert::SourcePixel;
 use self::coordinator::spawn_coordinator;
 use self::decode::{DecodeThread, FrameMsg};
+use self::grain_report::ReportPath;
 use self::grain_table::TablePath;
 use self::report::{RunSummary, WorkerTiming};
 use self::scenes::{Decided, SceneSplitter};
@@ -41,6 +44,8 @@ pub struct RunSettings {
     pub visible: bool,
     /// Where to write the AV1 film grain table, when one was asked for.
     pub grain_table: Option<PathBuf>,
+    /// Where to write the per-frame grain report, when one was asked for.
+    pub grain_report: Option<PathBuf>,
     /// Seconds tuning may take, when the user set a budget.
     pub tune_budget: Option<f64>,
     /// Whether the workers sample device time for the timing report.
@@ -63,11 +68,13 @@ pub fn run(
     let opener = move || source::open_source(&owned_input, cache);
     let output = stdout();
     let grain_table = opts.grain_table.clone();
+    let grain_report = opts.grain_report.clone();
     let settings = RunSettings {
         workers,
         frame_budget_bytes,
         visible,
         grain_table,
+        grain_report,
         tune_budget: opts.tune_budget,
         timing_report: opts.timing_report,
         shared_device: opts.shared_device,
@@ -93,10 +100,10 @@ pub fn run(
 
 /// Denoises the source `opener` returns scene by scene, writing y4m into `output`.
 ///
-/// Blocks until every thread in the pipeline has finished. The grain table is written only when
-/// every stage succeeds. When the options ask for `auto` tuning and nothing is stored for this
-/// configuration, the first frames are tuned on before the workers start, then denoised as usual.
-/// Returns where the run's time went.
+/// Blocks until every thread in the pipeline has finished. The grain table and report are written
+/// only when every stage succeeds. When the options ask for `auto` tuning and nothing is stored for
+/// this configuration, the first frames are tuned on before the workers start, then denoised as
+/// usual. Returns where the run's time went.
 pub fn run_with<W, F>(
     planes: &PlaneOptions,
     opener: F,
@@ -112,6 +119,7 @@ where
         frame_budget_bytes,
         visible,
         grain_table,
+        grain_report,
         tune_budget,
         timing_report,
         shared_device,
@@ -124,6 +132,7 @@ where
     }
 
     let table = grain_table.as_deref().map(TablePath::create).transpose()?;
+    let report = grain_report.as_deref().map(ReportPath::create).transpose()?;
 
     let (decode_thread, info) = DecodeThread::spawn(opener)?;
     let layout = info.layout;
@@ -194,7 +203,7 @@ where
     // elsewhere as the dispatcher's disconnect. Dispatch errors carry decode failures, which
     // never make a worker fail.
     //
-    // Returning early drops `table`, which removes its temporary file.
+    // Returning early drops `table` and `report`, which removes their temporary files.
     let (scenes, worker_timings) = coordinator_joined
         .and(workers_joined)
         .and_then(|joined| dispatched.map(|_| joined))
@@ -204,6 +213,10 @@ where
         let rate = info.details.frame_rate;
         let frame_rate = (*rate.numer() as u64, *rate.denom() as u64);
         table.write(&scenes, frame_rate)?;
+    }
+
+    if let Some(report) = report {
+        report.write(&scenes)?;
     }
 
     let summary = RunSummary {

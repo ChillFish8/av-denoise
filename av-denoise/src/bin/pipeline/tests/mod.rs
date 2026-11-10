@@ -3,6 +3,7 @@ mod convert;
 mod coordinator;
 mod decode;
 mod dispatch;
+mod grain_report;
 mod grain_table;
 mod report;
 mod run;
@@ -24,6 +25,29 @@ use av_denoise::{Algorithm, ChannelIntent, DenoisingMode, PlaneOptions, TuningMo
 use av_denoise::{ChromaSiting, Depth, FrameLayout, Planes, Subsampling, fill_plane};
 
 use super::source::{FrameReader, OpenedSource};
+
+/// A directory unique to one test, removed when it drops.
+pub(super) struct TestDir(PathBuf);
+
+impl TestDir {
+    pub(super) fn new(prefix: &str, test_name: &str) -> Self {
+        let name = format!("{prefix}-{}-{test_name}", std::process::id());
+        let path = std::env::temp_dir().join(name);
+        std::fs::create_dir_all(&path).expect("the test directory is created");
+
+        Self(path)
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// A writer the test can read back after the coordinator thread drops it.
 #[cfg(feature = "vulkan")]

@@ -168,6 +168,14 @@ pub struct Nl4dArgs {
     #[arg(long, value_name = "PATH")]
     pub unstable_export_av1_fgs: Option<PathBuf>,
 
+    /// Writes a per-frame report of the source's grain strength and how long it persists. Unstable.
+    ///
+    /// The flag and its output may change between releases. The report holds one JSON line per
+    /// frame with the source's luma grain strength and how much of that grain stays the same
+    /// from 1 to 8 frames later. It needs luma to be denoised.
+    #[arg(long, value_name = "PATH")]
+    pub unstable_grain_report: Option<PathBuf>,
+
     #[command(flatten)]
     pub motion: MotionArgs,
 }
@@ -204,16 +212,9 @@ impl Nl4dArgs {
         let intent = resolve_channel_intent(&globals.channel_mode)?;
 
         let exports_grain = self.unstable_export_av1_fgs.is_some();
-        if exports_grain && intent == ChannelIntent::Chroma {
-            anyhow::bail!("--unstable-export-av1-fgs measures luma grain, so it needs luma to be denoised");
-        }
-
-        if exports_grain {
-            tracing::warn!(
-                "--unstable-export-av1-fgs is unstable, its output and the flag itself may change \
-                 between releases"
-            );
-        }
+        let reports_grain = self.unstable_grain_report.is_some();
+        check_grain_flag("--unstable-export-av1-fgs", exports_grain, intent)?;
+        check_grain_flag("--unstable-grain-report", reports_grain, intent)?;
 
         // Checked in 8-bit units so the error reports the number the user typed. The library's
         // own check runs after the /255 normalisation, in 0..=1 units.
@@ -253,7 +254,7 @@ impl Nl4dArgs {
             noise_map: defaults.noise_map && !self.no_noise_map,
             pooled_threshold: defaults.pooled_threshold && !self.no_pooled_threshold,
             grain_export: exports_grain,
-            grain_report: defaults.grain_report,
+            grain_report: reports_grain,
         };
         let mode = DenoisingMode::Temporal {
             radius: temporal_radius,
@@ -278,6 +279,7 @@ impl Nl4dArgs {
             planes,
             progress: globals.progress,
             grain_table: self.unstable_export_av1_fgs.clone(),
+            grain_report: self.unstable_grain_report.clone(),
             tune_budget: self.common.checked_tune_budget()?,
             timing_report: self.common.timing_report,
             shared_device: self.common.shared_device,
@@ -297,6 +299,21 @@ impl Nl4dArgs {
             _ => {},
         }
     }
+}
+
+/// Rejects a given grain flag in chroma-only runs and warns that it is unstable.
+fn check_grain_flag(flag: &str, given: bool, intent: ChannelIntent) -> Result<(), anyhow::Error> {
+    if !given {
+        return Ok(());
+    }
+
+    if intent == ChannelIntent::Chroma {
+        anyhow::bail!("{flag} measures luma grain, so it needs luma to be denoised");
+    }
+
+    tracing::warn!("{flag} is unstable, its output and the flag itself may change between releases");
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -878,5 +895,72 @@ mod tests {
             error.to_string().contains("--unstable-export-av1-fgs"),
             "got {error}"
         );
+    }
+
+    #[test]
+    fn the_report_flag_alone_turns_grain_measurement_on() {
+        let (args, nl4d) = parse(&["--unstable-grain-report", "r.jsonl"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
+        let expected = std::path::Path::new("r.jsonl");
+
+        assert_eq!(opts.grain_report.as_deref(), Some(expected));
+        assert_eq!(opts.grain_table, None);
+        assert!(nl4d_options.grain_report);
+        assert!(!nl4d_options.grain_export);
+    }
+
+    #[test]
+    fn both_grain_flags_set_both_paths() {
+        let (args, nl4d) = parse(&[
+            "--unstable-export-av1-fgs",
+            "t.tbl",
+            "--unstable-grain-report",
+            "r.jsonl",
+        ]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
+        let expected_table = std::path::Path::new("t.tbl");
+        let expected_report = std::path::Path::new("r.jsonl");
+
+        assert_eq!(opts.grain_table.as_deref(), Some(expected_table));
+        assert_eq!(opts.grain_report.as_deref(), Some(expected_report));
+        assert!(nl4d_options.grain_export);
+        assert!(nl4d_options.grain_report);
+    }
+
+    #[test]
+    fn the_report_flag_is_rejected_in_chroma_only_runs() {
+        let (args, nl4d) = parse(&["--channel-mode", "chroma", "--unstable-grain-report", "r.jsonl"]);
+        let error = nl4d
+            .build_options(&args)
+            .expect_err("chroma only cannot report luma grain");
+
+        assert!(
+            error.to_string().contains("--unstable-grain-report"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn the_table_flag_alone_leaves_the_report_measurement_off() {
+        let (args, nl4d) = parse(&["--unstable-export-av1-fgs", "t.tbl"]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
+
+        assert_eq!(opts.grain_report, None);
+        assert!(!nl4d_options.grain_report);
+    }
+
+    #[test]
+    fn neither_grain_flag_leaves_grain_measurement_off() {
+        let (args, nl4d) = parse(&[]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
+
+        assert_eq!(opts.grain_table, None);
+        assert_eq!(opts.grain_report, None);
+        assert!(!nl4d_options.grain_export);
+        assert!(!nl4d_options.grain_report);
     }
 }
