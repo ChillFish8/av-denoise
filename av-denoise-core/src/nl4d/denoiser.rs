@@ -139,8 +139,7 @@ pub(crate) fn buffer_sizes(
     let front = front_buffer_sizes(client, &nlm_params, width, height, reads_luma_motion);
     let mut buffers = front.buffers;
 
-    let measures_table = params.grain_data && nlm_params.channels == ChannelMode::Luma;
-    if let (true, Some(blocks)) = (measures_table, front.motion_blocks) {
+    if let (true, Some(blocks)) = (params.grain_data, front.motion_blocks) {
         let ring_frames = 1 + 2 * u64::from(params.temporal_radius);
         let saved_mv = blocks.checked_mul(2 * ring_frames);
         buffers.push(("grain saved vectors", saved_mv));

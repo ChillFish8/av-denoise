@@ -5,6 +5,7 @@ use super::chunk::GrainChunk;
 use super::consts::{
     AUTOCOV_LEN,
     CELL,
+    CHROMA_PLANES,
     CHUNK_FRAMES,
     FRAME_TABLE_LEN,
     GROUPED_AUTOCOV_LEN,
@@ -28,19 +29,17 @@ use crate::nl4d::snapshot::LastFields;
 const SAVE_THREADS: u32 = 256;
 /// The std bucket edges, one more than the bucket count.
 const EDGES_LEN: usize = STD_BUCKETS + 1;
-/// Counts in one frame's histograms, source grain and then kept grain.
+/// Counts in one plane's histograms of one frame, source grain and then kept grain.
 const FRAME_HIST_LEN: usize = 2 * HIST_LEN;
-/// Counts in one chunk's histograms, one slot per frame.
+/// Counts in one plane's histograms of one chunk, one slot per frame.
 const CHUNK_HIST_LEN: usize = CHUNK_FRAMES as usize * FRAME_HIST_LEN;
-/// Values in one chunk's grouped records, one slot per frame.
+/// Values in one plane's grouped records of one chunk, one slot per frame.
 const CHUNK_AUTOCOV_LEN: usize = CHUNK_FRAMES as usize * GROUPED_AUTOCOV_LEN;
 
 /// Which measurements a [GrainExport] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GrainParts {
     /// The planes the pass measures.
-    ///
-    /// Luma also measures the source grain table, histograms and autocovariance.
     pub planes: MeasuredPlanes,
     /// Whether each frame keeps the noise reading it was filtered with.
     pub noise: bool,
@@ -116,17 +115,19 @@ pub(super) struct CompletedFrame<'a> {
     pub output_slot: usize,
 }
 
-/// One chunk's table histograms and autocovariance, one slot per frame.
+/// One chunk's table histograms and autocovariance, one slot per plane of each frame.
+///
+/// Frame `f`'s plane `p` sits in slot `f * planes + p`.
 #[derive(Clone)]
 struct TableChunk {
     hist: Handle,
     autocov: Handle,
+    planes: usize,
 }
 
 #[derive(Clone)]
 struct ChunkBuffers {
-    /// Present when the table is measured.
-    table: Option<TableChunk>,
+    table: TableChunk,
     /// Each frame's persistence sums.
     frame_record: Handle,
     /// Each frame's noise reading and colour fit, each present when it is kept.
@@ -140,8 +141,51 @@ struct Completed {
     output_slot: usize,
 }
 
+/// How one plane's table is measured.
+#[derive(Clone, Copy)]
+struct TablePlan {
+    /// The channel read from each pixel.
+    channel: u32,
+    /// Whether a cell's mean must sit inside the luma band to count.
+    luma_band: bool,
+}
+
+impl TablePlan {
+    fn for_planes(planes: MeasuredPlanes) -> Vec<TablePlan> {
+        match planes {
+            MeasuredPlanes::Luma => {
+                let luma = TablePlan {
+                    channel: 0,
+                    luma_band: true,
+                };
+                vec![luma]
+            },
+            MeasuredPlanes::Chroma => {
+                let plans = (0..CHROMA_PLANES).map(|plane| TablePlan {
+                    channel: plane as u32,
+                    luma_band: false,
+                });
+                plans.collect()
+            },
+        }
+    }
+}
+
+/// The ring positions and pairs one completed frame is measured with.
+struct FramePairs {
+    frame_slot: u32,
+    /// The next frame's ring slot, or the frame's own without one.
+    next_or_own_slot: u32,
+    kept_entry: u32,
+    prev_output: usize,
+    has_source: bool,
+    has_kept: bool,
+}
+
 /// The grain table measurement.
 struct TableMeasure {
+    /// One plan per measured plane, in table order.
+    plans: Vec<TablePlan>,
     /// Each frame's vectors to the next frame, in a ring entry keyed by its physical ring slot.
     ///
     /// A frame's vectors must be saved before the frame is measured.
@@ -159,7 +203,8 @@ struct TableMeasure {
 }
 
 impl TableMeasure {
-    fn new(client: &Client, geometry: &GrainGeometry) -> Self {
+    fn new(client: &Client, geometry: &GrainGeometry, planes: MeasuredPlanes) -> Self {
+        let plans = TablePlan::for_planes(planes);
         let edges_host = bucket_edges();
         let saved_mv_host = vec![0i32; geometry.saved_mv_len()];
         let saved_conf_host = vec![0.0f32; geometry.saved_conf_len()];
@@ -174,6 +219,7 @@ impl TableMeasure {
         let partials = client.empty(partials_bytes);
 
         Self {
+            plans,
             saved_mv,
             saved_conf,
             saved_valid: vec![false; geometry.ring_frames as usize],
@@ -223,7 +269,7 @@ impl TableMeasure {
         self.saved_valid[centre_slot as usize] = true;
     }
 
-    /// Measures one frame into its slot of `chunk`.
+    /// Measures each plane of one frame into its slot of `chunk`.
     ///
     /// `chunk_frames` is how many frames the chunk held before this one.
     fn measure(
@@ -250,48 +296,19 @@ impl TableMeasure {
         let next_or_own_slot = frame.next_slot.unwrap_or(frame_slot);
         let kept_entry = kept_from.map_or(frame_slot, |previous| previous.ring_slot);
         let prev_output = kept_from.map_or(output_slot, |previous| previous.output_slot);
-        let frame_len = geometry.frame_len();
-        let hist_offset = chunk_frames * FRAME_HIST_LEN as u32;
-        let record_offset = chunk_frames * GROUPED_AUTOCOV_LEN as u32;
+        let pairs = FramePairs {
+            frame_slot,
+            next_or_own_slot,
+            kept_entry,
+            prev_output,
+            has_source,
+            has_kept,
+        };
 
-        unsafe {
-            grain_measure::launch_unchecked(
-                client,
-                CubeCount::new_2d(geometry.cells_x(), geometry.cells_y()),
-                CubeDim::new_2d(CELL, CELL),
-                geometry.channels as usize,
-                BufferArg::from_raw_parts(frame.input.clone(), geometry.ring_len()),
-                BufferArg::from_raw_parts(frame.outputs[output_slot].clone(), frame_len),
-                BufferArg::from_raw_parts(frame.outputs[prev_output].clone(), frame_len),
-                BufferArg::from_raw_parts(self.saved_mv.clone(), geometry.saved_mv_len()),
-                BufferArg::from_raw_parts(self.saved_conf.clone(), geometry.saved_conf_len()),
-                BufferArg::from_raw_parts(self.edges.clone(), EDGES_LEN),
-                BufferArg::from_raw_parts(chunk.hist.clone(), CHUNK_HIST_LEN),
-                BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
-                frame_slot,
-                next_or_own_slot,
-                frame_slot,
-                kept_entry,
-                has_source as u32,
-                has_kept as u32,
-                hist_offset,
-                geometry.width,
-                geometry.height,
-                geometry.channels,
-                geometry.blocks_x,
-                geometry.blocks_y,
-                geometry.step,
-            );
-
-            grain_reduce_partials::launch_unchecked(
-                client,
-                CubeCount::new_1d(AUTOCOV_LEN as u32),
-                CubeDim::new_1d(REDUCE_THREADS),
-                BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
-                BufferArg::from_raw_parts(chunk.autocov.clone(), CHUNK_AUTOCOV_LEN),
-                record_offset,
-                geometry.cells(),
-            );
+        let planes = self.plans.len() as u32;
+        for (plane, plan) in self.plans.iter().enumerate() {
+            let frame_plane = chunk_frames * planes + plane as u32;
+            self.launch_plan(client, geometry, frame, chunk, &pairs, *plan, frame_plane);
         }
 
         self.last_completed = Some(Completed {
@@ -300,29 +317,100 @@ impl TableMeasure {
         });
     }
 
+    /// Measures one plane of a frame into slot `frame_plane` of `chunk`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every argument is a buffer, ring position or slot the plane's launches bind"
+    )]
+    fn launch_plan(
+        &self,
+        client: &Client,
+        geometry: &GrainGeometry,
+        frame: &CompletedFrame,
+        chunk: &TableChunk,
+        pairs: &FramePairs,
+        plan: TablePlan,
+        frame_plane: u32,
+    ) {
+        let frame_len = geometry.frame_len();
+        let hist_len = chunk.planes * CHUNK_HIST_LEN;
+        let autocov_len = chunk.planes * CHUNK_AUTOCOV_LEN;
+        let hist_offset = frame_plane * FRAME_HIST_LEN as u32;
+        let record_offset = frame_plane * GROUPED_AUTOCOV_LEN as u32;
+        let output = &frame.outputs[frame.output_slot];
+        let prev_output = &frame.outputs[pairs.prev_output];
+
+        unsafe {
+            grain_measure::launch_unchecked(
+                client,
+                CubeCount::new_2d(geometry.cells_x(), geometry.cells_y()),
+                CubeDim::new_2d(CELL, CELL),
+                geometry.channels as usize,
+                BufferArg::from_raw_parts(frame.input.clone(), geometry.ring_len()),
+                BufferArg::from_raw_parts(output.clone(), frame_len),
+                BufferArg::from_raw_parts(prev_output.clone(), frame_len),
+                BufferArg::from_raw_parts(self.saved_mv.clone(), geometry.saved_mv_len()),
+                BufferArg::from_raw_parts(self.saved_conf.clone(), geometry.saved_conf_len()),
+                BufferArg::from_raw_parts(self.edges.clone(), EDGES_LEN),
+                BufferArg::from_raw_parts(chunk.hist.clone(), hist_len),
+                BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
+                pairs.frame_slot,
+                pairs.next_or_own_slot,
+                pairs.frame_slot,
+                pairs.kept_entry,
+                pairs.has_source as u32,
+                pairs.has_kept as u32,
+                hist_offset,
+                geometry.width,
+                geometry.height,
+                geometry.channels,
+                geometry.blocks_x,
+                geometry.blocks_y,
+                geometry.step,
+                plan.channel,
+                plan.luma_band,
+            );
+
+            grain_reduce_partials::launch_unchecked(
+                client,
+                CubeCount::new_1d(AUTOCOV_LEN as u32),
+                CubeDim::new_1d(REDUCE_THREADS),
+                BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
+                BufferArg::from_raw_parts(chunk.autocov.clone(), autocov_len),
+                record_offset,
+                geometry.cells(),
+            );
+        }
+    }
+
     fn reset_stream(&mut self) {
         self.saved_valid.fill(false);
         self.last_completed = None;
     }
 
-    /// A chunk with every frame slot zeroed.
-    fn open_chunk(client: &Client) -> TableChunk {
-        let hist_host = vec![0i32; CHUNK_HIST_LEN];
-        let autocov_host = vec![0.0f32; CHUNK_AUTOCOV_LEN];
+    /// A chunk with every frame slot of every plane zeroed.
+    fn open_chunk(&self, client: &Client) -> TableChunk {
+        let planes = self.plans.len();
+        let hist_host = vec![0i32; planes * CHUNK_HIST_LEN];
+        let autocov_host = vec![0.0f32; planes * CHUNK_AUTOCOV_LEN];
         let hist_bytes = i32::as_bytes(&hist_host);
         let hist = client.create_from_slice(hist_bytes);
         let autocov_bytes = f32::as_bytes(&autocov_host);
         let autocov = client.create_from_slice(autocov_bytes);
 
-        TableChunk { hist, autocov }
+        TableChunk {
+            hist,
+            autocov,
+            planes,
+        }
     }
 }
 
 /// The grain measurement state of one nl4d denoiser.
 pub(crate) struct GrainExport {
     geometry: GrainGeometry,
-    /// Present when the table is measured.
-    table: Option<TableMeasure>,
+    /// The source and kept grain table of each measured plane.
+    table: TableMeasure,
     /// The persistence sums each frame adds to its chunk.
     persistence: PersistenceMeasure,
     /// The noise reading and colour fit each frame was filtered with.
@@ -342,8 +430,7 @@ struct FrameLens {
 
 impl GrainExport {
     pub(crate) fn new(client: &Client, geometry: GrainGeometry, parts: GrainParts) -> Self {
-        let measures_table = parts.planes == MeasuredPlanes::Luma;
-        let table = measures_table.then(|| TableMeasure::new(client, &geometry));
+        let table = TableMeasure::new(client, &geometry, parts.planes);
         let persistence = PersistenceMeasure::new(client, &geometry, parts.planes);
         let snapshots = SnapshotMeasure::new(client, geometry.ring_frames, parts.noise);
 
@@ -370,8 +457,8 @@ impl GrainExport {
     /// Saves the centre frame's vectors to the next frame, or marks the entry empty.
     ///
     /// `next_neighbour` is the motion field's neighbour index of the frame after the centre,
-    /// `None` when that frame is not a real frame of the same stream. Nothing is saved without the
-    /// table measurement.
+    /// `None` when that frame is not a real frame of the same stream. `fields` must sit on the
+    /// measured plane's motion block grid.
     pub(in crate::nl4d) fn save_vectors(
         &mut self,
         client: &Client,
@@ -379,11 +466,8 @@ impl GrainExport {
         centre_slot: u32,
         next_neighbour: Option<u32>,
     ) {
-        let Some(table) = self.table.as_mut() else {
-            return;
-        };
-
-        table.save_vectors(client, &self.geometry, fields, centre_slot, next_neighbour);
+        self.table
+            .save_vectors(client, &self.geometry, fields, centre_slot, next_neighbour);
     }
 
     /// Measures the frame that just completed into the newest chunk.
@@ -407,10 +491,8 @@ impl GrainExport {
         };
         let chunk = self.open_chunk(client);
 
-        let table = self.table.as_mut();
-        if let (Some(table), Some(table_chunk)) = (table, &chunk.table) {
-            table.measure(client, &self.geometry, &frame, table_chunk, chunk.frames);
-        }
+        self.table
+            .measure(client, &self.geometry, &frame, &chunk.table, chunk.frames);
 
         self.persistence
             .measure(client, &self.geometry, &frame, &chunk.frame_record, chunk.frames);
@@ -430,7 +512,7 @@ impl GrainExport {
     /// The copy's frame count is taken before the frame being measured.
     fn open_chunk(&mut self, client: &Client) -> ChunkBuffers {
         if !self.chunk_open {
-            let table = self.table.as_ref().map(|_| TableMeasure::open_chunk(client));
+            let table = self.table.open_chunk(client);
             let frame_record = self.persistence.open_chunk(client);
             let snapshots = self.snapshots.open_chunk(client);
             self.chunks.push(ChunkBuffers {
@@ -449,15 +531,12 @@ impl GrainExport {
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn measured_with_entry(&self) -> u32 {
-        self.table.as_ref().map_or(0, |table| table.measured_with_entry)
+        self.table.measured_with_entry
     }
 
     /// Forgets the stream's saved vectors and history, and closes the open chunk.
     pub(crate) fn reset_stream(&mut self) {
-        if let Some(table) = self.table.as_mut() {
-            table.reset_stream();
-        }
-
+        self.table.reset_stream();
         self.persistence.reset_stream();
         self.chunk_open = false;
     }
@@ -489,9 +568,7 @@ fn read_chunk(client: &Client, buffer: ChunkBuffers, lens: &FrameLens) -> Result
     let frames = buffer.frames;
     chunk.frames = frames;
 
-    if let Some(table) = buffer.table {
-        chunk.frame_tables = read_table(client, table, frames)?;
-    }
+    chunk.frame_tables = read_table(client, buffer.table, frames)?;
 
     let records = read_frames(client, buffer.frame_record, frames, lens.record, "frame record")?;
     let recorded = records.iter().map(|&value| value as f64);
@@ -525,7 +602,9 @@ fn read_frames(
     Ok(values[..kept_len].to_vec())
 }
 
-/// Reads the table slots of a chunk's first `frames` frames, `FRAME_TABLE_LEN` values per frame.
+/// Reads the table slots of a chunk's first `frames` frames.
+///
+/// Each frame holds `FRAME_TABLE_LEN` values per plane, its planes in turn.
 fn read_table(client: &Client, table: TableChunk, frames: u32) -> Result<Vec<f32>, anyhow::Error> {
     let hist_bytes = client
         .read_one(table.hist)
@@ -537,10 +616,10 @@ fn read_table(client: &Client, table: TableChunk, frames: u32) -> Result<Vec<f32
     let autocov = f32::from_bytes(&autocov_bytes);
     let (frame_hists, _) = hist.as_chunks::<FRAME_HIST_LEN>();
     let (frame_records, _) = autocov.as_chunks::<GROUPED_AUTOCOV_LEN>();
-    let frame_count = frames as usize;
+    let slot_count = frames as usize * table.planes;
 
-    let mut frame_tables = Vec::with_capacity(frame_count * FRAME_TABLE_LEN);
-    let slots = frame_hists.iter().zip(frame_records).take(frame_count);
+    let mut frame_tables = Vec::with_capacity(slot_count * FRAME_TABLE_LEN);
+    let slots = frame_hists.iter().zip(frame_records).take(slot_count);
     for (frame_hist, frame_record) in slots {
         let counts = frame_hist.iter().map(|&count| count as f32);
         frame_tables.extend(counts);

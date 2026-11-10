@@ -1,14 +1,15 @@
-use super::consts::{AUTOCOV_LEN, FRAME_TABLE_LEN, HIST_LEN, LAG_COUNT, STRENGTH_GROUPS};
+use super::consts::{AUTOCOV_LEN, CHROMA_PLANES, FRAME_TABLE_LEN, HIST_LEN, LAG_COUNT, STRENGTH_GROUPS};
 
 /// The grain statistics of up to 24 consecutive completed frames of one scene.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GrainChunk {
     /// How many completed frames the chunk covers.
     pub frames: u32,
-    /// Each frame's table statistics, 2800 values per frame, in frame order.
+    /// Each frame's table statistics in frame order, 2800 values per luma frame.
     ///
-    /// Counts are whole numbers and lag sums are the GPU's own f32 values. Empty when the table is
-    /// not measured.
+    /// A chroma frame holds the Cb table and then the Cr table, each in the luma layout. Counts
+    /// are whole numbers and lag sums are the GPU's own f32 values. Empty when the table is not
+    /// measured.
     pub frame_tables: Vec<f32>,
     /// Each frame's persistence sums in frame order, 24 values per luma frame and 6 per chroma
     /// frame.
@@ -61,6 +62,23 @@ impl GrainChunk {
         let (frame_tables, _) = self.frame_tables.as_chunks::<FRAME_TABLE_LEN>();
         for frame_table in frame_tables {
             sums.add_frame(frame_table);
+        }
+
+        sums
+    }
+
+    /// The chunk's table statistics of chroma plane `plane`, 0 for Cb and 1 for Cr, summed over
+    /// its frames.
+    #[cfg_attr(
+        not(all(test, any(feature = "vulkan", feature = "metal"))),
+        expect(dead_code, reason = "only the chroma grain tests read it")
+    )]
+    pub(crate) fn summed_chroma_table(&self, plane: usize) -> TableSums {
+        let mut sums = TableSums::zeroed();
+        let (frame_tables, _) = self.frame_tables.as_chunks::<FRAME_TABLE_LEN>();
+        let plane_tables = frame_tables.iter().skip(plane).step_by(CHROMA_PLANES);
+        for plane_table in plane_tables {
+            sums.add_frame(plane_table);
         }
 
         sums

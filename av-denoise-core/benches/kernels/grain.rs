@@ -167,10 +167,33 @@ impl Benchmark for GrainSaveVectorsBench {
     }
 }
 
-/// Measures the source and kept grain of one luma frame.
+/// Measures the source and kept grain of one frame.
 pub struct GrainMeasureBench {
     pub client: Client,
+    /// The size of the luma plane.
     pub size: GrainSize,
+    /// Whether the frame is a half-resolution chroma frame of two channels, read on Cr without
+    /// the luma band.
+    pub chroma: bool,
+}
+
+impl GrainMeasureBench {
+    /// The size of the measured plane.
+    fn plane(&self) -> GrainSize {
+        if !self.chroma {
+            return self.size;
+        }
+
+        GrainSize {
+            width: self.size.width / CHROMA_SUBSAMPLING,
+            height: self.size.height / CHROMA_SUBSAMPLING,
+            label: self.size.label,
+        }
+    }
+
+    fn channels(&self) -> u32 {
+        if self.chroma { CHROMA_CHANNELS } else { 1 }
+    }
 }
 
 #[derive(Clone)]
@@ -190,19 +213,22 @@ impl Benchmark for GrainMeasureBench {
     type Output = ();
 
     fn prepare(&self) -> Self::Input {
-        let pixels = self.size.pixels();
-        let blocks = self.size.blocks() as usize;
-        let cells = self.size.cells();
+        let plane = self.plane();
+        let channels = self.channels() as usize;
+        let samples = plane.pixels() * channels;
+        let blocks = plane.blocks() as usize;
+        let cells = plane.cells();
 
         // Two ring slots, a frame and a copy moved by one pixel, so every cell has per-pixel grain.
-        let frame = make_synthetic_frame(self.size.width, self.size.height, 1);
+        let frame = make_synthetic_frame(plane.width, plane.height, channels as u32);
+        let (first_pixel, rest) = frame.split_at(channels);
         let mut ring = frame.clone();
-        ring.extend_from_slice(&frame[1..]);
-        ring.push(frame[0]);
+        ring.extend_from_slice(rest);
+        ring.extend_from_slice(first_pixel);
 
         // Flat outputs with a small per-pixel ripple, so the kept grain is not zero either.
-        let out_prev_host = vec![0.5f32; pixels];
-        let out_t_host: Vec<f32> = (0..pixels)
+        let out_prev_host = vec![0.5f32; samples];
+        let out_t_host: Vec<f32> = (0..samples)
             .map(|index| 0.5 + 0.001 * ((index % 7) as f32 - 3.0))
             .collect();
         let saved_mv_host = vec![0i32; 2 * blocks * 2];
@@ -239,24 +265,28 @@ impl Benchmark for GrainMeasureBench {
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
-        let width = self.size.width;
-        let height = self.size.height;
-        let pixels = self.size.pixels();
-        let blocks = self.size.blocks() as usize;
-        let cells = self.size.cells();
+        let plane = self.plane();
+        let width = plane.width;
+        let height = plane.height;
+        let channels = self.channels();
+        let samples = plane.pixels() * channels as usize;
+        let blocks = plane.blocks() as usize;
+        let cells = plane.cells();
         let blocks_x = width.div_ceil(STEP);
         let blocks_y = height.div_ceil(STEP);
         let hist_offset = (MEASURED_FRAME * HIST_TOTAL) as u32;
+        let channel = if self.chroma { CR_CHANNEL } else { LUMA_CHANNEL };
+        let luma_band = !self.chroma;
 
         unsafe {
             grain_measure::launch_unchecked(
                 &self.client,
                 CubeCount::new_2d(width / CELL, height / CELL),
                 CubeDim::new_2d(CELL, CELL),
-                1usize,
-                BufferArg::from_raw_parts(args.input, 2 * pixels),
-                BufferArg::from_raw_parts(args.out_t, pixels),
-                BufferArg::from_raw_parts(args.out_prev, pixels),
+                channels as usize,
+                BufferArg::from_raw_parts(args.input, 2 * samples),
+                BufferArg::from_raw_parts(args.out_t, samples),
+                BufferArg::from_raw_parts(args.out_prev, samples),
                 BufferArg::from_raw_parts(args.saved_mv, 2 * blocks * 2),
                 BufferArg::from_raw_parts(args.saved_conf, 2 * blocks),
                 BufferArg::from_raw_parts(args.edges, EDGE_COUNT),
@@ -271,10 +301,12 @@ impl Benchmark for GrainMeasureBench {
                 hist_offset,
                 width,
                 height,
-                1u32,
+                channels,
                 blocks_x,
                 blocks_y,
                 STEP,
+                channel,
+                luma_band,
             );
         }
 
@@ -282,6 +314,10 @@ impl Benchmark for GrainMeasureBench {
     }
 
     fn name(&self) -> String {
+        if self.chroma {
+            return format!("grain_measure_chroma_{}", self.size.label);
+        }
+
         format!("grain_measure_{}", self.size.label)
     }
 

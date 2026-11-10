@@ -6,10 +6,13 @@ use cubecl::server::Handle;
 use super::mirror::{StillStream, mirror_still_chunks};
 use super::synthetic::{ar_field, gaussian_field, left_weights};
 use crate::bench_api::HostIo;
+use crate::engine::align::StorageAlign;
+use crate::motion::{LumaMotionRing, MotionCtx, RingRole, SharedMotion, Subsampling};
 use crate::nl4d::denoiser::buffer_sizes;
 use crate::nl4d::grain::chunk::{GrainChunk, TableSums};
 use crate::nl4d::grain::consts::{
     AUTOCOV_LEN,
+    CHROMA_PLANES,
     CHROMA_RECORD_LEN,
     CHUNK_FRAMES,
     FRAME_RECORD_LEN,
@@ -25,6 +28,8 @@ use crate::nl4d::grain::segment::SceneGrain;
 use crate::nl4d::grain::{FitOptions, GrainExport, GrainGeometry, GrainParts, MeasuredPlanes, build_table};
 use crate::nl4d::snapshot::LastFields;
 use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
+use crate::nlmeans::tests::models::ModelFitter;
 use crate::nlmeans::{
     ChannelMode,
     HqParams,
@@ -77,6 +82,28 @@ const FLAT_LEVEL: f32 = 0.5;
 const LONE_FRAMES: u32 = 10;
 /// The only frame whose pair differs.
 const LONE_FRAME: u32 = 3;
+const CHROMA_PASS: GrainParts = GrainParts {
+    planes: MeasuredPlanes::Chroma,
+    noise: false,
+};
+/// The Cr grain std of a direct chroma stream, twice the Cb grain.
+const CR_SIGMA: f32 = 2.0 * SIGMA;
+const DIRECT_CHROMA_FRAMES: u32 = 3;
+const GRID_WIDTH: u32 = 384;
+const GRID_HEIGHT: u32 = 192;
+const GRID_CHROMA_WIDTH: u32 = GRID_WIDTH / 2;
+const GRID_CHROMA_HEIGHT: u32 = GRID_HEIGHT / 2;
+/// How far the tiled content moves each frame, in chroma pixels.
+const CHROMA_PAN: u32 = 4;
+/// Side length of each flat chroma tile.
+const CHROMA_TILE: u32 = 24;
+const GRID_FRAMES: usize = 12 + LOOKAHEAD_FRAMES as usize;
+/// How far a panned lag may sit from the still one, relative to the still variance.
+const GRID_TOLERANCE: f64 = 0.02;
+const FOUR_TWO_ZERO: Subsampling = Subsampling {
+    shift_x: 1,
+    shift_y: 1,
+};
 
 fn make_client() -> Client {
     crate::tests::compilation_cache::install_test_compilation_cache();
@@ -366,7 +393,7 @@ fn chroma_grain_frames(count: u32) -> Vec<Vec<f32>> {
 }
 
 #[test]
-fn a_chroma_denoiser_reports_chroma_persistence_without_the_table() {
+fn a_chroma_denoiser_reports_chroma_persistence_and_both_planes_tables() {
     let mut chroma = params(true);
     chroma.nlm.channels = ChannelMode::Chroma;
     let names = buffer_names(&chroma);
@@ -376,13 +403,15 @@ fn a_chroma_denoiser_reports_chroma_persistence_without_the_table() {
 
     assert!(has_export);
     assert!(!chunks.is_empty());
-    assert!(chunks.iter().all(has_no_table_readings));
     for chunk in &chunks {
-        let expected_len = chunk.frames as usize * CHROMA_RECORD_LEN;
-        assert_eq!(chunk.frame_records.len(), expected_len);
+        let frame_count = chunk.frames as usize;
+        let records_len = frame_count * CHROMA_RECORD_LEN;
+        let tables_len = frame_count * CHROMA_PLANES * FRAME_TABLE_LEN;
+        assert_eq!(chunk.frame_records.len(), records_len);
+        assert_eq!(chunk.frame_tables.len(), tables_len);
     }
 
-    assert!(!names.contains(&SAVED_VECTORS));
+    assert!(names.contains(&SAVED_VECTORS));
     assert!(names.contains(&PERSISTENCE_HISTORY));
     assert!(names.contains(&PERSISTENCE_PARTIALS));
 }
@@ -424,10 +453,6 @@ fn has_table_readings(chunk: &GrainChunk) -> bool {
     let any_source = table.source_hist.iter().any(|&count| count > 0);
     let any_autocov = table.autocov.iter().any(|&sum| sum != 0.0);
     any_source && any_autocov
-}
-
-fn has_no_table_readings(chunk: &GrainChunk) -> bool {
-    chunk.frame_tables.is_empty()
 }
 
 /// Whether every frame has a record, and frame 1 compared some cells with frame 0.
@@ -492,7 +517,6 @@ fn write_slot(ring: &mut [f32], slot: u32, frame: &[f32]) {
 
 /// Feeds `stream` straight to a luma [GrainExport], as the denoiser does, and drains it.
 fn export_stream(stream: &StillStream) -> Vec<GrainChunk> {
-    let client = make_client();
     let geometry = GrainGeometry {
         width: stream.width,
         height: stream.height,
@@ -502,28 +526,41 @@ fn export_stream(stream: &StillStream) -> Vec<GrainChunk> {
         step: stream.step,
         ring_frames: DIRECT_RING_FRAMES,
     };
-    let blocks = stream.blocks_x() * stream.blocks_y();
+
+    export_frames(geometry, LUMA_PASS, &stream.sources, &stream.outputs)
+}
+
+/// Feeds `sources` and their denoised `outputs` straight to a [GrainExport] with still vectors,
+/// as the denoiser does, and drains it.
+fn export_frames(
+    geometry: GrainGeometry,
+    parts: GrainParts,
+    sources: &[Vec<f32>],
+    outputs: &[Vec<f32>],
+) -> Vec<GrainChunk> {
+    let client = make_client();
+    let blocks = geometry.blocks_x * geometry.blocks_y;
     let fields = still_fields(&client, blocks);
-    let frame_len = (stream.width * stream.height) as usize;
-    let frame_count = stream.sources.len();
+    let frame_len = sources[0].len();
+    let frame_count = sources.len();
     let mut ring = vec![0.0f32; frame_len * DIRECT_RING_FRAMES as usize];
-    let mut export = GrainExport::new(&client, geometry, LUMA_PASS);
+    let mut export = GrainExport::new(&client, geometry, parts);
 
     for index in 0..frame_count {
         let slot = ring_slot(index);
         let has_next = index + 1 < frame_count;
         let next_slot = has_next.then(|| ring_slot(index + 1));
         let next_neighbour = has_next.then_some(0u32);
-        write_slot(&mut ring, slot, &stream.sources[index]);
+        write_slot(&mut ring, slot, &sources[index]);
         if let Some(next) = next_slot {
-            write_slot(&mut ring, next, &stream.sources[index + 1]);
+            write_slot(&mut ring, next, &sources[index + 1]);
         }
 
         let input = upload(&client, &ring);
         let output_slot = index % 2;
         let previous = index.saturating_sub(1);
-        let current_output = upload(&client, &stream.outputs[index]);
-        let previous_output = upload(&client, &stream.outputs[previous]);
+        let current_output = upload(&client, &outputs[index]);
+        let previous_output = upload(&client, &outputs[previous]);
         let outputs = if output_slot == 0 {
             [current_output, previous_output]
         } else {
@@ -693,4 +730,237 @@ fn a_table_from_frame_tables_matches_the_chunk_table() {
     let table = build_table(&[scene], FRAME_RATE, &options);
 
     assert_eq!(table, BANDED_TABLE);
+}
+
+/// Flat chroma frames with fresh grain at [SIGMA] on Cb and [CR_SIGMA] on Cr, and flat outputs.
+fn direct_chroma_frames(frame_count: u32) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let size = BANDED_SIZE as usize;
+    let flat = vec![FLAT_LEVEL; 2 * size * size];
+    let mut sources = Vec::with_capacity(frame_count as usize);
+
+    for frame_index in 0..frame_count {
+        let seed = 2 * frame_index as u64 + 600;
+        let cb_grain = gaussian_field(size, size, seed);
+        let cr_grain = gaussian_field(size, size, seed + 1);
+        let mut source = Vec::with_capacity(2 * size * size);
+        for (&cb_sample, &cr_sample) in cb_grain.iter().zip(&cr_grain) {
+            source.push(FLAT_LEVEL + SIGMA * cb_sample as f32);
+            source.push(FLAT_LEVEL + CR_SIGMA * cr_sample as f32);
+        }
+
+        sources.push(source);
+    }
+
+    let outputs = vec![flat; frame_count as usize];
+
+    (sources, outputs)
+}
+
+#[test]
+fn chroma_chunks_hold_both_planes_tables() {
+    let (sources, outputs) = direct_chroma_frames(DIRECT_CHROMA_FRAMES);
+    let geometry = GrainGeometry {
+        width: BANDED_SIZE,
+        height: BANDED_SIZE,
+        channels: 2,
+        blocks_x: BANDED_SIZE / DIRECT_STEP,
+        blocks_y: BANDED_SIZE / DIRECT_STEP,
+        step: DIRECT_STEP,
+        ring_frames: DIRECT_RING_FRAMES,
+    };
+
+    let chunks = export_frames(geometry, CHROMA_PASS, &sources, &outputs);
+
+    assert_eq!(chunks.len(), 1);
+
+    let chunk = &chunks[0];
+    let cb_table = chunk.summed_chroma_table(0);
+    let cr_table = chunk.summed_chroma_table(1);
+    let cb_median = median_of(&cb_table.source_hist);
+    let cr_median = median_of(&cr_table.source_hist);
+    let tables_len = DIRECT_CHROMA_FRAMES as usize * CHROMA_PLANES * FRAME_TABLE_LEN;
+
+    assert_eq!(chunk.frame_tables.len(), tables_len);
+    assert!(cb_table.source_blocks() > 0);
+    assert!(cr_table.source_blocks() > 0);
+    assert!(
+        (cb_median / SIGMA as f64 - 1.0).abs() < 0.1,
+        "Cb median {cb_median} vs sigma {SIGMA}"
+    );
+    assert!(
+        (cr_median / CR_SIGMA as f64 - 1.0).abs() < 0.1,
+        "Cr median {cr_median} vs sigma {CR_SIGMA}"
+    );
+}
+
+/// The level at `(x, y)` of a checkerboard of flat `tile` by `tile` squares.
+fn tile_level(x: u32, y: u32, tile: u32) -> f32 {
+    let odd_tile = (x / tile + y / tile) % 2 == 1;
+    if odd_tile { 0.6 } else { 0.4 }
+}
+
+/// One grained plane of flat tiles, the content moved left by `offset` pixels.
+fn tiled_plane(width: u32, height: u32, tile: u32, offset: u32, seed: u64) -> Vec<f32> {
+    let grain = gaussian_field(width as usize, height as usize, seed);
+    let mut plane = Vec::with_capacity(grain.len());
+
+    for y in 0..height {
+        for x in 0..width {
+            let level = tile_level(x + offset, y, tile);
+            let sample = grain[(y * width + x) as usize] as f32;
+            plane.push(level + SIGMA * sample);
+        }
+    }
+
+    plane
+}
+
+/// A 4:2:0 clip of flat tiles moving left by `pan` chroma pixels a frame, with fresh grain each
+/// frame.
+///
+/// Returns each frame's luma plane and its interleaved chroma planes. Every frame's grain is the
+/// same whatever the pan.
+fn tiled_pan(pan: u32) -> Vec<(Vec<f32>, Vec<f32>)> {
+    let mut frames = Vec::with_capacity(GRID_FRAMES);
+
+    for frame_index in 0..GRID_FRAMES as u32 {
+        let offset = pan * frame_index;
+        let seed = 3 * frame_index as u64 + 700;
+        let luma_tile = 2 * CHROMA_TILE;
+        let luma = tiled_plane(GRID_WIDTH, GRID_HEIGHT, luma_tile, 2 * offset, seed);
+        let cb_plane = tiled_plane(
+            GRID_CHROMA_WIDTH,
+            GRID_CHROMA_HEIGHT,
+            CHROMA_TILE,
+            offset,
+            seed + 1,
+        );
+        let cr_plane = tiled_plane(
+            GRID_CHROMA_WIDTH,
+            GRID_CHROMA_HEIGHT,
+            CHROMA_TILE,
+            offset,
+            seed + 2,
+        );
+        let chroma = cb_plane
+            .iter()
+            .zip(&cr_plane)
+            .flat_map(|(&cb_sample, &cr_sample)| [cb_sample, cr_sample])
+            .collect();
+
+        frames.push((luma, chroma));
+    }
+
+    frames
+}
+
+/// The camera models of `fitter`, playing `role` in a luma motion ring.
+fn shared_motion(fitter: &ModelFitter, role: RingRole) -> SharedMotion {
+    let motion = fitter.motion();
+
+    SharedMotion {
+        luma_motion: Some(role),
+        ..motion
+    }
+}
+
+/// Streams [tiled_pan] through a luma pass and a grain-measuring chroma pass that reads its motion,
+/// and drains the chroma pass's chunks.
+fn shared_motion_chunks(pan: u32) -> Vec<GrainChunk> {
+    let client = make_client();
+    let luma_params = Nl4dParams::default();
+    let defaults = Nl4dParams::default();
+    let chroma_nlm = NlmParams {
+        channels: ChannelMode::Chroma,
+        ..defaults.nlm
+    };
+    let chroma_params = Nl4dParams {
+        nlm: chroma_nlm,
+        grain_data: true,
+        ..defaults
+    };
+
+    let mode = luma_params.nlm.motion_compensation;
+    let align = StorageAlign::from_client(&client);
+    let chroma_ctx =
+        MotionCtx::new(mode, GRID_CHROMA_WIDTH, GRID_CHROMA_HEIGHT, align).expect("a searching mode");
+    let radius = chroma_params.temporal_radius;
+    let ring = LumaMotionRing::new(&client, &chroma_ctx, radius, FOUR_TWO_ZERO);
+    let mut fitter = ModelFitter::new(&client, GRID_WIDTH, GRID_HEIGHT, mode);
+    let mut luma = Nl4dDenoiser::new(&client, luma_params, GRID_WIDTH, GRID_HEIGHT).expect("luma pass");
+    let mut chroma = Nl4dDenoiser::new(&client, chroma_params, GRID_CHROMA_WIDTH, GRID_CHROMA_HEIGHT)
+        .expect("chroma pass");
+
+    let writer = RingRole::Writer(ring.clone());
+    let reader = RingRole::Reader(ring);
+    let luma_motion = shared_motion(&fitter, writer);
+    let chroma_motion = shared_motion(&fitter, reader);
+    luma.set_shared_motion(luma_motion);
+    chroma.set_shared_motion(chroma_motion);
+
+    let clip = tiled_pan(pan);
+    for (luma_frame, chroma_frame) in &clip {
+        fitter.fit(luma_frame);
+        luma.push_frame(luma_frame);
+        luma.denoise().expect("luma denoise");
+        chroma.push_frame(chroma_frame);
+        chroma.denoise().expect("chroma denoise");
+    }
+
+    chroma.drain_grain_chunks().expect("drain")
+}
+
+/// Plane `plane`'s table statistics of every chunk, summed.
+fn merged_chroma_table(chunks: &[GrainChunk], plane: usize) -> TableSums {
+    let empty = GrainChunk::empty();
+    let mut merged = empty.summed_table();
+    for chunk in chunks {
+        let table = chunk.summed_chroma_table(plane);
+        merged.add(&table);
+    }
+
+    merged
+}
+
+/// Each lag sum over every strength group, per accepted pixel.
+fn lags_per_pixel(table: &TableSums) -> Vec<f64> {
+    let pixels: f64 = table.pixels.iter().sum();
+    let mut lags = vec![0.0f64; LAG_COUNT];
+    for group in 0..STRENGTH_GROUPS {
+        let sums = table.group_autocov(group);
+        for (total, &sum) in lags.iter_mut().zip(sums) {
+            *total += sum;
+        }
+    }
+
+    assert!(pixels > 0.0);
+
+    lags.iter().map(|&sum| sum / pixels).collect()
+}
+
+#[test]
+fn chroma_measure_reads_vectors_on_the_chroma_grid() {
+    let still_chunks = shared_motion_chunks(0);
+    let pan_chunks = shared_motion_chunks(CHROMA_PAN);
+    let still_table = merged_chroma_table(&still_chunks, 0);
+    let pan_table = merged_chroma_table(&pan_chunks, 0);
+    let still_lags = lags_per_pixel(&still_table);
+    let pan_lags = lags_per_pixel(&pan_table);
+    let variance = still_lags[0];
+    let still_blocks = still_table.source_blocks();
+    let pan_blocks = pan_table.source_blocks();
+
+    assert!(
+        2 * pan_blocks > still_blocks,
+        "pan {pan_blocks} vs still {still_blocks}"
+    );
+    for lane in 0..LAG_COUNT {
+        let difference = (pan_lags[lane] - still_lags[lane]).abs();
+        assert!(
+            difference <= GRID_TOLERANCE * variance,
+            "lane {lane}: pan {} vs still {}",
+            pan_lags[lane],
+            still_lags[lane]
+        );
+    }
 }

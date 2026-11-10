@@ -17,7 +17,7 @@ use crate::engine::{
     SampleFormat,
 };
 use crate::nl4d::grain::GrainChunk;
-use crate::nl4d::grain::consts::{CHROMA_RECORD_LEN, FRAME_RECORD_LEN};
+use crate::nl4d::grain::consts::{CHROMA_PLANES, CHROMA_RECORD_LEN, FRAME_RECORD_LEN, FRAME_TABLE_LEN};
 use crate::nl4d::grain::snapshot::colour_frame_len;
 use crate::nl4d::tests::helpers::noisy_frames;
 use crate::nl4d::{Nl4d, Nl4dDenoiser, Nl4dOptions, resolve_params};
@@ -366,5 +366,8 @@ fn a_chroma_pass_keeps_the_reading_and_both_planes_fit_per_frame() {
     assert_eq!(frame_noise.len(), FRAMES * reading_words);
     assert_each_frame_filled(&frame_colour, colour_len, "the colour fit");
     assert_each_frame_filled(&frame_noise, reading_words, "the noise reading");
-    assert!(chunks.iter().all(|chunk| chunk.frame_tables.is_empty()));
+    for chunk in &chunks {
+        let tables_len = chunk.frames as usize * CHROMA_PLANES * FRAME_TABLE_LEN;
+        assert_eq!(chunk.frame_tables.len(), tables_len);
+    }
 }

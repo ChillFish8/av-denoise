@@ -21,10 +21,15 @@ use crate::nl4d::grain::consts::{
 };
 use crate::nl4d::grain::fit::bucket_of;
 
-/// One completed frame's inputs, luma only.
+/// One completed frame's inputs, each pixel holding `channels` interleaved samples.
 pub(super) struct MirrorFrame<'a> {
     pub width: u32,
     pub height: u32,
+    pub channels: u32,
+    /// The channel every sample is read from.
+    pub channel: u32,
+    /// Whether a cell's mean must sit inside the luma band to count.
+    pub luma_band: bool,
     pub source_t: &'a [f32],
     pub source_next: &'a [f32],
     pub out_t: &'a [f32],
@@ -63,17 +68,28 @@ fn clamp_coord(value: i32, limit: u32) -> u32 {
     value.clamp(0, limit as i32 - 1) as u32
 }
 
+/// The index of the measured channel's sample at pixel `(x, y)`.
+fn sample_index(frame: &MirrorFrame, x: u32, y: u32) -> usize {
+    let pixel = y * frame.width + x;
+    (pixel * frame.channels + frame.channel) as usize
+}
+
 fn warped_index(frame: &MirrorFrame, x: u32, y: u32, shift: (i32, i32)) -> usize {
     let warped_x = clamp_coord(x as i32 + shift.0, frame.width);
     let warped_y = clamp_coord(y as i32 + shift.1, frame.height);
-    (warped_y * frame.width + warped_x) as usize
+    sample_index(frame, warped_x, warped_y)
+}
+
+fn in_luma_band(frame: &MirrorFrame, mean: f32) -> bool {
+    !frame.luma_band || (mean > LUMA_LOW && mean < LUMA_HIGH)
 }
 
 fn source_grain(frame: &MirrorFrame, x: u32, y: u32) -> f32 {
     let block = block_of(frame, x / CELL, y / CELL);
     let next_index = warped_index(frame, x, y, frame.source_mv[block]);
     let next = frame.source_next[next_index];
-    let current = frame.source_t[(y * frame.width + x) as usize];
+    let current_index = sample_index(frame, x, y);
+    let current = frame.source_t[current_index];
     (next - current) * std::f32::consts::FRAC_1_SQRT_2
 }
 
@@ -142,7 +158,7 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
 
             for y in cell_top..cell_top + CELL {
                 for x in cell_left..cell_left + CELL {
-                    let index = (y * frame.width + x) as usize;
+                    let index = sample_index(frame, x, y);
                     let pixel_grain = source_grain(frame, x, y);
                     grain.push(pixel_grain);
                     clean.push(frame.out_t[index]);
@@ -168,8 +184,7 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
                 && interior
                 && frame.source_conf[block] >= CONF_MIN
                 && clean_high - clean_low < FLAT_RANGE
-                && clean_stats.mean > LUMA_LOW
-                && clean_stats.mean < LUMA_HIGH
+                && in_luma_band(frame, clean_stats.mean)
                 && noisy_low >= CLIP_LOW
                 && noisy_high <= CLIP_HIGH
                 && grain_stats.std > STD_MIN;
@@ -188,8 +203,7 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
             let kept_ok = frame.has_kept
                 && frame.kept_conf[block] >= CONF_MIN
                 && previous_high - previous_low < FLAT_RANGE
-                && previous_stats.mean > LUMA_LOW
-                && previous_stats.mean < LUMA_HIGH
+                && in_luma_band(frame, previous_stats.mean)
                 && previous_low >= CLIP_LOW
                 && previous_high <= CLIP_HIGH
                 && kept_stats.std > STD_MIN;
@@ -242,6 +256,9 @@ pub(super) fn mirror_still_chunks(stream: &StillStream, edges: &[f32]) -> Vec<Mi
         let frame = MirrorFrame {
             width: stream.width,
             height: stream.height,
+            channels: 1,
+            channel: 0,
+            luma_band: true,
             source_t: &stream.sources[index],
             source_next: &stream.sources[next],
             out_t: &stream.outputs[index],

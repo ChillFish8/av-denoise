@@ -75,18 +75,6 @@ const fn lag_lane(dy: u32, dx_index: u32) -> u32 {
     }
 }
 
-#[cube]
-fn luma_at<N: Size>(
-    input: &[Vector<f32, N>],
-    x: u32,
-    y: u32,
-    slot: u32,
-    #[comptime] width: u32,
-    #[comptime] height: u32,
-) -> f32 {
-    channel_at(input, x, y, slot, 0u32, width, height)
-}
-
 /// The sample of channel `channel` at pixel `(x, y)` of ring slot `slot`.
 #[cube]
 pub(super) fn channel_at<N: Size>(
@@ -126,7 +114,8 @@ fn block_for(
     block_y * blocks_x + block_x
 }
 
-/// The motion-compensated source grain at one pixel, using the vector of the pixel's own cell.
+/// The motion-compensated source grain of channel `channel` at one pixel, using the vector of the
+/// pixel's own cell.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -140,6 +129,7 @@ fn source_grain_at<N: Size>(
     slot_t: u32,
     slot_next: u32,
     entry_base: u32,
+    #[comptime] channel: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] blocks_x: u32,
@@ -152,9 +142,20 @@ fn source_grain_at<N: Size>(
     let dy = saved_mv[(mv_index + 1) as usize];
     let next_x = clamp_shift(x, dx, width);
     let next_y = clamp_shift(y, dy, height);
-    let next = luma_at(input, next_x, next_y, slot_next, width, height);
-    let current = luma_at(input, x, y, slot_t, width, height);
+    let next = channel_at(input, next_x, next_y, slot_next, channel, width, height);
+    let current = channel_at(input, x, y, slot_t, channel, width, height);
     (next - current) * std::f32::consts::FRAC_1_SQRT_2
+}
+
+/// Whether a cell's denoised `mean` sits inside the luma band, always true without `luma_band`.
+#[cube]
+fn in_band(mean: f32, #[comptime] luma_band: bool) -> bool {
+    let mut inside = true;
+    if luma_band {
+        inside = mean > LUMA_LOW && mean < LUMA_HIGH;
+    }
+
+    inside
 }
 
 /// The highest bucket whose lower edge is at or below `grain_std`.
@@ -187,16 +188,18 @@ fn std_of(sum: f32, sum_sq: f32) -> f32 {
 
 /// Measures one completed frame's source grain and kept grain over one 8x8 cell.
 ///
-/// Launch one `CELL x CELL` cube per cell. Source grain is the motion-compensated difference of the
-/// noisy ring slots `slot_t` and `slot_next`. Kept grain is the same between the denoised frames
-/// `out_prev` at `t - 1` and `out_t` at `t`. Both are divided by sqrt 2 so they carry one frame's
-/// grain std. `source_entry` and `kept_entry` pick each difference's saved vectors and confidence,
-/// and a zero `has_source` or `has_kept` rejects every cell of that measurement.
+/// Launch one `CELL x CELL` cube per cell. Every sample is read from channel `channel`. Source
+/// grain is the motion-compensated difference of the noisy ring slots `slot_t` and `slot_next`.
+/// Kept grain is the same between the denoised frames `out_prev` at `t - 1` and `out_t` at `t`.
+/// Both are divided by sqrt 2 so they carry one frame's grain std. `source_entry` and `kept_entry`
+/// pick each difference's saved vectors and confidence, and a zero `has_source` or `has_kept`
+/// rejects every cell of that measurement.
 ///
 /// A source cell must sit off the left, right and bottom edges, so its lag halo never reads a
 /// clamped pixel. It also needs a confident vector, a flat, mid-luma `out_t`, no source pixel of
 /// `t` or `t + 1` near clipping, and a grain std above the floor. A kept cell passes the same
 /// gates, apart from the edge gate, with flatness, luma and clipping all read from `out_prev`.
+/// Without `luma_band`, neither gate checks the mean.
 ///
 /// Each accepted cell adds one count to its luma bin and std bucket of the frame's histograms,
 /// which start at `hist_offset` in `hist`. The first `HIST_LEN` counts are for source grain and
@@ -232,6 +235,8 @@ pub fn grain_measure<N: Size>(
     #[comptime] blocks_x: u32,
     #[comptime] blocks_y: u32,
     #[comptime] step: u32,
+    #[comptime] channel: u32,
+    #[comptime] luma_band: bool,
 ) {
     let mut tile = Shared::<[f32]>::new_slice(TILE_LEN as usize);
     let mut sums = Shared::<[f32]>::new_slice((SUM_LANES * THREADS) as usize);
@@ -273,6 +278,7 @@ pub fn grain_measure<N: Size>(
             slot_t,
             slot_next,
             source_base,
+            channel,
             width,
             height,
             blocks_x,
@@ -290,19 +296,20 @@ pub fn grain_measure<N: Size>(
         slot_t,
         slot_next,
         source_base,
+        channel,
         width,
         height,
         blocks_x,
         blocks_y,
         step,
     );
-    let clean = out_t[((y * width + x) * channels) as usize];
-    let current = luma_at(input, x, y, slot_t, width, height);
+    let clean = out_t[((y * width + x) * channels + channel) as usize];
+    let current = channel_at(input, x, y, slot_t, channel, width, height);
     let dx = saved_mv[(source_base + block * 2) as usize];
     let dy = saved_mv[(source_base + block * 2 + 1) as usize];
     let next_x = clamp_shift(x, dx, width);
     let next_y = clamp_shift(y, dy, height);
-    let next = luma_at(input, next_x, next_y, slot_next, width, height);
+    let next = channel_at(input, next_x, next_y, slot_next, channel, width, height);
 
     sums[thread_id as usize] = own_grain;
     sums[(THREADS + thread_id) as usize] = own_grain * own_grain;
@@ -347,8 +354,7 @@ pub fn grain_measure<N: Size>(
             && interior
             && confidence >= CONF_MIN
             && range < FLAT_RANGE
-            && mean > LUMA_LOW
-            && mean < LUMA_HIGH
+            && in_band(mean, luma_band)
             && lows[THREADS as usize] >= CLIP_LOW
             && highs[THREADS as usize] <= CLIP_HIGH
             && grain_std > STD_MIN;
@@ -418,8 +424,8 @@ pub fn grain_measure<N: Size>(
     let kept_dy = saved_mv[(kept_base + block * 2 + 1) as usize];
     let warped_x = clamp_shift(x, kept_dx, width);
     let warped_y = clamp_shift(y, kept_dy, height);
-    let warped = out_t[((warped_y * width + warped_x) * channels) as usize];
-    let previous = out_prev[((y * width + x) * channels) as usize];
+    let warped = out_t[((warped_y * width + warped_x) * channels + channel) as usize];
+    let previous = out_prev[((y * width + x) * channels + channel) as usize];
     let kept = (warped - previous) * std::f32::consts::FRAC_1_SQRT_2;
 
     sums[thread_id as usize] = kept;
@@ -459,8 +465,7 @@ pub fn grain_measure<N: Size>(
         let passes = has_kept != 0
             && confidence >= CONF_MIN
             && high - low < FLAT_RANGE
-            && mean > LUMA_LOW
-            && mean < LUMA_HIGH
+            && in_band(mean, luma_band)
             && low >= CLIP_LOW
             && high <= CLIP_HIGH
             && kept_std > STD_MIN;

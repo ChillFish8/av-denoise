@@ -28,6 +28,16 @@ const RAGGED: Shape = Shape {
     height: 70,
     step: 16,
 };
+/// A ragged frame of nine whole cell rows and a partial one.
+const RAGGED_CHROMA: Shape = Shape {
+    width: 100,
+    height: 8 * 9 + 4,
+    step: 16,
+};
+/// The flat level of the channel a two-channel scene does not measure.
+const OTHER_LEVEL: f32 = 0.8;
+/// A flat level below the luma band.
+const DARK_LEVEL: f32 = 10.0 / 255.0;
 const SIGMA: f32 = 2.0 / 255.0;
 const KEPT_SIGMA: f32 = 0.4 / 255.0;
 /// Counts in one frame's histograms.
@@ -146,6 +156,11 @@ impl Shape {
 
 struct Scene {
     shape: Shape,
+    /// Interleaved samples per pixel.
+    channels: u32,
+    /// The channel the measurement reads.
+    channel: u32,
+    luma_band: bool,
     source_t: Vec<f32>,
     source_next: Vec<f32>,
     out_t: Vec<f32>,
@@ -215,6 +230,9 @@ fn scene_with(shape: Shape, shift: (i32, i32), tiled: bool, textured_cells: &[(u
 
     Scene {
         shape,
+        channels: 1,
+        channel: 0,
+        luma_band: true,
         source_t,
         source_next,
         out_t: base.clone(),
@@ -250,6 +268,55 @@ fn kept_scene(shape: Shape) -> Scene {
     with_kept_grain(scene, (2, 1))
 }
 
+/// Places each of `samples` on `channel` of a two-channel pixel, the other channel at [OTHER_LEVEL].
+fn interleaved(samples: &[f32], channel: u32) -> Vec<f32> {
+    let mut pixels = Vec::with_capacity(2 * samples.len());
+    for &sample in samples {
+        let mut pixel = [OTHER_LEVEL; 2];
+        pixel[channel as usize] = sample;
+        pixels.extend_from_slice(&pixel);
+    }
+
+    pixels
+}
+
+/// Moves a one-channel `scene` onto `channel` of a two-channel scene and measures that channel.
+///
+/// The other channel is flat [OTHER_LEVEL] without grain in every frame.
+fn on_channel(scene: Scene, channel: u32, luma_band: bool) -> Scene {
+    let source_t = interleaved(&scene.source_t, channel);
+    let source_next = interleaved(&scene.source_next, channel);
+    let out_t = interleaved(&scene.out_t, channel);
+    let out_prev = interleaved(&scene.out_prev, channel);
+
+    Scene {
+        channels: 2,
+        channel,
+        luma_band,
+        source_t,
+        source_next,
+        out_t,
+        out_prev,
+        ..scene
+    }
+}
+
+/// Moves every sample of a one-channel `scene` so its flat base sits at `level`.
+fn lowered(mut scene: Scene, level: f32) -> Scene {
+    let offset = level - 0.5;
+    let samples = scene
+        .source_t
+        .iter_mut()
+        .chain(scene.source_next.iter_mut())
+        .chain(scene.out_t.iter_mut())
+        .chain(scene.out_prev.iter_mut());
+    for sample in samples {
+        *sample += offset;
+    }
+
+    scene
+}
+
 fn source_median(hist: &[u32]) -> f64 {
     let mut merged = vec![0u32; STD_BUCKETS];
     for (index, &count) in hist[..HIST_LEN].iter().enumerate() {
@@ -271,7 +338,7 @@ fn kept_total(hist: &[u32]) -> u32 {
 fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Vec<f64>) {
     let client = make_client();
     let shape = scene.shape;
-    let pixels = shape.pixels();
+    let samples = shape.pixels() * scene.channels as usize;
     let blocks = shape.blocks();
     let cells = shape.cells();
 
@@ -315,10 +382,10 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
             &client,
             grid,
             dim,
-            1usize,
-            BufferArg::from_raw_parts(input, 2 * pixels),
-            BufferArg::from_raw_parts(out_t, pixels),
-            BufferArg::from_raw_parts(out_prev, pixels),
+            scene.channels as usize,
+            BufferArg::from_raw_parts(input, 2 * samples),
+            BufferArg::from_raw_parts(out_t, samples),
+            BufferArg::from_raw_parts(out_prev, samples),
             BufferArg::from_raw_parts(saved_mv, 4 * blocks),
             BufferArg::from_raw_parts(saved_conf, 2 * blocks),
             BufferArg::from_raw_parts(edges_buf, edges.len()),
@@ -333,10 +400,12 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
             FRAME_HIST_LEN as u32,
             shape.width,
             shape.height,
-            1u32,
+            scene.channels,
             blocks_x,
             blocks_y,
             shape.step,
+            scene.channel,
+            scene.luma_band,
         );
     }
 
@@ -370,6 +439,9 @@ fn mirror_of(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Vec<
     let frame = MirrorFrame {
         width: shape.width,
         height: shape.height,
+        channels: scene.channels,
+        channel: scene.channel,
+        luma_band: scene.luma_band,
         source_t: &scene.source_t,
         source_next: &scene.source_next,
         out_t: &scene.out_t,
@@ -481,6 +553,67 @@ fn measure_matches_the_mirror_on_a_ragged_frame() {
     let source = source_total(&hist);
     let kept = kept_total(&hist);
 
+    assert!(source > 0);
+    assert!(kept > 0);
+}
+
+#[test]
+fn chroma_measure_matches_the_mirror_on_flat_grain() {
+    let flat = flat_scene((0, 0), &[]);
+    let scene = on_channel(flat, 1, false);
+    let hist = assert_matches_mirror(&scene);
+    let source = source_total(&hist);
+
+    assert!(source > 0);
+}
+
+#[test]
+fn chroma_measure_matches_the_mirror_on_a_ragged_frame() {
+    let kept = kept_scene(RAGGED_CHROMA);
+    let scene = on_channel(kept, 1, false);
+    let hist = assert_matches_mirror(&scene);
+    let source = source_total(&hist);
+    let kept = kept_total(&hist);
+
+    assert!(source > 0);
+    assert!(kept > 0);
+}
+
+#[test]
+fn chroma_measure_ignores_the_luma_band() {
+    let flat = flat_scene((0, 0), &[]);
+    let dark = lowered(flat, DARK_LEVEL);
+    let unbanded = on_channel(dark, 1, false);
+    let flat_again = flat_scene((0, 0), &[]);
+    let dark_again = lowered(flat_again, DARK_LEVEL);
+    let banded = on_channel(dark_again, 1, true);
+
+    let unbanded_hist = assert_matches_mirror(&unbanded);
+    let (banded_hist, banded_autocov) = run_measure(&banded, true, true);
+    let (host_hist, _) = mirror_of(&banded, true, true);
+    let unbanded_source = source_total(&unbanded_hist);
+    let banded_source = source_total(&banded_hist);
+
+    assert!(unbanded_source > 0);
+    assert_eq!(banded_hist, host_hist);
+    assert_eq!(banded_source, 0);
+    assert!(banded_autocov.iter().all(|&sum| sum == 0.0));
+}
+
+#[test]
+fn luma_measure_reads_channel_zero_of_two() {
+    let single = kept_scene(PLAIN);
+    let kept = kept_scene(PLAIN);
+    let paired = on_channel(kept, 0, true);
+
+    let (single_hist, single_autocov) = run_measure(&single, true, true);
+    let paired_hist = assert_matches_mirror(&paired);
+    let (_, paired_autocov) = run_measure(&paired, true, true);
+    let source = source_total(&paired_hist);
+    let kept = kept_total(&paired_hist);
+
+    assert_eq!(paired_hist, single_hist);
+    assert_autocov_close(&paired_autocov, &single_autocov);
     assert!(source > 0);
     assert!(kept > 0);
 }
