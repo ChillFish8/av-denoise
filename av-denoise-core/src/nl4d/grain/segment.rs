@@ -1,4 +1,4 @@
-use super::chunk::GrainChunk;
+use super::chunk::{GrainChunk, TableSums};
 use super::consts::{
     AR_COEFFS,
     BUCKETS_PER_GROUP,
@@ -31,7 +31,8 @@ pub struct SceneGrain {
 pub(crate) struct Segment {
     pub first_frame: u64,
     pub last_frame: u64,
-    pub stats: GrainChunk,
+    /// The table statistics of every chunk in the segment, summed.
+    pub table: TableSums,
 }
 
 /// One table entry's parameters.
@@ -94,28 +95,29 @@ pub(crate) fn segment_scene(scene: &SceneGrain) -> Vec<Segment> {
         let chunk_last = chunk_first + chunk.frames as u64 - 1;
         next_frame = chunk_last + 1;
 
+        let table = chunk.summed_table();
         let starts_new = match segments.last() {
             None => true,
-            Some(open) => drifted(&open.stats, chunk, &edges),
+            Some(open) => drifted(&open.table, &table, &edges),
         };
         if starts_new {
             segments.push(Segment {
                 first_frame: chunk_first,
                 last_frame: chunk_last,
-                stats: chunk.clone(),
+                table,
             });
             continue;
         }
 
         let open = segments.last_mut().expect("a segment is open");
         open.last_frame = chunk_last;
-        open.stats.merge(chunk);
+        open.table.add(&table);
     }
 
     segments
 }
 
-fn drifted(open: &GrainChunk, chunk: &GrainChunk, edges: &[f32]) -> bool {
+fn drifted(open: &TableSums, chunk: &TableSums, edges: &[f32]) -> bool {
     if chunk.source_blocks() < MIN_CHUNK_BLOCKS {
         return false;
     }
@@ -131,7 +133,7 @@ fn drifted(open: &GrainChunk, chunk: &GrainChunk, edges: &[f32]) -> bool {
 }
 
 /// Per-bin strength from the medians, `None` when too few bins are populated.
-fn strength_of(stats: &GrainChunk, edges: &[f32]) -> Option<Vec<BinStrength>> {
+fn strength_of(stats: &TableSums, edges: &[f32]) -> Option<Vec<BinStrength>> {
     let mut bins = Vec::new();
     for bin in 0..LUMA_BINS {
         let source = &stats.source_hist[bin * STD_BUCKETS..(bin + 1) * STD_BUCKETS];
@@ -163,7 +165,7 @@ fn strength_of(stats: &GrainChunk, edges: &[f32]) -> Option<Vec<BinStrength>> {
 /// A group joins when its std range overlaps the band between [BAND_LOW] and [BAND_HIGH] times the
 /// median, so blocks far from the typical grain strength never shape the texture. The summed record
 /// has its cell-mean bias undone before the solve.
-fn texture_of(stats: &GrainChunk, edges: &[f32]) -> Option<Texture> {
+fn texture_of(stats: &TableSums, edges: &[f32]) -> Option<Texture> {
     let median = overall_median(&stats.source_hist, edges)?;
     let band_low = BAND_LOW * median;
     let band_high = BAND_HIGH * median;
@@ -199,8 +201,8 @@ pub(crate) fn fit_scenes(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
     let mut parts = Vec::new();
     for (scene_index, scene) in scenes.iter().enumerate() {
         for segment in segment_scene(scene) {
-            let strength = strength_of(&segment.stats, &edges);
-            let texture = texture_of(&segment.stats, &edges);
+            let strength = strength_of(&segment.table, &edges);
+            let texture = texture_of(&segment.table, &edges);
             parts.push(Parts {
                 first_frame: segment.first_frame,
                 last_frame: segment.last_frame,

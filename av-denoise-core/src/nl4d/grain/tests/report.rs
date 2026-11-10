@@ -253,19 +253,6 @@ fn missing_records_give_null_rows() {
 }
 
 #[test]
-fn merging_chunks_appends_their_frame_records() {
-    let mut first = chunk_with(&[lag_one_record(300.0, 0.5)]);
-    let second = chunk_with(&[lag_one_record(400.0, 0.5), lag_one_record(500.0, 0.5)]);
-
-    first.merge(&second);
-
-    assert_eq!(first.frame_records.len(), 3 * FRAME_RECORD_LEN);
-    assert_eq!(first.frame_records[0], 300.0);
-    assert_eq!(first.frame_records[FRAME_RECORD_LEN], 400.0);
-    assert_eq!(first.frame_records[2 * FRAME_RECORD_LEN], 500.0);
-}
-
-#[test]
 fn a_row_serialises_with_the_report_keys() {
     let third_frame = FrameGrain {
         frame: 2,

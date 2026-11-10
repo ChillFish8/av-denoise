@@ -3,8 +3,11 @@ use super::synthetic::{
     autocov_of,
     chunk_at,
     chunk_in_bucket,
+    clear_pixels,
     gaussian_field,
     grain_record,
+    set_source_count,
+    table_chunk,
 };
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{BUCKETS_PER_GROUP, CHUNK_FRAMES, LUMA_BINS, MAX_POINTS, STD_BUCKETS};
@@ -14,24 +17,16 @@ use crate::nl4d::grain::segment::{SceneGrain, fit_scenes, segment_scene};
 /// A source bucket whose median doubled lands in the first bucket of a strength group.
 const EDGE_BUCKET: usize = 37;
 
-fn sparse_chunk() -> GrainChunk {
-    let mut chunk = GrainChunk::empty();
-    chunk.frames = CHUNK_FRAMES;
-
-    chunk
-}
-
 /// A chunk with an AR record and 1500 blocks at `std_codes` in only two luma bins.
 ///
 /// It holds enough blocks to start a segment, but too few populated bins for its own strength.
 fn narrow_chunk(std_codes: f32) -> GrainChunk {
     let edges = bucket_edges();
     let bucket = bucket_of(std_codes / 255.0, &edges);
-    let mut chunk = GrainChunk::empty();
-    chunk.frames = CHUNK_FRAMES;
+    let mut chunk = table_chunk();
 
     for bin in 4..6 {
-        chunk.source_hist[bin * STD_BUCKETS + bucket] = 1500;
+        set_source_count(&mut chunk, bin * STD_BUCKETS + bucket, 1500);
     }
 
     let record = grain_record();
@@ -74,8 +69,9 @@ fn coarse_record(gain: f64) -> Vec<f64> {
 
 /// The overall source median of a chunk built by [chunk_in_bucket].
 fn median_of_chunk(chunk: &GrainChunk) -> f64 {
+    let table = chunk.summed_table();
     let mut merged = vec![0u32; STD_BUCKETS];
-    for (index, &count) in chunk.source_hist.iter().enumerate() {
+    for (index, &count) in table.source_hist.iter().enumerate() {
         merged[index % STD_BUCKETS] += count;
     }
 
@@ -175,7 +171,7 @@ fn kept_above_source_clamps_to_zero() {
 fn a_thin_chunk_never_gets_its_own_entry() {
     let first_chunk = chunk_at(1.0, 300, None);
     let before_thin = chunk_at(3.0, 300, None);
-    let thin = sparse_chunk();
+    let thin = table_chunk();
     let after_thin = chunk_at(3.0, 300, None);
     let second_chunks = vec![before_thin, thin, after_thin];
     let first_scene = scene_of(0, vec![first_chunk]);
@@ -192,7 +188,7 @@ fn a_thin_chunk_never_gets_its_own_entry() {
 #[test]
 fn missing_texture_borrows_from_the_nearest_segment() {
     let mut no_texture = chunk_at(2.0, 300, None);
-    no_texture.pixels.fill(0.0);
+    clear_pixels(&mut no_texture);
     let textured = chunk_at(2.0, 300, None);
     let first_scene = scene_of(0, vec![textured]);
     let second_scene = scene_of(24, vec![no_texture]);
@@ -207,7 +203,7 @@ fn missing_texture_borrows_from_the_nearest_segment() {
 #[test]
 fn sparse_scene_borrows_from_a_neighbouring_scene() {
     let dense = chunk_at(2.0, 300, None);
-    let sparse = sparse_chunk();
+    let sparse = table_chunk();
     let first_scene = scene_of(0, vec![dense]);
     let second_scene = scene_of(24, vec![sparse]);
     let scenes = vec![first_scene, second_scene];
@@ -220,7 +216,7 @@ fn sparse_scene_borrows_from_a_neighbouring_scene() {
 
 #[test]
 fn sparse_segment_with_no_donor_gets_no_entry() {
-    let sparse = sparse_chunk();
+    let sparse = table_chunk();
     let scene = scene_of(0, vec![sparse]);
     let scenes = vec![scene];
 
@@ -238,7 +234,7 @@ fn an_outlier_group_leaves_the_texture_unchanged() {
     let coarse = coarse_record(40.0);
 
     let mut with_outlier = grain_only.clone();
-    with_outlier.source_hist[5 * STD_BUCKETS + outlier_bucket] = 10;
+    set_source_count(&mut with_outlier, 5 * STD_BUCKETS + outlier_bucket, 10);
     add_group_record(&mut with_outlier, outlier_bucket / BUCKETS_PER_GROUP, &coarse);
 
     let mut mixed = grain_only.clone();
@@ -308,7 +304,7 @@ fn a_chunk_in_every_luma_bin_thins_to_the_point_limit() {
     let bucket = bucket_of(2.0 / 255.0, &edges);
     let mut chunk = chunk_at(2.0, 300, None);
     for bin in 0..LUMA_BINS {
-        chunk.source_hist[bin * STD_BUCKETS + bucket] = 300;
+        set_source_count(&mut chunk, bin * STD_BUCKETS + bucket, 300);
     }
 
     let scene = scene_of(0, vec![chunk]);

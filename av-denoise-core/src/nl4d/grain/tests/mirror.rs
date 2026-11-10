@@ -4,6 +4,7 @@ use crate::nl4d::grain::consts::{
     AUTOCOV_LEN,
     BUCKETS_PER_GROUP,
     CELL,
+    CHUNK_FRAMES,
     CLIP_HIGH,
     CLIP_LOW,
     CONF_MIN,
@@ -200,4 +201,80 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
     }
 
     MirrorRecord { hist, autocov }
+}
+
+/// A luma stream with no motion, each frame with its denoised output.
+pub(super) struct StillStream {
+    pub width: u32,
+    pub height: u32,
+    /// The motion block size of the stream's vectors.
+    pub step: u32,
+    pub sources: Vec<Vec<f32>>,
+    pub outputs: Vec<Vec<f32>>,
+}
+
+impl StillStream {
+    pub fn blocks_x(&self) -> u32 {
+        self.width / self.step
+    }
+
+    pub fn blocks_y(&self) -> u32 {
+        self.height / self.step
+    }
+
+    fn blocks(&self) -> usize {
+        (self.blocks_x() * self.blocks_y()) as usize
+    }
+}
+
+/// Runs [mirror_measure] over every frame of `stream`, each block with a zero vector at full
+/// confidence, and sums each chunk of `CHUNK_FRAMES` frames.
+pub(super) fn mirror_still_chunks(stream: &StillStream, edges: &[f32]) -> Vec<MirrorRecord> {
+    let frame_count = stream.sources.len();
+    let still_mv = vec![(0, 0); stream.blocks()];
+    let full_conf = vec![1.0f32; stream.blocks()];
+    let mut chunks: Vec<MirrorRecord> = Vec::new();
+
+    for index in 0..frame_count {
+        let has_source = index + 1 < frame_count;
+        let next = if has_source { index + 1 } else { index };
+        let previous = index.saturating_sub(1);
+        let frame = MirrorFrame {
+            width: stream.width,
+            height: stream.height,
+            source_t: &stream.sources[index],
+            source_next: &stream.sources[next],
+            out_t: &stream.outputs[index],
+            out_prev: &stream.outputs[previous],
+            source_mv: &still_mv,
+            source_conf: &full_conf,
+            kept_mv: &still_mv,
+            kept_conf: &full_conf,
+            blocks_x: stream.blocks_x(),
+            blocks_y: stream.blocks_y(),
+            step: stream.step,
+            has_source,
+            has_kept: index > 0,
+        };
+        let record = mirror_measure(&frame, edges);
+
+        if index % CHUNK_FRAMES as usize == 0 {
+            let empty = MirrorRecord {
+                hist: vec![0; 2 * HIST_LEN],
+                autocov: vec![0.0; GROUPED_AUTOCOV_LEN],
+            };
+            chunks.push(empty);
+        }
+
+        let chunk = chunks.last_mut().expect("a chunk is open");
+        for (total, count) in chunk.hist.iter_mut().zip(record.hist) {
+            *total += count;
+        }
+
+        for (total, sum) in chunk.autocov.iter_mut().zip(record.autocov) {
+            *total += sum;
+        }
+    }
+
+    chunks
 }

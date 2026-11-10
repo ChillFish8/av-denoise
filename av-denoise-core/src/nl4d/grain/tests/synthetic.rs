@@ -2,14 +2,18 @@ use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{
     AR_COEFFS,
     AR_OFFSETS,
+    AUTOCOV_LEN,
     BUCKETS_PER_GROUP,
     CELL,
     CHUNK_FRAMES,
+    FRAME_TABLE_LEN,
+    HIST_LEN,
     LAG_COUNT,
     LAGS,
     MAX_LAG_X,
     MAX_LAG_Y,
     STD_BUCKETS,
+    STRENGTH_GROUPS,
 };
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of};
 
@@ -130,8 +134,8 @@ pub(super) fn cell_mean_removed_record(field: &[f64], width: usize, height: usiz
     sums
 }
 
-/// The autocovariance record of a lag-3 AR field with a 0.4 left weight.
-pub(super) fn grain_record() -> Vec<f64> {
+/// Lag-3 AR weights with only a 0.4 left weight.
+pub(super) fn left_weights() -> [f64; AR_COEFFS] {
     let mut weights = [0.0f64; AR_COEFFS];
     let left = AR_OFFSETS
         .iter()
@@ -139,28 +143,67 @@ pub(super) fn grain_record() -> Vec<f64> {
         .expect("left offset");
     weights[left] = 0.4;
 
+    weights
+}
+
+/// The autocovariance record of a lag-3 AR field with a 0.4 left weight.
+pub(super) fn grain_record() -> Vec<f64> {
+    let weights = left_weights();
     let field = ar_field(&weights, 300, 300, 5);
 
     autocov_of(&field, 300, 300)
 }
 
+/// A chunk of `CHUNK_FRAMES` frames with zeroed table statistics.
+///
+/// The helpers below write every statistic into the chunk's first frame.
+pub(super) fn table_chunk() -> GrainChunk {
+    let mut chunk = GrainChunk::empty();
+    chunk.frames = CHUNK_FRAMES;
+    chunk.frame_tables = vec![0.0; CHUNK_FRAMES as usize * FRAME_TABLE_LEN];
+
+    chunk
+}
+
+/// Sets the first frame's source count at `slot` of the histogram.
+pub(super) fn set_source_count(chunk: &mut GrainChunk, slot: usize, count: u32) {
+    chunk.frame_tables[slot] = count as f32;
+}
+
+/// Sets the first frame's kept count at `slot` of the histogram.
+pub(super) fn set_kept_count(chunk: &mut GrainChunk, slot: usize, count: u32) {
+    chunk.frame_tables[HIST_LEN + slot] = count as f32;
+}
+
+/// The first frame's 47-value record of one strength group.
+fn group_record_mut(chunk: &mut GrainChunk, group: usize) -> &mut [f32] {
+    let start = 2 * HIST_LEN + group * AUTOCOV_LEN;
+
+    &mut chunk.frame_tables[start..start + AUTOCOV_LEN]
+}
+
 /// Adds a 47-value record into one strength group of `chunk`.
 pub(super) fn add_group_record(chunk: &mut GrainChunk, group: usize, record: &[f64]) {
-    let sums = &mut chunk.autocov[group * LAG_COUNT..(group + 1) * LAG_COUNT];
-    for (sum, &extra) in sums.iter_mut().zip(&record[..LAG_COUNT]) {
-        *sum += extra;
+    let sums = group_record_mut(chunk, group);
+    for (sum, &extra) in sums.iter_mut().zip(record) {
+        *sum += extra as f32;
     }
+}
 
-    chunk.pixels[group] += record[LAG_COUNT];
+/// Zeroes the pixel count of every strength group.
+pub(super) fn clear_pixels(chunk: &mut GrainChunk) {
+    for group in 0..STRENGTH_GROUPS {
+        let record = group_record_mut(chunk, group);
+        record[LAG_COUNT] = 0.0;
+    }
 }
 
 /// A chunk whose source blocks all sit in `bucket` in luma bins 4 to 11, with no AR record.
 pub(super) fn chunk_in_bucket(bucket: usize, blocks_per_bin: u32) -> GrainChunk {
-    let mut chunk = GrainChunk::empty();
-    chunk.frames = CHUNK_FRAMES;
+    let mut chunk = table_chunk();
 
     for bin in 4..12 {
-        chunk.source_hist[bin * STD_BUCKETS + bucket] = blocks_per_bin;
+        set_source_count(&mut chunk, bin * STD_BUCKETS + bucket, blocks_per_bin);
     }
 
     chunk
@@ -177,7 +220,7 @@ pub(super) fn chunk_at(std_codes: f32, blocks_per_bin: u32, kept_codes: Option<f
     if let Some(kept) = kept_codes {
         let kept_bucket = bucket_of(kept / 255.0, &edges);
         for bin in 4..12 {
-            chunk.kept_hist[bin * STD_BUCKETS + kept_bucket] = blocks_per_bin;
+            set_kept_count(&mut chunk, bin * STD_BUCKETS + kept_bucket, blocks_per_bin);
         }
     }
 

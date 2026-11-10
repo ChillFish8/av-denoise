@@ -6,9 +6,9 @@ use super::consts::{
     AUTOCOV_LEN,
     CELL,
     CHUNK_FRAMES,
+    FRAME_TABLE_LEN,
     GROUPED_AUTOCOV_LEN,
     HIST_LEN,
-    LAG_COUNT,
     PARTIAL_LEN,
     PERSIST_BLOCK_CELLS,
     REDUCE_THREADS,
@@ -27,6 +27,12 @@ use crate::nl4d::snapshot::LastFields;
 const SAVE_THREADS: u32 = 256;
 /// The std bucket edges, one more than the bucket count.
 const EDGES_LEN: usize = STD_BUCKETS + 1;
+/// Counts in one frame's histograms, source grain and then kept grain.
+const FRAME_HIST_LEN: usize = 2 * HIST_LEN;
+/// Counts in one chunk's histograms, one slot per frame.
+const CHUNK_HIST_LEN: usize = CHUNK_FRAMES as usize * FRAME_HIST_LEN;
+/// Values in one chunk's grouped records, one slot per frame.
+const CHUNK_AUTOCOV_LEN: usize = CHUNK_FRAMES as usize * GROUPED_AUTOCOV_LEN;
 
 /// Which measurements a [GrainExport] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +117,7 @@ pub(super) struct CompletedFrame<'a> {
     pub output_slot: usize,
 }
 
-/// One chunk's table histograms and autocovariance.
+/// One chunk's table histograms and autocovariance, one slot per frame.
 #[derive(Clone)]
 struct TableChunk {
     hist: Handle,
@@ -216,12 +222,16 @@ impl TableMeasure {
         self.saved_valid[centre_slot as usize] = true;
     }
 
+    /// Measures one frame into its slot of `chunk`.
+    ///
+    /// `chunk_frames` is how many frames the chunk held before this one.
     fn measure(
         &mut self,
         client: &Client,
         geometry: &GrainGeometry,
         frame: &CompletedFrame,
         chunk: &TableChunk,
+        chunk_frames: u32,
     ) {
         let frame_slot = frame.frame_slot;
         let output_slot = frame.output_slot;
@@ -240,6 +250,8 @@ impl TableMeasure {
         let kept_entry = kept_from.map_or(frame_slot, |previous| previous.ring_slot);
         let prev_output = kept_from.map_or(output_slot, |previous| previous.output_slot);
         let frame_len = geometry.frame_len();
+        let hist_offset = chunk_frames * FRAME_HIST_LEN as u32;
+        let record_offset = chunk_frames * GROUPED_AUTOCOV_LEN as u32;
 
         unsafe {
             grain_measure::launch_unchecked(
@@ -253,7 +265,7 @@ impl TableMeasure {
                 BufferArg::from_raw_parts(self.saved_mv.clone(), geometry.saved_mv_len()),
                 BufferArg::from_raw_parts(self.saved_conf.clone(), geometry.saved_conf_len()),
                 BufferArg::from_raw_parts(self.edges.clone(), EDGES_LEN),
-                BufferArg::from_raw_parts(chunk.hist.clone(), 2 * HIST_LEN),
+                BufferArg::from_raw_parts(chunk.hist.clone(), CHUNK_HIST_LEN),
                 BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
                 frame_slot,
                 next_or_own_slot,
@@ -261,6 +273,7 @@ impl TableMeasure {
                 kept_entry,
                 has_source as u32,
                 has_kept as u32,
+                hist_offset,
                 geometry.width,
                 geometry.height,
                 geometry.channels,
@@ -274,7 +287,8 @@ impl TableMeasure {
                 CubeCount::new_1d(AUTOCOV_LEN as u32),
                 CubeDim::new_1d(REDUCE_THREADS),
                 BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
-                BufferArg::from_raw_parts(chunk.autocov.clone(), GROUPED_AUTOCOV_LEN),
+                BufferArg::from_raw_parts(chunk.autocov.clone(), CHUNK_AUTOCOV_LEN),
+                record_offset,
                 geometry.cells(),
             );
         }
@@ -290,9 +304,10 @@ impl TableMeasure {
         self.last_completed = None;
     }
 
+    /// A chunk with every frame slot zeroed.
     fn open_chunk(client: &Client) -> TableChunk {
-        let hist_host = vec![0i32; 2 * HIST_LEN];
-        let autocov_host = vec![0.0f32; GROUPED_AUTOCOV_LEN];
+        let hist_host = vec![0i32; CHUNK_HIST_LEN];
+        let autocov_host = vec![0.0f32; CHUNK_AUTOCOV_LEN];
         let hist_bytes = i32::as_bytes(&hist_host);
         let hist = client.create_from_slice(hist_bytes);
         let autocov_bytes = f32::as_bytes(&autocov_host);
@@ -309,7 +324,7 @@ pub(crate) struct GrainExport {
     table: Option<TableMeasure>,
     /// Present when persistence is measured.
     persistence: Option<PersistenceMeasure>,
-    /// Each completed frame adds into the newest chunk, which stays on the GPU until
+    /// Each completed frame fills its own slot in the newest chunk, which stays on the GPU until
     /// [Self::drain] reads every chunk back.
     chunks: Vec<ChunkBuffers>,
     chunk_open: bool,
@@ -373,7 +388,7 @@ impl GrainExport {
 
         let table = self.table.as_mut();
         if let (Some(table), Some(table_chunk)) = (table, &chunk.table) {
-            table.measure(client, &self.geometry, &frame, table_chunk);
+            table.measure(client, &self.geometry, &frame, table_chunk, chunk.frames);
         }
 
         let persistence = self.persistence.as_mut();
@@ -459,7 +474,7 @@ fn read_chunk(
     chunk.frames = buffer.frames;
 
     if let Some(table) = buffer.table {
-        read_table(client, table, &mut chunk)?;
+        chunk.frame_tables = read_table(client, table, buffer.frames)?;
     }
 
     if let Some(frame_record) = buffer.frame_record {
@@ -475,7 +490,8 @@ fn read_chunk(
     Ok(chunk)
 }
 
-fn read_table(client: &Client, table: TableChunk, chunk: &mut GrainChunk) -> Result<(), anyhow::Error> {
+/// Reads the table slots of a chunk's first `frames` frames, `FRAME_TABLE_LEN` values per frame.
+fn read_table(client: &Client, table: TableChunk, frames: u32) -> Result<Vec<f32>, anyhow::Error> {
     let hist_bytes = client
         .read_one(table.hist)
         .map_err(|error| anyhow::anyhow!("grain histogram readback failed: {error}"))?;
@@ -484,26 +500,17 @@ fn read_table(client: &Client, table: TableChunk, chunk: &mut GrainChunk) -> Res
         .map_err(|error| anyhow::anyhow!("grain autocovariance readback failed: {error}"))?;
     let hist = i32::from_bytes(&hist_bytes);
     let autocov = f32::from_bytes(&autocov_bytes);
-    let (source_counts, kept_counts) = hist.split_at(HIST_LEN);
+    let (frame_hists, _) = hist.as_chunks::<FRAME_HIST_LEN>();
+    let (frame_records, _) = autocov.as_chunks::<GROUPED_AUTOCOV_LEN>();
+    let frame_count = frames as usize;
 
-    for (target, &count) in chunk.source_hist.iter_mut().zip(source_counts) {
-        *target = count as u32;
+    let mut frame_tables = Vec::with_capacity(frame_count * FRAME_TABLE_LEN);
+    let slots = frame_hists.iter().zip(frame_records).take(frame_count);
+    for (frame_hist, frame_record) in slots {
+        let counts = frame_hist.iter().map(|&count| count as f32);
+        frame_tables.extend(counts);
+        frame_tables.extend_from_slice(frame_record);
     }
 
-    for (target, &count) in chunk.kept_hist.iter_mut().zip(kept_counts) {
-        *target = count as u32;
-    }
-
-    let (records, _) = autocov.as_chunks::<AUTOCOV_LEN>();
-    let (targets, _) = chunk.autocov.as_chunks_mut::<LAG_COUNT>();
-    let groups = targets.iter_mut().zip(chunk.pixels.iter_mut());
-    for ((target, pixels), record) in groups.zip(records) {
-        for (sum, &value) in target.iter_mut().zip(&record[..LAG_COUNT]) {
-            *sum = value as f64;
-        }
-
-        *pixels = record[LAG_COUNT] as f64;
-    }
-
-    Ok(())
+    Ok(frame_tables)
 }

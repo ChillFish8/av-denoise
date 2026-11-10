@@ -24,6 +24,12 @@ const RECORD_LANES: usize = 47;
 /// One record and a strength group per cell.
 const PARTIAL_LANES: usize = RECORD_LANES + 1;
 const STRENGTH_GROUPS: usize = 16;
+/// One record per strength group.
+const GROUPED_RECORD_LANES: usize = STRENGTH_GROUPS * RECORD_LANES;
+/// Frames in one grain chunk, each with its own histogram and record slot.
+const CHUNK_FRAMES: usize = 24;
+/// The chunk slot the benched frame writes, the last one.
+const MEASURED_FRAME: usize = CHUNK_FRAMES - 1;
 const REDUCE_THREADS: u32 = 128;
 const EDGE_COUNT: usize = 65;
 const PROJECTIONS: usize = 8;
@@ -202,7 +208,7 @@ impl Benchmark for GrainMeasureBench {
         let saved_mv_host = vec![0i32; 2 * blocks * 2];
         let saved_conf_host = vec![1.0f32; 2 * blocks];
         let edges_host: Vec<f32> = (0..EDGE_COUNT).map(|index| index as f32 * 0.002).collect();
-        let hist_host = vec![0i32; HIST_TOTAL];
+        let hist_host = vec![0i32; CHUNK_FRAMES * HIST_TOTAL];
 
         let ring_bytes = f32::as_bytes(&ring);
         let input = self.client.create_from_slice(ring_bytes);
@@ -240,6 +246,7 @@ impl Benchmark for GrainMeasureBench {
         let cells = self.size.cells();
         let blocks_x = width.div_ceil(STEP);
         let blocks_y = height.div_ceil(STEP);
+        let hist_offset = (MEASURED_FRAME * HIST_TOTAL) as u32;
 
         unsafe {
             grain_measure::launch_unchecked(
@@ -253,7 +260,7 @@ impl Benchmark for GrainMeasureBench {
                 BufferArg::from_raw_parts(args.saved_mv, 2 * blocks * 2),
                 BufferArg::from_raw_parts(args.saved_conf, 2 * blocks),
                 BufferArg::from_raw_parts(args.edges, EDGE_COUNT),
-                BufferArg::from_raw_parts(args.hist, HIST_TOTAL),
+                BufferArg::from_raw_parts(args.hist, CHUNK_FRAMES * HIST_TOTAL),
                 BufferArg::from_raw_parts(args.partials, cells * PARTIAL_LANES),
                 0u32,
                 1u32,
@@ -261,6 +268,7 @@ impl Benchmark for GrainMeasureBench {
                 1u32,
                 1u32,
                 1u32,
+                hist_offset,
                 width,
                 height,
                 1u32,
@@ -307,7 +315,7 @@ impl Benchmark for GrainReducePartialsBench {
             partials_host.push((cell % STRENGTH_GROUPS) as f32);
         }
 
-        let chunk_host = vec![0.0f32; STRENGTH_GROUPS * RECORD_LANES];
+        let chunk_host = vec![0.0f32; CHUNK_FRAMES * GROUPED_RECORD_LANES];
 
         let partials_bytes = f32::as_bytes(&partials_host);
         let partials = self.client.create_from_slice(partials_bytes);
@@ -319,6 +327,7 @@ impl Benchmark for GrainReducePartialsBench {
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {
         let cells = self.size.cells();
+        let record_offset = (MEASURED_FRAME * GROUPED_RECORD_LANES) as u32;
 
         unsafe {
             grain_reduce_partials::launch_unchecked(
@@ -326,7 +335,8 @@ impl Benchmark for GrainReducePartialsBench {
                 CubeCount::new_1d(RECORD_LANES as u32),
                 CubeDim::new_1d(REDUCE_THREADS),
                 BufferArg::from_raw_parts(args.partials, cells * PARTIAL_LANES),
-                BufferArg::from_raw_parts(args.chunk, STRENGTH_GROUPS * RECORD_LANES),
+                BufferArg::from_raw_parts(args.chunk, CHUNK_FRAMES * GROUPED_RECORD_LANES),
+                record_offset,
                 cells as u32,
             );
         }

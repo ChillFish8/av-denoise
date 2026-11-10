@@ -198,9 +198,10 @@ fn std_of(sum: f32, sum_sq: f32) -> f32 {
 /// `t` or `t + 1` near clipping, and a grain std above the floor. A kept cell passes the same
 /// gates, apart from the edge gate, with flatness, luma and clipping all read from `out_prev`.
 ///
-/// Each accepted cell adds one count to its luma bin and std bucket of `hist`, the first
-/// `HIST_LEN` counts for source grain and the next for kept grain. Every cell writes its partial,
-/// the 46 lag sums, pixel count and strength group of its source grain, as zeros when rejected.
+/// Each accepted cell adds one count to its luma bin and std bucket of the frame's histograms,
+/// which start at `hist_offset` in `hist`. The first `HIST_LEN` counts are for source grain and
+/// the next for kept grain. Every cell writes its partial, the 46 lag sums, pixel count and
+/// strength group of its source grain, as zeros when rejected.
 /// The lag sums take the cell's mean source grain off every pixel and halo neighbour first, so a
 /// uniform brightness flicker between the two frames never reaches them. The strength group keeps
 /// cells of outlying grain strength in a record of their own.
@@ -224,6 +225,7 @@ pub fn grain_measure<N: Size>(
     kept_entry: u32,
     has_source: u32,
     has_kept: u32,
+    hist_offset: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] channels: u32,
@@ -355,7 +357,7 @@ pub fn grain_measure<N: Size>(
         if passes {
             accepted[0] = 1.0f32;
             let bucket = bucket_for(grain_std, edges);
-            let slot = luma_bin(mean) * STD_BUCKETS as u32 + bucket;
+            let slot = hist_offset + luma_bin(mean) * STD_BUCKETS as u32 + bucket;
             group = bucket / BUCKETS_PER_GROUP as u32;
             Atomic::fetch_add(&hist[slot as usize], 1i32);
         }
@@ -465,7 +467,8 @@ pub fn grain_measure<N: Size>(
 
         if passes {
             let bucket = bucket_for(kept_std, edges);
-            let slot = HIST_LEN as u32 + luma_bin(mean) * STD_BUCKETS as u32 + bucket;
+            let kept_offset = hist_offset + HIST_LEN as u32;
+            let slot = kept_offset + luma_bin(mean) * STD_BUCKETS as u32 + bucket;
             Atomic::fetch_add(&hist[slot as usize], 1i32);
         }
     }
@@ -473,12 +476,13 @@ pub fn grain_measure<N: Size>(
 
 /// Adds one lane of every cell's partial into its strength group's record in `chunk`.
 ///
-/// Launch one cube of `REDUCE_THREADS` threads per lane, `AUTOCOV_LEN` cubes in all. `chunk` holds
-/// one record per strength group and keeps its earlier sums. Each thread adds its cells into its
-/// own column of a per-group scratch, and the columns then reduce to one value per group. A cell's
-/// group is clamped to the last group, so a bad value never indexes past the scratch.
+/// Launch one cube of `REDUCE_THREADS` threads per lane, `AUTOCOV_LEN` cubes in all. The frame's
+/// records start at `record_offset` in `chunk`, one per strength group, and keep their earlier
+/// sums. Each thread adds its cells into its own column of a per-group scratch, and the columns
+/// then reduce to one value per group. A cell's group is clamped to the last group, so a bad value
+/// never indexes past the scratch.
 #[cube(launch_unchecked)]
-pub fn grain_reduce_partials(partials: &[f32], chunk: &mut [f32], cells: u32) {
+pub fn grain_reduce_partials(partials: &[f32], chunk: &mut [f32], record_offset: u32, cells: u32) {
     let mut scratch = Shared::<[f32]>::new_slice((STRENGTH_GROUPS as u32 * REDUCE_THREADS) as usize);
     let lane = CUBE_POS_X;
     let thread_id = UNIT_POS_X;
@@ -516,7 +520,7 @@ pub fn grain_reduce_partials(partials: &[f32], chunk: &mut [f32], cells: u32) {
     }
 
     if thread_id < STRENGTH_GROUPS as u32 {
-        let target = (thread_id * AUTOCOV_LEN as u32 + lane) as usize;
+        let target = (record_offset + thread_id * AUTOCOV_LEN as u32 + lane) as usize;
         chunk[target] += scratch[(thread_id * REDUCE_THREADS) as usize];
     }
 }

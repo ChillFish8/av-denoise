@@ -30,6 +30,10 @@ const RAGGED: Shape = Shape {
 };
 const SIGMA: f32 = 2.0 / 255.0;
 const KEPT_SIGMA: f32 = 0.4 / 255.0;
+/// Counts in one frame's histograms.
+const FRAME_HIST_LEN: usize = 2 * HIST_LEN;
+/// Frame slots a measure or reduce writes into, the kernel's frame landing in the last one.
+const MEASURED_SLOTS: usize = 2;
 const FLICKER: f32 = 2.0 / 255.0;
 /// The lane of lag `(0, 3)` in a record.
 const LAG_RIGHT_3: usize = 3;
@@ -283,7 +287,7 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
     let mut saved_conf = scene.source_conf.clone();
     saved_conf.extend_from_slice(&scene.kept_conf);
     let edges = bucket_edges();
-    let hist_zeros = vec![0i32; 2 * HIST_LEN];
+    let hist_zeros = vec![0i32; MEASURED_SLOTS * FRAME_HIST_LEN];
 
     let ring_bytes = f32::as_bytes(&ring);
     let out_t_bytes = f32::as_bytes(&scene.out_t);
@@ -318,7 +322,7 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
             BufferArg::from_raw_parts(saved_mv, 4 * blocks),
             BufferArg::from_raw_parts(saved_conf, 2 * blocks),
             BufferArg::from_raw_parts(edges_buf, edges.len()),
-            BufferArg::from_raw_parts(hist.clone(), 2 * HIST_LEN),
+            BufferArg::from_raw_parts(hist.clone(), MEASURED_SLOTS * FRAME_HIST_LEN),
             BufferArg::from_raw_parts(partials.clone(), cells * PARTIAL_LEN),
             0u32,
             1u32,
@@ -326,6 +330,7 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
             1u32,
             has_source as u32,
             has_kept as u32,
+            FRAME_HIST_LEN as u32,
             shape.width,
             shape.height,
             1u32,
@@ -337,11 +342,15 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
 
     let hist_bytes = client.read_one(hist).expect("readback");
     let partial_bytes = client.read_one(partials).expect("readback");
-    let hist: Vec<u32> = i32::from_bytes(&hist_bytes)
+    let hist_counts = i32::from_bytes(&hist_bytes);
+    let (earlier_slot, measured_slot) = hist_counts.split_at(FRAME_HIST_LEN);
+    let hist: Vec<u32> = measured_slot[..FRAME_HIST_LEN]
         .iter()
         .map(|&count| count as u32)
         .collect();
     let partials = f32::from_bytes(&partial_bytes);
+
+    assert!(earlier_slot.iter().all(|&count| count == 0));
 
     let mut autocov = vec![0.0f64; GROUPED_AUTOCOV_LEN];
     let (cell_partials, _) = partials.as_chunks::<PARTIAL_LEN>();
@@ -748,9 +757,10 @@ fn reduce_adds_every_cell_into_its_group() {
         partials_host.push(group as f32);
     }
 
-    let start: Vec<f32> = (0..GROUPED_AUTOCOV_LEN).map(|lane| lane as f32).collect();
+    let chunk_len = MEASURED_SLOTS * GROUPED_AUTOCOV_LEN;
+    let chunk_start: Vec<f32> = (0..chunk_len).map(|lane| lane as f32).collect();
     let partials_bytes = f32::as_bytes(&partials_host);
-    let start_bytes = f32::as_bytes(&start);
+    let start_bytes = f32::as_bytes(&chunk_start);
     let partials = client.create_from_slice(partials_bytes);
     let chunk = client.create_from_slice(start_bytes);
 
@@ -763,11 +773,13 @@ fn reduce_adds_every_cell_into_its_group() {
             grid,
             dim,
             BufferArg::from_raw_parts(partials, partials_host.len()),
-            BufferArg::from_raw_parts(chunk.clone(), GROUPED_AUTOCOV_LEN),
+            BufferArg::from_raw_parts(chunk.clone(), chunk_len),
+            GROUPED_AUTOCOV_LEN as u32,
             cells as u32,
         );
     }
 
+    let (earlier_start, start) = chunk_start.split_at(GROUPED_AUTOCOV_LEN);
     let mut expected: Vec<f64> = start.iter().map(|&value| value as f64).collect();
     let (cell_partials, _) = partials_host.as_chunks::<PARTIAL_LEN>();
     for partial in cell_partials {
@@ -778,7 +790,10 @@ fn reduce_adds_every_cell_into_its_group() {
     }
 
     let bytes = client.read_one(chunk).expect("readback");
-    let reduced = f32::from_bytes(&bytes);
+    let chunk_values = f32::from_bytes(&bytes);
+    let (earlier_slot, reduced) = chunk_values.split_at(GROUPED_AUTOCOV_LEN);
+
+    assert_eq!(earlier_slot, earlier_start);
     for index in 0..GROUPED_AUTOCOV_LEN {
         let difference = (reduced[index] as f64 - expected[index]).abs();
         assert!(

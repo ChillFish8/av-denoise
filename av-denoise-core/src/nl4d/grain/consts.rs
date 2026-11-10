@@ -13,6 +13,8 @@ pub(crate) const STRENGTH_GROUPS: usize = 16;
 pub(crate) const BUCKETS_PER_GROUP: usize = STD_BUCKETS / STRENGTH_GROUPS;
 /// One autocovariance record per strength group.
 pub(crate) const GROUPED_AUTOCOV_LEN: usize = STRENGTH_GROUPS * AUTOCOV_LEN;
+/// Values in one frame's table statistics, the two histograms, the grouped lag sums and pixels.
+pub(crate) const FRAME_TABLE_LEN: usize = 2 * HIST_LEN + GROUPED_AUTOCOV_LEN;
 /// One cell's autocovariance record followed by its strength group.
 pub(crate) const PARTIAL_LEN: usize = AUTOCOV_LEN + 1;
 /// Threads per cube that reduce one lane of every cell's partial.
