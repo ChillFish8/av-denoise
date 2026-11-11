@@ -201,9 +201,9 @@ fn std_of(sum: f32, sum_sq: f32) -> f32 {
 /// gates, apart from the edge gate, with flatness, luma and clipping all read from `out_prev`.
 /// Without `luma_band`, neither gate checks the mean.
 ///
-/// Each accepted cell adds one count to its luma bin and std bucket of the frame's histograms,
-/// which start at `hist_offset` in `hist`. The first `HIST_LEN` counts are for source grain and
-/// the next for kept grain. Every cell writes its partial, the 46 lag sums, pixel count and
+/// Each accepted cell adds one count to the bin of its measured channel's mean and to its std
+/// bucket of the frame's histograms, which start at `hist_offset` in `hist`. The first
+/// `HIST_LEN` counts are for source grain and the next for kept grain. Every cell writes its partial, the 46 lag sums, pixel count and
 /// strength group of its source grain, as zeros when rejected.
 /// The lag sums take the cell's mean source grain off every pixel and halo neighbour first, so a
 /// uniform brightness flicker between the two frames never reaches them. The strength group keeps

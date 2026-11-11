@@ -1,8 +1,15 @@
 use super::synthetic::{chunk_at, chunk_in_bucket, set_kept_count};
 use crate::nl4d::grain::chroma::{chroma_levels, chroma_targets, chroma_texture_of, removed_share};
 use crate::nl4d::grain::consts::{BUCKETS_PER_GROUP, LUMA_BINS, STD_BUCKETS};
-use crate::nl4d::grain::fit::{bucket_edges, bucket_of, undo_mean_removal, yule_walker};
-use crate::nl4d::grain::template::ChromaPlane;
+use crate::nl4d::grain::fit::{
+    bucket_edges,
+    bucket_of,
+    finest_ar_shift,
+    quantise_at,
+    undo_mean_removal,
+    yule_walker,
+};
+use crate::nl4d::grain::template::{ChromaPlane, chroma_template_stats};
 use crate::noise::colour::{
     COLOUR_CELLS,
     COLOUR_CELLS_PER_BRIGHTNESS,
@@ -89,10 +96,26 @@ fn chroma_texture_matches_the_luma_fit_of_the_same_sums() {
 
     let corrected = undo_mean_removal(&record);
     let expected = yule_walker(&corrected).expect("a well-conditioned system");
-    let texture = chroma_texture_of(&stats, &edges).expect("the chunk has a texture");
+    let texture = chroma_texture_of(&stats, &edges, ChromaPlane::Cb).expect("the chunk has a texture");
 
     assert_eq!(texture.weights, expected);
     assert!(texture.block_to_field > 1.0, "{}", texture.block_to_field);
+}
+
+#[test]
+fn chroma_texture_reads_its_own_plane_template() {
+    let edges = bucket_edges();
+    let chunk = chunk_at(2.0, 300, None);
+    let stats = chunk.summed_table();
+
+    for plane in [ChromaPlane::Cb, ChromaPlane::Cr] {
+        let texture = chroma_texture_of(&stats, &edges, plane).expect("the chunk has a texture");
+        let shift = finest_ar_shift(&texture.weights);
+        let coeffs = quantise_at(&texture.weights, shift);
+        let (field_std, block_std) = chroma_template_stats(&coeffs, shift, plane);
+
+        assert_eq!(texture.block_to_field, field_std / block_std);
+    }
 }
 
 #[test]
@@ -222,8 +245,8 @@ fn chroma_targets_thin_to_ten_points() {
         .map(|bin| (bin * 16 + 8, f64::from(bin) + 1.0))
         .collect();
 
-    let targets = chroma_targets(&levels, 0.75, 1.2);
-    let factor = 1.2 * 0.75f64.sqrt();
+    let targets = chroma_targets(&levels, 0.75);
+    let factor = 0.75f64.sqrt();
     let kept_bins = [0u8, 1, 3, 4, 5, 7, 8, 9, 11, 12];
 
     assert_eq!(targets.len(), 10);

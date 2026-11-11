@@ -14,7 +14,7 @@ pub const REPORT_GROUPS: [AvdsGroup; 2] = [AvdsGroup::Persistence, AvdsGroup::Ch
 
 /// Why chroma grain cannot be written for the file, `None` when it can.
 ///
-/// Chroma grain needs chroma measured on a 4:2:0 file, with chroma table rows.
+/// Chroma grain needs chroma measured on a 4:2:0 file, with chroma table and chroma colour rows.
 pub fn chroma_unavailable(meta: &AvdsMeta, rows: &[AvdsFrame]) -> Option<String> {
     if meta.planes_measured == PlanesMeasured::Luma {
         return Some("the run did not measure chroma".to_owned());
@@ -27,6 +27,11 @@ pub fn chroma_unavailable(meta: &AvdsMeta, rows: &[AvdsFrame]) -> Option<String>
     let has_chroma_table = rows.iter().any(|row| row.chroma_table.is_some());
     if !rows.is_empty() && !has_chroma_table {
         return Some("the file holds no chroma table measurements".to_owned());
+    }
+
+    let has_chroma_colour = rows.iter().any(|row| row.chroma_colour.is_some());
+    if !rows.is_empty() && !has_chroma_colour {
+        return Some("the file holds no chroma colour measurements".to_owned());
     }
 
     None

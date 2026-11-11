@@ -16,6 +16,7 @@ use crate::nl4d::grain::consts::{
     STRENGTH_GROUPS,
 };
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of};
+use crate::nl4d::grain::table::FitOptions;
 use crate::noise::colour::{
     COLOUR_CELLS,
     COLOUR_FIT_PLANE_BLOCKS,
@@ -279,4 +280,10 @@ pub(super) fn chroma_chunk(cb: &GrainChunk, cr: &GrainChunk, colour_frame: &[f32
     chunk.frame_colour = colour_frame.repeat(cb.frames as usize);
 
     chunk
+}
+
+pub(super) fn chroma_options() -> FitOptions {
+    let options = FitOptions::default();
+
+    options.with_chroma(true)
 }

@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use super::consts::AR_COEFFS;
+use super::consts::{AR_COEFFS, CHROMA_PLANES};
 use super::segment::{FittedEntry, PlaneEntry, SceneGrain, fit_scenes};
 
 /// Grain table timestamps count 100 ns ticks.
@@ -61,10 +61,10 @@ fn plane_coeffs(plane: &PlaneEntry) -> String {
 
 /// The Cb and Cr values `line` writes for each plane, or `zeroed` for both without chroma.
 fn chroma_values(
-    chroma: Option<&[PlaneEntry; 2]>,
+    chroma: Option<&[PlaneEntry; CHROMA_PLANES]>,
     line: fn(&PlaneEntry) -> String,
     zeroed: &str,
-) -> [String; 2] {
+) -> [String; CHROMA_PLANES] {
     match chroma {
         Some(planes) => planes.each_ref().map(line),
         None => [zeroed.to_owned(), zeroed.to_owned()],

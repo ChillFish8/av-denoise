@@ -208,6 +208,24 @@ fn chroma_is_unavailable_without_chroma_table_rows() {
 }
 
 #[test]
+fn chroma_is_unavailable_without_chroma_colour_rows() {
+    let scenes = scenes_of(&[4], Measured::ALL);
+    let mut rows = rows_from_scenes(&scenes);
+    for row in &mut rows {
+        row.chroma_colour = None;
+    }
+
+    let meta = sample_meta(rows.len() as u64);
+
+    let reason = chroma_unavailable(&meta, &rows);
+
+    assert_eq!(
+        reason.as_deref(),
+        Some("the file holds no chroma colour measurements")
+    );
+}
+
+#[test]
 fn chroma_is_available_for_a_measured_420_file() {
     let scenes = scenes_of(&[4], Measured::ALL);
     let rows = rows_from_scenes(&scenes);

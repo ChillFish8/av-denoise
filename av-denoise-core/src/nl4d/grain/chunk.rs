@@ -7,8 +7,9 @@ pub struct GrainChunk {
     pub frames: u32,
     /// Each frame's table statistics in frame order, 2800 values per luma frame.
     ///
-    /// A chroma frame holds the Cb table and then the Cr table, each in the luma layout. Counts
-    /// are whole numbers and lag sums are the GPU's own f32 values. Empty when the table is not
+    /// A chroma frame holds the Cb table and then the Cr table, each in the luma layout. Each
+    /// histogram bins a block by the mean of its measured channel, luma or chroma. Counts are
+    /// whole numbers and lag sums are the GPU's own f32 values. Empty when the table is not
     /// measured.
     pub frame_tables: Vec<f32>,
     /// Each frame's persistence sums in frame order, 24 values per luma frame and 6 per chroma
@@ -26,7 +27,7 @@ pub struct GrainChunk {
 /// Summed table statistics of one or more frames, the inputs the table fit reads.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TableSums {
-    /// Accepted source block counts, 16 luma bins by 64 std buckets.
+    /// Accepted source block counts, 16 bins of the measured channel's mean by 64 std buckets.
     pub source_hist: Vec<u32>,
     /// Accepted kept-grain block counts, in the same layout.
     pub kept_hist: Vec<u32>,

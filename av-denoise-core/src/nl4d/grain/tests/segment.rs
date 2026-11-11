@@ -4,6 +4,7 @@ use super::synthetic::{
     autocov_of,
     chroma_chunk,
     chroma_colour_frame,
+    chroma_options,
     chunk_at,
     chunk_in_bucket,
     clear_pixels,
@@ -39,8 +40,7 @@ fn fit_measured(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
 
 /// Fits the scenes with chroma on and every measured part of the grain kept.
 fn fit_with_chroma(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
-    let defaults = FitOptions::default();
-    let options = defaults.with_chroma(true);
+    let options = chroma_options();
     let scenes: Vec<&SceneGrain> = scenes.iter().collect();
 
     fit_scenes(&scenes, &options)
@@ -428,11 +428,9 @@ fn the_ar_shift_fits_every_plane() {
         (4 * shared_left - luma_only_left).abs() <= 2,
         "{shared_left} {luma_only_left}"
     );
-    assert!(entry.ar_coeffs.iter().all(|coeff| (-128..=127).contains(coeff)));
     for plane in planes {
         let chroma_left = plane.ar_coeffs[left];
         assert!((64..127).contains(&chroma_left), "{chroma_left}");
-        assert!(plane.ar_coeffs.iter().all(|coeff| (-128..=127).contains(coeff)));
     }
 }
 

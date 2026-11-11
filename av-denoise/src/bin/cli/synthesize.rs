@@ -232,6 +232,8 @@ mod tests {
     const BLOCK_BINS: std::ops::Range<usize> = 4..12;
     const BLOCK_BUCKET: usize = 24;
     const BLOCKS_PER_BIN: f32 = 200.0;
+    /// The pixels of one measured 8x8 block.
+    const CELL_PIXELS: f32 = 64.0;
 
     /// The brightness bins of a colour fit, with the cells of each and the header words after them.
     const BRIGHTNESS_BINS: usize = 16;
@@ -247,7 +249,7 @@ mod tests {
 
     /// `planes` tables of uncorrelated grain with the variance `variance`.
     fn table_values(variance: f32, planes: usize) -> Vec<f32> {
-        let pixels = BLOCKS_PER_BIN * BLOCK_BINS.len() as f32 * 64.0;
+        let pixels = BLOCKS_PER_BIN * BLOCK_BINS.len() as f32 * CELL_PIXELS;
         let group = BLOCK_BUCKET / BUCKETS_PER_GROUP;
         let group_start = 2 * HISTOGRAM_LEN + group * RECORD_LEN;
         let mut values = vec![0.0; planes * TABLE_LEN];

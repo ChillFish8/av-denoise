@@ -5,6 +5,7 @@ use super::fit::{
     quantise_at,
     scaling_peak,
     scaling_points_at,
+    thinned,
     undo_mean_removal,
     yule_walker,
 };
@@ -88,12 +89,11 @@ fn plane_parts(
         stats.add(&sums);
     }
 
-    let texture = chroma_texture_of(&stats, edges);
+    let texture = chroma_texture_of(&stats, edges, plane);
     let levels = chroma_levels(colour, frames, plane);
     let share = removed_share(&stats, edges);
     let target = match (levels, share) {
-        // The entry's texture, which may be borrowed, turns these block stds into field stds.
-        (Some(levels), Some(share)) => Some(chroma_targets(&levels, share, 1.0)),
+        (Some(levels), Some(share)) => Some(chroma_targets(&levels, share)),
         _ => None,
     };
 
@@ -104,7 +104,8 @@ fn plane_parts(
 pub(crate) fn chroma_scaling(fit: &ChromaFit, plane: ChromaPlane, ar_shift: u32) -> ChromaScaling {
     let coeffs = quantise_at(&fit.texture.weights, ar_shift);
     let (sigma_template, _) = chroma_template_stats(&coeffs, ar_shift, plane);
-    // The targets leave 8-bit codes for the normalised units the luma targets use.
+    // The entry's texture, which may be borrowed, turns the block stds into field stds. The
+    // targets also leave 8-bit codes for the normalised units the luma targets use.
     let factor = fit.texture.block_to_field / 255.0;
     let targets = fit
         .target
@@ -139,14 +140,18 @@ impl ChromaScaling {
 /// The texture solved from the strength groups near the median source std, as luma's is.
 ///
 /// The pooled record has its cell-mean bias undone before the solve.
-pub(crate) fn chroma_texture_of(stats: &TableSums, edges: &[f32]) -> Option<ChromaTexture> {
+pub(crate) fn chroma_texture_of(
+    stats: &TableSums,
+    edges: &[f32],
+    plane: ChromaPlane,
+) -> Option<ChromaTexture> {
     let record = pooled_record(stats, edges)?;
     let corrected = undo_mean_removal(&record);
     let weights = yule_walker(&corrected)?;
 
     let shift = finest_ar_shift(&weights);
     let coeffs = quantise_at(&weights, shift);
-    let (field_std, block_std) = chroma_template_stats(&coeffs, shift, ChromaPlane::Cb);
+    let (field_std, block_std) = chroma_template_stats(&coeffs, shift, plane);
     let block_to_field = field_std / block_std;
 
     Some(ChromaTexture {
@@ -157,7 +162,7 @@ pub(crate) fn chroma_texture_of(stats: &TableSums, edges: &[f32]) -> Option<Chro
 
 /// The share of the source grain variance the denoiser removed, between 0 and 1.
 ///
-/// It compares the median kept std with the median source std over every luma bin. `None` with
+/// It compares the median kept std with the median source std over every bin. `None` with
 /// fewer than [MIN_BLOCKS_PER_BIN] source blocks. Fewer kept blocks than that count as no kept
 /// grain.
 pub(crate) fn removed_share(stats: &TableSums, edges: &[f32]) -> Option<f64> {
@@ -244,34 +249,16 @@ pub(crate) fn chroma_levels(colour: &[f32], frames: usize, plane: ChromaPlane) -
     (levels.len() >= MIN_POPULATED_BINS).then_some(levels)
 }
 
-/// The strength targets of one chroma plane, as whole-field grain stds in 8-bit codes.
+/// The strength targets of one chroma plane, as removed block stds in 8-bit codes.
 ///
-/// Each block std level becomes a field std through `block_to_field`, and only the removed `share`
-/// of its variance is kept. The levels thin evenly to [MAX_CHROMA_POINTS], keeping the first and
-/// last.
-pub(crate) fn chroma_targets(levels: &[(u8, f64)], share: f64, block_to_field: f64) -> Vec<(u8, f64)> {
-    let factor = block_to_field * share.sqrt();
+/// Only the removed `share` of each level's variance is kept. The levels thin evenly to
+/// [MAX_CHROMA_POINTS], keeping the first and last.
+pub(crate) fn chroma_targets(levels: &[(u8, f64)], share: f64) -> Vec<(u8, f64)> {
+    let factor = share.sqrt();
     let chosen = thinned(levels, MAX_CHROMA_POINTS);
 
     chosen
         .iter()
         .map(|&(luma, level)| (luma, level * factor))
-        .collect()
-}
-
-/// At most `limit` of the levels, evenly spaced and keeping the first and last.
-fn thinned(levels: &[(u8, f64)], limit: usize) -> Vec<(u8, f64)> {
-    if levels.len() <= limit {
-        return levels.to_vec();
-    }
-
-    let last = (levels.len() - 1) as f64;
-    let steps = (limit - 1) as f64;
-
-    (0..limit)
-        .map(|point| {
-            let position = (point as f64 * last / steps).round() as usize;
-            levels[position]
-        })
         .collect()
 }

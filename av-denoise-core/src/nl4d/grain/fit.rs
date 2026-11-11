@@ -351,3 +351,20 @@ pub(crate) fn scaling_points_at(points: &[(u8, f64)], sigma_template: f64, shift
         })
         .collect()
 }
+
+/// At most `limit` of the values, evenly spaced and keeping the first and last.
+pub(crate) fn thinned<T: Copy>(values: &[T], limit: usize) -> Vec<T> {
+    if values.len() <= limit {
+        return values.to_vec();
+    }
+
+    let last = (values.len() - 1) as f64;
+    let steps = (limit - 1) as f64;
+
+    (0..limit)
+        .map(|point| {
+            let position = (point as f64 * last / steps).round() as usize;
+            values[position]
+        })
+        .collect()
+}

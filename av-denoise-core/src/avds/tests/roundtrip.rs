@@ -13,7 +13,7 @@ use crate::avds::meta::{FRAMES_KEY, VERSION_KEY, metadata_pairs};
 use crate::avds::schema::{arrow_schema, columns, writer_properties};
 use crate::avds::write::record_batch;
 use crate::avds::{AvdsFrame, AvdsGroup, read_avds, read_avds_groups, rows_from_scenes, scenes_from_rows};
-use crate::nl4d::grain::consts::FRAME_TABLE_LEN;
+use crate::nl4d::grain::consts::{CHROMA_PLANES, FRAME_TABLE_LEN};
 
 /// A file of `batch` with `pairs` as its metadata, written without the grain data writer.
 fn raw_file(batch: &RecordBatch, pairs: Vec<KeyValue>) -> File {
@@ -328,7 +328,7 @@ fn chroma_table_round_trips() {
     for row in &read_rows {
         let chroma_table = row.chroma_table.as_ref().expect("the chroma table is measured");
 
-        assert_eq!(chroma_table.len(), 2 * FRAME_TABLE_LEN);
+        assert_eq!(chroma_table.len(), CHROMA_PLANES * FRAME_TABLE_LEN);
     }
 }
 
@@ -363,7 +363,7 @@ fn scenes_from_rows_restore_chroma_frame_tables() {
     for (chunk, original) in regrouped[0].chroma_chunks.iter().zip(&scenes[0].chroma_chunks) {
         assert_eq!(
             chunk.frame_tables.len(),
-            chunk.frames as usize * 2 * FRAME_TABLE_LEN
+            chunk.frames as usize * CHROMA_PLANES * FRAME_TABLE_LEN
         );
         assert_eq!(chunk.frame_tables, original.frame_tables);
     }

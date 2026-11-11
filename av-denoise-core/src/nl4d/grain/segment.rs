@@ -5,6 +5,7 @@ use super::chunk::{GrainChunk, TableSums};
 use super::consts::{
     AR_COEFFS,
     BUCKETS_PER_GROUP,
+    CHROMA_PLANES,
     DRIFT,
     LAG_COUNT,
     LUMA_BINS,
@@ -27,6 +28,7 @@ use super::fit::{
     scaling_peak,
     scaling_points,
     scaling_points_at,
+    thinned,
     undo_mean_removal,
     yule_walker,
 };
@@ -64,7 +66,7 @@ pub(crate) struct FittedEntry {
     pub scaling_shift: u32,
     pub points: Vec<(u8, u8)>,
     /// The Cb and then the Cr plane, `None` when the entry has no chroma grain.
-    pub chroma: Option<[PlaneEntry; 2]>,
+    pub chroma: Option<[PlaneEntry; CHROMA_PLANES]>,
 }
 
 /// One chroma plane's table values.
@@ -117,7 +119,7 @@ struct Parts {
     strength: Option<Vec<BinStrength>>,
     texture: Option<Texture>,
     /// The Cb and then the Cr plane's own measurements, all missing when chroma is off.
-    chroma: [ChromaParts; 2],
+    chroma: [ChromaParts; CHROMA_PLANES],
 }
 
 /// The table's rounded weights, the solved weights behind them and their template std.
@@ -128,7 +130,7 @@ struct TableWeights {
     sigma: f64,
 }
 
-/// The std median over every luma bin of a histogram.
+/// The std median over every bin of a histogram.
 pub(crate) fn overall_median(hist: &[u32], edges: &[f32]) -> Option<f64> {
     let mut merged = vec![0u32; STD_BUCKETS];
     for bin in 0..LUMA_BINS {
@@ -364,7 +366,7 @@ pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<Fi
 /// The chroma measurements of the scene's chroma chunks the segment covers.
 ///
 /// A scene without chroma chunks for the segment gives all of them missing.
-fn segment_chroma(scene: &SceneGrain, segment: &Segment, edges: &[f32]) -> [ChromaParts; 2] {
+fn segment_chroma(scene: &SceneGrain, segment: &Segment, edges: &[f32]) -> [ChromaParts; CHROMA_PLANES] {
     let covered = scene.chroma_chunks.get(segment.chunks.clone());
     let chunks = covered.unwrap_or_default();
 
@@ -372,7 +374,7 @@ fn segment_chroma(scene: &SceneGrain, segment: &Segment, edges: &[f32]) -> [Chro
 }
 
 /// Both chroma planes' texture and target, each borrowed on its own, `None` when any is missing.
-fn borrowed_chroma(parts: &[Parts], index: usize) -> Option<[ChromaFit; 2]> {
+fn borrowed_chroma(parts: &[Parts], index: usize) -> Option<[ChromaFit; CHROMA_PLANES]> {
     let cb = borrowed_plane(parts, index, ChromaPlane::Cb)?;
     let cr = borrowed_plane(parts, index, ChromaPlane::Cr)?;
 
@@ -426,7 +428,7 @@ fn build_entry(
     part: &Parts,
     strength: &[BinStrength],
     texture: Texture,
-    chroma: Option<[ChromaFit; 2]>,
+    chroma: Option<[ChromaFit; CHROMA_PLANES]>,
     fine_noise: f64,
 ) -> FittedEntry {
     let targets = luma_targets(strength, texture, fine_noise);
@@ -485,15 +487,7 @@ fn luma_targets(strength: &[BinStrength], texture: Texture, fine_noise: f64) -> 
     let factor = texture.block_to_field;
     let fine_share = fine_noise * texture.floor;
 
-    let mut chosen: Vec<BinStrength> = strength.to_vec();
-    if chosen.len() > MAX_POINTS {
-        let last = (chosen.len() - 1) as f64;
-        let steps = (MAX_POINTS - 1) as f64;
-        chosen = (0..MAX_POINTS)
-            .map(|point| (point as f64 * last / steps).round() as usize)
-            .map(|position| strength[position])
-            .collect();
-    }
+    let chosen = thinned(strength, MAX_POINTS);
 
     chosen
         .iter()

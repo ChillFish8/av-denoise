@@ -1,4 +1,4 @@
-use super::synthetic::{chroma_chunk, chroma_colour_frame, chunk_at, table_chunk};
+use super::synthetic::{chroma_chunk, chroma_colour_frame, chroma_options, chunk_at, table_chunk};
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::AR_COEFFS;
 use crate::nl4d::grain::segment::{FittedEntry, PlaneEntry, SceneGrain};
@@ -144,12 +144,6 @@ fn point_count(line: &str) -> usize {
     let count = line.split_whitespace().nth(1).expect("a point count");
 
     count.parse().expect("a whole number")
-}
-
-fn chroma_options() -> FitOptions {
-    let options = FitOptions::default();
-
-    options.with_chroma(true)
 }
 
 #[test]
