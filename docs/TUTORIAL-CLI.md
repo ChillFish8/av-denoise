@@ -279,15 +279,18 @@ Writes an AV1 film grain table for the grain the run removed. Add it to a finish
 `regrain apply`, which applies each scene's entry. SVT-AV1 `--fgs-table` and `grav1synth apply`
 apply only its first entry, so they suit a single-scene table only.
 
+The table holds luma and chroma grain by default. Chroma grain needs 4:2:0 video from a run that
+denoised chroma. Otherwise the command warns and writes luma grain only.
+
 The table's timestamps count the run's output frames from 0 at the source frame rate. It fits
 constant frame rate sources and encodes of the run's output.
 
-| Flag                    | What it does                                                                                                                                  | Default  |
-|-------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|----------|
-| `--input <PATH>`        | The grain data file written by `--export-avds`.                                                                                               | required |
-| `--output <PATH>`       | Where to write the table.                                                                                                                     | required |
-| `--planes <PLANES>`     | Which planes get grain, comma-separated. Only `luma` is accepted.                                                                             | `luma`   |
-| `--fine-noise <AMOUNT>` | The share of the fine, fresh scan noise taken out of the table, between 0 and 1. Textured grain stays. `0` keeps everything the run measured. | `0.5`    |
+| Flag                    | What it does                                                                                                                                  | Default       |
+|-------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|---------------|
+| `--input <PATH>`        | The grain data file written by `--export-avds`.                                                                                               | required      |
+| `--output <PATH>`       | Where to write the table.                                                                                                                     | required      |
+| `--planes <PLANES>`     | Which planes get grain, `luma` or `luma,chroma`. Chroma alone is refused.                                                                     | `luma,chroma` |
+| `--fine-noise <AMOUNT>` | The share of the fine, fresh scan noise taken out of the table, between 0 and 1. Textured grain stays. `0` keeps everything the run measured. | `0.5`         |
 
 ```bash
 av-denoise synthesize av1-fgs --input run.avds --output grain.tbl --fine-noise 0.25

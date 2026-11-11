@@ -25,7 +25,14 @@ pub use self::order::AvdsSceneWriter;
 pub use self::read::{read_avds, read_avds_groups};
 pub use self::rows::{rows_from_scenes, scenes_from_rows};
 pub use self::schema::AvdsGroup;
-pub use self::synthesize::{AV1_TABLE_GROUPS, REPORT_GROUPS, av1_table, report_rows};
+pub use self::synthesize::{
+    AV1_CHROMA_TABLE_GROUPS,
+    AV1_TABLE_GROUPS,
+    REPORT_GROUPS,
+    av1_table,
+    chroma_unavailable,
+    report_rows,
+};
 pub use self::write::{AvdsWriter, write_avds};
 use crate::{ChromaLayout, ChromaSiting};
 pub use crate::{DEFAULT_FINE_NOISE, FitOptions};

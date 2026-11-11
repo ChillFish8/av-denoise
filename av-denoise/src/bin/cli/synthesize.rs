@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use av_denoise::FrameGrain;
 use av_denoise::avds::{
+    AV1_CHROMA_TABLE_GROUPS,
     AV1_TABLE_GROUPS,
     AvdsFrame,
     AvdsGroup,
@@ -12,6 +13,7 @@ use av_denoise::avds::{
     FitOptions,
     REPORT_GROUPS,
     av1_table,
+    chroma_unavailable,
     read_avds_groups,
     report_rows,
 };
@@ -48,10 +50,11 @@ pub struct Av1FgsArgs {
     #[arg(long, value_name = "PATH")]
     pub output: PathBuf,
 
-    /// Which planes get grain (comma-separated).
+    /// Which planes get grain (comma-separated), `luma` or `luma,chroma`.
     ///
-    /// Only `luma` is accepted.
-    #[arg(long, value_enum, value_delimiter = ',', default_value = "luma")]
+    /// Chroma grain needs 4:2:0 video with chroma measured. Otherwise a warning is logged and only
+    /// luma gets grain.
+    #[arg(long, value_enum, value_delimiter = ',', default_value = "luma,chroma")]
     pub planes: Vec<GrainPlane>,
 
     /// The share of the fine, fresh scan noise taken out of the table, between 0 and 1.
@@ -90,13 +93,14 @@ pub enum GrainPlane {
 }
 
 impl Av1FgsArgs {
-    /// The fit options the arguments ask for, refusing planes other than luma alone.
+    /// The fit options the arguments ask for, refusing chroma without luma.
     fn fit_options(&self) -> Result<FitOptions, anyhow::Error> {
-        if self.planes != [GrainPlane::Luma] {
-            anyhow::bail!("--planes accepts luma only, chroma grain is not synthesised yet");
+        if !self.planes.contains(&GrainPlane::Luma) {
+            anyhow::bail!("--planes needs luma, chroma grain follows the luma entries");
         }
 
-        let options = FitOptions::with_fine_noise(self.fine_noise);
+        let chroma = self.planes.contains(&GrainPlane::Chroma);
+        let options = FitOptions::with_fine_noise(self.fine_noise).with_chroma(chroma);
 
         Ok(options)
     }
@@ -111,9 +115,22 @@ pub fn run_synthesize(args: &SynthesizeArgs) -> Result<(), anyhow::Error> {
 }
 
 fn write_av1_table(args: &Av1FgsArgs) -> Result<(), anyhow::Error> {
-    let options = args.fit_options()?;
+    let mut options = args.fit_options()?;
     let output = StagedFile::create(&args.output, "grain table")?;
-    let (meta, rows) = read_file(&args.input, &AV1_TABLE_GROUPS)?;
+    let groups: &[AvdsGroup] = if options.chroma {
+        &AV1_CHROMA_TABLE_GROUPS
+    } else {
+        &AV1_TABLE_GROUPS
+    };
+    let (meta, rows) = read_file(&args.input, groups)?;
+
+    if options.chroma {
+        let unavailable = chroma_unavailable(&meta, &rows);
+        if let Some(reason) = unavailable {
+            tracing::warn!("chroma grain is not written, {reason}");
+            options = options.with_chroma(false);
+        }
+    }
 
     let table = av1_table(&meta, rows, &options)?;
     warn_on_empty_table(&table);
@@ -171,10 +188,12 @@ fn parse_fine_noise(text: &str) -> Result<f64, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use arrow_array::{ArrayRef, Int32Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
+    use av_denoise::avds::{PlanesMeasured, write_avds};
+    use av_denoise::{ChromaLayout, ChromaSiting};
     use clap::Parser;
     use parquet::arrow::ArrowWriter;
 
@@ -195,6 +214,144 @@ mod tests {
         let mut writer = ArrowWriter::try_new(file, schema, None).expect("the writer opens");
         writer.write(&batch).expect("the rows are written");
         writer.close().expect("the file closes");
+    }
+
+    /// The luma bins and std buckets of a table's histograms.
+    const LUMA_BINS: usize = 16;
+    const STD_BUCKETS: usize = 64;
+    /// The strength groups of a table, each a record of lag sums then a pixel count.
+    const STRENGTH_GROUPS: usize = 16;
+    const BUCKETS_PER_GROUP: usize = STD_BUCKETS / STRENGTH_GROUPS;
+    const LAG_SUMS: usize = 46;
+    const RECORD_LEN: usize = LAG_SUMS + 1;
+    /// Values in one plane's frame table, two histograms and the grouped records.
+    const HISTOGRAM_LEN: usize = LUMA_BINS * STD_BUCKETS;
+    const TABLE_LEN: usize = 2 * HISTOGRAM_LEN + STRENGTH_GROUPS * RECORD_LEN;
+
+    /// The luma bins the table's blocks sit in, and the std bucket they share.
+    const BLOCK_BINS: std::ops::Range<usize> = 4..12;
+    const BLOCK_BUCKET: usize = 24;
+    const BLOCKS_PER_BIN: f32 = 200.0;
+
+    /// The brightness bins of a colour fit, with the cells of each and the header words after them.
+    const BRIGHTNESS_BINS: usize = 16;
+    const CELLS_PER_BRIGHTNESS: usize = 61;
+    const COLOUR_CELLS: usize = BRIGHTNESS_BINS * CELLS_PER_BRIGHTNESS;
+    const HEADER_LEN: usize = 22;
+    const POPULATED_WORD: usize = 18;
+    const BLOCKS_WORD: usize = 19;
+    const LUMA_LOW_WORD: usize = 20;
+    const LUMA_HIGH_WORD: usize = 21;
+    /// Values in a frame's chroma colour fit, both planes.
+    const CHROMA_COLOUR_LEN: usize = 2 * (2 * COLOUR_CELLS + HEADER_LEN);
+
+    /// `planes` tables of uncorrelated grain with the variance `variance`.
+    fn table_values(variance: f32, planes: usize) -> Vec<f32> {
+        let pixels = BLOCKS_PER_BIN * BLOCK_BINS.len() as f32 * 64.0;
+        let group = BLOCK_BUCKET / BUCKETS_PER_GROUP;
+        let group_start = 2 * HISTOGRAM_LEN + group * RECORD_LEN;
+        let mut values = vec![0.0; planes * TABLE_LEN];
+
+        for plane in 0..planes {
+            let start = plane * TABLE_LEN;
+            for bin in BLOCK_BINS {
+                values[start + bin * STD_BUCKETS + BLOCK_BUCKET] = BLOCKS_PER_BIN;
+            }
+
+            values[start + group_start] = variance * pixels;
+            values[start + group_start + LAG_SUMS] = pixels;
+        }
+
+        values
+    }
+
+    /// A colour fit of both planes, each with grain of 4 codes over luma 40 to 150.
+    fn chroma_colour_values() -> Vec<f32> {
+        let mut values = Vec::with_capacity(CHROMA_COLOUR_LEN);
+        for _plane in 0..2 {
+            let log_grain = vec![4.0f32.ln(); COLOUR_CELLS];
+            let positions = vec![0.0; COLOUR_CELLS];
+            let mut header = vec![0.0; HEADER_LEN];
+            header[POPULATED_WORD] = 1.0;
+            header[BLOCKS_WORD] = 600.0;
+            header[LUMA_LOW_WORD] = 40.0;
+            header[LUMA_HIGH_WORD] = 150.0;
+
+            values.extend(log_grain);
+            values.extend(positions);
+            values.extend(header);
+        }
+
+        values
+    }
+
+    fn table_row(frame: u64, chroma: bool) -> AvdsFrame {
+        let chroma_table = chroma.then(|| table_values(0.0005, 2));
+        let chroma_colour = chroma.then(chroma_colour_values);
+
+        AvdsFrame {
+            frame,
+            scene: 0,
+            first_of_scene: frame == 0,
+            table: Some(table_values(0.001, 1)),
+            chroma_table,
+            persistence: None,
+            chroma_persistence: None,
+            noise: None,
+            chroma_noise: None,
+            colour: None,
+            chroma_colour,
+        }
+    }
+
+    /// Writes a 4:2:0 grain data file of `frames` frames, with chroma rows when `chroma` is on.
+    fn write_avds_file(path: &Path, frames: u64, chroma: bool) {
+        let meta = AvdsMeta {
+            writer: "av-denoise test".to_owned(),
+            frame_rate: (24, 1),
+            width: 64,
+            height: 48,
+            bit_depth: 10,
+            subsampling: ChromaLayout::Yuv420,
+            chroma_siting: ChromaSiting::Left,
+            frames,
+            planes_measured: PlanesMeasured::LumaChroma,
+        };
+        let rows: Vec<AvdsFrame> = (0..frames).map(|frame| table_row(frame, chroma)).collect();
+
+        let file = File::create(path).expect("the file is created");
+        write_avds(file, &meta, &rows).expect("the file is written");
+    }
+
+    #[derive(Clone, Default)]
+    struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let mut buffer = self.0.lock().expect("the sink is not poisoned");
+            buffer.extend_from_slice(bytes);
+
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The log text written while `work` runs.
+    fn capture_warnings<T>(work: impl FnOnce() -> T) -> String {
+        let sink = LogSink::default();
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, work);
+
+        let buffer = sink.0.lock().expect("the sink is not poisoned");
+
+        String::from_utf8_lossy(&buffer).into_owned()
     }
 
     fn temporary_of(path: &Path) -> PathBuf {
@@ -236,13 +393,31 @@ mod tests {
     }
 
     #[test]
-    fn av1_fgs_defaults_to_luma_and_half_the_fine_noise() {
+    fn planes_default_to_luma_and_chroma() {
         let av1_fgs = parsed_av1_fgs(&["av1-fgs", "--input", "run.avds", "--output", "grain.tbl"]);
 
         assert_eq!(av1_fgs.input, PathBuf::from("run.avds"));
         assert_eq!(av1_fgs.output, PathBuf::from("grain.tbl"));
-        assert_eq!(av1_fgs.planes, [GrainPlane::Luma]);
+        assert_eq!(av1_fgs.planes, [GrainPlane::Luma, GrainPlane::Chroma]);
         assert_eq!(av1_fgs.fine_noise, 0.5);
+    }
+
+    #[test]
+    fn planes_reach_the_fit_options() {
+        let both = [GrainPlane::Luma, GrainPlane::Chroma];
+        let reversed = [GrainPlane::Chroma, GrainPlane::Luma];
+        let luma = [GrainPlane::Luma];
+
+        for (planes, chroma) in [(&both[..], true), (&reversed[..], true), (&luma[..], false)] {
+            let args = av1_fgs(PathBuf::new(), PathBuf::new(), planes.to_vec());
+            let SynthesizeKind::Av1Fgs(av1_fgs) = args.kind else {
+                panic!("expected av1-fgs");
+            };
+
+            let options = av1_fgs.fit_options().expect("the planes are accepted");
+
+            assert_eq!(options.chroma, chroma);
+        }
     }
 
     #[test]
@@ -351,22 +526,89 @@ mod tests {
     }
 
     #[test]
-    fn chroma_planes_are_refused() {
+    fn chroma_alone_is_refused() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let input = dir.path().join("run.avds");
         let output = dir.path().join("grain.tbl");
 
-        for planes in [
-            vec![GrainPlane::Chroma],
-            vec![GrainPlane::Luma, GrainPlane::Chroma],
-        ] {
-            let args = av1_fgs(input.clone(), output.clone(), planes);
-            let error = run_synthesize(&args).expect_err("chroma is refused");
-            let message = error.to_string();
+        let args = av1_fgs(input, output.clone(), vec![GrainPlane::Chroma]);
+        let error = run_synthesize(&args).expect_err("chroma alone is refused");
+        let message = error.to_string();
 
-            assert!(message.contains("--planes accepts luma only"), "got {message}");
-            assert!(!output.exists());
-            assert!(!temporary_of(&output).exists());
+        assert!(message.contains("--planes needs luma"), "got {message}");
+        assert!(!output.exists());
+        assert!(!temporary_of(&output).exists());
+    }
+
+    #[test]
+    fn a_luma_only_file_writes_the_luma_table_and_warns() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let input = dir.path().join("run.avds");
+        let both_output = dir.path().join("both.tbl");
+        let luma_output = dir.path().join("luma.tbl");
+        write_avds_file(&input, 40, false);
+        let both_planes = vec![GrainPlane::Luma, GrainPlane::Chroma];
+        let both_args = av1_fgs(input.clone(), both_output.clone(), both_planes);
+        let luma_args = av1_fgs(input, luma_output.clone(), vec![GrainPlane::Luma]);
+
+        let warnings = capture_warnings(|| run_synthesize(&both_args).expect("the table is written"));
+        run_synthesize(&luma_args).expect("the table is written");
+
+        let both = std::fs::read_to_string(both_output).expect("the table is written");
+        let luma = std::fs::read_to_string(luma_output).expect("the table is written");
+
+        assert_ne!(luma, "filmgrn1\n");
+        assert_eq!(both, luma);
+        assert!(warnings.contains("chroma grain is not written"), "got {warnings}");
+    }
+
+    #[test]
+    fn luma_planes_match_the_luma_only_table() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let input = dir.path().join("run.avds");
+        let output = dir.path().join("grain.tbl");
+        write_avds_file(&input, 40, true);
+        let args = av1_fgs(input.clone(), output.clone(), vec![GrainPlane::Luma]);
+        run_synthesize(&args).expect("the table is written");
+
+        let (meta, rows) = read_file(&input, &AV1_TABLE_GROUPS).expect("the file reads");
+        let options = FitOptions::with_fine_noise(0.0);
+        let expected = av1_table(&meta, rows, &options).expect("the table builds");
+
+        let written = std::fs::read_to_string(output).expect("the table is written");
+        assert_eq!(written, expected);
+    }
+
+    #[test]
+    fn chroma_planes_match_the_chroma_table() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let input = dir.path().join("run.avds");
+        let output = dir.path().join("grain.tbl");
+        write_avds_file(&input, 40, true);
+        let both_planes = vec![GrainPlane::Luma, GrainPlane::Chroma];
+        let args = av1_fgs(input.clone(), output.clone(), both_planes);
+        run_synthesize(&args).expect("the table is written");
+
+        let (meta, rows) = read_file(&input, &AV1_CHROMA_TABLE_GROUPS).expect("the file reads");
+        let options = FitOptions::with_fine_noise(0.0).with_chroma(true);
+        let expected = av1_table(&meta, rows, &options).expect("the table builds");
+        let (_, luma_rows) = read_file(&input, &AV1_TABLE_GROUPS).expect("the file reads");
+        let luma_options = FitOptions::with_fine_noise(0.0);
+        let luma_only = av1_table(&meta, luma_rows, &luma_options).expect("the table builds");
+
+        let written = std::fs::read_to_string(output).expect("the table is written");
+
+        assert_eq!(written, expected);
+        assert_ne!(written, luma_only);
+        for prefix in ["\tsCb ", "\tsCr "] {
+            let line = written
+                .lines()
+                .find(|line| line.starts_with(prefix))
+                .expect("the table has the plane's scaling line");
+            let values: Vec<&str> = line.split_whitespace().skip(2).collect();
+            let has_strength = values.iter().skip(1).step_by(2).any(|value| *value != "0");
+
+            assert!(has_strength, "got {line}");
         }
     }
 

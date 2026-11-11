@@ -1,17 +1,20 @@
 use super::{Measured, sample_meta, scenes_of, written_file};
 use crate::avds::{
+    AV1_CHROMA_TABLE_GROUPS,
     AV1_TABLE_GROUPS,
     AvdsFrame,
     AvdsMeta,
     FitOptions,
+    PlanesMeasured,
     REPORT_GROUPS,
     av1_table,
+    chroma_unavailable,
     read_avds,
     read_avds_groups,
     report_rows,
     rows_from_scenes,
 };
-use crate::{SceneGrain, build_table, frame_rows};
+use crate::{ChromaLayout, SceneGrain, build_table, frame_rows};
 
 const LUMA_ONLY: Measured = Measured {
     persistence: true,
@@ -152,4 +155,80 @@ fn an_empty_file_gives_an_empty_table() {
     let table = av1_table(&meta, Vec::new(), &options).expect("the table builds");
 
     assert_eq!(table, "filmgrn1\n");
+}
+
+#[test]
+fn av1_fgs_with_chroma_from_the_file_matches_the_direct_table() {
+    let scenes = scenes_of(&[30, 24, 7], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let meta = sample_meta(rows.len() as u64);
+    let options = FitOptions::default().with_chroma(true);
+    let file = written_file(&meta, &rows);
+    let (_, chroma_rows) = read_avds_groups(file, &AV1_CHROMA_TABLE_GROUPS).expect("the file reads");
+
+    let table = av1_table(&meta, chroma_rows, &options).expect("the table builds");
+    let direct = build_table(&scenes, meta.frame_rate, &options);
+
+    assert_eq!(table, direct);
+}
+
+#[test]
+fn chroma_is_unavailable_for_a_luma_only_file() {
+    let scenes = scenes_of(&[4], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let mut meta = sample_meta(rows.len() as u64);
+    meta.planes_measured = PlanesMeasured::Luma;
+
+    let reason = chroma_unavailable(&meta, &rows);
+
+    assert!(reason.is_some());
+}
+
+#[test]
+fn chroma_is_unavailable_for_a_422_file() {
+    let scenes = scenes_of(&[4], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let mut meta = sample_meta(rows.len() as u64);
+    meta.subsampling = ChromaLayout::Yuv422;
+
+    let reason = chroma_unavailable(&meta, &rows);
+
+    assert!(reason.is_some());
+}
+
+#[test]
+fn chroma_is_unavailable_without_chroma_table_rows() {
+    let scenes = scenes_of(&[4], LUMA_ONLY);
+    let rows = rows_from_scenes(&scenes);
+    let meta = sample_meta(rows.len() as u64);
+
+    let reason = chroma_unavailable(&meta, &rows);
+
+    assert!(reason.is_some());
+}
+
+#[test]
+fn chroma_is_available_for_a_measured_420_file() {
+    let scenes = scenes_of(&[4], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let meta = sample_meta(rows.len() as u64);
+
+    let reason = chroma_unavailable(&meta, &rows);
+
+    assert_eq!(reason, None);
+}
+
+#[test]
+fn av1_table_refuses_chroma_it_cannot_write() {
+    let scenes = scenes_of(&[4], LUMA_ONLY);
+    let rows = rows_from_scenes(&scenes);
+    let meta = sample_meta(rows.len() as u64);
+    let options = FitOptions::default().with_chroma(true);
+
+    let error = av1_table(&meta, rows, &options).expect_err("chroma cannot be written");
+
+    assert!(
+        error.to_string().contains("chroma grain cannot be written"),
+        "got {error}"
+    );
 }

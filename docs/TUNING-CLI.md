@@ -61,12 +61,14 @@ survive where each frequency on its own would fall under the threshold.
 
 **`--export-avds <PATH>` keeps the look of film grain.** It writes the source's grain, measured
 during the run, to a grain data file at PATH. `av-denoise synthesize av1-fgs` then turns the file
-into an AV1 film grain table, which describes the source's luma grain minus whatever the output
-still keeps. Add it to a finished AV1 encode with `regrain apply`, which applies each scene's
-entry. The decoder then adds matching grain back, so the encode stays clean while the picture
-keeps its grain. SVT-AV1's `--fgs-table` and `grav1synth apply` apply only the table's first entry
-to every frame, so they suit a single-scene table only. The y4m output is the same with or without
-the flag. It is rejected with `--channel-mode chroma`, and a failed run leaves no file.
+into an AV1 film grain table, which describes the source's luma and chroma grain minus whatever
+the output still keeps. `--planes luma` leaves chroma grain out, and so does a source that is not
+4:2:0 or a run that did not denoise chroma. Add it to a finished AV1 encode with `regrain apply`,
+which applies each scene's entry. The decoder then adds matching grain back, so the encode stays
+clean while the picture keeps its grain. SVT-AV1's `--fgs-table` and `grav1synth apply` apply only
+the table's first entry to every frame, so they suit a single-scene table only. The y4m output is
+the same with or without the flag. It is rejected with `--channel-mode chroma`, and a failed run
+leaves no file.
 
 `--fine-noise` on `synthesize av1-fgs` takes a share of the fine, fresh scan noise out of the
 table and keeps the textured grain. It defaults to 0.5, and 0 keeps everything the run measured.
