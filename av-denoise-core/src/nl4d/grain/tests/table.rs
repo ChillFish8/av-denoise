@@ -1,4 +1,4 @@
-use super::synthetic::{chroma_chunk, chroma_colour_frame, chroma_options, chunk_at, table_chunk};
+use super::synthetic::{chroma_chunk, chroma_options, chunk_at, table_chunk};
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::AR_COEFFS;
 use crate::nl4d::grain::segment::{FittedEntry, PlaneEntry, SceneGrain};
@@ -6,13 +6,9 @@ use crate::nl4d::grain::table::{FitOptions, boundary_ticks, build_table, format_
 
 const NTSC: (u64, u64) = (24_000, 1_001);
 
-/// A scene whose chroma chunks repeat its luma tables for both planes, with `colour_frame` in every
-/// frame.
-fn scene_with_chroma(first_frame: u64, chunks: Vec<GrainChunk>, colour_frame: &[f32]) -> SceneGrain {
-    let chroma_chunks = chunks
-        .iter()
-        .map(|chunk| chroma_chunk(chunk, chunk, colour_frame))
-        .collect();
+/// A scene whose chroma chunks repeat its luma tables, one-frame counts included, for both planes.
+fn scene_with_chroma(first_frame: u64, chunks: Vec<GrainChunk>) -> SceneGrain {
+    let chroma_chunks = chunks.iter().map(|chunk| chroma_chunk(chunk, chunk)).collect();
 
     SceneGrain {
         first_frame,
@@ -24,27 +20,25 @@ fn scene_with_chroma(first_frame: u64, chunks: Vec<GrainChunk>, colour_frame: &[
 /// Three scenes with drift, weaker one-frame grain, a thin chunk and a sparse scene, each with
 /// chroma.
 fn measured_scenes() -> Vec<SceneGrain> {
-    let colour = chroma_colour_frame(1.5, 1.0);
-
     let steady = chunk_at(2.0, 300, None);
     let drifted = chunk_at(2.9, 300, Some(1.2));
     let thin = table_chunk();
     let first_chunks = vec![steady, drifted, thin];
-    let first = scene_with_chroma(0, first_chunks, &colour);
+    let first = scene_with_chroma(0, first_chunks);
 
     let weak_frame = chunk_at(1.5, 300, Some(0.5));
     let full_frame = chunk_at(1.6, 300, None);
     let second_chunks = vec![weak_frame, full_frame];
-    let second = scene_with_chroma(72, second_chunks, &colour);
+    let second = scene_with_chroma(72, second_chunks);
 
     let sparse = table_chunk();
-    let third = scene_with_chroma(120, vec![sparse], &colour);
+    let third = scene_with_chroma(120, vec![sparse]);
 
     vec![first, second, third]
 }
 
 /// The table of [measured_scenes] with the default options, as built by the commit
-/// `Measure one-frame grain in place of kept grain`.
+/// `Read grain strength from one frame`.
 const HEAD_TABLE: &str = "filmgrn1\n\
     E 0 9801457 1 7391 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
@@ -56,7 +50,7 @@ const HEAD_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 9801458 29821457 1 8628 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 178 88 178 104 178 120 178 136 178 152 178 168 178 184 178\n\
+    \tsY 8  72 72 88 72 104 72 120 72 136 72 152 72 168 72 184 72\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
@@ -64,7 +58,7 @@ const HEAD_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 29821458 49841457 1 9865 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 93 88 93 104 93 120 93 136 93 152 93 168 93 184 93\n\
+    \tsY 8  72 30 88 30 104 30 120 30 136 30 152 30 168 30 184 30\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
@@ -72,7 +66,7 @@ const HEAD_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 49841458 59851458 1 11102 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 93 88 93 104 93 120 93 136 93 152 93 168 93 184 93\n\
+    \tsY 8  72 30 88 30 104 30 120 30 136 30 152 30 168 30 184 30\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
@@ -91,7 +85,7 @@ const HEAD_FINE_NOISE_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 9801458 29821457 1 8628 1\n\
     \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 167 88 167 104 167 120 167 136 167 152 167 168 167 184 167\n\
+    \tsY 8  72 67 88 67 104 67 120 67 136 67 152 67 168 67 184 67\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\
@@ -99,7 +93,7 @@ const HEAD_FINE_NOISE_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 29821458 49841457 1 9865 1\n\
     \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 86 88 86 104 86 120 86 136 86 152 86 168 86 184 86\n\
+    \tsY 8  72 28 88 28 104 28 120 28 136 28 152 28 168 28 184 28\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\
@@ -107,7 +101,7 @@ const HEAD_FINE_NOISE_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 49841458 59851458 1 11102 1\n\
     \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 86 88 86 104 86 120 86 136 86 152 86 168 86 184 86\n\
+    \tsY 8  72 28 88 28 104 28 120 28 136 28 152 28 168 28 184 28\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\

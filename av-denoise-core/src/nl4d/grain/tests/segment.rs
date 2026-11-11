@@ -3,13 +3,14 @@ use super::synthetic::{
     ar_field,
     autocov_of,
     chroma_chunk,
-    chroma_colour_frame,
     chroma_options,
     chunk_at,
     chunk_in_bucket,
     clear_pixels,
     gaussian_field,
     grain_record,
+    keep_frame_bins,
+    set_frame_count,
     set_source_count,
     table_chunk,
 };
@@ -23,7 +24,7 @@ use crate::nl4d::grain::consts::{
     MAX_POINTS,
     STD_BUCKETS,
 };
-use crate::nl4d::grain::fit::{bucket_edges, bucket_of, hist_median};
+use crate::nl4d::grain::fit::{bucket_edges, bucket_of, code_step, hist_median, unrounded_std};
 use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes, segment_scene};
 use crate::nl4d::grain::table::FitOptions;
 
@@ -46,6 +47,40 @@ fn fit_with_chroma(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
     fit_scenes(&scenes, &options)
 }
 
+/// Fits one chunk as its own scene, with rounding taken off at `bit_depth`.
+fn fit_chunk(chunk: GrainChunk, bit_depth: Option<u32>) -> FittedEntry {
+    let scene = scene_of(0, vec![chunk]);
+    let options = match bit_depth {
+        Some(depth) => FitOptions::default().with_bit_depth(depth),
+        None => FitOptions::default(),
+    };
+
+    let mut entries = fit_scenes(&[&scene], &options);
+    assert_eq!(entries.len(), 1);
+
+    entries.remove(0)
+}
+
+/// Each luma point's scaling value over two to the scaling shift.
+fn effective_points(entry: &FittedEntry) -> Vec<f64> {
+    let scale = (1u32 << entry.scaling_shift) as f64;
+
+    entry
+        .points
+        .iter()
+        .map(|&(_, value)| value as f64 / scale)
+        .collect()
+}
+
+/// The median of a bucket's histogram, holding every block in `bucket`.
+fn bucket_median(bucket: usize) -> f64 {
+    let edges = bucket_edges();
+    let mut counts = vec![0u32; STD_BUCKETS];
+    counts[bucket] = 300;
+
+    hist_median(&counts, &edges).expect("a populated bucket")
+}
+
 /// The position of the left neighbour's weight.
 fn left_lane() -> usize {
     AR_OFFSETS
@@ -64,11 +99,20 @@ fn left_record(weight: f64) -> Vec<f64> {
     autocov_of(&field, 300, 300)
 }
 
-/// A chunk whose source blocks sit at 2 codes in luma bins 4 to 11, with `record` as its texture.
+/// Sets the first frame's one-frame counts at `bucket` in luma bins 4 to 11.
+fn fill_frame_bucket(chunk: &mut GrainChunk, bucket: usize) {
+    for bin in 4..12 {
+        set_frame_count(chunk, bin * STD_BUCKETS + bucket, 300);
+    }
+}
+
+/// A chunk whose source and one-frame blocks sit at 2 codes in luma bins 4 to 11, with `record` as
+/// its texture.
 fn chunk_with_record(record: &[f64]) -> GrainChunk {
     let edges = bucket_edges();
     let bucket = bucket_of(2.0 / 255.0, &edges);
     let mut chunk = chunk_in_bucket(bucket, 300);
+    fill_frame_bucket(&mut chunk, bucket);
     add_group_record(&mut chunk, bucket / BUCKETS_PER_GROUP, record);
 
     chunk
@@ -139,7 +183,8 @@ fn median_of_chunk(chunk: &GrainChunk) -> f64 {
 /// A chunk at [EDGE_BUCKET] and the strength group holding twice its median.
 fn edge_chunk() -> (GrainChunk, usize) {
     let edges = bucket_edges();
-    let chunk = chunk_in_bucket(EDGE_BUCKET, 300);
+    let mut chunk = chunk_in_bucket(EDGE_BUCKET, 300);
+    fill_frame_bucket(&mut chunk, EDGE_BUCKET);
     let band_high = 2.0 * median_of_chunk(&chunk);
     let edge_bucket = bucket_of(band_high as f32, &edges);
 
@@ -340,6 +385,7 @@ fn a_chunk_in_every_luma_bin_thins_to_the_point_limit() {
     let mut chunk = chunk_at(2.0, 300, None);
     for bin in 0..LUMA_BINS {
         set_source_count(&mut chunk, bin * STD_BUCKETS + bucket, 300);
+        set_frame_count(&mut chunk, bin * STD_BUCKETS + bucket, 300);
     }
 
     let scene = scene_of(0, vec![chunk]);
@@ -356,13 +402,14 @@ fn a_chunk_in_every_luma_bin_thins_to_the_point_limit() {
 
 #[test]
 fn a_segment_without_chroma_borrows_from_its_neighbour() {
-    let colour = chroma_colour_frame(6.0, 5.0);
     let steady = chunk_at(2.0, 300, None);
     let drifted = chunk_at(2.8, 300, None);
     let settled = chunk_at(2.0, 300, None);
-    let steady_chroma = chroma_chunk(&steady, &steady, &colour);
-    let drifted_chroma = chroma_chunk(&drifted, &drifted, &[]);
-    let settled_chroma = chroma_chunk(&settled, &settled, &colour);
+    let mut thin_chroma = drifted.clone();
+    keep_frame_bins(&mut thin_chroma, 4..6);
+    let steady_chroma = chroma_chunk(&steady, &steady);
+    let drifted_chroma = chroma_chunk(&thin_chroma, &thin_chroma);
+    let settled_chroma = chroma_chunk(&settled, &settled);
     let scene = SceneGrain {
         first_frame: 0,
         chunks: vec![steady, drifted, settled],
@@ -384,8 +431,7 @@ fn the_ar_shift_fits_every_plane() {
     let chroma_record = left_record(0.7);
     let luma = chunk_with_record(&luma_record);
     let chroma_tables = chunk_with_record(&chroma_record);
-    let colour = chroma_colour_frame(1.5, 1.5);
-    let chroma = chroma_chunk(&chroma_tables, &chroma_tables, &colour);
+    let chroma = chroma_chunk(&chroma_tables, &chroma_tables);
     let scenes = vec![SceneGrain {
         first_frame: 0,
         chunks: vec![luma],
@@ -415,8 +461,8 @@ fn the_ar_shift_fits_every_plane() {
 #[test]
 fn strong_chroma_lowers_the_scaling_shift() {
     let luma = chunk_at(2.0, 300, None);
-    let colour = chroma_colour_frame(8.0, 8.0);
-    let chroma = chroma_chunk(&luma, &luma, &colour);
+    let chroma_tables = chunk_at(2.0, 300, Some(8.0));
+    let chroma = chroma_chunk(&chroma_tables, &chroma_tables);
     let scenes = vec![SceneGrain {
         first_frame: 0,
         chunks: vec![luma],
@@ -432,5 +478,84 @@ fn strong_chroma_lowers_the_scaling_shift() {
     for plane in planes {
         let capped = plane.points.iter().any(|&(_, value)| value == 255);
         assert!(!capped || entry.scaling_shift == 8, "{:?}", plane.points);
+    }
+}
+
+/// The one-frame grain doubles, so each point grows by the ratio of the two bucket medians.
+#[test]
+fn strength_reads_the_one_frame_histogram() {
+    let edges = bucket_edges();
+    let weak_bucket = bucket_of(2.0 / 255.0, &edges);
+    let strong_bucket = bucket_of(4.0 / 255.0, &edges);
+    let weak_median = bucket_median(weak_bucket);
+    let strong_median = bucket_median(strong_bucket);
+    let growth = strong_median / weak_median;
+    let weak_chunk = chunk_at(1.0, 300, Some(2.0));
+    let strong_chunk = chunk_at(1.0, 300, Some(4.0));
+
+    let weak = fit_chunk(weak_chunk, None);
+    let strong = fit_chunk(strong_chunk, None);
+    let weak_points = effective_points(&weak);
+    let strong_points = effective_points(&strong);
+    let coarsest_shift = weak.scaling_shift.min(strong.scaling_shift);
+    let step = 1.0 / (1u32 << coarsest_shift) as f64;
+
+    assert!((growth / 2.0 - 1.0).abs() < 0.11, "{growth}");
+    assert_eq!(weak.ar_coeffs, strong.ar_coeffs);
+    assert_eq!(weak_points.len(), strong_points.len());
+    for (&weak_point, &strong_point) in weak_points.iter().zip(&strong_points) {
+        let error = (strong_point - growth * weak_point).abs();
+        assert!(error <= step, "{weak_point} {strong_point} {growth}");
+    }
+}
+
+#[test]
+fn the_source_histogram_no_longer_sets_strength() {
+    let low_source = chunk_at(1.0, 300, Some(2.0));
+    let high_source = chunk_at(1.5, 300, Some(2.0));
+
+    let low = fit_chunk(low_source, None);
+    let high = fit_chunk(high_source, None);
+
+    assert_eq!(low.ar_coeffs, high.ar_coeffs);
+    assert_eq!(low.scaling_shift, high.scaling_shift);
+    assert_eq!(low.points, high.points);
+}
+
+#[test]
+fn rounding_comes_off_each_bin_at_eight_bits() {
+    let edges = bucket_edges();
+    let frame_bucket = bucket_of(0.6 / 255.0, &edges);
+    let median = bucket_median(frame_bucket);
+    let unrounded = unrounded_std(median, code_step(8));
+    let expected = unrounded / median;
+
+    let chunk = chunk_at(1.0, 300, Some(0.6));
+    let rounded_entry = fit_chunk(chunk.clone(), None);
+    let unrounded_entry = fit_chunk(chunk, Some(8));
+    let rounded_points = effective_points(&rounded_entry);
+    let unrounded_points = effective_points(&unrounded_entry);
+
+    assert!(expected < 0.95, "{expected}");
+    assert!(!rounded_points.is_empty());
+    assert_eq!(rounded_points.len(), unrounded_points.len());
+    for (&before, &after) in rounded_points.iter().zip(&unrounded_points) {
+        let ratio = after / before;
+        assert!((ratio / expected - 1.0).abs() < 0.02, "{ratio} vs {expected}");
+    }
+}
+
+#[test]
+fn faint_grain_gives_finite_small_points() {
+    let chunk = chunk_at(1.0, 300, Some(0.2));
+    let rounded_entry = fit_chunk(chunk.clone(), None);
+    let unrounded_entry = fit_chunk(chunk, Some(8));
+    let rounded_points = effective_points(&rounded_entry);
+    let unrounded_points = effective_points(&unrounded_entry);
+
+    assert_eq!(rounded_points.len(), unrounded_points.len());
+    for (&before, &after) in rounded_points.iter().zip(&unrounded_points) {
+        assert!(after.is_finite() && after > 0.0, "{after}");
+        assert!(after < before, "{after} vs {before}");
     }
 }

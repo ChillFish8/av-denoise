@@ -269,7 +269,8 @@ fn synthesize_av1_fgs_matches_the_measured_table() {
     let args = SynthesizeArgs { kind };
     run_synthesize(&args).expect("the table is synthesized");
 
-    let options = FitOptions::default();
+    // The clip is 8-bit, and the synthesized table takes that rounding off.
+    let options = FitOptions::default().with_bit_depth(8);
     let expected = build_table(&measured, FRAME_RATE, &options);
     let synthesized = std::fs::read_to_string(&synthesized_path).expect("the synthesized table exists");
     let entries = expected.matches("\nE ").count();

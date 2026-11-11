@@ -235,20 +235,20 @@ mod tests {
     /// The pixels of one measured 8x8 block.
     const CELL_PIXELS: f32 = 64.0;
 
-    /// The brightness bins of a colour fit, with the cells of each and the header words after them.
-    const BRIGHTNESS_BINS: usize = 16;
-    const CELLS_PER_BRIGHTNESS: usize = 61;
-    const COLOUR_CELLS: usize = BRIGHTNESS_BINS * CELLS_PER_BRIGHTNESS;
-    const HEADER_LEN: usize = 22;
-    const POPULATED_WORD: usize = 18;
-    const BLOCKS_WORD: usize = 19;
-    const LUMA_LOW_WORD: usize = 20;
-    const LUMA_HIGH_WORD: usize = 21;
-    /// Values in a frame's chroma colour fit, both planes.
-    const CHROMA_COLOUR_LEN: usize = 2 * (2 * COLOUR_CELLS + HEADER_LEN);
+    /// The chroma rows a test file holds.
+    #[derive(Debug, Clone, Copy)]
+    enum ChromaRows {
+        Missing,
+        Measured,
+        /// Chroma tables whose one-frame histograms are empty.
+        WithoutOneFrame,
+    }
 
     /// `planes` tables of uncorrelated grain with the variance `variance`.
-    fn table_values(variance: f32, planes: usize) -> Vec<f32> {
+    ///
+    /// The source blocks always fill the source histogram, and the one-frame histogram too when
+    /// `one_frame` is set.
+    fn table_values(variance: f32, planes: usize, one_frame: bool) -> Vec<f32> {
         let pixels = BLOCKS_PER_BIN * BLOCK_BINS.len() as f32 * CELL_PIXELS;
         let group = BLOCK_BUCKET / BUCKETS_PER_GROUP;
         let group_start = 2 * HISTOGRAM_LEN + group * RECORD_LEN;
@@ -257,7 +257,11 @@ mod tests {
         for plane in 0..planes {
             let start = plane * TABLE_LEN;
             for bin in BLOCK_BINS {
-                values[start + bin * STD_BUCKETS + BLOCK_BUCKET] = BLOCKS_PER_BIN;
+                let slot = start + bin * STD_BUCKETS + BLOCK_BUCKET;
+                values[slot] = BLOCKS_PER_BIN;
+                if one_frame {
+                    values[HISTOGRAM_LEN + slot] = BLOCKS_PER_BIN;
+                }
             }
 
             values[start + group_start] = variance * pixels;
@@ -267,47 +271,31 @@ mod tests {
         values
     }
 
-    /// A colour fit of both planes, each with grain of 4 codes over luma 40 to 150.
-    fn chroma_colour_values() -> Vec<f32> {
-        let mut values = Vec::with_capacity(CHROMA_COLOUR_LEN);
-        for _plane in 0..2 {
-            let log_grain = vec![4.0f32.ln(); COLOUR_CELLS];
-            let positions = vec![0.0; COLOUR_CELLS];
-            let mut header = vec![0.0; HEADER_LEN];
-            header[POPULATED_WORD] = 1.0;
-            header[BLOCKS_WORD] = 600.0;
-            header[LUMA_LOW_WORD] = 40.0;
-            header[LUMA_HIGH_WORD] = 150.0;
-
-            values.extend(log_grain);
-            values.extend(positions);
-            values.extend(header);
-        }
-
-        values
-    }
-
-    fn table_row(frame: u64, chroma: bool) -> AvdsFrame {
-        let chroma_table = chroma.then(|| table_values(0.0005, 2));
-        let chroma_colour = chroma.then(chroma_colour_values);
+    fn table_row(frame: u64, chroma: ChromaRows) -> AvdsFrame {
+        let chroma_table = match chroma {
+            ChromaRows::Missing => None,
+            ChromaRows::Measured => Some(table_values(0.0005, 2, true)),
+            ChromaRows::WithoutOneFrame => Some(table_values(0.0005, 2, false)),
+        };
+        let table = table_values(0.001, 1, true);
 
         AvdsFrame {
             frame,
             scene: 0,
             first_of_scene: frame == 0,
-            table: Some(table_values(0.001, 1)),
+            table: Some(table),
             chroma_table,
             persistence: None,
             chroma_persistence: None,
             noise: None,
             chroma_noise: None,
             colour: None,
-            chroma_colour,
+            chroma_colour: None,
         }
     }
 
-    /// Writes a 4:2:0 grain data file of `frames` frames, with chroma rows when `chroma` is on.
-    fn write_avds_file(path: &Path, frames: u64, chroma: bool) {
+    /// Writes a 4:2:0 grain data file of `frames` frames, with the chroma rows `chroma` asks for.
+    fn write_avds_file(path: &Path, frames: u64, chroma: ChromaRows) {
         let meta = AvdsMeta {
             writer: "av-denoise test".to_owned(),
             frame_rate: (24, 1),
@@ -548,7 +536,7 @@ mod tests {
         let input = dir.path().join("run.avds");
         let both_output = dir.path().join("both.tbl");
         let luma_output = dir.path().join("luma.tbl");
-        write_avds_file(&input, 40, false);
+        write_avds_file(&input, 40, ChromaRows::Missing);
         let both_planes = vec![GrainPlane::Luma, GrainPlane::Chroma];
         let both_args = av1_fgs(input.clone(), both_output.clone(), both_planes);
         let luma_args = av1_fgs(input, luma_output.clone(), vec![GrainPlane::Luma]);
@@ -565,11 +553,36 @@ mod tests {
     }
 
     #[test]
+    fn a_file_without_one_frame_chroma_writes_the_luma_table_and_warns() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let input = dir.path().join("run.avds");
+        let both_output = dir.path().join("both.tbl");
+        let luma_output = dir.path().join("luma.tbl");
+        write_avds_file(&input, 40, ChromaRows::WithoutOneFrame);
+        let both_planes = vec![GrainPlane::Luma, GrainPlane::Chroma];
+        let both_args = av1_fgs(input.clone(), both_output.clone(), both_planes);
+        let luma_args = av1_fgs(input, luma_output.clone(), vec![GrainPlane::Luma]);
+
+        let warnings = capture_warnings(|| run_synthesize(&both_args).expect("the table is written"));
+        run_synthesize(&luma_args).expect("the table is written");
+
+        let both = std::fs::read_to_string(both_output).expect("the table is written");
+        let luma = std::fs::read_to_string(luma_output).expect("the table is written");
+
+        assert_ne!(luma, "filmgrn1\n");
+        assert_eq!(both, luma);
+        assert!(
+            warnings.contains("no one-frame chroma measurements"),
+            "got {warnings}"
+        );
+    }
+
+    #[test]
     fn luma_planes_match_the_luma_only_table() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let input = dir.path().join("run.avds");
         let output = dir.path().join("grain.tbl");
-        write_avds_file(&input, 40, true);
+        write_avds_file(&input, 40, ChromaRows::Measured);
         let args = av1_fgs(input.clone(), output.clone(), vec![GrainPlane::Luma]);
         run_synthesize(&args).expect("the table is written");
 
@@ -586,7 +599,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let input = dir.path().join("run.avds");
         let output = dir.path().join("grain.tbl");
-        write_avds_file(&input, 40, true);
+        write_avds_file(&input, 40, ChromaRows::Measured);
         let both_planes = vec![GrainPlane::Luma, GrainPlane::Chroma];
         let args = av1_fgs(input.clone(), output.clone(), both_planes);
         run_synthesize(&args).expect("the table is written");

@@ -16,6 +16,7 @@ use crate::nl4d::grain::consts::{
 use crate::nl4d::grain::fit::{
     bucket_edges,
     bucket_of,
+    code_step,
     finest_ar_shift,
     finest_scaling_shift,
     hist_median,
@@ -26,6 +27,7 @@ use crate::nl4d::grain::fit::{
     scaling_points,
     scaling_points_at,
     undo_mean_removal,
+    unrounded_std,
     yule_walker,
 };
 use crate::nl4d::grain::template::{median_of, sample_std, template_stats};
@@ -345,4 +347,53 @@ fn mean_correction_recovers_an_ar_fields_correlation() {
     }
 
     assert!(truth[1] - measured[1] > 0.03, "{} vs {}", measured[1], truth[1]);
+}
+
+#[test]
+fn unrounded_std_of_no_grain_is_zero() {
+    let unrounded = unrounded_std(0.0, 1.0);
+
+    assert_eq!(unrounded, 0.0);
+}
+
+#[test]
+fn unrounded_std_matches_the_rounding_model() {
+    for (measured, expected) in [(0.271, 0.13), (0.577, 0.50), (0.850, 0.80)] {
+        let unrounded = unrounded_std(measured, 1.0);
+
+        assert!((unrounded - expected).abs() < 0.01, "{measured}: {unrounded}");
+    }
+}
+
+#[test]
+fn unrounded_std_of_faint_grain_stays_positive() {
+    let unrounded: Vec<f64> = [0.20, 0.25, 0.28]
+        .iter()
+        .map(|&measured| unrounded_std(measured, 1.0))
+        .collect();
+
+    for &value in &unrounded {
+        assert!(value.is_finite() && value > 0.0, "{unrounded:?}");
+    }
+
+    assert!(
+        unrounded.windows(2).all(|pair| pair[0] < pair[1]),
+        "{unrounded:?}"
+    );
+}
+
+#[test]
+fn ten_bit_rounding_barely_moves_strong_grain() {
+    let step: f64 = 255.0 / 1023.0;
+    let unrounded = unrounded_std(0.80, step);
+    let expected = (0.64 - step * step / 12.0).sqrt();
+
+    assert!((unrounded - expected).abs() < 0.004, "{unrounded} vs {expected}");
+}
+
+#[test]
+fn the_code_step_of_eight_bits_is_one_code() {
+    let step = code_step(8);
+
+    assert_eq!(step, 1.0 / 255.0);
 }

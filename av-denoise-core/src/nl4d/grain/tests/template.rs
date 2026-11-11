@@ -1,4 +1,4 @@
-use crate::nl4d::grain::consts::{AR_COEFFS, AR_OFFSETS, LAGS};
+use crate::nl4d::grain::consts::{AR_COEFFS, AR_OFFSETS, CELL, LAGS, TEMPLATE_SEEDS};
 use crate::nl4d::grain::gaussian::GAUSSIAN_SEQUENCE;
 use crate::nl4d::grain::template::{
     Av1Random,
@@ -6,6 +6,8 @@ use crate::nl4d::grain::template::{
     chroma_template,
     chroma_template_stats,
     luma_template,
+    median_of,
+    sample_std,
     template_seed,
     template_stats,
 };
@@ -185,4 +187,51 @@ fn chroma_template_stats_grow_with_correlation() {
         "flat median {flat_median}"
     );
     assert!(sigma > flat_sigma, "sigma {sigma} flat sigma {flat_sigma}");
+}
+
+/// The columns of a 4:2:0 chroma template.
+const CHROMA_COLS: usize = 44;
+/// The first row and column of a chroma template's interior.
+const CHROMA_INTERIOR_START: usize = 6;
+/// The side length of a chroma template's interior.
+const CHROMA_INTERIOR_SIZE: usize = 32;
+const BLOCK_SIZE: usize = CELL as usize;
+const BLOCKS_PER_SIDE: usize = CHROMA_INTERIOR_SIZE / BLOCK_SIZE;
+
+/// The sample std of every 8x8 block of a chroma template's 32x32 interior.
+fn interior_block_stds(template: &[i32]) -> Vec<f64> {
+    let mut stds = Vec::new();
+    for block_y in 0..BLOCKS_PER_SIDE {
+        for block_x in 0..BLOCKS_PER_SIDE {
+            let mut block = Vec::with_capacity(BLOCK_SIZE * BLOCK_SIZE);
+            for y in 0..BLOCK_SIZE {
+                let row = CHROMA_INTERIOR_START + block_y * BLOCK_SIZE + y;
+                let col = CHROMA_INTERIOR_START + block_x * BLOCK_SIZE;
+                let row_start = row * CHROMA_COLS + col;
+                let values = template[row_start..row_start + BLOCK_SIZE].iter();
+                block.extend(values.map(|&value| value as f64));
+            }
+
+            let block_std = sample_std(&block);
+            stds.push(block_std);
+        }
+    }
+
+    stds
+}
+
+#[test]
+fn chroma_template_stats_use_8x8_blocks() {
+    let mut block_stds = Vec::new();
+    for index in 0..TEMPLATE_SEEDS {
+        let seed = template_seed(index);
+        let template = chroma_template(&SCENE_EIGHT, 7, seed, ChromaPlane::Cr);
+        let stds = interior_block_stds(&template);
+        block_stds.extend(stds);
+    }
+
+    let expected = median_of(&mut block_stds);
+    let (_, median) = chroma_template_stats(&SCENE_EIGHT, 7, ChromaPlane::Cr);
+
+    assert_eq!(median, expected);
 }

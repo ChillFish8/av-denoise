@@ -1,4 +1,11 @@
-use super::synthetic::{ar_field, cell_mean_removed_record, gaussian_field, set_source_count, table_chunk};
+use super::synthetic::{
+    ar_field,
+    cell_mean_removed_record,
+    gaussian_field,
+    set_frame_count,
+    set_source_count,
+    table_chunk,
+};
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{
     AR_COEFFS,
@@ -122,6 +129,8 @@ fn block_stds(field: &[f64]) -> Vec<f64> {
 }
 
 /// A chunk measured from `field` in luma bins 4 to 11, its record in the median block's group.
+///
+/// The field's block stds fill both the source and the one-frame histograms.
 fn chunk_of(field: &[f64]) -> GrainChunk {
     let edges = bucket_edges();
     let mut counts = vec![0u32; STD_BUCKETS];
@@ -135,6 +144,7 @@ fn chunk_of(field: &[f64]) -> GrainChunk {
     for bin in 4..12 {
         for (bucket, &count) in counts.iter().enumerate() {
             set_source_count(&mut chunk, bin * STD_BUCKETS + bucket, count);
+            set_frame_count(&mut chunk, bin * STD_BUCKETS + bucket, count);
         }
     }
 

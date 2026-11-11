@@ -1,6 +1,5 @@
 use super::consts::{AR_COEFFS, AR_OFFSETS, CELL, TEMPLATE_SEEDS};
 use super::gaussian::GAUSSIAN_SEQUENCE;
-use crate::noise::TEMPORAL_NOISE_BLOCK;
 
 /// The size of a grain template and the interior its statistics read.
 #[derive(Copy, Clone)]
@@ -23,13 +22,13 @@ const LUMA_LAYOUT: TemplateLayout = TemplateLayout {
     block_size: CELL as usize,
 };
 
-/// The 4:2:0 chroma template, whose blocks match the colour model's grain blocks.
+/// The 4:2:0 chroma template, whose 8x8 blocks match the one-frame chroma cells.
 const CHROMA_LAYOUT: TemplateLayout = TemplateLayout {
     rows: 38,
     cols: 44,
     interior_start: 6,
     interior_size: 32,
-    block_size: TEMPORAL_NOISE_BLOCK as usize,
+    block_size: CELL as usize,
 };
 
 /// A chroma plane of an AV1 film grain template.
@@ -145,10 +144,9 @@ pub(crate) fn template_stats(coeffs: &[i32; AR_COEFFS], ar_shift: u32) -> (f64, 
     stats_over_seeds(LUMA_LAYOUT, build)
 }
 
-/// The grain std of these weights' chroma templates, and the median std of their 16x16 blocks.
+/// The grain std of these weights' chroma templates, and the median std of their 8x8 blocks.
 ///
 /// Both read the 32x32 interior of [TEMPLATE_SEEDS] templates. A block's std removes its own mean.
-/// The blocks match the colour model's chroma grain blocks.
 pub(crate) fn chroma_template_stats(
     coeffs: &[i32; AR_COEFFS],
     ar_shift: u32,

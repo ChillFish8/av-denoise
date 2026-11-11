@@ -19,6 +19,7 @@ use super::consts::{
 };
 use super::fit::{
     bucket_edges,
+    code_step,
     finest_ar_shift,
     finest_scaling_shift,
     floor_fraction,
@@ -30,6 +31,7 @@ use super::fit::{
     scaling_points_at,
     thinned,
     undo_mean_removal,
+    unrounded_std,
     yule_walker,
 };
 use super::table::FitOptions;
@@ -76,11 +78,12 @@ pub(crate) struct PlaneEntry {
     pub points: Vec<(u8, u8)>,
 }
 
-/// The source std median of one populated luma bin.
+/// The one-frame block std of one populated luma bin.
 #[derive(Debug, Clone, Copy)]
-struct BinStrength {
-    bin: usize,
-    std: f64,
+pub(crate) struct BinStrength {
+    pub bin: usize,
+    /// The bin's median one-frame block std, with any rounding taken off, in normalised units.
+    pub std: f64,
 }
 
 /// Quantised AR weights and their shift.
@@ -190,24 +193,39 @@ fn drifted(open: &TableSums, chunk: &TableSums, edges: &[f32]) -> bool {
     !(1.0 / DRIFT..=DRIFT).contains(&ratio)
 }
 
-/// Per-bin strength from the medians, `None` when too few bins are populated.
-fn strength_of(stats: &TableSums, edges: &[f32]) -> Option<Vec<BinStrength>> {
+/// Per-bin strength from the one-frame medians, `None` when too few bins are populated.
+///
+/// With `rounding` holding a code step, each median has that rounding taken off by
+/// [unrounded_std].
+pub(crate) fn strength_of(
+    stats: &TableSums,
+    edges: &[f32],
+    rounding: Option<f64>,
+) -> Option<Vec<BinStrength>> {
     let mut bins = Vec::new();
     for bin in 0..LUMA_BINS {
-        let source = &stats.source_hist[bin * STD_BUCKETS..(bin + 1) * STD_BUCKETS];
-        let source_blocks: u64 = source.iter().map(|&count| count as u64).sum();
-        if source_blocks < MIN_BLOCKS_PER_BIN {
+        let counts = &stats.frame_hist[bin * STD_BUCKETS..(bin + 1) * STD_BUCKETS];
+        let blocks: u64 = counts.iter().map(|&count| count as u64).sum();
+        if blocks < MIN_BLOCKS_PER_BIN {
             continue;
         }
 
-        let source_median = hist_median(source, edges).expect("bin is populated");
-        bins.push(BinStrength {
-            bin,
-            std: source_median,
-        });
+        let median = hist_median(counts, edges).expect("bin is populated");
+        let std = match rounding {
+            Some(code_step) => unrounded_std(median, code_step),
+            None => median,
+        };
+        bins.push(BinStrength { bin, std });
     }
 
     (bins.len() >= MIN_POPULATED_BINS).then_some(bins)
+}
+
+/// The 8-bit luma at the centre of luma bin `bin`.
+pub(crate) fn bin_luma(bin: usize) -> u8 {
+    let centre = (bin as f64 + 0.5) * 256.0 / LUMA_BINS as f64;
+
+    centre.round() as u8
 }
 
 /// The texture solved from the strength groups near the median source std.
@@ -304,17 +322,19 @@ fn reduced_weights(corrected: &[f64], measured: TableWeights) -> TableWeights {
 
 /// Fits every scene's segments, borrowing missing strength or texture, and drops what has no donor.
 ///
-/// With chroma on, each chroma plane borrows its texture and target the same way. An entry gets
-/// chroma only when both planes have both.
+/// Every plane reads its strength from one frame's grain, with the rounding of
+/// [FitOptions::bit_depth] taken off. With chroma on, each chroma plane borrows its texture and
+/// target the same way. An entry gets chroma only when both planes have both.
 pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<FittedEntry> {
     let edges = bucket_edges();
+    let rounding = options.bit_depth.map(code_step);
     let mut parts = Vec::new();
     for (scene_index, scene) in scenes.iter().enumerate() {
         for segment in segment_scene(scene) {
-            let strength = strength_of(&segment.table, &edges);
+            let strength = strength_of(&segment.table, &edges, rounding);
             let texture = texture_of(&segment.table, &edges, options.fine_noise);
             let chroma = if options.chroma {
-                segment_chroma(scene, &segment, &edges)
+                segment_chroma(scene, &segment, &edges, rounding)
             } else {
                 Default::default()
             };
@@ -354,11 +374,16 @@ pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<Fi
 /// The chroma measurements of the scene's chroma chunks the segment covers.
 ///
 /// A scene without chroma chunks for the segment gives all of them missing.
-fn segment_chroma(scene: &SceneGrain, segment: &Segment, edges: &[f32]) -> [ChromaParts; CHROMA_PLANES] {
+fn segment_chroma(
+    scene: &SceneGrain,
+    segment: &Segment,
+    edges: &[f32],
+    rounding: Option<f64>,
+) -> [ChromaParts; CHROMA_PLANES] {
     let covered = scene.chroma_chunks.get(segment.chunks.clone());
     let chunks = covered.unwrap_or_default();
 
-    chroma_parts(chunks, edges)
+    chroma_parts(chunks, edges, rounding)
 }
 
 /// Both chroma planes' texture and target, each borrowed on its own, `None` when any is missing.
@@ -469,7 +494,7 @@ fn build_entry(
 
 /// Luma's strength targets, as `(luma, sigma)` with sigma in normalised units.
 ///
-/// Each bin's target is its source block std turned into a whole-field std.
+/// Each bin's target is its one-frame block std turned into a whole-field std.
 fn luma_targets(strength: &[BinStrength], texture: Texture) -> Vec<(u8, f64)> {
     let factor = texture.block_to_field;
 
@@ -478,9 +503,8 @@ fn luma_targets(strength: &[BinStrength], texture: Texture) -> Vec<(u8, f64)> {
     chosen
         .iter()
         .map(|entry| {
-            let sigma = entry.std * factor;
-            let centre = (entry.bin as f64 + 0.5) * 256.0 / LUMA_BINS as f64;
-            (centre.round() as u8, sigma)
+            let luma = bin_luma(entry.bin);
+            (luma, entry.std * factor)
         })
         .collect()
 }

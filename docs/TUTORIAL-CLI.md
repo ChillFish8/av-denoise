@@ -275,9 +275,9 @@ can try different options without denoising again.
 
 ### `synthesize av1-fgs`
 
-Writes an AV1 film grain table for the grain the run removed. Add it to a finished AV1 encode with
-`regrain apply`, which applies each scene's entry. SVT-AV1 `--fgs-table` and `grav1synth apply`
-apply only its first entry, so they suit a single-scene table only.
+Writes an AV1 film grain table for all of the source's grain, as one frame shows it. Add it to a
+finished AV1 encode with `regrain apply`, which applies each scene's entry. SVT-AV1 `--fgs-table`
+and `grav1synth apply` apply only its first entry, so they suit a single-scene table only.
 
 The table holds luma and chroma grain by default. Chroma grain needs 4:2:0 video from a run that
 denoised chroma. Otherwise the command warns and writes luma grain only.

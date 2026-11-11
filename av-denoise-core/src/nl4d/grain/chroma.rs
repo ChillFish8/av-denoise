@@ -1,5 +1,5 @@
 use super::chunk::{GrainChunk, TableSums};
-use super::consts::{AR_COEFFS, CHROMA_PLANES, MAX_CHROMA_POINTS, MIN_POPULATED_BINS};
+use super::consts::{AR_COEFFS, CHROMA_PLANES, MAX_CHROMA_POINTS};
 use super::fit::{
     finest_ar_shift,
     quantise_at,
@@ -9,18 +9,8 @@ use super::fit::{
     undo_mean_removal,
     yule_walker,
 };
-use super::segment::{PlaneEntry, pooled_record};
+use super::segment::{BinStrength, PlaneEntry, bin_luma, pooled_record, strength_of};
 use super::template::{ChromaPlane, chroma_template_stats};
-use crate::noise::colour::{
-    COLOUR_BRIGHTNESS_BINS,
-    COLOUR_BRIGHTNESS_STEP,
-    COLOUR_CELLS,
-    COLOUR_CELLS_PER_BRIGHTNESS,
-    COLOUR_FIT_PLANE_LUMA_HIGH,
-    COLOUR_FIT_PLANE_LUMA_LOW,
-    COLOUR_FIT_PLANE_POPULATED,
-    COLOUR_FIT_PLANE_WORDS,
-};
 
 /// A chroma plane's fitted texture.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,7 +27,7 @@ pub(crate) struct ChromaTexture {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ChromaParts {
     pub texture: Option<ChromaTexture>,
-    /// The grain's block std at up to [MAX_CHROMA_POINTS] lumas, in 8-bit codes.
+    /// The grain's one-frame block std at up to [MAX_CHROMA_POINTS] lumas, in normalised units.
     pub target: Option<Vec<(u8, f64)>>,
 }
 
@@ -45,7 +35,7 @@ pub(crate) struct ChromaParts {
 #[derive(Debug, Clone)]
 pub(crate) struct ChromaFit {
     pub texture: ChromaTexture,
-    /// The grain's block std at each luma, in 8-bit codes.
+    /// The grain's one-frame block std at each luma, in normalised units.
     pub target: Vec<(u8, f64)>,
 }
 
@@ -59,27 +49,28 @@ pub(crate) struct ChromaScaling {
 }
 
 /// Each chroma plane's own measurements over `chunks`, Cb then Cr.
-pub(crate) fn chroma_parts(chunks: &[GrainChunk], edges: &[f32]) -> [ChromaParts; CHROMA_PLANES] {
-    let mut colour = Vec::new();
-    let mut frames = 0usize;
-    for chunk in chunks {
-        colour.extend_from_slice(&chunk.frame_colour);
-        frames += chunk.frames as usize;
-    }
-
-    let cb = plane_parts(chunks, &colour, frames, ChromaPlane::Cb, edges);
-    let cr = plane_parts(chunks, &colour, frames, ChromaPlane::Cr, edges);
+///
+/// With `rounding` holding a code step, each strength reading has that rounding taken off.
+pub(crate) fn chroma_parts(
+    chunks: &[GrainChunk],
+    edges: &[f32],
+    rounding: Option<f64>,
+) -> [ChromaParts; CHROMA_PLANES] {
+    let cb = plane_parts(chunks, ChromaPlane::Cb, edges, rounding);
+    let cr = plane_parts(chunks, ChromaPlane::Cr, edges, rounding);
 
     [cb, cr]
 }
 
-/// One plane's texture from its summed table and its target from the colour fit's levels.
+/// One plane's texture and target, both from its summed table.
+///
+/// The target reads the one-frame histogram, binned by luma, and thins evenly to
+/// [MAX_CHROMA_POINTS] bins, keeping the first and last.
 fn plane_parts(
     chunks: &[GrainChunk],
-    colour: &[f32],
-    frames: usize,
     plane: ChromaPlane,
     edges: &[f32],
+    rounding: Option<f64>,
 ) -> ChromaParts {
     let mut stats = TableSums::zeroed();
     for chunk in chunks {
@@ -88,19 +79,31 @@ fn plane_parts(
     }
 
     let texture = chroma_texture_of(&stats, edges, plane);
-    let levels = chroma_levels(colour, frames, plane);
-    let target = levels.map(|levels| chroma_targets(&levels));
+    let strength = strength_of(&stats, edges, rounding);
+    let target = strength.map(|bins| thinned_targets(&bins));
 
     ChromaParts { texture, target }
+}
+
+/// The `(luma, std)` targets of a plane's bins, thinned to [MAX_CHROMA_POINTS].
+fn thinned_targets(bins: &[BinStrength]) -> Vec<(u8, f64)> {
+    let chosen = thinned(bins, MAX_CHROMA_POINTS);
+
+    chosen
+        .iter()
+        .map(|entry| {
+            let luma = bin_luma(entry.bin);
+            (luma, entry.std)
+        })
+        .collect()
 }
 
 /// The plane's weights rounded at `ar_shift`, its template std and its whole-field targets.
 pub(crate) fn chroma_scaling(fit: &ChromaFit, plane: ChromaPlane, ar_shift: u32) -> ChromaScaling {
     let coeffs = quantise_at(&fit.texture.weights, ar_shift);
     let (sigma_template, _) = chroma_template_stats(&coeffs, ar_shift, plane);
-    // The entry's texture, which may be borrowed, turns the block stds into field stds. The
-    // targets also leave 8-bit codes for the normalised units the luma targets use.
-    let factor = fit.texture.block_to_field / 255.0;
+    // The entry's texture, which may be borrowed, turns the block stds into field stds.
+    let factor = fit.texture.block_to_field;
     let targets = fit
         .target
         .iter()
@@ -152,77 +155,4 @@ pub(crate) fn chroma_texture_of(
         weights,
         block_to_field,
     })
-}
-
-/// The grain std of each brightness bin of one chroma plane, read from `frames` frames of colour
-/// fit.
-///
-/// The colour model's log grain is the natural log of a 16x16 block's grain std in 8-bit codes, so
-/// each level is a block std on that scale. A bin reads its neutral cell, and its level is the root
-/// mean square over the frames. Frames whose plane has no populated cell are skipped. Only the bins
-/// between the lowest and highest populated luma of the read frames are kept, each at its centre
-/// luma. `None` with fewer than [MIN_POPULATED_BINS] bins.
-pub(crate) fn chroma_levels(colour: &[f32], frames: usize, plane: ChromaPlane) -> Option<Vec<(u8, f64)>> {
-    let cells = COLOUR_CELLS as usize;
-    let bins = COLOUR_BRIGHTNESS_BINS as usize;
-    let cells_per_bin = COLOUR_CELLS_PER_BRIGHTNESS as usize;
-    let plane_len = 2 * cells + COLOUR_FIT_PLANE_WORDS as usize;
-    let frame_len = CHROMA_PLANES * plane_len;
-    let plane_start = plane.index() * plane_len;
-
-    let mut energy = vec![0.0f64; bins];
-    let mut read_frames = 0usize;
-    let mut luma_low = f64::INFINITY;
-    let mut luma_high = f64::NEG_INFINITY;
-
-    let frame_values = colour.chunks_exact(frame_len).take(frames);
-    for frame in frame_values {
-        let plane_values = &frame[plane_start..plane_start + plane_len];
-        let (log_grain, rest) = plane_values.split_at(cells);
-        let header = &rest[cells..];
-        let populated = header[COLOUR_FIT_PLANE_POPULATED as usize];
-        if populated <= 0.0 {
-            continue;
-        }
-
-        let frame_low = header[COLOUR_FIT_PLANE_LUMA_LOW as usize] as f64;
-        let frame_high = header[COLOUR_FIT_PLANE_LUMA_HIGH as usize] as f64;
-        luma_low = luma_low.min(frame_low);
-        luma_high = luma_high.max(frame_high);
-
-        for (bin, total) in energy.iter_mut().enumerate() {
-            let neutral = log_grain[bin * cells_per_bin] as f64;
-            *total += (2.0 * neutral).exp();
-        }
-
-        read_frames += 1;
-    }
-
-    if read_frames == 0 {
-        return None;
-    }
-
-    let step = COLOUR_BRIGHTNESS_STEP as f64;
-    let first_bin = (luma_low / step).floor() as usize;
-    let highest_bin = (luma_high / step).floor() as usize;
-    let last_bin = highest_bin.min(bins - 1);
-
-    let mut levels = Vec::new();
-    let kept_bins = energy.iter().enumerate().take(last_bin + 1).skip(first_bin);
-    for (bin, &total) in kept_bins {
-        let mean_energy = total / read_frames as f64;
-        let centre = (bin as f64 + 0.5) * step;
-        let luma = centre.round() as u8;
-        let level = mean_energy.sqrt();
-        levels.push((luma, level));
-    }
-
-    (levels.len() >= MIN_POPULATED_BINS).then_some(levels)
-}
-
-/// The strength targets of one chroma plane, as block stds in 8-bit codes.
-///
-/// The levels thin evenly to [MAX_CHROMA_POINTS], keeping the first and last.
-pub(crate) fn chroma_targets(levels: &[(u8, f64)]) -> Vec<(u8, f64)> {
-    thinned(levels, MAX_CHROMA_POINTS)
 }

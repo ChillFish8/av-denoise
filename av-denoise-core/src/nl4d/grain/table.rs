@@ -132,6 +132,11 @@ pub struct FitOptions {
     /// With chroma on, one AR shift and one scaling shift fit all three planes, so luma's values
     /// can differ from a luma-only table by rounding.
     pub chroma: bool,
+    /// The bit depth the measured video was rounded to, `None` by default.
+    ///
+    /// Each strength reading has that rounding taken off before the fit. `None` takes no rounding
+    /// off.
+    pub bit_depth: Option<u32>,
 }
 
 impl FitOptions {
@@ -139,13 +144,21 @@ impl FitOptions {
     pub fn with_fine_noise(share: f64) -> Self {
         Self {
             fine_noise: share,
-            chroma: false,
+            ..Self::default()
         }
     }
 
     /// The options with chroma grain on or off.
     pub fn with_chroma(self, chroma: bool) -> Self {
         Self { chroma, ..self }
+    }
+
+    /// The options with the rounding of `bit_depth`-bit video taken off each strength reading.
+    pub fn with_bit_depth(self, bit_depth: u32) -> Self {
+        Self {
+            bit_depth: Some(bit_depth),
+            ..self
+        }
     }
 
     /// The options with the fine noise share clamped to 0..=1, NaN read as 0.
@@ -159,7 +172,7 @@ impl FitOptions {
 
         Self {
             fine_noise,
-            chroma: self.chroma,
+            ..self.clone()
         }
     }
 }

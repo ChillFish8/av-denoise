@@ -10,6 +10,7 @@ use crate::nl4d::grain::consts::{
     HIST_LEN,
     LAG_COUNT,
     LAGS,
+    LUMA_BINS,
     MAX_LAG_X,
     MAX_LAG_Y,
     STD_BUCKETS,
@@ -17,16 +18,6 @@ use crate::nl4d::grain::consts::{
 };
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of};
 use crate::nl4d::grain::table::FitOptions;
-use crate::noise::colour::{
-    COLOUR_CELLS,
-    COLOUR_FIT_PLANE_BLOCKS,
-    COLOUR_FIT_PLANE_LUMA_HIGH,
-    COLOUR_FIT_PLANE_LUMA_LOW,
-    COLOUR_FIT_PLANE_POPULATED,
-    COLOUR_FIT_PLANE_WORDS,
-};
-
-const COLOUR_PLANE_LEN: usize = 2 * COLOUR_CELLS as usize + COLOUR_FIT_PLANE_WORDS as usize;
 
 fn splitmix(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -241,32 +232,20 @@ pub(super) fn chunk_at(std_codes: f32, blocks_per_bin: u32, frame_codes: Option<
     chunk
 }
 
-/// One frame's chroma colour fit with every Cb cell at `cb_codes` and every Cr cell at `cr_codes`
-/// of grain, populated between luma 40 and 200.
-pub(super) fn chroma_colour_frame(cb_codes: f32, cr_codes: f32) -> Vec<f32> {
-    let cells = COLOUR_CELLS as usize;
-    let mut frame = Vec::with_capacity(2 * COLOUR_PLANE_LEN);
+/// Zeroes the first frame's one-frame counts in every luma bin outside `kept`.
+pub(super) fn keep_frame_bins(chunk: &mut GrainChunk, kept: std::ops::Range<usize>) {
+    for bin in 0..LUMA_BINS {
+        if kept.contains(&bin) {
+            continue;
+        }
 
-    for codes in [cb_codes, cr_codes] {
-        let mut plane = vec![0.0f32; COLOUR_PLANE_LEN];
-        let log_grain = codes.ln();
-        plane[..cells].fill(log_grain);
-
-        let header = &mut plane[2 * cells..];
-        header[COLOUR_FIT_PLANE_POPULATED as usize] = 1.0;
-        header[COLOUR_FIT_PLANE_BLOCKS as usize] = 600.0;
-        header[COLOUR_FIT_PLANE_LUMA_LOW as usize] = 40.0;
-        header[COLOUR_FIT_PLANE_LUMA_HIGH as usize] = 200.0;
-        frame.extend(plane);
+        let start = HIST_LEN + bin * STD_BUCKETS;
+        chunk.frame_tables[start..start + STD_BUCKETS].fill(0.0);
     }
-
-    frame
 }
 
-/// A chroma chunk with the frame tables of `cb` and `cr` and `colour_frame` in every frame.
-///
-/// An empty `colour_frame` leaves the chunk without a colour fit.
-pub(super) fn chroma_chunk(cb: &GrainChunk, cr: &GrainChunk, colour_frame: &[f32]) -> GrainChunk {
+/// A chroma chunk with the frame tables of `cb` and `cr` in every frame.
+pub(super) fn chroma_chunk(cb: &GrainChunk, cr: &GrainChunk) -> GrainChunk {
     let mut chunk = GrainChunk::empty();
     chunk.frames = cb.frames;
 
@@ -276,8 +255,6 @@ pub(super) fn chroma_chunk(cb: &GrainChunk, cr: &GrainChunk, colour_frame: &[f32
         chunk.frame_tables.extend_from_slice(cb_table);
         chunk.frame_tables.extend_from_slice(cr_table);
     }
-
-    chunk.frame_colour = colour_frame.repeat(cb.frames as usize);
 
     chunk
 }

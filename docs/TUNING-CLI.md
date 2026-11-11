@@ -61,8 +61,9 @@ survive where each frequency on its own would fall under the threshold.
 
 **`--export-avds <PATH>` keeps the look of film grain.** It writes the source's grain, measured
 during the run, to a grain data file at PATH. `av-denoise synthesize av1-fgs` then turns the file
-into an AV1 film grain table, which describes the source's luma and chroma grain minus whatever
-the output still keeps. `--planes luma` leaves chroma grain out, and so does a source that is not
+into an AV1 film grain table, which describes all of the source's grain on each plane, as one
+frame shows it. The table leaves nothing out for the grain the output keeps, since an encode
+removes most of it. `--planes luma` leaves chroma grain out, and so does a source that is not
 4:2:0 or a run that did not denoise chroma. Add it to a finished AV1 encode with `regrain apply`,
 which applies each scene's entry. The decoder then adds matching grain back, so the encode stays
 clean while the picture keeps its grain. SVT-AV1's `--fgs-table` and `grav1synth apply` apply only
