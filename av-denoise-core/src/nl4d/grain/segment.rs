@@ -364,7 +364,7 @@ pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<Fi
             None
         };
 
-        let entry = build_entry(&parts[index], &strength, texture, chroma);
+        let entry = build_entry(&parts[index], &strength, texture, chroma, options.strength);
         entries.push(entry);
     }
 
@@ -437,13 +437,15 @@ fn borrow<T>(parts: &[Parts], index: usize, value: impl Fn(&Parts) -> Option<T>)
 ///
 /// Without chroma, luma alone picks the shifts. With chroma, the AR shift is the finest that fits
 /// every plane's weights and the scaling shift the finest that fits every plane's strongest point.
+/// Every plane's targets are `dial` times the measured ones before the shifts are chosen.
 fn build_entry(
     part: &Parts,
     strength: &[BinStrength],
     texture: Texture,
     chroma: Option<[ChromaFit; CHROMA_PLANES]>,
+    dial: f64,
 ) -> FittedEntry {
-    let targets = luma_targets(strength, texture);
+    let targets = luma_targets(strength, texture, dial);
     let Some([cb_fit, cr_fit]) = chroma else {
         let (coeffs, ar_shift) = texture.table;
         let (points, scaling_shift) = scaling_points(&targets, texture.table_sigma);
@@ -472,8 +474,8 @@ fn build_entry(
         (coeffs, sigma)
     };
 
-    let cb = chroma_scaling(&cb_fit, ChromaPlane::Cb, ar_shift);
-    let cr = chroma_scaling(&cr_fit, ChromaPlane::Cr, ar_shift);
+    let cb = chroma_scaling(&cb_fit, ChromaPlane::Cb, ar_shift, dial);
+    let cr = chroma_scaling(&cr_fit, ChromaPlane::Cr, ar_shift, dial);
     let luma_peak = scaling_peak(&targets, sigma_template);
     let peak = luma_peak.max(cb.peak()).max(cr.peak());
     let scaling_shift = finest_scaling_shift(peak);
@@ -494,9 +496,9 @@ fn build_entry(
 
 /// Luma's strength targets, as `(luma, sigma)` with sigma in normalised units.
 ///
-/// Each bin's target is its one-frame block std turned into a whole-field std.
-fn luma_targets(strength: &[BinStrength], texture: Texture) -> Vec<(u8, f64)> {
-    let factor = texture.block_to_field;
+/// Each bin's target is its one-frame block std turned into a whole-field std, times `dial`.
+fn luma_targets(strength: &[BinStrength], texture: Texture, dial: f64) -> Vec<(u8, f64)> {
+    let factor = texture.block_to_field * dial;
 
     let chosen = thinned(strength, MAX_POINTS);
 

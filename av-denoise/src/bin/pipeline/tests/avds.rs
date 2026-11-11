@@ -264,6 +264,7 @@ fn synthesize_av1_fgs_matches_the_measured_table() {
         output: synthesized_path.clone(),
         planes: vec![GrainPlane::Luma],
         fine_noise: 0.0,
+        strength: 1.0,
     };
     let kind = SynthesizeKind::Av1Fgs(av1_fgs);
     let args = SynthesizeArgs { kind };

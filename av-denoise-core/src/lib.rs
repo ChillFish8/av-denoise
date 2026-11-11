@@ -43,10 +43,12 @@ pub use self::kernel_cache::prepare_kernel_cache;
 pub use self::nl4d::Nl4dOptions;
 pub use self::nl4d::grain::{
     DEFAULT_FINE_NOISE,
+    DEFAULT_STRENGTH,
     FitOptions,
     FrameGrain,
     GrainChunk,
     GrainChunks,
+    MAX_STRENGTH,
     SceneGrain,
     build_table,
     frame_rows,

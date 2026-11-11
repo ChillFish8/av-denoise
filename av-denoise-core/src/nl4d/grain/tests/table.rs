@@ -142,6 +142,34 @@ fn point_count(line: &str) -> usize {
     count.parse().expect("a whole number")
 }
 
+/// The scaling shift of each entry's `p` line.
+fn scaling_shifts(text: &str) -> Vec<u32> {
+    lines_named(text, "p ")
+        .iter()
+        .map(|line| {
+            let word = line.split_whitespace().nth(4).expect("a scaling shift");
+
+            word.parse().expect("a whole number")
+        })
+        .collect()
+}
+
+/// The `(x, value)` points of each `prefix` scaling line.
+fn table_points(text: &str, prefix: &str) -> Vec<Vec<(u32, u32)>> {
+    lines_named(text, prefix)
+        .iter()
+        .map(|line| {
+            let numbers: Vec<u32> = line
+                .split_whitespace()
+                .skip(2)
+                .map(|word| word.parse().expect("a whole number"))
+                .collect();
+
+            numbers.chunks(2).map(|pair| (pair[0], pair[1])).collect()
+        })
+        .collect()
+}
+
 #[test]
 fn luma_tables_match_the_stored_table() {
     let scenes = measured_scenes();
@@ -360,4 +388,126 @@ fn scenes_are_sorted_before_fitting() {
     assert_eq!(starts.len(), 2);
     assert!(starts[0].starts_with("E 0 "));
     assert!(starts[1].starts_with("E 9801458 "));
+}
+
+#[test]
+fn the_strength_dial_halves_every_scaling_point() {
+    let scenes = measured_scenes();
+    let full_options = chroma_options();
+    let half_options = chroma_options().with_strength(0.5);
+
+    let full = build_table(&scenes, NTSC, &full_options);
+    let half = build_table(&scenes, NTSC, &half_options);
+    let full_shifts = scaling_shifts(&full);
+    let half_shifts = scaling_shifts(&half);
+
+    for prefix in ["sY ", "sCb ", "sCr "] {
+        let full_planes = table_points(&full, prefix);
+        let half_planes = table_points(&half, prefix);
+        assert_eq!(full_planes.len(), half_planes.len());
+
+        for (entry, (full_points, half_points)) in full_planes.iter().zip(&half_planes).enumerate() {
+            assert_eq!(full_points.len(), half_points.len(), "{prefix} entry {entry}");
+
+            let full_shift = full_shifts[entry] as i32;
+            let half_shift = half_shifts[entry] as i32;
+            let shift_gap = full_shift - half_shift;
+            let shift_factor = 2f64.powi(shift_gap);
+            let scale = 2.0 * shift_factor;
+
+            for (&(full_x, full_value), &(half_x, half_value)) in full_points.iter().zip(half_points) {
+                assert_eq!(full_x, half_x);
+
+                let doubled = scale * half_value as f64;
+                let gap = (doubled - full_value as f64).abs();
+                assert!(
+                    gap <= 2.0,
+                    "{prefix} entry {entry}: {doubled} against {full_value}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn strength_zero_writes_zero_scaling_values() {
+    let scenes = measured_scenes();
+    let full_options = chroma_options();
+    let zero_options = chroma_options().with_strength(0.0);
+
+    let full = build_table(&scenes, NTSC, &full_options);
+    let zero = build_table(&scenes, NTSC, &zero_options);
+
+    for prefix in ["sY ", "sCb ", "sCr "] {
+        let full_planes = table_points(&full, prefix);
+        let zero_planes = table_points(&zero, prefix);
+        assert_eq!(full_planes.len(), zero_planes.len());
+
+        for (full_points, zero_points) in full_planes.iter().zip(&zero_planes) {
+            let full_xs: Vec<u32> = full_points.iter().map(|point| point.0).collect();
+            let zero_xs: Vec<u32> = zero_points.iter().map(|point| point.0).collect();
+            assert_eq!(full_xs, zero_xs, "{prefix}");
+
+            assert!(zero_points.iter().all(|point| point.1 == 0), "{prefix}");
+        }
+    }
+}
+
+#[test]
+fn a_strong_dial_lowers_the_shared_scaling_shift() {
+    let scenes = measured_scenes();
+    let full_options = chroma_options();
+    let strong_options = chroma_options().with_strength(4.0);
+
+    let full = build_table(&scenes, NTSC, &full_options);
+    let strong = build_table(&scenes, NTSC, &strong_options);
+    let full_shifts = scaling_shifts(&full);
+    let strong_shifts = scaling_shifts(&strong);
+
+    assert_eq!(full_shifts.len(), strong_shifts.len());
+
+    for (full_shift, strong_shift) in full_shifts.iter().zip(&strong_shifts) {
+        assert!(strong_shift <= full_shift, "{strong_shift} above {full_shift}");
+    }
+
+    let pairs = strong_shifts.iter().zip(&full_shifts);
+    let lowered = pairs.filter(|(strong, full)| strong < full).count();
+    assert!(lowered > 0);
+
+    for prefix in ["sY ", "sCb ", "sCr "] {
+        let planes = table_points(&strong, prefix);
+
+        for (entry, points) in planes.iter().enumerate() {
+            // At the coarsest shift a point may clip at 255, so only finer shifts are checked.
+            if strong_shifts[entry] == 8 {
+                continue;
+            }
+
+            assert!(points.iter().all(|point| point.1 < 255), "{prefix} entry {entry}");
+        }
+    }
+}
+
+#[test]
+fn build_table_clamps_the_strength() {
+    let scenes = measured_scenes();
+    let build = |strength: f64| {
+        let options = chroma_options().with_strength(strength);
+
+        build_table(&scenes, NTSC, &options)
+    };
+
+    assert_eq!(build(f64::NAN), build(1.0));
+    assert_eq!(build(9.0), build(4.0));
+    assert_eq!(build(-1.0), build(0.0));
+}
+
+#[test]
+fn the_default_options_keep_full_strength() {
+    let default_options = FitOptions::default();
+    let fine_noise_options = FitOptions::with_fine_noise(0.5);
+
+    assert_eq!(default_options.strength, 1.0);
+    assert_eq!(default_options.bit_depth, None);
+    assert_eq!(fine_noise_options.strength, 1.0);
 }

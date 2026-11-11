@@ -20,4 +20,10 @@ pub(crate) use self::persistence::MeasuredPlanes;
 pub use self::report::{FrameGrain, frame_rows};
 pub use self::segment::SceneGrain;
 pub(crate) use self::snapshot::PassSources;
-pub use self::table::{DEFAULT_FINE_NOISE, FitOptions, build_table};
+pub use self::table::{
+    DEFAULT_FINE_NOISE,
+    DEFAULT_STRENGTH,
+    FitOptions,
+    MAX_STRENGTH,
+    build_table,
+};

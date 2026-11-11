@@ -74,6 +74,10 @@ leaves no file.
 `--fine-noise` on `synthesize av1-fgs` moves a share of the fine, fresh scan noise out of the
 grain's texture, so the texture leans towards the textured grain. The grain keeps its measured
 strength. It defaults to 0.5, and 0 leaves the texture as the run measured it.
+
+`--strength` on `synthesize av1-fgs` multiplies the grain std of every plane that gets grain. The
+table matches the source's grain at 1, the default. The dial is the lever for an encode that keeps some grain
+itself, or for a result that looks too grainy. It takes values between 0 and 4.
 See [Grain data and `av-denoise synthesize`](TUTORIAL-CLI.md#grain-data-and-av-denoise-synthesize)
 for every option.
 

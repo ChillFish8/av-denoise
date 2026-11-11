@@ -98,12 +98,13 @@ fn thinned_targets(bins: &[BinStrength]) -> Vec<(u8, f64)> {
         .collect()
 }
 
-/// The plane's weights rounded at `ar_shift`, its template std and its whole-field targets.
-pub(crate) fn chroma_scaling(fit: &ChromaFit, plane: ChromaPlane, ar_shift: u32) -> ChromaScaling {
+/// The plane's weights rounded at `ar_shift`, its template std and its whole-field targets, times
+/// `dial`.
+pub(crate) fn chroma_scaling(fit: &ChromaFit, plane: ChromaPlane, ar_shift: u32, dial: f64) -> ChromaScaling {
     let coeffs = quantise_at(&fit.texture.weights, ar_shift);
     let (sigma_template, _) = chroma_template_stats(&coeffs, ar_shift, plane);
     // The entry's texture, which may be borrowed, turns the block stds into field stds.
-    let factor = fit.texture.block_to_field;
+    let factor = fit.texture.block_to_field * dial;
     let targets = fit
         .target
         .iter()

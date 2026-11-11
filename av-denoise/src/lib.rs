@@ -19,6 +19,7 @@ pub use av_denoise_core::{
     ChromaSiting,
     DEFAULT_FINE_NOISE,
     DEFAULT_PILOT_STRENGTH_SCALE,
+    DEFAULT_STRENGTH,
     DenoisingMode,
     DevicePlane,
     EdgePadding,

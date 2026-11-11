@@ -117,8 +117,14 @@ pub(crate) fn format_table(entries: &[FittedEntry], frame_rate: (u64, u64)) -> S
 /// The recommended share of the fine, fresh scan noise moved out of a grain table's texture.
 pub const DEFAULT_FINE_NOISE: f64 = 0.5;
 
+/// The strength that matches the source's grain.
+pub const DEFAULT_STRENGTH: f64 = 1.0;
+
+/// The largest strength a grain table is fitted at.
+pub const MAX_STRENGTH: f64 = 4.0;
+
 /// How a grain table is fitted.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct FitOptions {
     /// The share of the fine, fresh scan noise moved out of the grain's texture, between 0 and 1.
@@ -137,6 +143,22 @@ pub struct FitOptions {
     /// Each strength reading has that rounding taken off before the fit. `None` takes no rounding
     /// off.
     pub bit_depth: Option<u32>,
+    /// A multiple of the source's grain std on every plane, between 0 and [MAX_STRENGTH].
+    ///
+    /// [DEFAULT_STRENGTH] matches the source and 0 writes no grain. The multiple is applied before
+    /// the shared scaling shift is chosen.
+    pub strength: f64,
+}
+
+impl Default for FitOptions {
+    fn default() -> Self {
+        Self {
+            fine_noise: 0.0,
+            chroma: false,
+            bit_depth: None,
+            strength: DEFAULT_STRENGTH,
+        }
+    }
 }
 
 impl FitOptions {
@@ -161,7 +183,13 @@ impl FitOptions {
         }
     }
 
-    /// The options with the fine noise share clamped to 0..=1, NaN read as 0.
+    /// The options with the grain at `strength` times the source's.
+    pub fn with_strength(self, strength: f64) -> Self {
+        Self { strength, ..self }
+    }
+
+    /// The options with the fine noise share clamped to 0..=1, NaN read as 0, and the strength
+    /// clamped to 0..=[MAX_STRENGTH], NaN read as [DEFAULT_STRENGTH].
     fn clamped(&self) -> Self {
         let share = self.fine_noise;
         let fine_noise = if share.is_nan() {
@@ -170,8 +198,16 @@ impl FitOptions {
             share.clamp(0.0, 1.0)
         };
 
+        let factor = self.strength;
+        let strength = if factor.is_nan() {
+            DEFAULT_STRENGTH
+        } else {
+            factor.clamp(0.0, MAX_STRENGTH)
+        };
+
         Self {
             fine_noise,
+            strength,
             ..self.clone()
         }
     }
@@ -180,7 +216,8 @@ impl FitOptions {
 /// Fits every scene and returns the `filmgrn1` table text.
 ///
 /// `frame_rate` is `(numerator, denominator)` frames per second. Entries follow the output's frame
-/// timeline from 0. The fine noise share is clamped to 0..=1, and NaN reads as 0.
+/// timeline from 0. The fine noise share is clamped to 0..=1, and NaN reads as 0. The strength is
+/// clamped to 0..=[MAX_STRENGTH], and NaN reads as [DEFAULT_STRENGTH].
 pub fn build_table(scenes: &[SceneGrain], frame_rate: (u64, u64), options: &FitOptions) -> String {
     let mut sorted: Vec<&SceneGrain> = scenes.iter().collect();
     sorted.sort_by_key(|scene| scene.first_frame);

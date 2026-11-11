@@ -10,7 +10,9 @@ use av_denoise::avds::{
     AvdsGroup,
     AvdsMeta,
     DEFAULT_FINE_NOISE,
+    DEFAULT_STRENGTH,
     FitOptions,
+    MAX_STRENGTH,
     REPORT_GROUPS,
     av1_table,
     chroma_unavailable,
@@ -68,6 +70,18 @@ pub struct Av1FgsArgs {
         allow_negative_numbers = true
     )]
     pub fine_noise: f64,
+
+    /// How strong the grain is, as a multiple of the source's, between 0 and 4.
+    ///
+    /// 1 matches the source's grain. A lower value suits an encode that keeps some grain itself.
+    #[arg(
+        long,
+        value_name = "FACTOR",
+        default_value_t = DEFAULT_STRENGTH,
+        value_parser = parse_strength,
+        allow_negative_numbers = true
+    )]
+    pub strength: f64,
 }
 
 /// The options of `synthesize report`.
@@ -100,7 +114,9 @@ impl Av1FgsArgs {
         }
 
         let chroma = self.planes.contains(&GrainPlane::Chroma);
-        let options = FitOptions::with_fine_noise(self.fine_noise).with_chroma(chroma);
+        let options = FitOptions::with_fine_noise(self.fine_noise)
+            .with_chroma(chroma)
+            .with_strength(self.strength);
 
         Ok(options)
     }
@@ -184,6 +200,15 @@ fn parse_fine_noise(text: &str) -> Result<f64, String> {
     }
 
     Ok(amount)
+}
+
+fn parse_strength(text: &str) -> Result<f64, String> {
+    let factor: f64 = text.parse().map_err(|_| format!("{text} is not a number"))?;
+    if !(0.0..=MAX_STRENGTH).contains(&factor) {
+        return Err(format!("{factor} is not between 0 and 4"));
+    }
+
+    Ok(factor)
 }
 
 #[cfg(test)]
@@ -357,6 +382,7 @@ mod tests {
             output,
             planes,
             fine_noise: 0.0,
+            strength: 1.0,
         };
         let kind = SynthesizeKind::Av1Fgs(av1_fgs);
 
@@ -513,6 +539,43 @@ mod tests {
 
             assert!(parsed.is_ok(), "{amount} is refused");
         }
+    }
+
+    #[test]
+    fn strength_defaults_to_one() {
+        let av1_fgs = parsed_av1_fgs(&["av1-fgs", "--input", "a", "--output", "b"]);
+
+        assert_eq!(av1_fgs.strength, 1.0);
+    }
+
+    #[test]
+    fn strength_reaches_the_fit_options() {
+        let extra = ["av1-fgs", "--input", "a", "--output", "b", "--strength", "0.5"];
+        let av1_fgs = parsed_av1_fgs(&extra);
+
+        let options = av1_fgs.fit_options().expect("luma is accepted");
+
+        assert_eq!(options.strength, 0.5);
+    }
+
+    #[test]
+    fn strength_outside_zero_to_four_is_refused() {
+        for factor in ["4.5", "-1"] {
+            let extra = ["av1-fgs", "--input", "a", "--output", "b", "--strength", factor];
+            let error = parse(&extra).expect_err("the factor is refused");
+            let message = error.to_string();
+
+            assert!(message.contains("between 0 and 4"), "got {message}");
+        }
+    }
+
+    #[test]
+    fn strength_must_be_a_number() {
+        let extra = ["av1-fgs", "--input", "a", "--output", "b", "--strength", "strong"];
+        let error = parse(&extra).expect_err("the factor is refused");
+        let message = error.to_string();
+
+        assert!(message.contains("is not a number"), "got {message}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::{AvdsFrame, AvdsGroup, AvdsMeta, PlanesMeasured, scenes_from_rows};
 use crate::nl4d::grain::consts::{FRAME_TABLE_LEN, HIST_LEN};
-use crate::{ChromaLayout, FitOptions, FrameGrain, build_table, frame_rows};
+use crate::{ChromaLayout, FitOptions, FrameGrain, MAX_STRENGTH, build_table, frame_rows};
 
 /// The groups [av1_table] reads, for [read_avds_groups](crate::avds::read_avds_groups).
 pub const AV1_TABLE_GROUPS: [AvdsGroup; 1] = [AvdsGroup::Table];
@@ -58,9 +58,10 @@ fn has_chroma_frame_counts(row: &AvdsFrame) -> bool {
 /// The AV1 film grain table the rows describe, as `filmgrn1` text.
 ///
 /// The fit takes the rounding of the file's bit depth off each strength reading. Fails when the
-/// file's frame rate has a zero part, when its bit depth is not between 1 and 16, when the fine
-/// noise share is not between 0 and 1, when the rows hold frames but none of them has the luma
-/// table measurements, or when chroma grain is on and [chroma_unavailable] gives a reason.
+/// file's frame rate has a zero part, when the strength is not between 0 and 4, when its bit depth
+/// is not between 1 and 16, when the fine noise share is not between 0 and 1, when the rows hold
+/// frames but none of them has the luma table measurements, or when chroma grain is on and
+/// [chroma_unavailable] gives a reason.
 pub fn av1_table(
     meta: &AvdsMeta,
     rows: Vec<AvdsFrame>,
@@ -69,6 +70,11 @@ pub fn av1_table(
     let (numerator, denominator) = meta.frame_rate;
     if numerator == 0 || denominator == 0 {
         anyhow::bail!("the grain data file's frame rate {numerator}/{denominator} is not valid");
+    }
+
+    let strength = options.strength;
+    if !(0.0..=MAX_STRENGTH).contains(&strength) {
+        anyhow::bail!("the grain strength {strength} is not between 0 and 4");
     }
 
     let bit_depth = meta.bit_depth;

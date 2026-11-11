@@ -426,3 +426,18 @@ fn av1_table_refuses_chroma_it_cannot_write() {
         "got {error}"
     );
 }
+
+#[test]
+fn av1_table_refuses_a_strength_past_four() {
+    let scenes = scenes_of(&[4], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let meta = sample_meta(rows.len() as u64);
+
+    for strength in [4.5, -0.1] {
+        let options = FitOptions::default().with_strength(strength);
+
+        let error = av1_table(&meta, rows.clone(), &options).expect_err("the strength is refused");
+
+        assert!(error.to_string().contains("the grain strength"), "got {error}");
+    }
+}
