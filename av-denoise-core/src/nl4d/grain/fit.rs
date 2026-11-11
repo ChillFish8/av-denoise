@@ -264,17 +264,38 @@ fn ar_power(coeffs: &[f64; AR_COEFFS], frequency_y: f64, frequency_x: f64) -> f6
 ///
 /// AV1 allows an AR shift between 6 and 9. Weights that overflow at a shift of 6 are clamped.
 pub(crate) fn quantise_ar(coeffs: &[f64; AR_COEFFS]) -> ([i32; AR_COEFFS], u32) {
-    for shift in [9u32, 8, 7, 6] {
+    let shift = finest_ar_shift(coeffs);
+    let quantised = quantise_at(coeffs, shift);
+
+    (quantised, shift)
+}
+
+/// The finest AR shift between 6 and 9 at which every rounded weight fits a signed byte.
+///
+/// Weights that overflow at every shift give 6.
+pub(crate) fn finest_ar_shift(coeffs: &[f64; AR_COEFFS]) -> u32 {
+    for shift in [9u32, 8, 7] {
         let scale = (1u32 << shift) as f64;
-        let quantised = coeffs.map(|coeff| (coeff * scale).round() as i32);
-        let fits = quantised.iter().all(|&value| (-128..=127).contains(&value));
+        let fits = coeffs.iter().all(|&coeff| {
+            let rounded = (coeff * scale).round() as i32;
+            (-128..=127).contains(&rounded)
+        });
         if fits {
-            return (quantised, shift);
+            return shift;
         }
     }
 
-    let clamped = coeffs.map(|coeff| ((coeff * 64.0).round() as i32).clamp(-128, 127));
-    (clamped, 6)
+    6
+}
+
+/// Rounds the weights to AV1 integers at `shift`, clamped to a signed byte.
+pub(crate) fn quantise_at(coeffs: &[f64; AR_COEFFS], shift: u32) -> [i32; AR_COEFFS] {
+    let scale = (1u32 << shift) as f64;
+
+    coeffs.map(|coeff| {
+        let rounded = (coeff * scale).round() as i32;
+        rounded.clamp(-128, 127)
+    })
 }
 
 /// Turns per-bin target sigmas into AV1 scaling points and the scaling shift.
@@ -284,26 +305,49 @@ pub(crate) fn quantise_ar(coeffs: &[f64; AR_COEFFS]) -> ([i32; AR_COEFFS], u32) 
 /// 11 and a byte per scaling value, so the finest shift that fits the largest value wins and
 /// values past 255 are capped.
 pub(crate) fn scaling_points(points: &[(u8, f64)], sigma_template: f64) -> (Vec<(u8, u8)>, u32) {
-    let raw: Vec<f64> = points
-        .iter()
-        .map(|&(_, sigma)| sigma * 255.0 / sigma_template)
-        .collect();
-    let largest = raw.iter().copied().fold(0.0f64, f64::max);
+    let peak = scaling_peak(points, sigma_template);
+    let shift = finest_scaling_shift(peak);
+    let scaled = scaling_points_at(points, sigma_template, shift);
 
-    let mut shift = 8u32;
-    for candidate in [11u32, 10, 9, 8] {
-        if largest * (1u32 << candidate) as f64 <= 255.0 {
-            shift = candidate;
-            break;
+    (scaled, shift)
+}
+
+/// The scaling value one sigma needs before the scaling shift.
+fn raw_scaling(sigma: f64, sigma_template: f64) -> f64 {
+    sigma * 255.0 / sigma_template
+}
+
+/// The largest scaling value the points need before the scaling shift, at least 0.
+pub(crate) fn scaling_peak(points: &[(u8, f64)], sigma_template: f64) -> f64 {
+    points
+        .iter()
+        .map(|&(_, sigma)| raw_scaling(sigma, sigma_template))
+        .fold(0.0f64, f64::max)
+}
+
+/// The finest scaling shift between 8 and 11 at which `peak` stays within a byte.
+///
+/// A peak past a byte at every shift gives 8.
+pub(crate) fn finest_scaling_shift(peak: f64) -> u32 {
+    for shift in [11u32, 10, 9] {
+        if peak * (1u32 << shift) as f64 <= 255.0 {
+            return shift;
         }
     }
 
-    let factor = (1u32 << shift) as f64;
-    let scaled = points
-        .iter()
-        .zip(raw.iter())
-        .map(|(&(luma, _), &value)| (luma, (value * factor).round().min(255.0) as u8))
-        .collect();
+    8
+}
 
-    (scaled, shift)
+/// The scaling points at `shift`, with values past 255 capped.
+pub(crate) fn scaling_points_at(points: &[(u8, f64)], sigma_template: f64, shift: u32) -> Vec<(u8, u8)> {
+    let factor = (1u32 << shift) as f64;
+
+    points
+        .iter()
+        .map(|&(luma, sigma)| {
+            let value = raw_scaling(sigma, sigma_template);
+            let scaled = (value * factor).round().min(255.0) as u8;
+            (luma, scaled)
+        })
+        .collect()
 }

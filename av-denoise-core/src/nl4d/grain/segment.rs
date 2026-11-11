@@ -97,8 +97,8 @@ struct Parts {
     texture: Option<Texture>,
 }
 
-/// The source std median over every luma bin of a histogram.
-fn overall_median(hist: &[u32], edges: &[f32]) -> Option<f64> {
+/// The std median over every luma bin of a histogram.
+pub(crate) fn overall_median(hist: &[u32], edges: &[f32]) -> Option<f64> {
     let mut merged = vec![0u32; STD_BUCKETS];
     for bin in 0..LUMA_BINS {
         let row = &hist[bin * STD_BUCKETS..(bin + 1) * STD_BUCKETS];
@@ -188,11 +188,35 @@ fn strength_of(stats: &TableSums, edges: &[f32]) -> Option<Vec<BinStrength>> {
 
 /// The texture solved from the strength groups near the median source std.
 ///
-/// A group joins when its std range overlaps the band between [BAND_LOW] and [BAND_HIGH] times the
-/// median, so blocks far from the typical grain strength never shape the texture. The summed record
-/// has its cell-mean bias undone before the solve. The table's weights are solved again after
-/// `fine_noise` times the floor's variance comes off the zero lag.
+/// The pooled record has its cell-mean bias undone before the solve. The table's weights are solved
+/// again after `fine_noise` times the floor's variance comes off the zero lag.
 fn texture_of(stats: &TableSums, edges: &[f32], fine_noise: f64) -> Option<Texture> {
+    let record = pooled_record(stats, edges)?;
+    let mut corrected = undo_mean_removal(&record);
+    let measured_weights = yule_walker(&corrected)?;
+    let floor = floor_fraction(&measured_weights);
+    let (measured_coeffs, measured_shift) = quantise_ar(&measured_weights);
+    let (measured_sigma, measured_median) = template_stats(&measured_coeffs, measured_shift);
+    let block_to_field = measured_sigma / measured_median;
+
+    take_out_fine_noise(&mut corrected, floor, fine_noise);
+    let measured = (measured_coeffs, measured_shift);
+    let (table, table_sigma) = reduced_weights(&corrected, measured, measured_sigma);
+
+    Some(Texture {
+        table,
+        table_sigma,
+        block_to_field,
+        floor,
+    })
+}
+
+/// The summed lag record of the strength groups near the median source std.
+///
+/// A group joins when its std range overlaps the band between [BAND_LOW] and [BAND_HIGH] times the
+/// median, so blocks far from the typical grain strength never shape the texture. `None` when the
+/// pooled groups cover fewer than [MIN_AR_PIXELS] pixels.
+pub(crate) fn pooled_record(stats: &TableSums, edges: &[f32]) -> Option<Vec<f64>> {
     let median = overall_median(&stats.source_hist, edges)?;
     let band_low = BAND_LOW * median;
     let band_high = BAND_HIGH * median;
@@ -216,23 +240,7 @@ fn texture_of(stats: &TableSums, edges: &[f32], fine_noise: f64) -> Option<Textu
         return None;
     }
 
-    let mut corrected = undo_mean_removal(&record);
-    let measured_weights = yule_walker(&corrected)?;
-    let floor = floor_fraction(&measured_weights);
-    let (measured_coeffs, measured_shift) = quantise_ar(&measured_weights);
-    let (measured_sigma, measured_median) = template_stats(&measured_coeffs, measured_shift);
-    let block_to_field = measured_sigma / measured_median;
-
-    take_out_fine_noise(&mut corrected, floor, fine_noise);
-    let measured = (measured_coeffs, measured_shift);
-    let (table, table_sigma) = reduced_weights(&corrected, measured, measured_sigma);
-
-    Some(Texture {
-        table,
-        table_sigma,
-        block_to_field,
-        floor,
-    })
+    Some(record)
 }
 
 /// Takes `fine_noise` times the floor's share of the zero lag off a corrected record.

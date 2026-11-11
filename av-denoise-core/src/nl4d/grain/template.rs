@@ -1,5 +1,6 @@
 use super::consts::{AR_COEFFS, AR_OFFSETS, CELL, TEMPLATE_SEEDS};
 use super::gaussian::GAUSSIAN_SEQUENCE;
+use crate::noise::TEMPORAL_NOISE_BLOCK;
 
 /// The size of a grain template and the interior its statistics read.
 #[derive(Copy, Clone)]
@@ -10,6 +11,8 @@ struct TemplateLayout {
     interior_start: usize,
     /// The side length of the square interior.
     interior_size: usize,
+    /// The side length of the blocks whose median std the statistics read.
+    block_size: usize,
 }
 
 const LUMA_LAYOUT: TemplateLayout = TemplateLayout {
@@ -17,14 +20,17 @@ const LUMA_LAYOUT: TemplateLayout = TemplateLayout {
     cols: 82,
     interior_start: 9,
     interior_size: 64,
+    block_size: CELL as usize,
 };
 
+/// The 4:2:0 chroma template, whose blocks match the colour model's grain blocks.
 #[cfg_attr(not(test), expect(dead_code, reason = "only the chroma grain tests read it"))]
 const CHROMA_LAYOUT: TemplateLayout = TemplateLayout {
     rows: 38,
     cols: 44,
     interior_start: 6,
     interior_size: 32,
+    block_size: TEMPORAL_NOISE_BLOCK as usize,
 };
 
 /// A chroma plane of an AV1 film grain template.
@@ -42,6 +48,14 @@ impl ChromaPlane {
         match self {
             ChromaPlane::Cb => 0xb524,
             ChromaPlane::Cr => 0x49d8,
+        }
+    }
+
+    /// The plane's position in a chroma record, 0 for Cb and 1 for Cr.
+    pub(crate) fn index(self) -> usize {
+        match self {
+            ChromaPlane::Cb => 0,
+            ChromaPlane::Cr => 1,
         }
     }
 }
@@ -135,9 +149,10 @@ pub(crate) fn template_stats(coeffs: &[i32; AR_COEFFS], ar_shift: u32) -> (f64, 
     stats_over_seeds(LUMA_LAYOUT, build)
 }
 
-/// The grain std of these weights' chroma templates, and the median std of their 8x8 blocks.
+/// The grain std of these weights' chroma templates, and the median std of their 16x16 blocks.
 ///
 /// Both read the 32x32 interior of [TEMPLATE_SEEDS] templates. A block's std removes its own mean.
+/// The blocks match the colour model's chroma grain blocks.
 #[cfg_attr(not(test), expect(dead_code, reason = "only the chroma grain tests read it"))]
 pub(crate) fn chroma_template_stats(
     coeffs: &[i32; AR_COEFFS],
@@ -157,7 +172,7 @@ fn stats_over_seeds(layout: TemplateLayout, build: impl Fn(u16) -> Vec<i32>) -> 
         let seed = template_seed(index);
         let template = build(seed);
         let interior = interior_of(&template, layout);
-        let interior_block_stds = block_stds_of(&interior, interior_size);
+        let interior_block_stds = block_stds_of(&interior, layout);
         block_stds.extend(interior_block_stds);
         samples.extend(interior);
     }
@@ -181,8 +196,9 @@ fn interior_of(template: &[i32], layout: TemplateLayout) -> Vec<f64> {
     interior
 }
 
-fn block_stds_of(interior: &[f64], interior_size: usize) -> Vec<f64> {
-    let cell = CELL as usize;
+fn block_stds_of(interior: &[f64], layout: TemplateLayout) -> Vec<f64> {
+    let interior_size = layout.interior_size;
+    let cell = layout.block_size;
     let blocks_per_side = interior_size / cell;
     let mut stds = Vec::with_capacity(blocks_per_side * blocks_per_side);
     for block_y in 0..blocks_per_side {

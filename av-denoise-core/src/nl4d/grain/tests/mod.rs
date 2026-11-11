@@ -1,3 +1,4 @@
+mod chroma;
 mod export;
 mod fine_noise;
 mod fit;

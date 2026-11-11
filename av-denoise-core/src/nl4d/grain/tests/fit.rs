@@ -16,10 +16,15 @@ use crate::nl4d::grain::consts::{
 use crate::nl4d::grain::fit::{
     bucket_edges,
     bucket_of,
+    finest_ar_shift,
+    finest_scaling_shift,
     hist_median,
     measured_lane,
     quantise_ar,
+    quantise_at,
+    scaling_peak,
     scaling_points,
+    scaling_points_at,
     undo_mean_removal,
     yule_walker,
 };
@@ -133,6 +138,61 @@ fn quantise_picks_the_finest_shift_that_fits() {
 
     assert_eq!(fine_shift, 9);
     assert_eq!(fine[23], 102);
+}
+
+#[test]
+fn quantise_ar_matches_its_parts() {
+    let expected_shifts = [(0.2, 9), (0.4, 8), (0.7, 7), (1.5, 6), (3.0, 6)];
+    for (value, expected_shift) in expected_shifts {
+        let mut weights = [0.0f64; AR_COEFFS];
+        weights[0] = -0.1;
+        weights[23] = value;
+
+        let shift = finest_ar_shift(&weights);
+        let coeffs = quantise_at(&weights, shift);
+        let whole = quantise_ar(&weights);
+
+        assert_eq!(shift, expected_shift, "weight {value}");
+        assert_eq!(whole, (coeffs, shift), "weight {value}");
+    }
+
+    let mut overflowing = [0.0f64; AR_COEFFS];
+    overflowing[0] = 3.0;
+    overflowing[1] = -3.0;
+    let (coeffs, _) = quantise_ar(&overflowing);
+
+    assert_eq!(coeffs[0], 127);
+    assert_eq!(coeffs[1], -128);
+}
+
+#[test]
+fn scaling_points_match_their_parts() {
+    let point_sets = [
+        vec![(24u8, 1.0f64 / 255.0), (120u8, 2.0f64 / 255.0)],
+        vec![(40u8, 6.0f64 / 255.0), (200u8, 9.0f64 / 255.0)],
+        vec![
+            (16u8, 20.0f64 / 255.0),
+            (80u8, 30.0f64 / 255.0),
+            (240u8, 3.0f64 / 255.0),
+        ],
+        vec![(128u8, 90.0f64 / 255.0)],
+    ];
+    for points in point_sets {
+        let peak = scaling_peak(&points, 40.0);
+        let shift = finest_scaling_shift(peak);
+        let parts = scaling_points_at(&points, 40.0, shift);
+        let whole = scaling_points(&points, 40.0);
+
+        assert_eq!(whole, (parts, shift), "points {points:?}");
+    }
+}
+
+#[test]
+fn the_finest_scaling_shift_fits_the_peak() {
+    assert_eq!(finest_scaling_shift(0.1), 11);
+    assert_eq!(finest_scaling_shift(0.4), 9);
+    assert_eq!(finest_scaling_shift(0.9), 8);
+    assert_eq!(finest_scaling_shift(2.0), 8);
 }
 
 #[test]
