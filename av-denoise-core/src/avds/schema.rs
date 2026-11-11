@@ -254,16 +254,16 @@ fn table_plane_columns(group: AvdsGroup, prefix: &str, table_start: usize) -> Ve
     }
 
     let source_name = format!("{prefix}_source_hist");
-    let kept_name = format!("{prefix}_kept_hist");
+    let frame_name = format!("{prefix}_frame_hist");
     let lag_sums_name = format!("{prefix}_lag_sums");
     let pixels_name = format!("{prefix}_pixels");
 
     let source = Column::span(source_name, group, Value::Count, hist_start, HIST_LEN);
-    let kept = Column::span(kept_name, group, Value::Count, hist_start + HIST_LEN, HIST_LEN);
+    let frame = Column::span(frame_name, group, Value::Count, hist_start + HIST_LEN, HIST_LEN);
     let lag_sums = Column::new(lag_sums_name, group, Value::Float, lag_sums);
     let pixels = Column::new(pixels_name, group, Value::Float, pixels);
 
-    vec![source, kept, lag_sums, pixels]
+    vec![source, frame, lag_sums, pixels]
 }
 
 /// Each lag's cell count, auto sum and cross sum, as lists over the lags.

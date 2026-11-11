@@ -727,7 +727,15 @@ impl Nl4dDenoiser {
 
     /// Pools the grain into colour cells with the block means `source` holds, and keeps each
     /// frame's colour fit when the grain is measured.
+    ///
+    /// A chroma grain measurement also bins its one-frame cells by the luma of those blocks.
     pub(crate) fn measure_colour(&mut self, source: ColourSource) {
+        let measures_chroma = self.channels == ChannelMode::Chroma;
+        if measures_chroma && let Some(grain) = self.grain.as_mut() {
+            let luma_source = source.clone();
+            grain.keep_luma_means(luma_source);
+        }
+
         self.front.measure_colour(source);
 
         let planes = self.front.colour_fit().map(ColourFit::planes);
@@ -745,7 +753,16 @@ impl Nl4dDenoiser {
 
         let client = self.front.compute_client();
         let input = self.front.input_ring();
-        grain.measure(client, input, &self.outputs, slot_t, slot_next, output_slot);
+        let stream_frame = self.front.slot_frame(slot_t);
+        grain.measure(
+            client,
+            input,
+            &self.outputs,
+            slot_t,
+            slot_next,
+            output_slot,
+            stream_frame,
+        );
     }
 
     /// Normalises the accumulator region at `region_slot` into the next output buffer.

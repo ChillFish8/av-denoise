@@ -1,5 +1,5 @@
 use super::chunk::{GrainChunk, TableSums};
-use super::consts::{AR_COEFFS, CHROMA_PLANES, MAX_CHROMA_POINTS, MIN_BLOCKS_PER_BIN, MIN_POPULATED_BINS};
+use super::consts::{AR_COEFFS, CHROMA_PLANES, MAX_CHROMA_POINTS, MIN_POPULATED_BINS};
 use super::fit::{
     finest_ar_shift,
     quantise_at,
@@ -9,7 +9,7 @@ use super::fit::{
     undo_mean_removal,
     yule_walker,
 };
-use super::segment::{PlaneEntry, overall_median, pooled_record};
+use super::segment::{PlaneEntry, pooled_record};
 use super::template::{ChromaPlane, chroma_template_stats};
 use crate::noise::colour::{
     COLOUR_BRIGHTNESS_BINS,
@@ -37,7 +37,7 @@ pub(crate) struct ChromaTexture {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ChromaParts {
     pub texture: Option<ChromaTexture>,
-    /// The removed grain's block std at up to [MAX_CHROMA_POINTS] lumas, in 8-bit codes.
+    /// The grain's block std at up to [MAX_CHROMA_POINTS] lumas, in 8-bit codes.
     pub target: Option<Vec<(u8, f64)>>,
 }
 
@@ -45,7 +45,7 @@ pub(crate) struct ChromaParts {
 #[derive(Debug, Clone)]
 pub(crate) struct ChromaFit {
     pub texture: ChromaTexture,
-    /// The removed grain's block std at each luma, in 8-bit codes.
+    /// The grain's block std at each luma, in 8-bit codes.
     pub target: Vec<(u8, f64)>,
 }
 
@@ -73,9 +73,7 @@ pub(crate) fn chroma_parts(chunks: &[GrainChunk], edges: &[f32]) -> [ChromaParts
     [cb, cr]
 }
 
-/// One plane's texture from its summed table and its target from the colour fit.
-///
-/// The target needs both the colour fit's levels and the removed share of the table.
+/// One plane's texture from its summed table and its target from the colour fit's levels.
 fn plane_parts(
     chunks: &[GrainChunk],
     colour: &[f32],
@@ -91,11 +89,7 @@ fn plane_parts(
 
     let texture = chroma_texture_of(&stats, edges, plane);
     let levels = chroma_levels(colour, frames, plane);
-    let share = removed_share(&stats, edges);
-    let target = match (levels, share) {
-        (Some(levels), Some(share)) => Some(chroma_targets(&levels, share)),
-        _ => None,
-    };
+    let target = levels.map(|levels| chroma_targets(&levels));
 
     ChromaParts { texture, target }
 }
@@ -158,29 +152,6 @@ pub(crate) fn chroma_texture_of(
         weights,
         block_to_field,
     })
-}
-
-/// The share of the source grain variance the denoiser removed, between 0 and 1.
-///
-/// It compares the median kept std with the median source std over every bin. `None` with
-/// fewer than [MIN_BLOCKS_PER_BIN] source blocks. Fewer kept blocks than that count as no kept
-/// grain.
-pub(crate) fn removed_share(stats: &TableSums, edges: &[f32]) -> Option<f64> {
-    if stats.source_blocks() < MIN_BLOCKS_PER_BIN {
-        return None;
-    }
-
-    let source = overall_median(&stats.source_hist, edges)?;
-    let kept_blocks: u64 = stats.kept_hist.iter().map(|&count| count as u64).sum();
-    if kept_blocks < MIN_BLOCKS_PER_BIN {
-        return Some(1.0);
-    }
-
-    let kept = overall_median(&stats.kept_hist, edges)?;
-    let ratio = kept / source;
-    let share = 1.0 - ratio * ratio;
-
-    Some(share.max(0.0))
 }
 
 /// The grain std of each brightness bin of one chroma plane, read from `frames` frames of colour
@@ -249,16 +220,9 @@ pub(crate) fn chroma_levels(colour: &[f32], frames: usize, plane: ChromaPlane) -
     (levels.len() >= MIN_POPULATED_BINS).then_some(levels)
 }
 
-/// The strength targets of one chroma plane, as removed block stds in 8-bit codes.
+/// The strength targets of one chroma plane, as block stds in 8-bit codes.
 ///
-/// Only the removed `share` of each level's variance is kept. The levels thin evenly to
-/// [MAX_CHROMA_POINTS], keeping the first and last.
-pub(crate) fn chroma_targets(levels: &[(u8, f64)], share: f64) -> Vec<(u8, f64)> {
-    let factor = share.sqrt();
-    let chosen = thinned(levels, MAX_CHROMA_POINTS);
-
-    chosen
-        .iter()
-        .map(|&(luma, level)| (luma, level * factor))
-        .collect()
+/// The levels thin evenly to [MAX_CHROMA_POINTS], keeping the first and last.
+pub(crate) fn chroma_targets(levels: &[(u8, f64)]) -> Vec<(u8, f64)> {
+    thinned(levels, MAX_CHROMA_POINTS)
 }

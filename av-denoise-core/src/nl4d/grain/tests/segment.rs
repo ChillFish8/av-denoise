@@ -203,28 +203,6 @@ fn a_fitted_entry_has_points_and_weights() {
 }
 
 #[test]
-fn kept_equal_to_source_gives_zero_strength() {
-    let chunk = chunk_at(2.0, 300, Some(2.0));
-    let scene = scene_of(0, vec![chunk]);
-    let scenes = vec![scene];
-
-    let entries = fit_measured(&scenes);
-
-    assert!(entries[0].points.iter().all(|&(_, scale)| scale == 0));
-}
-
-#[test]
-fn kept_above_source_clamps_to_zero() {
-    let chunk = chunk_at(2.0, 300, Some(3.0));
-    let scene = scene_of(0, vec![chunk]);
-    let scenes = vec![scene];
-
-    let entries = fit_measured(&scenes);
-
-    assert!(entries[0].points.iter().all(|&(_, scale)| scale == 0));
-}
-
-#[test]
 fn a_thin_chunk_never_gets_its_own_entry() {
     let first_chunk = chunk_at(1.0, 300, None);
     let before_thin = chunk_at(3.0, 300, None);

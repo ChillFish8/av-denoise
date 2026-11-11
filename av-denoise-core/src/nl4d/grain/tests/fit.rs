@@ -256,7 +256,7 @@ fn a_chunk_sums_its_frames() {
     let summed = chunk.summed_table();
 
     assert_eq!(summed.source_hist[5], 3);
-    assert_eq!(summed.kept_hist[2], 7);
+    assert_eq!(summed.frame_hist[2], 7);
     assert_eq!(summed.group_autocov(1)[0], 2.0);
     assert_eq!(summed.pixels[1], 16.0);
     assert_eq!(summed.pixels.len(), STRENGTH_GROUPS);
@@ -272,7 +272,7 @@ fn a_chunk_without_tables_sums_to_zero() {
     let summed = chunk.summed_table();
 
     assert_eq!(summed.source_hist, vec![0; HIST_LEN]);
-    assert_eq!(summed.kept_hist, vec![0; HIST_LEN]);
+    assert_eq!(summed.frame_hist, vec![0; HIST_LEN]);
     assert_eq!(summed.autocov, vec![0.0; STRENGTH_GROUPS * LAG_COUNT]);
     assert_eq!(summed.pixels, vec![0.0; STRENGTH_GROUPS]);
 }

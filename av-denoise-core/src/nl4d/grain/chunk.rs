@@ -7,10 +7,12 @@ pub struct GrainChunk {
     pub frames: u32,
     /// Each frame's table statistics in frame order, 2800 values per luma frame.
     ///
-    /// A chroma frame holds the Cb table and then the Cr table, each in the luma layout. Each
-    /// histogram bins a block by the mean of its measured channel, luma or chroma. Counts are
-    /// whole numbers and lag sums are the GPU's own f32 values. Empty when the table is not
-    /// measured.
+    /// A table holds the source histogram, the one-frame histogram and the grouped lag sums. A
+    /// chroma frame holds the Cb table and then the Cr table, each in the luma layout. The source
+    /// histogram bins a block by the mean of its measured channel, luma or chroma. The one-frame
+    /// histogram bins a luma block the same way and a chroma block by the luma of its colour
+    /// block, and stays empty on a chroma frame whose block luma is not held. Counts are whole
+    /// numbers and lag sums are the GPU's own f32 values. Empty when the table is not measured.
     pub frame_tables: Vec<f32>,
     /// Each frame's persistence sums in frame order, 24 values per luma frame and 6 per chroma
     /// frame.
@@ -29,8 +31,8 @@ pub struct GrainChunk {
 pub(crate) struct TableSums {
     /// Accepted source block counts, 16 bins of the measured channel's mean by 64 std buckets.
     pub source_hist: Vec<u32>,
-    /// Accepted kept-grain block counts, in the same layout.
-    pub kept_hist: Vec<u32>,
+    /// Accepted one-frame block counts, in the same layout.
+    pub frame_hist: Vec<u32>,
     /// The 46 source lag sums of each strength group.
     pub autocov: Vec<f64>,
     /// How many source pixels each strength group's sums cover.
@@ -86,7 +88,7 @@ impl TableSums {
     pub(crate) fn zeroed() -> Self {
         Self {
             source_hist: vec![0; HIST_LEN],
-            kept_hist: vec![0; HIST_LEN],
+            frame_hist: vec![0; HIST_LEN],
             autocov: vec![0.0; STRENGTH_GROUPS * LAG_COUNT],
             pixels: vec![0.0; STRENGTH_GROUPS],
         }
@@ -94,7 +96,7 @@ impl TableSums {
 
     pub(crate) fn add(&mut self, other: &TableSums) {
         add_counts(&mut self.source_hist, &other.source_hist);
-        add_counts(&mut self.kept_hist, &other.kept_hist);
+        add_counts(&mut self.frame_hist, &other.frame_hist);
         add_sums(&mut self.autocov, &other.autocov);
         add_sums(&mut self.pixels, &other.pixels);
     }
@@ -102,9 +104,9 @@ impl TableSums {
     /// Adds one frame's table statistics, laid out as in [GrainChunk::frame_tables].
     fn add_frame(&mut self, frame_table: &[f32; FRAME_TABLE_LEN]) {
         let (source_counts, rest) = frame_table.split_at(HIST_LEN);
-        let (kept_counts, grouped) = rest.split_at(HIST_LEN);
+        let (frame_counts, grouped) = rest.split_at(HIST_LEN);
         add_whole_counts(&mut self.source_hist, source_counts);
-        add_whole_counts(&mut self.kept_hist, kept_counts);
+        add_whole_counts(&mut self.frame_hist, frame_counts);
 
         let (records, _) = grouped.as_chunks::<AUTOCOV_LEN>();
         let (targets, _) = self.autocov.as_chunks_mut::<LAG_COUNT>();

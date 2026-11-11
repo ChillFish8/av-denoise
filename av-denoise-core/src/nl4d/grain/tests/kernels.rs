@@ -13,8 +13,10 @@ use crate::nl4d::grain::consts::{
     STD_BUCKETS,
     STRENGTH_GROUPS,
 };
-use crate::nl4d::grain::fit::{bucket_edges, hist_median};
+use crate::nl4d::grain::fit::{bucket_edges, bucket_of, hist_median};
 use crate::nl4d::kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
+use crate::noise::TEMPORAL_NOISE_BLOCK;
+use crate::noise::colour::COLOUR_MEAN_FIELDS;
 
 const THREADS: u32 = 16;
 const PLAIN: Shape = Shape {
@@ -39,7 +41,12 @@ const OTHER_LEVEL: f32 = 0.8;
 /// A flat level below the luma band.
 const DARK_LEVEL: f32 = 10.0 / 255.0;
 const SIGMA: f32 = 2.0 / 255.0;
-const KEPT_SIGMA: f32 = 0.4 / 255.0;
+/// The colour block luma of the left half of a two-level means grid, on the 8-bit scale.
+const LEFT_LUMA: f32 = 40.0;
+/// The colour block luma of the right half of a two-level means grid, on the 8-bit scale.
+const RIGHT_LUMA: f32 = 200.0;
+/// The colour block luma of a ragged grid's last block row, alone in brightness bin 14.
+const BOTTOM_LUMA: f32 = 232.0;
 /// Counts in one frame's histograms.
 const FRAME_HIST_LEN: usize = 2 * HIST_LEN;
 /// Frame slots a measure or reduce writes into, the kernel's frame landing in the last one.
@@ -164,11 +171,12 @@ struct Scene {
     source_t: Vec<f32>,
     source_next: Vec<f32>,
     out_t: Vec<f32>,
-    out_prev: Vec<f32>,
     source_mv: Vec<(i32, i32)>,
-    kept_mv: Vec<(i32, i32)>,
     source_conf: Vec<f32>,
-    kept_conf: Vec<f32>,
+    /// Each colour block's luma, Cb and Cr means, `None` when not held.
+    luma_means: Option<Vec<f32>>,
+    /// The colour blocks in one row, 0 when one-frame cells bin by their own mean.
+    means_blocks_x: u32,
 }
 
 /// Moves `values` by `shift` whole pixels, repeating the frame edge.
@@ -200,8 +208,8 @@ fn add_noise(values: &[f32], sigma: f32, seed: u64, shape: Shape) -> Vec<f32> {
 
 /// Fresh grain each frame over a flat 0.5 base, or 16x16 tiles of 0.4 and 0.6 when `tiled`.
 ///
-/// `shift` moves the next frame's content by whole pixels, and the saved vectors follow it. Both
-/// outputs are the clean base.
+/// `shift` moves the next frame's content by whole pixels, and the saved vectors follow it. The
+/// output is the clean base.
 fn scene_with(shape: Shape, shift: (i32, i32), tiled: bool, textured_cells: &[(u32, u32)]) -> Scene {
     let width = shape.width;
     let mut base = vec![0.5f32; shape.pixels()];
@@ -235,12 +243,11 @@ fn scene_with(shape: Shape, shift: (i32, i32), tiled: bool, textured_cells: &[(u
         luma_band: true,
         source_t,
         source_next,
-        out_t: base.clone(),
-        out_prev: base,
+        out_t: base,
         source_mv: vec![shift; blocks],
-        kept_mv: vec![(0, 0); blocks],
         source_conf: vec![1.0; blocks],
-        kept_conf: vec![1.0; blocks],
+        luma_means: None,
+        means_blocks_x: 0,
     }
 }
 
@@ -248,24 +255,52 @@ fn flat_scene(shift: (i32, i32), textured_cells: &[(u32, u32)]) -> Scene {
     scene_with(PLAIN, shift, false, textured_cells)
 }
 
-/// Gives the outputs kept grain that follows `kept_shift`.
-///
-/// Output `t - 1` is the clean base plus small noise, and output `t` is that frame moved by
-/// `kept_shift` plus fresh small noise.
-fn with_kept_grain(mut scene: Scene, kept_shift: (i32, i32)) -> Scene {
-    let shape = scene.shape;
-    let out_prev = add_noise(&scene.out_prev, KEPT_SIGMA, 3, shape);
-    let moved_prev = shifted(&out_prev, shape, kept_shift);
-    scene.out_t = add_noise(&moved_prev, KEPT_SIGMA, 4, shape);
-    scene.out_prev = out_prev;
-    scene.kept_mv.fill(kept_shift);
+fn moving_scene(shape: Shape) -> Scene {
+    scene_with(shape, (1, -1), false, &[])
+}
+
+/// The same grain at `t` and `t + 1` over a flat base, with still vectors.
+fn static_scene() -> Scene {
+    let mut scene = flat_scene((0, 0), &[]);
+    scene.source_next = scene.source_t.clone();
 
     scene
 }
 
-fn kept_scene(shape: Shape) -> Scene {
-    let scene = scene_with(shape, (1, -1), false, &[]);
-    with_kept_grain(scene, (2, 1))
+/// Bins the scene's one-frame cells by a colour grid, each block's luma given by `luma_of`.
+///
+/// The grid covers the scene in 16x16 blocks by `div_ceil`. Without `held`, the scene has the
+/// grid's shape but no means.
+fn with_luma_means(mut scene: Scene, held: bool, luma_of: impl Fn(u32, u32) -> f32) -> Scene {
+    let blocks_x = scene.shape.width.div_ceil(TEMPORAL_NOISE_BLOCK);
+    let blocks_y = scene.shape.height.div_ceil(TEMPORAL_NOISE_BLOCK);
+    let mut means = Vec::with_capacity((blocks_x * blocks_y * COLOUR_MEAN_FIELDS) as usize);
+    for block_y in 0..blocks_y {
+        for block_x in 0..blocks_x {
+            let luma = luma_of(block_x, block_y);
+            means.extend_from_slice(&[luma, 128.0, 128.0]);
+        }
+    }
+
+    scene.means_blocks_x = blocks_x;
+    scene.luma_means = held.then_some(means);
+
+    scene
+}
+
+/// A flat two-channel scene measured on channel 1, binned by [LEFT_LUMA] and [RIGHT_LUMA] blocks.
+fn two_level_chroma_scene(held: bool) -> Scene {
+    let flat = flat_scene((0, 0), &[]);
+    let chroma = on_channel(flat, 1, false);
+    let half = chroma.shape.width.div_ceil(TEMPORAL_NOISE_BLOCK) / 2;
+
+    with_luma_means(
+        chroma,
+        held,
+        |block_x, _| {
+            if block_x < half { LEFT_LUMA } else { RIGHT_LUMA }
+        },
+    )
 }
 
 /// Places each of `samples` on `channel` of a two-channel pixel, the other channel at [OTHER_LEVEL].
@@ -287,7 +322,6 @@ fn on_channel(scene: Scene, channel: u32, luma_band: bool) -> Scene {
     let source_t = interleaved(&scene.source_t, channel);
     let source_next = interleaved(&scene.source_next, channel);
     let out_t = interleaved(&scene.out_t, channel);
-    let out_prev = interleaved(&scene.out_prev, channel);
 
     Scene {
         channels: 2,
@@ -296,7 +330,6 @@ fn on_channel(scene: Scene, channel: u32, luma_band: bool) -> Scene {
         source_t,
         source_next,
         out_t,
-        out_prev,
         ..scene
     }
 }
@@ -308,8 +341,7 @@ fn lowered(mut scene: Scene, level: f32) -> Scene {
         .source_t
         .iter_mut()
         .chain(scene.source_next.iter_mut())
-        .chain(scene.out_t.iter_mut())
-        .chain(scene.out_prev.iter_mut());
+        .chain(scene.out_t.iter_mut());
     for sample in samples {
         *sample += offset;
     }
@@ -317,9 +349,10 @@ fn lowered(mut scene: Scene, level: f32) -> Scene {
     scene
 }
 
-fn source_median(hist: &[u32]) -> f64 {
+/// The median of a histogram's counts over every luma bin.
+fn merged_median(hist: &[u32]) -> f64 {
     let mut merged = vec![0u32; STD_BUCKETS];
-    for (index, &count) in hist[..HIST_LEN].iter().enumerate() {
+    for (index, &count) in hist.iter().enumerate() {
         merged[index % STD_BUCKETS] += count;
     }
 
@@ -327,15 +360,26 @@ fn source_median(hist: &[u32]) -> f64 {
     hist_median(&merged, &edges).expect("accepted blocks")
 }
 
+fn source_median(hist: &[u32]) -> f64 {
+    merged_median(&hist[..HIST_LEN])
+}
+
 fn source_total(hist: &[u32]) -> u32 {
     hist[..HIST_LEN].iter().sum()
 }
 
-fn kept_total(hist: &[u32]) -> u32 {
+fn frame_total(hist: &[u32]) -> u32 {
     hist[HIST_LEN..].iter().sum()
 }
 
-fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Vec<f64>) {
+/// The one-frame count of each luma bin.
+fn frame_bin_totals(hist: &[u32]) -> Vec<u32> {
+    let (bins, _) = hist[HIST_LEN..].as_chunks::<STD_BUCKETS>();
+
+    bins.iter().map(|bin| bin.iter().sum()).collect()
+}
+
+fn run_measure(scene: &Scene, has_source: bool) -> (Vec<u32>, Vec<f64>) {
     let client = make_client();
     let shape = scene.shape;
     let samples = shape.pixels() * scene.channels as usize;
@@ -345,30 +389,32 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
     let mut ring = scene.source_t.clone();
     ring.extend_from_slice(&scene.source_next);
 
-    let mut saved_mv = Vec::with_capacity(4 * blocks);
-    for &(dx, dy) in scene.source_mv.iter().chain(scene.kept_mv.iter()) {
+    let mut saved_mv = Vec::with_capacity(2 * blocks);
+    for &(dx, dy) in &scene.source_mv {
         saved_mv.push(dx);
         saved_mv.push(dy);
     }
 
-    let mut saved_conf = scene.source_conf.clone();
-    saved_conf.extend_from_slice(&scene.kept_conf);
+    let placeholder = vec![0.0f32];
+    let held_means = scene.luma_means.as_ref();
+    let luma_means = held_means.unwrap_or(&placeholder);
+    let has_luma_means = held_means.is_some();
     let edges = bucket_edges();
     let hist_zeros = vec![0i32; MEASURED_SLOTS * FRAME_HIST_LEN];
 
     let ring_bytes = f32::as_bytes(&ring);
     let out_t_bytes = f32::as_bytes(&scene.out_t);
-    let out_prev_bytes = f32::as_bytes(&scene.out_prev);
     let saved_mv_bytes = i32::as_bytes(&saved_mv);
-    let saved_conf_bytes = f32::as_bytes(&saved_conf);
+    let saved_conf_bytes = f32::as_bytes(&scene.source_conf);
     let edges_bytes = f32::as_bytes(&edges);
+    let means_bytes = f32::as_bytes(luma_means);
     let hist_zero_bytes = i32::as_bytes(&hist_zeros);
     let input = client.create_from_slice(ring_bytes);
     let out_t = client.create_from_slice(out_t_bytes);
-    let out_prev = client.create_from_slice(out_prev_bytes);
     let saved_mv = client.create_from_slice(saved_mv_bytes);
     let saved_conf = client.create_from_slice(saved_conf_bytes);
     let edges_buf = client.create_from_slice(edges_bytes);
+    let means = client.create_from_slice(means_bytes);
     let hist = client.create_from_slice(hist_zero_bytes);
     let partials = client.empty(cells * PARTIAL_LEN * size_of::<f32>());
 
@@ -385,18 +431,17 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
             scene.channels as usize,
             BufferArg::from_raw_parts(input, 2 * samples),
             BufferArg::from_raw_parts(out_t, samples),
-            BufferArg::from_raw_parts(out_prev, samples),
-            BufferArg::from_raw_parts(saved_mv, 4 * blocks),
-            BufferArg::from_raw_parts(saved_conf, 2 * blocks),
+            BufferArg::from_raw_parts(saved_mv, 2 * blocks),
+            BufferArg::from_raw_parts(saved_conf, blocks),
             BufferArg::from_raw_parts(edges_buf, edges.len()),
+            BufferArg::from_raw_parts(means, luma_means.len()),
             BufferArg::from_raw_parts(hist.clone(), MEASURED_SLOTS * FRAME_HIST_LEN),
             BufferArg::from_raw_parts(partials.clone(), cells * PARTIAL_LEN),
             0u32,
             1u32,
             0u32,
-            1u32,
             has_source as u32,
-            has_kept as u32,
+            has_luma_means as u32,
             FRAME_HIST_LEN as u32,
             shape.width,
             shape.height,
@@ -406,6 +451,7 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
             shape.step,
             scene.channel,
             scene.luma_band,
+            scene.means_blocks_x,
         );
     }
 
@@ -433,7 +479,7 @@ fn run_measure(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Ve
     (hist, autocov)
 }
 
-fn mirror_of(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Vec<f64>) {
+fn mirror_of(scene: &Scene, has_source: bool) -> (Vec<u32>, Vec<f64>) {
     let edges = bucket_edges();
     let shape = scene.shape;
     let frame = MirrorFrame {
@@ -445,16 +491,14 @@ fn mirror_of(scene: &Scene, has_source: bool, has_kept: bool) -> (Vec<u32>, Vec<
         source_t: &scene.source_t,
         source_next: &scene.source_next,
         out_t: &scene.out_t,
-        out_prev: &scene.out_prev,
         source_mv: &scene.source_mv,
         source_conf: &scene.source_conf,
-        kept_mv: &scene.kept_mv,
-        kept_conf: &scene.kept_conf,
+        luma_means: scene.luma_means.as_deref(),
+        means_blocks_x: scene.means_blocks_x,
         blocks_x: shape.blocks_x(),
         blocks_y: shape.blocks_y(),
         step: shape.step,
         has_source,
-        has_kept,
     };
     let record = mirror_measure(&frame, &edges);
     (record.hist, record.autocov)
@@ -474,8 +518,8 @@ fn assert_autocov_close(gpu: &[f64], host: &[f64]) {
 }
 
 fn assert_matches_mirror(scene: &Scene) -> Vec<u32> {
-    let (gpu_hist, gpu_autocov) = run_measure(scene, true, true);
-    let (host_hist, host_autocov) = mirror_of(scene, true, true);
+    let (gpu_hist, gpu_autocov) = run_measure(scene, true);
+    let (host_hist, host_autocov) = mirror_of(scene, true);
 
     let pixels = pixels_of(&gpu_autocov);
 
@@ -536,25 +580,116 @@ fn measure_matches_the_mirror_on_flat_grain() {
 }
 
 #[test]
-fn measure_matches_the_mirror_on_kept_grain() {
-    let scene = kept_scene(PLAIN);
+fn frame_hist_matches_the_mirror_on_flat_grain() {
+    let scene = moving_scene(PLAIN);
     let hist = assert_matches_mirror(&scene);
     let source = source_total(&hist);
-    let kept = kept_total(&hist);
+    let frame = frame_total(&hist);
 
     assert!(source > 0);
-    assert!(kept > 0);
+    assert!(frame > 0);
 }
 
 #[test]
 fn measure_matches_the_mirror_on_a_ragged_frame() {
-    let scene = kept_scene(RAGGED);
+    let scene = moving_scene(RAGGED);
     let hist = assert_matches_mirror(&scene);
     let source = source_total(&hist);
-    let kept = kept_total(&hist);
+    let frame = frame_total(&hist);
 
     assert!(source > 0);
-    assert!(kept > 0);
+    assert!(frame > 0);
+}
+
+#[test]
+fn static_grain_fills_the_frame_hist_in_one_frame() {
+    let scene = static_scene();
+    let edges = bucket_edges();
+    let (gpu_hist, _) = run_measure(&scene, true);
+    let (host_hist, _) = mirror_of(&scene, true);
+    let source = source_total(&gpu_hist);
+    let frame_median = merged_median(&gpu_hist[HIST_LEN..]);
+    let median_bucket = bucket_of(frame_median as f32, &edges);
+    let sigma_bucket = bucket_of(SIGMA, &edges);
+
+    assert_eq!(gpu_hist, host_hist);
+    assert!(source <= 1, "{source} source cells");
+    assert!(
+        median_bucket.abs_diff(sigma_bucket) <= 1,
+        "median {frame_median} vs sigma {SIGMA}"
+    );
+}
+
+#[test]
+fn a_one_frame_cell_needs_no_motion_confidence() {
+    let mut scene = flat_scene((0, 0), &[]);
+    scene.source_conf.fill(0.0);
+    let (gpu_hist, _) = run_measure(&scene, true);
+    let (host_hist, _) = mirror_of(&scene, true);
+    let source = source_total(&gpu_hist);
+    let frame = frame_total(&gpu_hist);
+
+    assert_eq!(gpu_hist, host_hist);
+    assert_eq!(source, 0);
+    assert_eq!(frame as usize, PLAIN.cells());
+}
+
+#[test]
+fn chroma_frame_hist_bins_by_the_luma_means() {
+    let scene = two_level_chroma_scene(true);
+    let (gpu_hist, _) = run_measure(&scene, true);
+    let (host_hist, _) = mirror_of(&scene, true);
+    let bins = frame_bin_totals(&gpu_hist);
+    let elsewhere: u32 = bins
+        .iter()
+        .enumerate()
+        .filter(|&(bin, _)| bin != 2 && bin != 12)
+        .map(|(_, &count)| count)
+        .sum();
+
+    assert_eq!(gpu_hist, host_hist);
+    assert!(bins[2] > 0);
+    assert!(bins[12] > 0);
+    assert_eq!(elsewhere, 0);
+}
+
+#[test]
+fn chroma_frame_hist_is_empty_without_luma_means() {
+    let held = two_level_chroma_scene(true);
+    let missing = two_level_chroma_scene(false);
+    let (held_hist, held_autocov) = run_measure(&held, true);
+    let (missing_hist, missing_autocov) = run_measure(&missing, true);
+    let (host_hist, _) = mirror_of(&missing, true);
+    let held_frame = frame_total(&held_hist);
+    let missing_frame = frame_total(&missing_hist);
+
+    assert_eq!(missing_hist, host_hist);
+    assert_eq!(missing_frame, 0);
+    assert!(held_frame > 0);
+    assert_eq!(missing_hist[..HIST_LEN], held_hist[..HIST_LEN]);
+    assert_autocov_close(&missing_autocov, &held_autocov);
+}
+
+#[test]
+fn chroma_frame_hist_matches_the_mirror_on_a_ragged_frame() {
+    let moving = moving_scene(RAGGED_CHROMA);
+    let chroma = on_channel(moving, 1, false);
+    let bottom_row = RAGGED_CHROMA.height.div_ceil(TEMPORAL_NOISE_BLOCK) - 1;
+    let scene = with_luma_means(chroma, true, |block_x, block_y| {
+        if block_y == bottom_row {
+            return BOTTOM_LUMA;
+        }
+
+        24.0 + 20.0 * block_x as f32
+    });
+    let hist = assert_matches_mirror(&scene);
+    let bins = frame_bin_totals(&hist);
+    let source = source_total(&hist);
+
+    assert_eq!(scene.means_blocks_x, 7);
+    assert_eq!(bottom_row, 4);
+    assert!(source > 0);
+    assert!(bins[14] > 0, "{bins:?}");
 }
 
 #[test]
@@ -568,18 +703,6 @@ fn chroma_measure_matches_the_mirror_on_flat_grain() {
 }
 
 #[test]
-fn chroma_measure_matches_the_mirror_on_a_ragged_frame() {
-    let kept = kept_scene(RAGGED_CHROMA);
-    let scene = on_channel(kept, 1, false);
-    let hist = assert_matches_mirror(&scene);
-    let source = source_total(&hist);
-    let kept = kept_total(&hist);
-
-    assert!(source > 0);
-    assert!(kept > 0);
-}
-
-#[test]
 fn chroma_measure_ignores_the_luma_band() {
     let flat = flat_scene((0, 0), &[]);
     let dark = lowered(flat, DARK_LEVEL);
@@ -589,8 +712,8 @@ fn chroma_measure_ignores_the_luma_band() {
     let banded = on_channel(dark_again, 1, true);
 
     let unbanded_hist = assert_matches_mirror(&unbanded);
-    let (banded_hist, banded_autocov) = run_measure(&banded, true, true);
-    let (host_hist, _) = mirror_of(&banded, true, true);
+    let (banded_hist, banded_autocov) = run_measure(&banded, true);
+    let (host_hist, _) = mirror_of(&banded, true);
     let unbanded_source = source_total(&unbanded_hist);
     let banded_source = source_total(&banded_hist);
 
@@ -602,20 +725,20 @@ fn chroma_measure_ignores_the_luma_band() {
 
 #[test]
 fn luma_measure_reads_channel_zero_of_two() {
-    let single = kept_scene(PLAIN);
-    let kept = kept_scene(PLAIN);
-    let paired = on_channel(kept, 0, true);
+    let single = moving_scene(PLAIN);
+    let moving = moving_scene(PLAIN);
+    let paired = on_channel(moving, 0, true);
 
-    let (single_hist, single_autocov) = run_measure(&single, true, true);
+    let (single_hist, single_autocov) = run_measure(&single, true);
     let paired_hist = assert_matches_mirror(&paired);
-    let (_, paired_autocov) = run_measure(&paired, true, true);
+    let (_, paired_autocov) = run_measure(&paired, true);
     let source = source_total(&paired_hist);
-    let kept = kept_total(&paired_hist);
+    let frame = frame_total(&paired_hist);
 
     assert_eq!(paired_hist, single_hist);
     assert_autocov_close(&paired_autocov, &single_autocov);
     assert!(source > 0);
-    assert!(kept > 0);
+    assert!(frame > 0);
 }
 
 #[test]
@@ -623,9 +746,9 @@ fn flicker_leaves_the_record_unchanged() {
     let steady = flat_scene((0, 0), &[]);
     let unflickered = flat_scene((0, 0), &[]);
     let flickered = with_flicker(unflickered);
-    let (steady_hist, steady_autocov) = run_measure(&steady, true, false);
-    let (flicker_hist, flicker_autocov) = run_measure(&flickered, true, false);
-    let (host_hist, host_autocov) = mirror_of(&flickered, true, false);
+    let (steady_hist, steady_autocov) = run_measure(&steady, true);
+    let (flicker_hist, flicker_autocov) = run_measure(&flickered, true);
+    let (host_hist, host_autocov) = mirror_of(&flickered, true);
     let steady_ratio = lag_3_ratio(&steady_autocov);
     let flicker_ratio = lag_3_ratio(&flicker_autocov);
     let steady_source = source_total(&steady_hist);
@@ -642,42 +765,15 @@ fn flicker_leaves_the_record_unchanged() {
 }
 
 #[test]
-fn kept_grain_is_not_counted_without_a_kept_pair() {
-    let scene = kept_scene(PLAIN);
-    let (hist, _) = run_measure(&scene, true, false);
-    let source = source_total(&hist);
-    let kept = kept_total(&hist);
-
-    assert!(source > 0);
-    assert_eq!(kept, 0);
-}
-
-#[test]
-fn a_low_kept_confidence_cell_is_rejected() {
-    let mut scene = kept_scene(PLAIN);
-    let (before, _) = run_measure(&scene, true, true);
-    let block = PLAIN.block_at(3, 3);
-    scene.kept_conf[block] = 0.5;
-    let (after, _) = run_measure(&scene, true, true);
-    let kept_before = kept_total(&before);
-    let kept_after = kept_total(&after);
-    let source_before = source_total(&before);
-    let source_after = source_total(&after);
-
-    assert_eq!(kept_after + 1, kept_before);
-    assert_eq!(source_after, source_before);
-}
-
-#[test]
 fn followed_motion_measures_the_same_grain_as_a_still_pair() {
     let still = scene_with(PLAIN, (0, 0), true, &[]);
     let moved = scene_with(PLAIN, (3, -2), true, &[]);
     let mut ignored = scene_with(PLAIN, (3, -2), true, &[]);
     ignored.source_mv.fill((0, 0));
 
-    let (still_hist, _) = run_measure(&still, true, false);
-    let (moved_hist, _) = run_measure(&moved, true, false);
-    let (ignored_hist, _) = run_measure(&ignored, true, false);
+    let (still_hist, _) = run_measure(&still, true);
+    let (moved_hist, _) = run_measure(&moved, true);
+    let (ignored_hist, _) = run_measure(&ignored, true);
     let still_median = source_median(&still_hist);
     let moved_median = source_median(&moved_hist);
     let ignored_median = source_median(&ignored_hist);
@@ -696,8 +792,8 @@ fn followed_motion_measures_the_same_grain_as_a_still_pair() {
 fn a_textured_cell_is_rejected() {
     let plain = flat_scene((0, 0), &[]);
     let textured = flat_scene((0, 0), &[(3, 3)]);
-    let (plain_hist, _) = run_measure(&plain, true, false);
-    let (textured_hist, _) = run_measure(&textured, true, false);
+    let (plain_hist, _) = run_measure(&plain, true);
+    let (textured_hist, _) = run_measure(&textured, true);
     let plain_source = source_total(&plain_hist);
     let textured_source = source_total(&textured_hist);
 
@@ -717,8 +813,8 @@ fn a_cell_without_grain_is_rejected() {
         }
     }
 
-    let (plain_hist, _) = run_measure(&plain, true, false);
-    let (empty_hist, _) = run_measure(&empty, true, false);
+    let (plain_hist, _) = run_measure(&plain, true);
+    let (empty_hist, _) = run_measure(&empty, true);
     let plain_source = source_total(&plain_hist);
     let empty_source = source_total(&empty_hist);
 
@@ -728,10 +824,10 @@ fn a_cell_without_grain_is_rejected() {
 #[test]
 fn a_low_confidence_cell_is_rejected() {
     let mut scene = flat_scene((0, 0), &[]);
-    let (before, _) = run_measure(&scene, true, false);
+    let (before, _) = run_measure(&scene, true);
     let block = PLAIN.block_at(3, 3);
     scene.source_conf[block] = 0.5;
-    let (after, _) = run_measure(&scene, true, false);
+    let (after, _) = run_measure(&scene, true);
     let source_before = source_total(&before);
     let source_after = source_total(&after);
 
@@ -741,7 +837,7 @@ fn a_low_confidence_cell_is_rejected() {
 #[test]
 fn missing_pairs_give_zero_counts() {
     let scene = flat_scene((0, 0), &[]);
-    let (hist, autocov) = run_measure(&scene, false, false);
+    let (hist, autocov) = run_measure(&scene, false);
 
     assert!(hist.iter().all(|&count| count == 0));
     assert!(autocov.iter().all(|&sum| sum == 0.0));
@@ -754,9 +850,9 @@ fn clipped_blocks_are_rejected() {
     fill_cell_row(&mut clipped, 0, 0.0);
     fill_cell_row(&mut clipped, 2, 1.0);
 
-    let (plain_hist, _) = run_measure(&plain, true, false);
-    let (gpu_hist, _) = run_measure(&clipped, true, false);
-    let (host_hist, _) = mirror_of(&clipped, true, false);
+    let (plain_hist, _) = run_measure(&plain, true);
+    let (gpu_hist, _) = run_measure(&clipped, true);
+    let (host_hist, _) = mirror_of(&clipped, true);
     let interior_per_row = PLAIN.cells_x() - 2;
     let plain_source = source_total(&plain_hist);
     let clipped_source = source_total(&gpu_hist);
@@ -780,8 +876,8 @@ fn ten_bit_and_eight_bit_give_the_same_record() {
         *value = quantise_ten(*value);
     }
 
-    let (eight_hist, eight_autocov) = run_measure(&eight, true, false);
-    let (ten_hist, ten_autocov) = run_measure(&ten, true, false);
+    let (eight_hist, eight_autocov) = run_measure(&eight, true);
+    let (ten_hist, ten_autocov) = run_measure(&ten, true);
     let eight_source = source_total(&eight_hist);
     let ten_source = source_total(&ten_hist);
 

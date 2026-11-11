@@ -18,6 +18,8 @@ use crate::nl4d::grain::consts::{
     STD_MIN,
     STRENGTH_GROUPS,
 };
+use crate::noise::TEMPORAL_NOISE_BLOCK;
+use crate::noise::colour::{COLOUR_BRIGHTNESS_STEP, COLOUR_MEAN_FIELDS};
 
 /// Threads in one measuring cube, one per pixel of a cell.
 const THREADS: u32 = 64;
@@ -33,8 +35,9 @@ const LAG_LANES: u32 = 46;
 const REDUCE_ROUNDS: u32 = THREADS.ilog2();
 /// Halving rounds that reduce [REDUCE_THREADS] values to one.
 const CHUNK_ROUNDS: u32 = REDUCE_THREADS.ilog2();
-/// Shared lanes for sums of the grain, its square and the clean luma.
-const SUM_LANES: u32 = 3;
+/// Shared lanes for sums of the grain, its square, the clean sample, the centred source sample and
+/// its square.
+const SUM_LANES: u32 = 5;
 
 /// Copies one neighbour's motion vectors and confidence into saved ring entry `entry`.
 ///
@@ -178,6 +181,42 @@ fn luma_bin(mean: f32) -> u32 {
     u32::min(scaled, comptime!(LUMA_BINS as u32 - 1))
 }
 
+/// Whether a one-frame cell has a brightness to bin by, always true without a colour grid.
+#[cube]
+fn means_ready(has_luma_means: u32, #[comptime] means_blocks_x: u32) -> bool {
+    let mut ready = true;
+    if comptime!(means_blocks_x > 0) {
+        ready = has_luma_means != 0;
+    }
+
+    ready
+}
+
+/// The brightness bin of a one-frame cell.
+///
+/// Without a colour grid it is the bin of the cell's denoised `mean`. Otherwise it is the bin of
+/// the mean luma of the colour block the cell origin falls in, on the 8-bit scale.
+#[cube]
+fn frame_bin(
+    luma_means: &[f32],
+    mean: f32,
+    cell_x: u32,
+    cell_y: u32,
+    #[comptime] means_blocks_x: u32,
+) -> u32 {
+    let mut bin = luma_bin(mean);
+    if comptime!(means_blocks_x > 0) {
+        let block_x = cell_x * CELL / TEMPORAL_NOISE_BLOCK;
+        let block_y = cell_y * CELL / TEMPORAL_NOISE_BLOCK;
+        let block = block_y * means_blocks_x + block_x;
+        let block_luma = luma_means[(block * COLOUR_MEAN_FIELDS) as usize];
+        let scaled = u32::cast_from(block_luma / COLOUR_BRIGHTNESS_STEP);
+        bin = u32::min(scaled, comptime!(LUMA_BINS as u32 - 1));
+    }
+
+    bin
+}
+
 /// The sample standard deviation of [THREADS] values from their sum and sum of squares.
 #[cube]
 fn std_of(sum: f32, sum_sq: f32) -> f32 {
@@ -186,28 +225,30 @@ fn std_of(sum: f32, sum_sq: f32) -> f32 {
     f32::sqrt(f32::max(variance, 0.0f32))
 }
 
-/// Measures one completed frame's source grain and kept grain over one 8x8 cell.
+/// Measures one completed frame's source grain and one-frame grain over one 8x8 cell.
 ///
 /// Launch one `CELL x CELL` cube per cell. Every sample is read from channel `channel`. Source
-/// grain is the motion-compensated difference of the noisy ring slots `slot_t` and `slot_next`.
-/// Kept grain is the same between the denoised frames `out_prev` at `t - 1` and `out_t` at `t`.
-/// Both are divided by sqrt 2 so they carry one frame's grain std. `source_entry` and `kept_entry`
-/// pick each difference's saved vectors and confidence, and a zero `has_source` or `has_kept`
-/// rejects every cell of that measurement.
+/// grain is the motion-compensated difference of the noisy ring slots `slot_t` and `slot_next`,
+/// divided by sqrt 2 so it carries one frame's grain std. `source_entry` picks the difference's
+/// saved vectors and confidence. One-frame grain is the cell's own std in slot `slot_t`, with its
+/// mean taken off. A zero `has_source` rejects every cell.
 ///
-/// A source cell must sit off the left, right and bottom edges, so its lag halo never reads a
-/// clamped pixel. It also needs a confident vector, a flat, mid-luma `out_t`, no source pixel of
-/// `t` or `t + 1` near clipping, and a grain std above the floor. A kept cell passes the same
-/// gates, apart from the edge gate, with flatness, luma and clipping all read from `out_prev`.
-/// Without `luma_band`, neither gate checks the mean.
+/// Every cell needs a flat `out_t`, a mean inside the luma band when `luma_band` is set, and no
+/// source pixel of `t` or `t + 1` near clipping. A source cell must also sit off the left, right
+/// and bottom edges, so its lag halo never reads a clamped pixel, and needs a confident vector and
+/// a grain std above the floor. A one-frame cell needs only a std above the floor, and with a
+/// colour grid a set `has_luma_means`.
 ///
-/// Each accepted cell adds one count to the bin of its measured channel's mean and to its std
-/// bucket of the frame's histograms, which start at `hist_offset` in `hist`. The first
-/// `HIST_LEN` counts are for source grain and the next for kept grain. Every cell writes its partial, the 46 lag sums, pixel count and
-/// strength group of its source grain, as zeros when rejected.
-/// The lag sums take the cell's mean source grain off every pixel and halo neighbour first, so a
-/// uniform brightness flicker between the two frames never reaches them. The strength group keeps
-/// cells of outlying grain strength in a record of their own.
+/// Each accepted cell adds one count to its brightness bin and std bucket of the frame's
+/// histograms, which start at `hist_offset` in `hist`. The first `HIST_LEN` counts are for source
+/// grain and the next for one-frame grain. A source cell bins by its `out_t` mean, and so does a
+/// one-frame cell when `means_blocks_x` is 0. Otherwise a one-frame cell bins by the mean luma in
+/// `luma_means` of the colour block its origin falls in, on a grid `means_blocks_x` blocks wide.
+///
+/// Every cell writes its partial, the 46 lag sums, pixel count and strength group of its source
+/// grain, as zeros when rejected. The lag sums take the cell's mean source grain off every pixel
+/// and halo neighbour first, so a uniform brightness flicker between the two frames never reaches
+/// them. The strength group keeps cells of outlying grain strength in a record of their own.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -216,18 +257,17 @@ fn std_of(sum: f32, sum_sq: f32) -> f32 {
 pub fn grain_measure<N: Size>(
     input: &[Vector<f32, N>],
     out_t: &[f32],
-    out_prev: &[f32],
     saved_mv: &[i32],
     saved_conf: &[f32],
     edges: &[f32],
+    luma_means: &[f32],
     hist: &mut [Atomic<i32>],
     partials: &mut [f32],
     slot_t: u32,
     slot_next: u32,
     source_entry: u32,
-    kept_entry: u32,
     has_source: u32,
-    has_kept: u32,
+    has_luma_means: u32,
     hist_offset: u32,
     #[comptime] width: u32,
     #[comptime] height: u32,
@@ -237,6 +277,7 @@ pub fn grain_measure<N: Size>(
     #[comptime] step: u32,
     #[comptime] channel: u32,
     #[comptime] luma_band: bool,
+    #[comptime] means_blocks_x: u32,
 ) {
     let mut tile = Shared::<[f32]>::new_slice(TILE_LEN as usize);
     let mut sums = Shared::<[f32]>::new_slice((SUM_LANES * THREADS) as usize);
@@ -259,7 +300,6 @@ pub fn grain_measure<N: Size>(
     let y = origin_y + local_y;
     let block = block_for(cell_x, cell_y, blocks_x, blocks_y, step);
     let source_base = source_entry * blocks * 2;
-    let kept_base = kept_entry * blocks * 2;
     let mut group = 0u32;
 
     // Source grain over the cell and its halo, every coordinate clamped into the frame.
@@ -310,10 +350,15 @@ pub fn grain_measure<N: Size>(
     let next_x = clamp_shift(x, dx, width);
     let next_y = clamp_shift(y, dy, height);
     let next = channel_at(input, next_x, next_y, slot_next, channel, width, height);
+    // The cell origin's sample comes off first, so the f32 sums of squares keep their precision.
+    let origin = channel_at(input, origin_x, origin_y, slot_t, channel, width, height);
+    let centred = current - origin;
 
     sums[thread_id as usize] = own_grain;
     sums[(THREADS + thread_id) as usize] = own_grain * own_grain;
     sums[(2 * THREADS + thread_id) as usize] = clean;
+    sums[(3 * THREADS + thread_id) as usize] = centred;
+    sums[(4 * THREADS + thread_id) as usize] = centred * centred;
     lows[thread_id as usize] = clean;
     lows[(THREADS + thread_id) as usize] = f32::min(current, next);
     highs[thread_id as usize] = clean;
@@ -347,17 +392,16 @@ pub fn grain_measure<N: Size>(
         let count = THREADS as f32;
         let grain_std = std_of(sums[0], sums[THREADS as usize]);
         let mean = sums[(2 * THREADS) as usize] / count;
+        let frame_std = std_of(sums[(3 * THREADS) as usize], sums[(4 * THREADS) as usize]);
         let range = highs[0] - lows[0];
         let interior = cell_x >= 1 && cell_x + 2 <= cells_x && cell_y + 2 <= cells_y;
         let confidence = saved_conf[(source_entry * blocks + block) as usize];
-        let passes = has_source != 0
-            && interior
-            && confidence >= CONF_MIN
+        let usable = has_source != 0
             && range < FLAT_RANGE
             && in_band(mean, luma_band)
             && lows[THREADS as usize] >= CLIP_LOW
-            && highs[THREADS as usize] <= CLIP_HIGH
-            && grain_std > STD_MIN;
+            && highs[THREADS as usize] <= CLIP_HIGH;
+        let passes = usable && interior && confidence >= CONF_MIN && grain_std > STD_MIN;
         accepted[0] = 0.0f32;
 
         if passes {
@@ -365,6 +409,15 @@ pub fn grain_measure<N: Size>(
             let bucket = bucket_for(grain_std, edges);
             let slot = hist_offset + luma_bin(mean) * STD_BUCKETS as u32 + bucket;
             group = bucket / BUCKETS_PER_GROUP as u32;
+            Atomic::fetch_add(&hist[slot as usize], 1i32);
+        }
+
+        let frame_passes = usable && frame_std > STD_MIN && means_ready(has_luma_means, means_blocks_x);
+        if frame_passes {
+            let bucket = bucket_for(frame_std, edges);
+            let bin = frame_bin(luma_means, mean, cell_x, cell_y, means_blocks_x);
+            let frame_offset = hist_offset + HIST_LEN as u32;
+            let slot = frame_offset + bin * STD_BUCKETS as u32 + bucket;
             Atomic::fetch_add(&hist[slot as usize], 1i32);
         }
     }
@@ -417,65 +470,6 @@ pub fn grain_measure<N: Size>(
 
         partials[(base + LAG_LANES) as usize] = take * THREADS as f32;
         partials[(base + AUTOCOV_LEN as u32) as usize] = group as f32;
-    }
-
-    // Kept grain on the same cell of output `t - 1`.
-    let kept_dx = saved_mv[(kept_base + block * 2) as usize];
-    let kept_dy = saved_mv[(kept_base + block * 2 + 1) as usize];
-    let warped_x = clamp_shift(x, kept_dx, width);
-    let warped_y = clamp_shift(y, kept_dy, height);
-    let warped = out_t[((warped_y * width + warped_x) * channels + channel) as usize];
-    let previous = out_prev[((y * width + x) * channels + channel) as usize];
-    let kept = (warped - previous) * std::f32::consts::FRAC_1_SQRT_2;
-
-    sums[thread_id as usize] = kept;
-    sums[(THREADS + thread_id) as usize] = kept * kept;
-    sums[(2 * THREADS + thread_id) as usize] = previous;
-    lows[thread_id as usize] = previous;
-    highs[thread_id as usize] = previous;
-    sync_cube();
-
-    #[unroll]
-    for round in 0..REDUCE_ROUNDS {
-        let kept_stride = comptime!(THREADS >> (round + 1));
-        if thread_id < kept_stride {
-            #[unroll]
-            for index in 0..SUM_LANES {
-                let here = (index * THREADS + thread_id) as usize;
-                let there = (index * THREADS + thread_id + kept_stride) as usize;
-                sums[here] += sums[there];
-            }
-
-            let here = thread_id as usize;
-            let there = (thread_id + kept_stride) as usize;
-            lows[here] = f32::min(lows[here], lows[there]);
-            highs[here] = f32::max(highs[here], highs[there]);
-        }
-
-        sync_cube();
-    }
-
-    if thread_id == 0 {
-        let count = THREADS as f32;
-        let kept_std = std_of(sums[0], sums[THREADS as usize]);
-        let mean = sums[(2 * THREADS) as usize] / count;
-        let low = lows[0];
-        let high = highs[0];
-        let confidence = saved_conf[(kept_entry * blocks + block) as usize];
-        let passes = has_kept != 0
-            && confidence >= CONF_MIN
-            && high - low < FLAT_RANGE
-            && in_band(mean, luma_band)
-            && low >= CLIP_LOW
-            && high <= CLIP_HIGH
-            && kept_std > STD_MIN;
-
-        if passes {
-            let bucket = bucket_for(kept_std, edges);
-            let kept_offset = hist_offset + HIST_LEN as u32;
-            let slot = kept_offset + luma_bin(mean) * STD_BUCKETS as u32 + bucket;
-            Atomic::fetch_add(&hist[slot as usize], 1i32);
-        }
     }
 }
 

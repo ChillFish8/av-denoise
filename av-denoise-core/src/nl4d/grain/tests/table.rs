@@ -21,7 +21,8 @@ fn scene_with_chroma(first_frame: u64, chunks: Vec<GrainChunk>, colour_frame: &[
     }
 }
 
-/// Three scenes with drift, kept grain, a thin chunk and a sparse scene, each with chroma.
+/// Three scenes with drift, weaker one-frame grain, a thin chunk and a sparse scene, each with
+/// chroma.
 fn measured_scenes() -> Vec<SceneGrain> {
     let colour = chroma_colour_frame(1.5, 1.0);
 
@@ -31,9 +32,9 @@ fn measured_scenes() -> Vec<SceneGrain> {
     let first_chunks = vec![steady, drifted, thin];
     let first = scene_with_chroma(0, first_chunks, &colour);
 
-    let partly_kept = chunk_at(1.5, 300, Some(0.5));
-    let unkept = chunk_at(1.6, 300, None);
-    let second_chunks = vec![partly_kept, unkept];
+    let weak_frame = chunk_at(1.5, 300, Some(0.5));
+    let full_frame = chunk_at(1.6, 300, None);
+    let second_chunks = vec![weak_frame, full_frame];
     let second = scene_with_chroma(72, second_chunks, &colour);
 
     let sparse = table_chunk();
@@ -42,7 +43,8 @@ fn measured_scenes() -> Vec<SceneGrain> {
     vec![first, second, third]
 }
 
-/// The table of [measured_scenes] built at 35c1c8b with the default options.
+/// The table of [measured_scenes] with the default options, as built by the commit
+/// `Measure one-frame grain in place of kept grain`.
 const HEAD_TABLE: &str = "filmgrn1\n\
     E 0 9801457 1 7391 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
@@ -54,7 +56,7 @@ const HEAD_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 9801458 29821457 1 8628 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 163 88 163 104 163 120 163 136 163 152 163 168 163 184 163\n\
+    \tsY 8  72 178 88 178 104 178 120 178 136 178 152 178 168 178 184 178\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
@@ -62,7 +64,7 @@ const HEAD_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 29821458 49841457 1 9865 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 88 88 88 104 88 120 88 136 88 152 88 168 88 184 88\n\
+    \tsY 8  72 93 88 93 104 93 120 93 136 93 152 93 168 93 184 93\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
@@ -70,7 +72,7 @@ const HEAD_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 49841458 59851458 1 11102 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 88 88 88 104 88 120 88 136 88 152 88 168 88 184 88\n\
+    \tsY 8  72 93 88 93 104 93 120 93 136 93 152 93 168 93 184 93\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
@@ -89,7 +91,7 @@ const HEAD_FINE_NOISE_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 9801458 29821457 1 8628 1\n\
     \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 152 88 152 104 152 120 152 136 152 152 152 168 152 184 152\n\
+    \tsY 8  72 167 88 167 104 167 120 167 136 167 152 167 168 167 184 167\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\
@@ -97,7 +99,7 @@ const HEAD_FINE_NOISE_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 29821458 49841457 1 9865 1\n\
     \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 82 88 82 104 82 120 82 136 82 152 82 168 82 184 82\n\
+    \tsY 8  72 86 88 86 104 86 120 86 136 86 152 86 168 86 184 86\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\
@@ -105,7 +107,7 @@ const HEAD_FINE_NOISE_TABLE: &str = "filmgrn1\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     E 49841458 59851458 1 11102 1\n\
     \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 82 88 82 104 82 120 82 136 82 152 82 168 82 184 82\n\
+    \tsY 8  72 86 88 86 104 86 120 86 136 86 152 86 168 86 184 86\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\
@@ -147,7 +149,7 @@ fn point_count(line: &str) -> usize {
 }
 
 #[test]
-fn chroma_off_tables_are_byte_identical() {
+fn luma_tables_match_the_stored_table() {
     let scenes = measured_scenes();
     let default_options = FitOptions::default();
     let fine_noise_options = FitOptions::with_fine_noise(0.5);

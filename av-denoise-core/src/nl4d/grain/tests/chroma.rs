@@ -1,6 +1,6 @@
-use super::synthetic::{chunk_at, chunk_in_bucket, set_kept_count};
-use crate::nl4d::grain::chroma::{chroma_levels, chroma_targets, chroma_texture_of, removed_share};
-use crate::nl4d::grain::consts::{BUCKETS_PER_GROUP, LUMA_BINS, STD_BUCKETS};
+use super::synthetic::chunk_at;
+use crate::nl4d::grain::chroma::{chroma_levels, chroma_targets, chroma_texture_of};
+use crate::nl4d::grain::consts::{BUCKETS_PER_GROUP, LUMA_BINS};
 use crate::nl4d::grain::fit::{
     bucket_edges,
     bucket_of,
@@ -119,44 +119,6 @@ fn chroma_texture_reads_its_own_plane_template() {
 }
 
 #[test]
-fn removed_share_is_one_without_kept_grain() {
-    let edges = bucket_edges();
-    let chunk = chunk_at(2.0, 300, None);
-    let stats = chunk.summed_table();
-
-    let share = removed_share(&stats, &edges);
-
-    assert_eq!(share, Some(1.0));
-}
-
-#[test]
-fn removed_share_of_half_the_std_kept_is_three_quarters() {
-    let edges = bucket_edges();
-    let source_bucket = bucket_of(4.0 / 255.0, &edges);
-    let kept_bucket = bucket_of(2.0 / 255.0, &edges);
-    let mut chunk = chunk_in_bucket(source_bucket, 300);
-    for bin in 4..12 {
-        set_kept_count(&mut chunk, bin * STD_BUCKETS + kept_bucket, 300);
-    }
-
-    let stats = chunk.summed_table();
-    let share = removed_share(&stats, &edges).expect("the chunk has source blocks");
-
-    assert!((share - 0.75).abs() < 0.02, "{share}");
-}
-
-#[test]
-fn removed_share_needs_source_blocks() {
-    let edges = bucket_edges();
-    let chunk = chunk_in_bucket(30, 10);
-    let stats = chunk.summed_table();
-
-    let share = removed_share(&stats, &edges);
-
-    assert_eq!(share, None);
-}
-
-#[test]
 fn chroma_levels_read_the_neutral_cells() {
     let neutral = 0.8f32.ln();
     let frame = populated_frame(ChromaPlane::Cr, neutral);
@@ -245,13 +207,12 @@ fn chroma_targets_thin_to_ten_points() {
         .map(|bin| (bin * 16 + 8, f64::from(bin) + 1.0))
         .collect();
 
-    let targets = chroma_targets(&levels, 0.75);
-    let factor = 0.75f64.sqrt();
+    let targets = chroma_targets(&levels);
     let kept_bins = [0u8, 1, 3, 4, 5, 7, 8, 9, 11, 12];
 
     assert_eq!(targets.len(), 10);
     for (&(luma, target), &bin) in targets.iter().zip(&kept_bins) {
-        let expected = (f64::from(bin) + 1.0) * factor;
+        let expected = f64::from(bin) + 1.0;
         assert_eq!(luma, bin * 16 + 8);
         assert!((target - expected).abs() < 1e-12, "luma {luma}: {target}");
     }

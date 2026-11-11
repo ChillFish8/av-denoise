@@ -76,12 +76,11 @@ pub(crate) struct PlaneEntry {
     pub points: Vec<(u8, u8)>,
 }
 
-/// The source and kept std medians of one populated luma bin.
+/// The source std median of one populated luma bin.
 #[derive(Debug, Clone, Copy)]
 struct BinStrength {
     bin: usize,
-    source: f64,
-    kept: f64,
+    std: f64,
 }
 
 /// Quantised AR weights and their shift.
@@ -196,23 +195,15 @@ fn strength_of(stats: &TableSums, edges: &[f32]) -> Option<Vec<BinStrength>> {
     let mut bins = Vec::new();
     for bin in 0..LUMA_BINS {
         let source = &stats.source_hist[bin * STD_BUCKETS..(bin + 1) * STD_BUCKETS];
-        let kept = &stats.kept_hist[bin * STD_BUCKETS..(bin + 1) * STD_BUCKETS];
         let source_blocks: u64 = source.iter().map(|&count| count as u64).sum();
         if source_blocks < MIN_BLOCKS_PER_BIN {
             continue;
         }
 
-        let kept_blocks: u64 = kept.iter().map(|&count| count as u64).sum();
         let source_median = hist_median(source, edges).expect("bin is populated");
-        let kept_median = if kept_blocks >= MIN_BLOCKS_PER_BIN {
-            hist_median(kept, edges).expect("bin is populated")
-        } else {
-            0.0
-        };
         bins.push(BinStrength {
             bin,
-            source: source_median,
-            kept: kept_median,
+            std: source_median,
         });
     }
 
@@ -478,7 +469,7 @@ fn build_entry(
 
 /// Luma's strength targets, as `(luma, sigma)` with sigma in normalised units.
 ///
-/// Each bin keeps the variance the denoiser removed.
+/// Each bin's target is its source block std turned into a whole-field std.
 fn luma_targets(strength: &[BinStrength], texture: Texture) -> Vec<(u8, f64)> {
     let factor = texture.block_to_field;
 
@@ -487,14 +478,9 @@ fn luma_targets(strength: &[BinStrength], texture: Texture) -> Vec<(u8, f64)> {
     chosen
         .iter()
         .map(|entry| {
-            let sigma_source = entry.source * factor;
-            let sigma_kept = entry.kept * factor;
-            let source_variance = sigma_source * sigma_source;
-            let kept_variance = sigma_kept * sigma_kept;
-            // Only the grain the denoiser removed is synthesised, so the kept grain comes off.
-            let removed_variance = (source_variance - kept_variance).max(0.0);
+            let sigma = entry.std * factor;
             let centre = (entry.bin as f64 + 0.5) * 256.0 / LUMA_BINS as f64;
-            (centre.round() as u8, removed_variance.sqrt())
+            (centre.round() as u8, sigma)
         })
         .collect()
 }

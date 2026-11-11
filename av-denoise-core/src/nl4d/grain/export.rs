@@ -25,11 +25,13 @@ use super::persistence::{
 use super::snapshot::{PassSources, SnapshotChunk, SnapshotMeasure};
 use crate::nl4d::kernels::{grain_measure, grain_reduce_partials, grain_save_vectors};
 use crate::nl4d::snapshot::LastFields;
+use crate::noise::TEMPORAL_NOISE_BLOCK;
+use crate::noise::colour::{COLOUR_MEAN_FIELDS, ColourSource};
 
 const SAVE_THREADS: u32 = 256;
 /// The std bucket edges, one more than the bucket count.
 const EDGES_LEN: usize = STD_BUCKETS + 1;
-/// Counts in one plane's histograms of one frame, source grain and then kept grain.
+/// Counts in one plane's histograms of one frame, source grain and then one-frame grain.
 const FRAME_HIST_LEN: usize = 2 * HIST_LEN;
 /// Counts in one plane's histograms of one chunk, one slot per frame.
 const CHUNK_HIST_LEN: usize = CHUNK_FRAMES as usize * FRAME_HIST_LEN;
@@ -94,6 +96,19 @@ impl GrainGeometry {
         self.cells() as usize * PARTIAL_LEN
     }
 
+    /// The colour blocks in one row of the measured plane.
+    fn means_blocks_x(&self) -> u32 {
+        self.width.div_ceil(TEMPORAL_NOISE_BLOCK)
+    }
+
+    /// Values in the measured plane's colour block means.
+    fn means_len(&self) -> usize {
+        let blocks_y = self.height.div_ceil(TEMPORAL_NOISE_BLOCK);
+        let blocks = self.means_blocks_x() * blocks_y;
+
+        (blocks * COLOUR_MEAN_FIELDS) as usize
+    }
+
     /// Values in one channel's persistence history.
     pub(super) fn history_len(&self) -> usize {
         persistence_history_len(self.width, self.height) as usize
@@ -113,6 +128,8 @@ pub(super) struct CompletedFrame<'a> {
     /// The ring slot of the next real frame, `None` for a stream's last frame.
     pub next_slot: Option<u32>,
     pub output_slot: usize,
+    /// The frame's index in its stream.
+    pub stream_frame: u32,
 }
 
 /// One chunk's table histograms and autocovariance, one slot per plane of each frame.
@@ -135,12 +152,6 @@ struct ChunkBuffers {
     frames: u32,
 }
 
-#[derive(Clone, Copy)]
-struct Completed {
-    ring_slot: u32,
-    output_slot: usize,
-}
-
 /// How one plane's table is measured.
 #[derive(Clone, Copy)]
 struct TablePlan {
@@ -148,22 +159,27 @@ struct TablePlan {
     channel: u32,
     /// Whether a cell's mean must sit inside the luma band to count.
     luma_band: bool,
+    /// The colour blocks in one row, 0 when one-frame cells bin by their own mean.
+    means_blocks_x: u32,
 }
 
 impl TablePlan {
-    fn for_planes(planes: MeasuredPlanes) -> Vec<TablePlan> {
+    fn for_planes(planes: MeasuredPlanes, geometry: &GrainGeometry) -> Vec<TablePlan> {
         match planes {
             MeasuredPlanes::Luma => {
                 let luma = TablePlan {
                     channel: 0,
                     luma_band: true,
+                    means_blocks_x: 0,
                 };
                 vec![luma]
             },
             MeasuredPlanes::Chroma => {
+                let means_blocks_x = geometry.means_blocks_x();
                 let plans = (0..CHROMA_PLANES).map(|plane| TablePlan {
                     channel: plane as u32,
                     luma_band: false,
+                    means_blocks_x,
                 });
                 plans.collect()
             },
@@ -171,15 +187,14 @@ impl TablePlan {
     }
 }
 
-/// The ring positions and pairs one completed frame is measured with.
+/// The ring positions, pair and block means one completed frame is measured with.
 struct FramePairs {
     frame_slot: u32,
     /// The next frame's ring slot, or the frame's own without one.
     next_or_own_slot: u32,
-    kept_entry: u32,
-    prev_output: usize,
     has_source: bool,
-    has_kept: bool,
+    /// The frame's colour block means, present while they are held.
+    luma_means: Option<Handle>,
 }
 
 /// The grain table measurement.
@@ -196,7 +211,10 @@ struct TableMeasure {
     saved_valid: Vec<bool>,
     edges: Handle,
     partials: Handle,
-    last_completed: Option<Completed>,
+    /// The colour block means chroma cells bin by, present once the colour model measures them.
+    luma_means: Option<ColourSource>,
+    /// One value bound in place of block means that are not held.
+    means_placeholder: Handle,
     /// How many measured frames had a saved entry to their next frame.
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     measured_with_entry: u32,
@@ -204,10 +222,11 @@ struct TableMeasure {
 
 impl TableMeasure {
     fn new(client: &Client, geometry: &GrainGeometry, planes: MeasuredPlanes) -> Self {
-        let plans = TablePlan::for_planes(planes);
+        let plans = TablePlan::for_planes(planes, geometry);
         let edges_host = bucket_edges();
         let saved_mv_host = vec![0i32; geometry.saved_mv_len()];
         let saved_conf_host = vec![0.0f32; geometry.saved_conf_len()];
+        let placeholder_host = [0.0f32];
 
         let saved_mv_bytes = i32::as_bytes(&saved_mv_host);
         let saved_mv = client.create_from_slice(saved_mv_bytes);
@@ -217,6 +236,8 @@ impl TableMeasure {
         let edges = client.create_from_slice(edges_bytes);
         let partials_bytes = geometry.partials_len().max(1) * size_of::<f32>();
         let partials = client.empty(partials_bytes);
+        let placeholder_bytes = f32::as_bytes(&placeholder_host);
+        let means_placeholder = client.create_from_slice(placeholder_bytes);
 
         Self {
             plans,
@@ -225,7 +246,8 @@ impl TableMeasure {
             saved_valid: vec![false; geometry.ring_frames as usize],
             edges,
             partials,
-            last_completed: None,
+            luma_means: None,
+            means_placeholder,
             #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
             measured_with_entry: 0,
         }
@@ -281,7 +303,6 @@ impl TableMeasure {
         chunk_frames: u32,
     ) {
         let frame_slot = frame.frame_slot;
-        let output_slot = frame.output_slot;
         let has_source = frame.next_slot.is_some() && self.saved_valid[frame_slot as usize];
 
         #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
@@ -289,20 +310,14 @@ impl TableMeasure {
             self.measured_with_entry += 1;
         }
 
-        let kept_from = self
-            .last_completed
-            .filter(|previous| self.saved_valid[previous.ring_slot as usize]);
-        let has_kept = kept_from.is_some();
         let next_or_own_slot = frame.next_slot.unwrap_or(frame_slot);
-        let kept_entry = kept_from.map_or(frame_slot, |previous| previous.ring_slot);
-        let prev_output = kept_from.map_or(output_slot, |previous| previous.output_slot);
+        let source = self.luma_means.as_ref();
+        let luma_means = source.and_then(|source| source.held(frame.stream_frame));
         let pairs = FramePairs {
             frame_slot,
             next_or_own_slot,
-            kept_entry,
-            prev_output,
             has_source,
-            has_kept,
+            luma_means,
         };
 
         let planes = self.plans.len() as u32;
@@ -310,11 +325,6 @@ impl TableMeasure {
             let frame_plane = chunk_frames * planes + plane as u32;
             self.launch_plan(client, geometry, frame, chunk, &pairs, *plan, frame_plane);
         }
-
-        self.last_completed = Some(Completed {
-            ring_slot: frame_slot,
-            output_slot,
-        });
     }
 
     /// Measures one plane of a frame into slot `frame_plane` of `chunk`.
@@ -338,7 +348,12 @@ impl TableMeasure {
         let hist_offset = frame_plane * FRAME_HIST_LEN as u32;
         let record_offset = frame_plane * GROUPED_AUTOCOV_LEN as u32;
         let output = &frame.outputs[frame.output_slot];
-        let prev_output = &frame.outputs[pairs.prev_output];
+        let held_means = pairs.luma_means.as_ref().filter(|_| plan.means_blocks_x > 0);
+        let has_luma_means = held_means.is_some();
+        let (means, means_len) = match held_means {
+            Some(means) => (means, geometry.means_len()),
+            None => (&self.means_placeholder, 1),
+        };
 
         unsafe {
             grain_measure::launch_unchecked(
@@ -348,18 +363,17 @@ impl TableMeasure {
                 geometry.channels as usize,
                 BufferArg::from_raw_parts(frame.input.clone(), geometry.ring_len()),
                 BufferArg::from_raw_parts(output.clone(), frame_len),
-                BufferArg::from_raw_parts(prev_output.clone(), frame_len),
                 BufferArg::from_raw_parts(self.saved_mv.clone(), geometry.saved_mv_len()),
                 BufferArg::from_raw_parts(self.saved_conf.clone(), geometry.saved_conf_len()),
                 BufferArg::from_raw_parts(self.edges.clone(), EDGES_LEN),
+                BufferArg::from_raw_parts(means.clone(), means_len),
                 BufferArg::from_raw_parts(chunk.hist.clone(), hist_len),
                 BufferArg::from_raw_parts(self.partials.clone(), geometry.partials_len()),
                 pairs.frame_slot,
                 pairs.next_or_own_slot,
                 pairs.frame_slot,
-                pairs.kept_entry,
                 pairs.has_source as u32,
-                pairs.has_kept as u32,
+                has_luma_means as u32,
                 hist_offset,
                 geometry.width,
                 geometry.height,
@@ -369,6 +383,7 @@ impl TableMeasure {
                 geometry.step,
                 plan.channel,
                 plan.luma_band,
+                plan.means_blocks_x,
             );
 
             grain_reduce_partials::launch_unchecked(
@@ -385,7 +400,6 @@ impl TableMeasure {
 
     fn reset_stream(&mut self) {
         self.saved_valid.fill(false);
-        self.last_completed = None;
     }
 
     /// A chunk with every frame slot of every plane zeroed.
@@ -409,7 +423,7 @@ impl TableMeasure {
 /// The grain measurement state of one nl4d denoiser.
 pub(crate) struct GrainExport {
     geometry: GrainGeometry,
-    /// The source and kept grain table of each measured plane.
+    /// The source and one-frame grain table of each measured plane.
     table: TableMeasure,
     /// The persistence sums each frame adds to its chunk.
     persistence: PersistenceMeasure,
@@ -449,6 +463,11 @@ impl GrainExport {
         self.snapshots.keep_colour(client, planes);
     }
 
+    /// Bins each chroma frame's one-frame cells by the luma of its colour blocks in `source`.
+    pub(crate) fn keep_luma_means(&mut self, source: ColourSource) {
+        self.table.luma_means = Some(source);
+    }
+
     /// Copies what a pass filtered its centre frame with into the frame's ring slot `centre_slot`.
     pub(crate) fn keep_snapshots(&self, client: &Client, sources: &PassSources, centre_slot: u32) {
         self.snapshots.keep(client, sources, centre_slot);
@@ -473,6 +492,11 @@ impl GrainExport {
     /// Measures the frame that just completed into the newest chunk.
     ///
     /// `next_slot` is the ring slot of the next real frame, `None` for a stream's last frame.
+    /// `stream_frame` is the completed frame's index in its stream.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every argument is a buffer or ring position of the completed frame"
+    )]
     pub(crate) fn measure(
         &mut self,
         client: &Client,
@@ -481,6 +505,7 @@ impl GrainExport {
         frame_slot: u32,
         next_slot: Option<u32>,
         output_slot: usize,
+        stream_frame: u32,
     ) {
         let frame = CompletedFrame {
             input,
@@ -488,6 +513,7 @@ impl GrainExport {
             frame_slot,
             next_slot,
             output_slot,
+            stream_frame,
         };
         let chunk = self.open_chunk(client);
 

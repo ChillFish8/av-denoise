@@ -308,9 +308,15 @@ pub(crate) struct ColourSource {
 }
 
 impl ColourSource {
+    /// Stream frame `frame`'s block means on the source's grid, `None` when its slot holds another
+    /// frame.
+    pub(crate) fn held(&self, frame: u32) -> Option<Handle> {
+        self.blocks.read(self.grid, frame)
+    }
+
     /// Stream frame `frame`'s block means, or an error when they are no longer held.
     fn held_means(&self, frame: u32) -> Result<Handle, anyhow::Error> {
-        let means = self.blocks.read(self.grid, frame);
+        let means = self.held(frame);
         let Some(means) = means else {
             let message = format!("the block colour of stream frame {frame} is not held");
             return Err(anyhow::anyhow!(message));

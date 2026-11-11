@@ -4,6 +4,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::mirror::{StillStream, mirror_still_chunks};
+use super::snapshot::{ColourRun, HEIGHT as COLOUR_RUN_HEIGHT, WIDTH as COLOUR_RUN_WIDTH};
 use super::synthetic::{ar_field, gaussian_field, left_weights};
 use crate::bench_api::HostIo;
 use crate::engine::align::StorageAlign;
@@ -23,11 +24,11 @@ use crate::nl4d::grain::consts::{
     STD_BUCKETS,
     STRENGTH_GROUPS,
 };
-use crate::nl4d::grain::fit::{bucket_edges, hist_median};
+use crate::nl4d::grain::fit::{bucket_edges, bucket_of, hist_median};
 use crate::nl4d::grain::segment::SceneGrain;
 use crate::nl4d::grain::{FitOptions, GrainExport, GrainGeometry, GrainParts, MeasuredPlanes, build_table};
 use crate::nl4d::snapshot::LastFields;
-use crate::nl4d::{Nl4dDenoiser, Nl4dParams};
+use crate::nl4d::{Nl4dDenoiser, Nl4dOptions, Nl4dParams};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
 use crate::nlmeans::tests::models::ModelFitter;
 use crate::nlmeans::{
@@ -343,25 +344,113 @@ fn panning_content_measures_the_source_grain() {
     );
 }
 
+/// A flat stream with the same grain field on every frame, and flat outputs.
+fn static_grain_stream(frame_count: u32) -> StillStream {
+    let size = BANDED_SIZE as usize;
+    let field = gaussian_field(size, size, 800);
+    let grained: Vec<f32> = field
+        .iter()
+        .map(|&sample| FLAT_LEVEL + SIGMA * sample as f32)
+        .collect();
+    let flat = vec![FLAT_LEVEL; size * size];
+
+    StillStream {
+        width: BANDED_SIZE,
+        height: BANDED_SIZE,
+        step: DIRECT_STEP,
+        sources: vec![grained; frame_count as usize],
+        outputs: vec![flat; frame_count as usize],
+    }
+}
+
 #[test]
-fn kept_grain_is_weaker_than_source_grain() {
-    let frames = grain_frames(SIGMA, 9);
-    let export_on = params(true);
-    let (_, chunks, _) = run(export_on, &frames);
+fn static_grain_reads_in_full_in_one_frame() {
+    let stream = static_grain_stream(LONE_FRAMES);
+    let edges = bucket_edges();
+    let chunks = export_stream(&stream);
     let table = merged_table(&chunks);
-    let kept_total: u32 = table.kept_hist.iter().sum();
-    let source_total: u32 = table.source_hist.iter().sum();
+    let frame_median = median_of(&table.frame_hist);
+    let median_bucket = bucket_of(frame_median as f32, &edges);
+    let sigma_bucket = bucket_of(SIGMA, &edges);
 
-    let kept_median = median_of(&table.kept_hist);
-    let source_median = median_of(&table.source_hist);
-
-    assert!(kept_total > 0);
-    assert!(source_total > 0);
-    assert_eq!(table.kept_hist.len(), HIST_LEN);
+    assert_eq!(table.frame_hist.len(), HIST_LEN);
+    assert_eq!(table.source_blocks(), 0);
     assert!(
-        kept_median < source_median,
-        "kept {kept_median} vs source {source_median}"
+        median_bucket.abs_diff(sigma_bucket) <= 1,
+        "median {frame_median} vs sigma {SIGMA}"
     );
+}
+
+/// A flat luma level at the centre of brightness bin 8.
+const BIN_8_LUMA: f32 = 136.0 / 255.0;
+
+/// Frames of flat [BIN_8_LUMA] luma with neutral chroma under fresh grain at [SIGMA].
+fn flat_luma_chroma_grain(count: usize) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let chroma_width = COLOUR_RUN_WIDTH as usize / 2;
+    let chroma_height = COLOUR_RUN_HEIGHT as usize / 2;
+    let luma_len = (COLOUR_RUN_WIDTH * COLOUR_RUN_HEIGHT) as usize;
+    let luma = vec![vec![BIN_8_LUMA; luma_len]; count];
+    let mut chroma = Vec::with_capacity(count);
+
+    for frame_index in 0..count {
+        let seed = 2 * frame_index as u64 + 900;
+        let cb_grain = gaussian_field(chroma_width, chroma_height, seed);
+        let cr_grain = gaussian_field(chroma_width, chroma_height, seed + 1);
+        let samples = cb_grain
+            .iter()
+            .zip(&cr_grain)
+            .flat_map(|(&cb_sample, &cr_sample)| {
+                let cb = FLAT_LEVEL + SIGMA * cb_sample as f32;
+                let cr = FLAT_LEVEL + SIGMA * cr_sample as f32;
+                [cb, cr]
+            });
+        chroma.push(samples.collect());
+    }
+
+    (luma, chroma)
+}
+
+/// The one-frame count of each luma bin of `table`.
+fn frame_bin_totals(table: &TableSums) -> Vec<u32> {
+    let (bins, _) = table.frame_hist.as_chunks::<STD_BUCKETS>();
+
+    bins.iter().map(|bin| bin.iter().sum()).collect()
+}
+
+#[test]
+fn a_chroma_denoiser_bins_one_frame_cells_by_luma() {
+    let (luma, chroma) = flat_luma_chroma_grain(12);
+    let options = Nl4dOptions {
+        temporal_radius: 2,
+        grain_data: true,
+        ..Nl4dOptions::default()
+    };
+    let mut run = ColourRun::with_frames(options, ChannelMode::Chroma, &luma, &chroma);
+    let chunks = run.drive();
+    let frame_tables: Vec<f32> = chunks
+        .iter()
+        .flat_map(|chunk| chunk.frame_tables.iter().copied())
+        .collect();
+    let (plane_tables, _) = frame_tables.as_chunks::<FRAME_TABLE_LEN>();
+    let frames_with_next = luma.len() - 1;
+
+    assert_eq!(plane_tables.len(), luma.len() * CHROMA_PLANES);
+    for (slot, plane_table) in plane_tables.iter().enumerate() {
+        let frame = slot / CHROMA_PLANES;
+        let frame_counts = &plane_table[HIST_LEN..2 * HIST_LEN];
+        let has_frame = frame_counts.iter().any(|&count| count > 0.0);
+
+        assert_eq!(has_frame, frame < frames_with_next, "frame {frame} slot {slot}");
+    }
+
+    for plane in 0..CHROMA_PLANES {
+        let table = merged_chroma_table(&chunks, plane);
+        let bins = frame_bin_totals(&table);
+        let total: u32 = bins.iter().sum();
+
+        assert!(total > 0, "plane {plane}");
+        assert_eq!(bins[8], total, "plane {plane}: {bins:?}");
+    }
 }
 
 #[test]
@@ -567,8 +656,17 @@ fn export_frames(
             [previous_output, current_output]
         };
 
+        let stream_frame = index as u32;
         export.save_vectors(&client, &fields, slot, next_neighbour);
-        export.measure(&client, &input, &outputs, slot, next_slot, output_slot);
+        export.measure(
+            &client,
+            &input,
+            &outputs,
+            slot,
+            next_slot,
+            output_slot,
+            stream_frame,
+        );
     }
 
     export.drain(&client).expect("drain")
@@ -619,7 +717,7 @@ fn banded_stream(frame_count: u32) -> StillStream {
 const BANDED_TABLE: &str = "filmgrn1
 E 0 20625000 1 7391 1
 \tp 3 8 0 11 0 1 128 192 256 128 192 256
-\tsY 5  72 127 120 127 152 127 184 125 200 127
+\tsY 5  72 129 120 129 152 129 184 128 200 129
 \tsCb 2 0 0 255 0
 \tsCr 2 0 0 255 0
 \tcY 0 0 -1 0 0 0 -1 1 -1 0 0 1 0 0 0 1 0 1 0 -1 0 -1 1 102
@@ -645,13 +743,13 @@ fn frame_tables_sum_to_the_chunk_measurement() {
     assert_eq!(chunks.len(), mirrored.len());
     for (chunk, mirror) in chunks.iter().zip(&mirrored) {
         let summed = chunk.summed_table();
-        let (source_hist, kept_hist) = mirror.hist.split_at(HIST_LEN);
+        let (source_hist, frame_hist) = mirror.hist.split_at(HIST_LEN);
         let (records, _) = mirror.autocov.as_chunks::<AUTOCOV_LEN>();
         let frame_count = chunk.frames as usize;
 
         assert_eq!(chunk.frame_tables.len(), frame_count * FRAME_TABLE_LEN);
         assert_eq!(summed.source_hist, source_hist);
-        assert_eq!(summed.kept_hist, kept_hist);
+        assert_eq!(summed.frame_hist, frame_hist);
         assert!(summed.source_blocks() > 0);
 
         for (group, record) in records.iter().enumerate() {
@@ -667,7 +765,9 @@ fn frame_tables_sum_to_the_chunk_measurement() {
     }
 }
 
-/// The same grain field on frames 0 to 3 and flat frames after, so only frame 3's pair has grain.
+/// The same grain field on frames 0 to 3 and flat frames after.
+///
+/// Only frame 3's pair has grain, and only frames 0 to 3 have one-frame grain.
 fn grain_leaving_after_frame_3() -> StillStream {
     let size = BANDED_SIZE as usize;
     let field = gaussian_field(size, size, 500);
@@ -708,8 +808,13 @@ fn each_frame_holds_only_its_own_statistics() {
 
     assert_eq!(frame_tables.len(), LONE_FRAMES as usize);
     for (index, frame_table) in frame_tables.iter().enumerate() {
-        let has_values = frame_table.iter().any(|&value| value != 0.0);
-        assert_eq!(has_values, index == LONE_FRAME as usize, "frame {index}");
+        let (source_counts, rest) = frame_table.split_at(HIST_LEN);
+        let (frame_counts, grouped) = rest.split_at(HIST_LEN);
+        let has_source = source_counts.iter().chain(grouped).any(|&value| value != 0.0);
+        let has_frame = frame_counts.iter().any(|&value| value != 0.0);
+
+        assert_eq!(has_source, index == LONE_FRAME as usize, "frame {index}");
+        assert_eq!(has_frame, index <= LONE_FRAME as usize, "frame {index}");
     }
 
     let summed = chunk.summed_table();

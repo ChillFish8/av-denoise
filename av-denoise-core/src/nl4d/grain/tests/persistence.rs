@@ -390,7 +390,7 @@ fn measure_frame(client: &Client, export: &mut GrainExport, source: &[f32], deno
     let output = upload(client, denoised);
     let outputs = [output.clone(), output];
 
-    export.measure(client, &input, &outputs, 0, None, 0);
+    export.measure(client, &input, &outputs, 0, None, 0, 0);
 }
 
 /// Measures one stream, each frame against its own denoised output.

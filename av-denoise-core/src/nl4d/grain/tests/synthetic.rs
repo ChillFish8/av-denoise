@@ -181,8 +181,8 @@ pub(super) fn set_source_count(chunk: &mut GrainChunk, slot: usize, count: u32) 
     chunk.frame_tables[slot] = count as f32;
 }
 
-/// Sets the first frame's kept count at `slot` of the histogram.
-pub(super) fn set_kept_count(chunk: &mut GrainChunk, slot: usize, count: u32) {
+/// Sets the first frame's one-frame count at `slot` of the histogram.
+pub(super) fn set_frame_count(chunk: &mut GrainChunk, slot: usize, count: u32) {
     chunk.frame_tables[HIST_LEN + slot] = count as f32;
 }
 
@@ -222,17 +222,17 @@ pub(super) fn chunk_in_bucket(bucket: usize, blocks_per_bin: u32) -> GrainChunk 
 
 /// A chunk whose source blocks all sit at `std_codes` in luma bins 4 to 11, with an AR record.
 ///
-/// The record goes into the strength group of the blocks' bucket.
-pub(super) fn chunk_at(std_codes: f32, blocks_per_bin: u32, kept_codes: Option<f32>) -> GrainChunk {
+/// The one-frame blocks sit at `frame_codes` in the same bins, or with the source blocks when it is
+/// `None`. The record goes into the strength group of the source blocks' bucket.
+pub(super) fn chunk_at(std_codes: f32, blocks_per_bin: u32, frame_codes: Option<f32>) -> GrainChunk {
     let edges = bucket_edges();
     let bucket = bucket_of(std_codes / 255.0, &edges);
     let mut chunk = chunk_in_bucket(bucket, blocks_per_bin);
 
-    if let Some(kept) = kept_codes {
-        let kept_bucket = bucket_of(kept / 255.0, &edges);
-        for bin in 4..12 {
-            set_kept_count(&mut chunk, bin * STD_BUCKETS + kept_bucket, blocks_per_bin);
-        }
+    let frame_std = frame_codes.unwrap_or(std_codes);
+    let frame_bucket = bucket_of(frame_std / 255.0, &edges);
+    for bin in 4..12 {
+        set_frame_count(&mut chunk, bin * STD_BUCKETS + frame_bucket, blocks_per_bin);
     }
 
     let record = grain_record();

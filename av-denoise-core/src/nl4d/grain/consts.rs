@@ -83,9 +83,9 @@ pub(crate) const PATTERNS: [u64; PROJECTIONS] = [
     0x56D2_61D7_728A_23AD,
 ];
 
-/// Fewest blocks for a luma bin to give a strength reading.
+/// Fewest source blocks for a luma bin to give a strength reading.
 ///
-/// A bin's kept reading counts as 0 below it.
+/// A bin with fewer source blocks is left out of the segment's strength.
 pub(crate) const MIN_BLOCKS_PER_BIN: u64 = 200;
 /// Fewest readable luma bins for a segment to have its own strength.
 pub(crate) const MIN_POPULATED_BINS: usize = 3;

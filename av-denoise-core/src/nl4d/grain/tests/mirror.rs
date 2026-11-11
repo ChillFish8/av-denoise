@@ -20,6 +20,8 @@ use crate::nl4d::grain::consts::{
     STD_MIN,
 };
 use crate::nl4d::grain::fit::bucket_of;
+use crate::noise::TEMPORAL_NOISE_BLOCK;
+use crate::noise::colour::{COLOUR_BRIGHTNESS_STEP, COLOUR_MEAN_FIELDS};
 
 /// One completed frame's inputs, each pixel holding `channels` interleaved samples.
 pub(super) struct MirrorFrame<'a> {
@@ -33,18 +35,17 @@ pub(super) struct MirrorFrame<'a> {
     pub source_t: &'a [f32],
     pub source_next: &'a [f32],
     pub out_t: &'a [f32],
-    pub out_prev: &'a [f32],
     /// `(dx, dy)` per motion block for `t` to `t + 1`.
     pub source_mv: &'a [(i32, i32)],
     pub source_conf: &'a [f32],
-    /// `(dx, dy)` per motion block for `t - 1` to `t`.
-    pub kept_mv: &'a [(i32, i32)],
-    pub kept_conf: &'a [f32],
+    /// Each colour block's luma, Cb and Cr means on the 8-bit scale, `None` when not held.
+    pub luma_means: Option<&'a [f32]>,
+    /// The colour blocks in one row, 0 for a frame that bins one-frame cells by its own mean.
+    pub means_blocks_x: u32,
     pub blocks_x: u32,
     pub blocks_y: u32,
     pub step: u32,
     pub has_source: bool,
-    pub has_kept: bool,
 }
 
 pub(super) struct MirrorRecord {
@@ -111,10 +112,34 @@ fn range_of(values: &[f32]) -> (f32, f32) {
     (low, high)
 }
 
-fn hist_slot(mean: f32, std: f32, edges: &[f32]) -> usize {
-    let bin = ((mean * LUMA_BINS as f32) as usize).min(LUMA_BINS - 1);
+fn luma_bin(mean: f32) -> usize {
+    let bin = (mean * LUMA_BINS as f32) as usize;
+    bin.min(LUMA_BINS - 1)
+}
+
+fn hist_slot(bin: usize, std: f32, edges: &[f32]) -> usize {
     let bucket = bucket_of(std, edges);
     bin * STD_BUCKETS + bucket
+}
+
+/// The brightness bin of a one-frame cell, `None` when its colour block's luma is not held.
+///
+/// A frame without a colour grid bins by the cell's denoised `mean`. Otherwise the cell reads the
+/// colour block its origin falls in.
+fn frame_bin(frame: &MirrorFrame, cell_x: u32, cell_y: u32, mean: f32) -> Option<usize> {
+    if frame.means_blocks_x == 0 {
+        let bin = luma_bin(mean);
+        return Some(bin);
+    }
+
+    let means = frame.luma_means?;
+    let block_x = cell_x * CELL / TEMPORAL_NOISE_BLOCK;
+    let block_y = cell_y * CELL / TEMPORAL_NOISE_BLOCK;
+    let block = block_y * frame.means_blocks_x + block_x;
+    let block_luma = means[(block * COLOUR_MEAN_FIELDS) as usize];
+    let bin = (block_luma / COLOUR_BRIGHTNESS_STEP) as usize;
+
+    Some(bin.min(LUMA_BINS - 1))
 }
 
 /// Adds the cell's lag products to `record`, each pixel against its neighbour at every lag.
@@ -150,11 +175,12 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
             let cell_top = cell_y * CELL;
             let block = block_of(frame, cell_x, cell_y);
             let pixels = (CELL * CELL) as usize;
+            let origin_index = sample_index(frame, cell_left, cell_top);
+            let origin = frame.source_t[origin_index];
             let mut grain = Vec::with_capacity(pixels);
             let mut clean = Vec::with_capacity(pixels);
             let mut noisy = Vec::with_capacity(2 * pixels);
-            let mut kept = Vec::with_capacity(pixels);
-            let mut previous_values = Vec::with_capacity(pixels);
+            let mut centred = Vec::with_capacity(pixels);
 
             for y in cell_top..cell_top + CELL {
                 for x in cell_left..cell_left + CELL {
@@ -163,15 +189,10 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
                     grain.push(pixel_grain);
                     clean.push(frame.out_t[index]);
                     noisy.push(frame.source_t[index]);
+                    centred.push(frame.source_t[index] - origin);
 
                     let next_index = warped_index(frame, x, y, frame.source_mv[block]);
                     noisy.push(frame.source_next[next_index]);
-
-                    let kept_index = warped_index(frame, x, y, frame.kept_mv[block]);
-                    let warped = frame.out_t[kept_index];
-                    let previous = frame.out_prev[index];
-                    kept.push((warped - previous) * std::f32::consts::FRAC_1_SQRT_2);
-                    previous_values.push(previous);
                 }
             }
 
@@ -180,16 +201,16 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
             let clean_stats = stats_of(&clean);
             let (clean_low, clean_high) = range_of(&clean);
             let (noisy_low, noisy_high) = range_of(&noisy);
-            let source_ok = frame.has_source
-                && interior
-                && frame.source_conf[block] >= CONF_MIN
+            let shared_ok = frame.has_source
                 && clean_high - clean_low < FLAT_RANGE
                 && in_luma_band(frame, clean_stats.mean)
                 && noisy_low >= CLIP_LOW
-                && noisy_high <= CLIP_HIGH
-                && grain_stats.std > STD_MIN;
+                && noisy_high <= CLIP_HIGH;
+            let source_ok =
+                shared_ok && interior && frame.source_conf[block] >= CONF_MIN && grain_stats.std > STD_MIN;
             if source_ok {
-                let slot = hist_slot(clean_stats.mean, grain_stats.std, edges);
+                let bin = luma_bin(clean_stats.mean);
+                let slot = hist_slot(bin, grain_stats.std, edges);
                 hist[slot] += 1;
 
                 let group = bucket_of(grain_stats.std, edges) / BUCKETS_PER_GROUP;
@@ -197,18 +218,11 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
                 add_lag_sums(frame, cell_left, cell_top, grain_stats.mean, record);
             }
 
-            let kept_stats = stats_of(&kept);
-            let previous_stats = stats_of(&previous_values);
-            let (previous_low, previous_high) = range_of(&previous_values);
-            let kept_ok = frame.has_kept
-                && frame.kept_conf[block] >= CONF_MIN
-                && previous_high - previous_low < FLAT_RANGE
-                && in_luma_band(frame, previous_stats.mean)
-                && previous_low >= CLIP_LOW
-                && previous_high <= CLIP_HIGH
-                && kept_stats.std > STD_MIN;
-            if kept_ok {
-                let slot = hist_slot(previous_stats.mean, kept_stats.std, edges);
+            let frame_stats = stats_of(&centred);
+            let bin = frame_bin(frame, cell_x, cell_y, clean_stats.mean);
+            let frame_ok = shared_ok && frame_stats.std > STD_MIN;
+            if frame_ok && let Some(bin) = bin {
+                let slot = hist_slot(bin, frame_stats.std, edges);
                 hist[HIST_LEN + slot] += 1;
             }
         }
@@ -252,7 +266,6 @@ pub(super) fn mirror_still_chunks(stream: &StillStream, edges: &[f32]) -> Vec<Mi
     for index in 0..frame_count {
         let has_source = index + 1 < frame_count;
         let next = if has_source { index + 1 } else { index };
-        let previous = index.saturating_sub(1);
         let frame = MirrorFrame {
             width: stream.width,
             height: stream.height,
@@ -262,16 +275,14 @@ pub(super) fn mirror_still_chunks(stream: &StillStream, edges: &[f32]) -> Vec<Mi
             source_t: &stream.sources[index],
             source_next: &stream.sources[next],
             out_t: &stream.outputs[index],
-            out_prev: &stream.outputs[previous],
             source_mv: &still_mv,
             source_conf: &full_conf,
-            kept_mv: &still_mv,
-            kept_conf: &full_conf,
+            luma_means: None,
+            means_blocks_x: 0,
             blocks_x: stream.blocks_x(),
             blocks_y: stream.blocks_y(),
             step: stream.step,
             has_source,
-            has_kept: index > 0,
         };
         let record = mirror_measure(&frame, edges);
 

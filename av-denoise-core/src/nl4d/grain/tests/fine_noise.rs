@@ -1,11 +1,4 @@
-use super::synthetic::{
-    ar_field,
-    cell_mean_removed_record,
-    gaussian_field,
-    set_kept_count,
-    set_source_count,
-    table_chunk,
-};
+use super::synthetic::{ar_field, cell_mean_removed_record, gaussian_field, set_source_count, table_chunk};
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{
     AR_COEFFS,
@@ -129,32 +122,19 @@ fn block_stds(field: &[f64]) -> Vec<f64> {
 }
 
 /// A chunk measured from `field` in luma bins 4 to 11, its record in the median block's group.
-///
-/// With a `kept_ratio`, every block also leaves kept grain of that share of its std.
-fn chunk_of(field: &[f64], kept_ratio: Option<f64>) -> GrainChunk {
+fn chunk_of(field: &[f64]) -> GrainChunk {
     let edges = bucket_edges();
     let mut counts = vec![0u32; STD_BUCKETS];
-    let mut kept_counts = vec![0u32; STD_BUCKETS];
     let mut stds = block_stds(field);
     for &std in &stds {
         let bucket = bucket_of(std as f32, &edges);
         counts[bucket] += 1;
-
-        if let Some(ratio) = kept_ratio {
-            let kept_std = std * ratio;
-            let kept_bucket = bucket_of(kept_std as f32, &edges);
-            kept_counts[kept_bucket] += 1;
-        }
     }
 
     let mut chunk = table_chunk();
     for bin in 4..12 {
         for (bucket, &count) in counts.iter().enumerate() {
             set_source_count(&mut chunk, bin * STD_BUCKETS + bucket, count);
-        }
-
-        for (bucket, &count) in kept_counts.iter().enumerate() {
-            set_kept_count(&mut chunk, bin * STD_BUCKETS + bucket, count);
         }
     }
 
@@ -172,11 +152,7 @@ fn chunk_of(field: &[f64], kept_ratio: Option<f64>) -> GrainChunk {
 }
 
 fn scenes_of(field: &[f64]) -> Vec<SceneGrain> {
-    scenes_with_kept(field, None)
-}
-
-fn scenes_with_kept(field: &[f64], kept_ratio: Option<f64>) -> Vec<SceneGrain> {
-    let chunk = chunk_of(field, kept_ratio);
+    let chunk = chunk_of(field);
     let scene = SceneGrain {
         first_frame: 0,
         chunks: vec![chunk],
@@ -201,11 +177,7 @@ fn floor_of(field: &[f64]) -> f64 {
 }
 
 fn fit_with(field: &[f64], fine_noise: f64) -> FittedEntry {
-    fit_with_kept(field, fine_noise, None)
-}
-
-fn fit_with_kept(field: &[f64], fine_noise: f64, kept_ratio: Option<f64>) -> FittedEntry {
-    let scenes = scenes_with_kept(field, kept_ratio);
+    let scenes = scenes_of(field);
     let options = FitOptions::with_fine_noise(fine_noise);
     let scenes: Vec<&SceneGrain> = scenes.iter().collect();
     let mut entries = fit_scenes(&scenes, &options);
@@ -361,17 +333,11 @@ fn fine_noise_never_drives_a_bin_to_zero() {
     let (field, _, _) = mixed_field();
 
     let entry = fit_with(&field, 1.0);
-    let kept_entry = fit_with_kept(&field, 1.0, Some(0.8));
 
     assert!(
         entry.points.iter().all(|&(_, value)| value > 0),
         "{:?}",
         entry.points
-    );
-    assert!(
-        kept_entry.points.iter().all(|&(_, value)| value > 0),
-        "{:?}",
-        kept_entry.points
     );
 }
 

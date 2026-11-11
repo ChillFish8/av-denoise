@@ -231,6 +231,25 @@ fn a_missing_column_is_refused_with_its_name() {
 }
 
 #[test]
+fn a_file_missing_a_frame_hist_column_is_refused() {
+    let scenes = scenes_of(&[4], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let batch = sample_batch(&rows);
+    let schema = batch.schema();
+    let dropped = schema.index_of("table_frame_hist").expect("the column exists");
+    let kept: Vec<usize> = (0..batch.num_columns())
+        .filter(|&index| index != dropped)
+        .collect();
+    let projected = batch.project(&kept).expect("the batch projects");
+
+    let pairs = pairs_with_frames(4);
+    let file = raw_file(&projected, pairs);
+    let error = read_avds(file).expect_err("a missing column is refused");
+
+    assert!(error.to_string().contains("table_frame_hist"), "got {error}");
+}
+
+#[test]
 fn a_row_count_that_differs_from_frames_is_refused() {
     let scenes = scenes_of(&[4], Measured::ALL);
     let rows = rows_from_scenes(&scenes);
@@ -297,11 +316,11 @@ fn integer_and_float_columns_use_their_encodings() {
             "frame" | "scene" => Encoding::DELTA_BINARY_PACKED,
             "first_of_scene" => Encoding::RLE,
             "table_source_hist.list.item"
-            | "table_kept_hist.list.item"
+            | "table_frame_hist.list.item"
             | "chroma_table_cb_source_hist.list.item"
-            | "chroma_table_cb_kept_hist.list.item"
+            | "chroma_table_cb_frame_hist.list.item"
             | "chroma_table_cr_source_hist.list.item"
-            | "chroma_table_cr_kept_hist.list.item" => Encoding::RLE_DICTIONARY,
+            | "chroma_table_cr_frame_hist.list.item" => Encoding::RLE_DICTIONARY,
             _ => Encoding::BYTE_STREAM_SPLIT,
         };
 

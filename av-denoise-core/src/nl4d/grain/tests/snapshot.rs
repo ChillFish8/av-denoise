@@ -26,8 +26,8 @@ use crate::nlmeans::tests::helpers::{make_client, upload_planes};
 use crate::noise::colour::{COLOUR_CELLS, COLOUR_FIT_PLANE_WORDS, ColourBlocks, ColourFit, ColourGrid};
 use crate::noise::{READING_WORDS, history_capacity};
 
-const WIDTH: u32 = 128;
-const HEIGHT: u32 = 96;
+pub(super) const WIDTH: u32 = 128;
+pub(super) const HEIGHT: u32 = 96;
 const RADIUS: u32 = 2;
 /// Fewer frames than the reading history holds, so it still holds every frame at the end.
 const FRAMES: usize = 18;
@@ -76,7 +76,7 @@ fn frame_geometry() -> Geometry {
 }
 
 /// An engine fed the block colour of every frame, as the planar engine feeds its passes.
-struct ColourRun {
+pub(super) struct ColourRun {
     client: Client,
     channels: ChannelMode,
     engine: Nl4d,
@@ -89,6 +89,19 @@ struct ColourRun {
 
 impl ColourRun {
     fn new(options: Nl4dOptions, channels: ChannelMode) -> Self {
+        let luma_frames = noisy_frames(WIDTH, HEIGHT, 1, FRAMES);
+        let chroma_frames = noisy_frames(WIDTH / 2, HEIGHT / 2, 2, FRAMES);
+
+        Self::with_frames(options, channels, &luma_frames, &chroma_frames)
+    }
+
+    /// A run over `luma_frames` and their interleaved 4:2:0 `chroma_frames`.
+    pub(super) fn with_frames(
+        options: Nl4dOptions,
+        channels: ChannelMode,
+        luma_frames: &[Vec<f32>],
+        chroma_frames: &[Vec<f32>],
+    ) -> Self {
         let client = make_client();
         let geometry = pass_geometry(channels);
         let mut engine = Nl4d::new(&client, options, geometry).expect("build");
@@ -102,10 +115,8 @@ impl ColourRun {
         let source = blocks.source(grid);
         engine.measure_colour(source);
 
-        let luma_frames = noisy_frames(WIDTH, HEIGHT, 1, FRAMES);
-        let chroma_frames = noisy_frames(WIDTH / 2, HEIGHT / 2, 2, FRAMES);
-        let mut planes = Vec::with_capacity(FRAMES);
-        for (luma, chroma) in luma_frames.iter().zip(&chroma_frames) {
+        let mut planes = Vec::with_capacity(luma_frames.len());
+        for (luma, chroma) in luma_frames.iter().zip(chroma_frames) {
             let mut handles = upload_planes(&client, luma, 1);
             let chroma_handles = upload_planes(&client, chroma, 2);
             handles.extend(chroma_handles);
@@ -123,8 +134,8 @@ impl ColourRun {
     }
 
     /// Pushes every frame and the tail, emitting each frame, and drains the grain chunks.
-    fn drive(&mut self) -> Vec<GrainChunk> {
-        for index in 0..FRAMES {
+    pub(super) fn drive(&mut self) -> Vec<GrainChunk> {
+        for index in 0..self.planes.len() {
             let ready = self.push(index);
             self.observe();
             self.emit(ready);

@@ -52,6 +52,12 @@ const LUMA_CHANNEL: u32 = 0;
 const CR_CHANNEL: u32 = 1;
 /// Cells one persisting cube adds, four per thread.
 const PERSIST_BLOCK_CELLS: u32 = 4 * PERSIST_THREADS;
+/// The side length of one colour block.
+const COLOUR_BLOCK: u32 = 16;
+/// The luma, Cb and Cr means of one colour block.
+const COLOUR_MEAN_FIELDS: usize = 3;
+/// The colour block luma of a chroma frame, on the 8-bit scale.
+const MID_LUMA: f32 = 128.0;
 
 /// A frame size the grain benches run at.
 #[derive(Clone, Copy)]
@@ -167,7 +173,7 @@ impl Benchmark for GrainSaveVectorsBench {
     }
 }
 
-/// Measures the source and kept grain of one frame.
+/// Measures the source and one-frame grain of one frame.
 pub struct GrainMeasureBench {
     pub client: Client,
     /// The size of the luma plane.
@@ -194,16 +200,39 @@ impl GrainMeasureBench {
     fn channels(&self) -> u32 {
         if self.chroma { CHROMA_CHANNELS } else { 1 }
     }
+
+    /// The colour blocks in one row, 0 for a luma frame.
+    fn means_blocks_x(&self) -> u32 {
+        if !self.chroma {
+            return 0;
+        }
+
+        let plane = self.plane();
+        plane.width.div_ceil(COLOUR_BLOCK)
+    }
+
+    /// Values in the bound block means, one placeholder value for a luma frame.
+    fn means_len(&self) -> usize {
+        if !self.chroma {
+            return 1;
+        }
+
+        let plane = self.plane();
+        let blocks_y = plane.height.div_ceil(COLOUR_BLOCK);
+        let blocks = self.means_blocks_x() * blocks_y;
+
+        blocks as usize * COLOUR_MEAN_FIELDS
+    }
 }
 
 #[derive(Clone)]
 pub struct GrainMeasureInput {
     pub input: Handle,
     pub out_t: Handle,
-    pub out_prev: Handle,
     pub saved_mv: Handle,
     pub saved_conf: Handle,
     pub edges: Handle,
+    pub luma_means: Handle,
     pub hist: Handle,
     pub partials: Handle,
 }
@@ -226,28 +255,28 @@ impl Benchmark for GrainMeasureBench {
         ring.extend_from_slice(rest);
         ring.extend_from_slice(first_pixel);
 
-        // Flat outputs with a small per-pixel ripple, so the kept grain is not zero either.
-        let out_prev_host = vec![0.5f32; samples];
+        // A flat output with a small per-pixel ripple inside the flat gate.
         let out_t_host: Vec<f32> = (0..samples)
             .map(|index| 0.5 + 0.001 * ((index % 7) as f32 - 3.0))
             .collect();
-        let saved_mv_host = vec![0i32; 2 * blocks * 2];
-        let saved_conf_host = vec![1.0f32; 2 * blocks];
+        let saved_mv_host = vec![0i32; blocks * 2];
+        let saved_conf_host = vec![1.0f32; blocks];
         let edges_host: Vec<f32> = (0..EDGE_COUNT).map(|index| index as f32 * 0.002).collect();
+        let means_host = vec![MID_LUMA; self.means_len()];
         let hist_host = vec![0i32; CHUNK_FRAMES * HIST_TOTAL];
 
         let ring_bytes = f32::as_bytes(&ring);
         let input = self.client.create_from_slice(ring_bytes);
         let out_t_bytes = f32::as_bytes(&out_t_host);
         let out_t = self.client.create_from_slice(out_t_bytes);
-        let out_prev_bytes = f32::as_bytes(&out_prev_host);
-        let out_prev = self.client.create_from_slice(out_prev_bytes);
         let saved_mv_bytes = i32::as_bytes(&saved_mv_host);
         let saved_mv = self.client.create_from_slice(saved_mv_bytes);
         let saved_conf_bytes = f32::as_bytes(&saved_conf_host);
         let saved_conf = self.client.create_from_slice(saved_conf_bytes);
         let edges_bytes = f32::as_bytes(&edges_host);
         let edges = self.client.create_from_slice(edges_bytes);
+        let means_bytes = f32::as_bytes(&means_host);
+        let luma_means = self.client.create_from_slice(means_bytes);
         let hist_bytes = i32::as_bytes(&hist_host);
         let hist = self.client.create_from_slice(hist_bytes);
         let partials = self.client.empty(cells * PARTIAL_LANES * size_of::<f32>());
@@ -255,10 +284,10 @@ impl Benchmark for GrainMeasureBench {
         GrainMeasureInput {
             input,
             out_t,
-            out_prev,
             saved_mv,
             saved_conf,
             edges,
+            luma_means,
             hist,
             partials,
         }
@@ -277,6 +306,7 @@ impl Benchmark for GrainMeasureBench {
         let hist_offset = (MEASURED_FRAME * HIST_TOTAL) as u32;
         let channel = if self.chroma { CR_CHANNEL } else { LUMA_CHANNEL };
         let luma_band = !self.chroma;
+        let has_luma_means = u32::from(self.chroma);
 
         unsafe {
             grain_measure::launch_unchecked(
@@ -286,18 +316,17 @@ impl Benchmark for GrainMeasureBench {
                 channels as usize,
                 BufferArg::from_raw_parts(args.input, 2 * samples),
                 BufferArg::from_raw_parts(args.out_t, samples),
-                BufferArg::from_raw_parts(args.out_prev, samples),
-                BufferArg::from_raw_parts(args.saved_mv, 2 * blocks * 2),
-                BufferArg::from_raw_parts(args.saved_conf, 2 * blocks),
+                BufferArg::from_raw_parts(args.saved_mv, blocks * 2),
+                BufferArg::from_raw_parts(args.saved_conf, blocks),
                 BufferArg::from_raw_parts(args.edges, EDGE_COUNT),
+                BufferArg::from_raw_parts(args.luma_means, self.means_len()),
                 BufferArg::from_raw_parts(args.hist, CHUNK_FRAMES * HIST_TOTAL),
                 BufferArg::from_raw_parts(args.partials, cells * PARTIAL_LANES),
                 0u32,
                 1u32,
                 0u32,
                 1u32,
-                1u32,
-                1u32,
+                has_luma_means,
                 hist_offset,
                 width,
                 height,
@@ -307,6 +336,7 @@ impl Benchmark for GrainMeasureBench {
                 STEP,
                 channel,
                 luma_band,
+                self.means_blocks_x(),
             );
         }
 
