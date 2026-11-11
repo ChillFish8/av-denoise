@@ -206,7 +206,7 @@ fn fit_with(field: &[f64], fine_noise: f64) -> FittedEntry {
 
 fn fit_with_kept(field: &[f64], fine_noise: f64, kept_ratio: Option<f64>) -> FittedEntry {
     let scenes = scenes_with_kept(field, kept_ratio);
-    let options = FitOptions { fine_noise };
+    let options = FitOptions::with_fine_noise(fine_noise);
     let scenes: Vec<&SceneGrain> = scenes.iter().collect();
     let mut entries = fit_scenes(&scenes, &options);
 
@@ -400,13 +400,13 @@ fn pure_white_grain_at_the_full_share_keeps_a_finite_table() {
 fn build_table_clamps_the_fine_noise_share() {
     let (field, _, _) = mixed_field();
     let scenes = scenes_of(&field);
-    let none = FitOptions { fine_noise: 0.0 };
-    let full = FitOptions { fine_noise: 1.0 };
+    let none = FitOptions::with_fine_noise(0.0);
+    let full = FitOptions::with_fine_noise(1.0);
     let none_table = build_table(&scenes, NTSC, &none);
     let full_table = build_table(&scenes, NTSC, &full);
 
     for (share, expected) in [(-0.5, &none_table), (f64::NAN, &none_table), (1.5, &full_table)] {
-        let options = FitOptions { fine_noise: share };
+        let options = FitOptions::with_fine_noise(share);
 
         let table = build_table(&scenes, NTSC, &options);
 

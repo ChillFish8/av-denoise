@@ -102,7 +102,6 @@ pub(crate) const TEMPLATE_SEEDS: u32 = 24;
 /// AV1 allows at most 14 luma scaling points.
 pub(crate) const MAX_POINTS: usize = 14;
 /// AV1 allows at most 10 scaling points per chroma plane.
-#[cfg_attr(not(test), expect(dead_code, reason = "only the chroma grain tests read it"))]
 pub(crate) const MAX_CHROMA_POINTS: usize = 10;
 
 const fn lag_table() -> [(i32, i32); LAG_COUNT] {

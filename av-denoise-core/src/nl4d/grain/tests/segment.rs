@@ -1,6 +1,9 @@
 use super::synthetic::{
     add_group_record,
+    ar_field,
     autocov_of,
+    chroma_chunk,
+    chroma_colour_frame,
     chunk_at,
     chunk_in_bucket,
     clear_pixels,
@@ -10,7 +13,15 @@ use super::synthetic::{
     table_chunk,
 };
 use crate::nl4d::grain::chunk::GrainChunk;
-use crate::nl4d::grain::consts::{BUCKETS_PER_GROUP, CHUNK_FRAMES, LUMA_BINS, MAX_POINTS, STD_BUCKETS};
+use crate::nl4d::grain::consts::{
+    AR_COEFFS,
+    AR_OFFSETS,
+    BUCKETS_PER_GROUP,
+    CHUNK_FRAMES,
+    LUMA_BINS,
+    MAX_POINTS,
+    STD_BUCKETS,
+};
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of, hist_median};
 use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes, segment_scene};
 use crate::nl4d::grain::table::FitOptions;
@@ -24,6 +35,43 @@ fn fit_measured(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
     let scenes: Vec<&SceneGrain> = scenes.iter().collect();
 
     fit_scenes(&scenes, &options)
+}
+
+/// Fits the scenes with chroma on and every measured part of the grain kept.
+fn fit_with_chroma(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
+    let defaults = FitOptions::default();
+    let options = defaults.with_chroma(true);
+    let scenes: Vec<&SceneGrain> = scenes.iter().collect();
+
+    fit_scenes(&scenes, &options)
+}
+
+/// The position of the left neighbour's weight.
+fn left_lane() -> usize {
+    AR_OFFSETS
+        .iter()
+        .position(|&offset| offset == (0, -1))
+        .expect("left offset")
+}
+
+/// The autocovariance record of a lag-3 AR field with only a left weight of `weight`.
+fn left_record(weight: f64) -> Vec<f64> {
+    let left = left_lane();
+    let mut weights = [0.0f64; AR_COEFFS];
+    weights[left] = weight;
+    let field = ar_field(&weights, 300, 300, 5);
+
+    autocov_of(&field, 300, 300)
+}
+
+/// A chunk whose source blocks sit at 2 codes in luma bins 4 to 11, with `record` as its texture.
+fn chunk_with_record(record: &[f64]) -> GrainChunk {
+    let edges = bucket_edges();
+    let bucket = bucket_of(2.0 / 255.0, &edges);
+    let mut chunk = chunk_in_bucket(bucket, 300);
+    add_group_record(&mut chunk, bucket / BUCKETS_PER_GROUP, record);
+
+    chunk
 }
 
 /// A chunk with an AR record and 1500 blocks at `std_codes` in only two luma bins.
@@ -326,4 +374,87 @@ fn a_chunk_in_every_luma_bin_thins_to_the_point_limit() {
     assert!(points.windows(2).all(|pair| pair[0].0 < pair[1].0));
     assert_eq!(first_luma, 8);
     assert_eq!(last_luma, 248);
+}
+
+#[test]
+fn a_segment_without_chroma_borrows_from_its_neighbour() {
+    let colour = chroma_colour_frame(6.0, 5.0);
+    let steady = chunk_at(2.0, 300, None);
+    let drifted = chunk_at(2.8, 300, None);
+    let settled = chunk_at(2.0, 300, None);
+    let steady_chroma = chroma_chunk(&steady, &steady, &colour);
+    let drifted_chroma = chroma_chunk(&drifted, &drifted, &[]);
+    let settled_chroma = chroma_chunk(&settled, &settled, &colour);
+    let scene = SceneGrain {
+        first_frame: 0,
+        chunks: vec![steady, drifted, settled],
+        chroma_chunks: vec![steady_chroma, drifted_chroma, settled_chroma],
+    };
+
+    let entries = fit_with_chroma(&[scene]);
+
+    assert_eq!(entries.len(), 3);
+    assert!(entries[0].chroma.is_some());
+    assert_eq!(entries[1].chroma, entries[0].chroma);
+    assert_eq!(entries[1].ar_shift, entries[0].ar_shift);
+    assert_eq!(entries[1].scaling_shift, entries[0].scaling_shift);
+}
+
+#[test]
+fn the_ar_shift_fits_every_plane() {
+    let luma_record = left_record(0.15);
+    let chroma_record = left_record(0.7);
+    let luma = chunk_with_record(&luma_record);
+    let chroma_tables = chunk_with_record(&chroma_record);
+    let colour = chroma_colour_frame(1.5, 1.5);
+    let chroma = chroma_chunk(&chroma_tables, &chroma_tables, &colour);
+    let scenes = vec![SceneGrain {
+        first_frame: 0,
+        chunks: vec![luma],
+        chroma_chunks: vec![chroma],
+    }];
+
+    let luma_only = fit_measured(&scenes);
+    let with_chroma = fit_with_chroma(&scenes);
+    let entry = &with_chroma[0];
+    let planes = entry.chroma.as_ref().expect("both chroma planes");
+    let left = left_lane();
+    let luma_only_left = luma_only[0].ar_coeffs[left];
+    let shared_left = entry.ar_coeffs[left];
+
+    assert_eq!(luma_only[0].ar_shift, 9);
+    assert_eq!(entry.ar_shift, 7);
+    assert!(
+        (4 * shared_left - luma_only_left).abs() <= 2,
+        "{shared_left} {luma_only_left}"
+    );
+    assert!(entry.ar_coeffs.iter().all(|coeff| (-128..=127).contains(coeff)));
+    for plane in planes {
+        let chroma_left = plane.ar_coeffs[left];
+        assert!((64..127).contains(&chroma_left), "{chroma_left}");
+        assert!(plane.ar_coeffs.iter().all(|coeff| (-128..=127).contains(coeff)));
+    }
+}
+
+#[test]
+fn strong_chroma_lowers_the_scaling_shift() {
+    let luma = chunk_at(2.0, 300, None);
+    let colour = chroma_colour_frame(8.0, 8.0);
+    let chroma = chroma_chunk(&luma, &luma, &colour);
+    let scenes = vec![SceneGrain {
+        first_frame: 0,
+        chunks: vec![luma],
+        chroma_chunks: vec![chroma],
+    }];
+
+    let luma_only = fit_measured(&scenes);
+    let with_chroma = fit_with_chroma(&scenes);
+    let entry = &with_chroma[0];
+    let planes = entry.chroma.as_ref().expect("both chroma planes");
+
+    assert!(entry.scaling_shift < luma_only[0].scaling_shift);
+    for plane in planes {
+        let capped = plane.points.iter().any(|&(_, value)| value == 255);
+        assert!(!capped || entry.scaling_shift == 8, "{:?}", plane.points);
+    }
 }

@@ -1,12 +1,14 @@
 use std::fmt::Write;
 
 use super::consts::AR_COEFFS;
-use super::segment::{FittedEntry, SceneGrain, fit_scenes};
+use super::segment::{FittedEntry, PlaneEntry, SceneGrain, fit_scenes};
 
 /// Grain table timestamps count 100 ns ticks.
 const TICKS_PER_SECOND: u128 = 10_000_000;
 const SEED_BASE: u64 = 7391;
 const SEED_STEP: u64 = 1237;
+/// The scaling line values of a chroma plane without grain.
+const ZEROED_SCALING: &str = "2 0 0 255 0";
 
 /// The tick half a frame before `frame`, clamped at 0, for a rate of `numerator / denominator` fps.
 pub(crate) fn boundary_ticks(frame: u64, frame_rate: (u64, u64)) -> u64 {
@@ -41,10 +43,38 @@ fn join_points(points: &[(u8, u8)]) -> String {
     words.join(" ")
 }
 
+/// A chroma plane's scaling line values, the point count then the points.
+fn plane_scaling(plane: &PlaneEntry) -> String {
+    let count = plane.points.len();
+    let points = join_points(&plane.points);
+
+    format!("{count} {points}")
+}
+
+/// A chroma plane's coefficient line values, the 24 weights then a luma coefficient of 0.
+fn plane_coeffs(plane: &PlaneEntry) -> String {
+    let mut values = plane.ar_coeffs.to_vec();
+    values.push(0);
+
+    join_values(&values)
+}
+
+/// The Cb and Cr values `line` writes for each plane, or `zeroed` for both without chroma.
+fn chroma_values(
+    chroma: Option<&[PlaneEntry; 2]>,
+    line: fn(&PlaneEntry) -> String,
+    zeroed: &str,
+) -> [String; 2] {
+    match chroma {
+        Some(planes) => planes.each_ref().map(line),
+        None => [zeroed.to_owned(), zeroed.to_owned()],
+    }
+}
+
 pub(crate) fn format_table(entries: &[FittedEntry], frame_rate: (u64, u64)) -> String {
-    let mut chroma_values = vec![0i32; AR_COEFFS];
-    chroma_values.push(-128);
-    let chroma_coeffs = join_values(&chroma_values);
+    let mut zeroed_values = vec![0i32; AR_COEFFS];
+    zeroed_values.push(-128);
+    let zeroed_coeffs = join_values(&zeroed_values);
 
     let mut text = String::from("filmgrn1\n");
 
@@ -60,6 +90,10 @@ pub(crate) fn format_table(entries: &[FittedEntry], frame_rate: (u64, u64)) -> S
         let points = join_points(&entry.points);
         let point_count = entry.points.len();
         let coeffs = join_values(&entry.ar_coeffs);
+        // Without chroma the planes scale to zero everywhere, so only luma gets grain.
+        let chroma = entry.chroma.as_ref();
+        let [cb_scaling, cr_scaling] = chroma_values(chroma, plane_scaling, ZEROED_SCALING);
+        let [cb_coeffs, cr_coeffs] = chroma_values(chroma, plane_coeffs, &zeroed_coeffs);
 
         writeln!(text, "E {start} {end} 1 {seed} 1").expect("writing to a String");
         // Lag 3, the AR and scaling shifts, and overlap on.
@@ -70,12 +104,11 @@ pub(crate) fn format_table(entries: &[FittedEntry], frame_rate: (u64, u64)) -> S
         )
         .expect("writing to a String");
         writeln!(text, "\tsY {point_count}  {points}").expect("writing to a String");
-        // Chroma scales to zero everywhere, so only luma gets grain.
-        text.push_str("\tsCb 2 0 0 255 0\n");
-        text.push_str("\tsCr 2 0 0 255 0\n");
+        writeln!(text, "\tsCb {cb_scaling}").expect("writing to a String");
+        writeln!(text, "\tsCr {cr_scaling}").expect("writing to a String");
         writeln!(text, "\tcY {coeffs}").expect("writing to a String");
-        writeln!(text, "\tcCb {chroma_coeffs}").expect("writing to a String");
-        writeln!(text, "\tcCr {chroma_coeffs}").expect("writing to a String");
+        writeln!(text, "\tcCb {cb_coeffs}").expect("writing to a String");
+        writeln!(text, "\tcCr {cr_coeffs}").expect("writing to a String");
     }
 
     text
@@ -92,12 +125,25 @@ pub struct FitOptions {
     ///
     /// The default of 0 keeps everything measured. [DEFAULT_FINE_NOISE] is the recommended share.
     pub fine_noise: f64,
+    /// Whether entries carry Cb and Cr grain as well as luma, off by default.
+    ///
+    /// With chroma on, one AR shift and one scaling shift fit all three planes, so luma's values
+    /// can differ from a luma-only table by rounding.
+    pub chroma: bool,
 }
 
 impl FitOptions {
     /// The options with `share` of the fine noise taken out.
     pub fn with_fine_noise(share: f64) -> Self {
-        Self { fine_noise: share }
+        Self {
+            fine_noise: share,
+            chroma: false,
+        }
+    }
+
+    /// The options with chroma grain on or off.
+    pub fn with_chroma(self, chroma: bool) -> Self {
+        Self { chroma, ..self }
     }
 
     /// The options with the fine noise share clamped to 0..=1, NaN read as 0.
@@ -109,7 +155,10 @@ impl FitOptions {
             share.clamp(0.0, 1.0)
         };
 
-        Self { fine_noise }
+        Self {
+            fine_noise,
+            chroma: self.chroma,
+        }
     }
 }
 

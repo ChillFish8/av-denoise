@@ -69,10 +69,6 @@ impl GrainChunk {
 
     /// The chunk's table statistics of chroma plane `plane`, 0 for Cb and 1 for Cr, summed over
     /// its frames.
-    #[cfg_attr(
-        not(all(test, any(feature = "vulkan", feature = "metal"))),
-        expect(dead_code, reason = "only the chroma grain tests read it")
-    )]
     pub(crate) fn summed_chroma_table(&self, plane: usize) -> TableSums {
         let mut sums = TableSums::zeroed();
         let (frame_tables, _) = self.frame_tables.as_chunks::<FRAME_TABLE_LEN>();
@@ -86,7 +82,7 @@ impl GrainChunk {
 }
 
 impl TableSums {
-    fn zeroed() -> Self {
+    pub(crate) fn zeroed() -> Self {
         Self {
             source_hist: vec![0; HIST_LEN],
             kept_hist: vec![0; HIST_LEN],

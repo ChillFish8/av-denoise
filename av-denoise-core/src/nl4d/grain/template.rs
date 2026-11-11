@@ -24,7 +24,6 @@ const LUMA_LAYOUT: TemplateLayout = TemplateLayout {
 };
 
 /// The 4:2:0 chroma template, whose blocks match the colour model's grain blocks.
-#[cfg_attr(not(test), expect(dead_code, reason = "only the chroma grain tests read it"))]
 const CHROMA_LAYOUT: TemplateLayout = TemplateLayout {
     rows: 38,
     cols: 44,
@@ -35,13 +34,11 @@ const CHROMA_LAYOUT: TemplateLayout = TemplateLayout {
 
 /// A chroma plane of an AV1 film grain template.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "only the chroma grain tests read it"))]
 pub(crate) enum ChromaPlane {
     Cb,
     Cr,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "only the chroma grain tests read it"))]
 impl ChromaPlane {
     /// The mask AV1 applies to the grain seed before drawing this plane's samples.
     pub(crate) fn seed_mask(self) -> u16 {
@@ -92,7 +89,6 @@ pub(crate) fn luma_template(coeffs: &[i32; AR_COEFFS], ar_shift: u32, seed: u16)
 /// Builds the 38x44 4:2:0 chroma grain template an 8-bit AV1 decoder makes for these weights.
 ///
 /// The luma weight is taken as zero, so the template depends on the chroma samples alone.
-#[cfg_attr(not(test), expect(dead_code, reason = "only the chroma grain tests read it"))]
 pub(crate) fn chroma_template(
     coeffs: &[i32; AR_COEFFS],
     ar_shift: u32,
@@ -153,7 +149,6 @@ pub(crate) fn template_stats(coeffs: &[i32; AR_COEFFS], ar_shift: u32) -> (f64, 
 ///
 /// Both read the 32x32 interior of [TEMPLATE_SEEDS] templates. A block's std removes its own mean.
 /// The blocks match the colour model's chroma grain blocks.
-#[cfg_attr(not(test), expect(dead_code, reason = "only the chroma grain tests read it"))]
 pub(crate) fn chroma_template_stats(
     coeffs: &[i32; AR_COEFFS],
     ar_shift: u32,

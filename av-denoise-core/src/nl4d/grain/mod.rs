@@ -1,4 +1,3 @@
-#[cfg_attr(not(test), expect(dead_code, reason = "only the chroma grain tests read it"))]
 mod chroma;
 mod chunk;
 pub(crate) mod consts;

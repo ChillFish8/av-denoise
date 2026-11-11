@@ -16,6 +16,16 @@ use crate::nl4d::grain::consts::{
     STRENGTH_GROUPS,
 };
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of};
+use crate::noise::colour::{
+    COLOUR_CELLS,
+    COLOUR_FIT_PLANE_BLOCKS,
+    COLOUR_FIT_PLANE_LUMA_HIGH,
+    COLOUR_FIT_PLANE_LUMA_LOW,
+    COLOUR_FIT_PLANE_POPULATED,
+    COLOUR_FIT_PLANE_WORDS,
+};
+
+const COLOUR_PLANE_LEN: usize = 2 * COLOUR_CELLS as usize + COLOUR_FIT_PLANE_WORDS as usize;
 
 fn splitmix(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -226,6 +236,47 @@ pub(super) fn chunk_at(std_codes: f32, blocks_per_bin: u32, kept_codes: Option<f
 
     let record = grain_record();
     add_group_record(&mut chunk, bucket / BUCKETS_PER_GROUP, &record);
+
+    chunk
+}
+
+/// One frame's chroma colour fit with every Cb cell at `cb_codes` and every Cr cell at `cr_codes`
+/// of grain, populated between luma 40 and 200.
+pub(super) fn chroma_colour_frame(cb_codes: f32, cr_codes: f32) -> Vec<f32> {
+    let cells = COLOUR_CELLS as usize;
+    let mut frame = Vec::with_capacity(2 * COLOUR_PLANE_LEN);
+
+    for codes in [cb_codes, cr_codes] {
+        let mut plane = vec![0.0f32; COLOUR_PLANE_LEN];
+        let log_grain = codes.ln();
+        plane[..cells].fill(log_grain);
+
+        let header = &mut plane[2 * cells..];
+        header[COLOUR_FIT_PLANE_POPULATED as usize] = 1.0;
+        header[COLOUR_FIT_PLANE_BLOCKS as usize] = 600.0;
+        header[COLOUR_FIT_PLANE_LUMA_LOW as usize] = 40.0;
+        header[COLOUR_FIT_PLANE_LUMA_HIGH as usize] = 200.0;
+        frame.extend(plane);
+    }
+
+    frame
+}
+
+/// A chroma chunk with the frame tables of `cb` and `cr` and `colour_frame` in every frame.
+///
+/// An empty `colour_frame` leaves the chunk without a colour fit.
+pub(super) fn chroma_chunk(cb: &GrainChunk, cr: &GrainChunk, colour_frame: &[f32]) -> GrainChunk {
+    let mut chunk = GrainChunk::empty();
+    chunk.frames = cb.frames;
+
+    let (cb_tables, _) = cb.frame_tables.as_chunks::<FRAME_TABLE_LEN>();
+    let (cr_tables, _) = cr.frame_tables.as_chunks::<FRAME_TABLE_LEN>();
+    for (cb_table, cr_table) in cb_tables.iter().zip(cr_tables) {
+        chunk.frame_tables.extend_from_slice(cb_table);
+        chunk.frame_tables.extend_from_slice(cr_table);
+    }
+
+    chunk.frame_colour = colour_frame.repeat(cb.frames as usize);
 
     chunk
 }

@@ -1,3 +1,6 @@
+use std::ops::Range;
+
+use super::chroma::{ChromaFit, ChromaParts, chroma_parts, chroma_scaling};
 use super::chunk::{GrainChunk, TableSums};
 use super::consts::{
     AR_COEFFS,
@@ -15,15 +18,20 @@ use super::consts::{
 };
 use super::fit::{
     bucket_edges,
+    finest_ar_shift,
+    finest_scaling_shift,
     floor_fraction,
     hist_median,
     quantise_ar,
+    quantise_at,
+    scaling_peak,
     scaling_points,
+    scaling_points_at,
     undo_mean_removal,
     yule_walker,
 };
 use super::table::FitOptions;
-use super::template::template_stats;
+use super::template::{ChromaPlane, template_stats};
 
 /// The grain chunks of one scene, in frame order.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +48,8 @@ pub struct SceneGrain {
 pub(crate) struct Segment {
     pub first_frame: u64,
     pub last_frame: u64,
+    /// The indices of the scene's chunks the segment covers.
+    pub chunks: Range<usize>,
     /// The table statistics of every chunk in the segment, summed.
     pub table: TableSums,
 }
@@ -52,6 +62,15 @@ pub(crate) struct FittedEntry {
     pub ar_coeffs: [i32; AR_COEFFS],
     pub ar_shift: u32,
     pub scaling_shift: u32,
+    pub points: Vec<(u8, u8)>,
+    /// The Cb and then the Cr plane, `None` when the entry has no chroma grain.
+    pub chroma: Option<[PlaneEntry; 2]>,
+}
+
+/// One chroma plane's table values.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlaneEntry {
+    pub ar_coeffs: [i32; AR_COEFFS],
     pub points: Vec<(u8, u8)>,
 }
 
@@ -71,6 +90,8 @@ type Weights = ([i32; AR_COEFFS], u32);
 struct Texture {
     /// The weights the table carries, with the chosen share of the fine noise taken out.
     table: Weights,
+    /// The solved weights the table's weights are rounded from.
+    table_weights: [f64; AR_COEFFS],
     /// The template std of the table's weights, in 8-bit units.
     table_sigma: f64,
     /// The measured template's ratio of its whole-field std to its 8x8 block median std.
@@ -95,6 +116,16 @@ struct Parts {
     scene: usize,
     strength: Option<Vec<BinStrength>>,
     texture: Option<Texture>,
+    /// The Cb and then the Cr plane's own measurements, all missing when chroma is off.
+    chroma: [ChromaParts; 2],
+}
+
+/// The table's rounded weights, the solved weights behind them and their template std.
+#[derive(Debug, Clone, Copy)]
+struct TableWeights {
+    quantised: Weights,
+    weights: [f64; AR_COEFFS],
+    sigma: f64,
 }
 
 /// The std median over every luma bin of a histogram.
@@ -116,7 +147,7 @@ pub(crate) fn segment_scene(scene: &SceneGrain) -> Vec<Segment> {
     let mut segments: Vec<Segment> = Vec::new();
     let mut next_frame = scene.first_frame;
 
-    for chunk in &scene.chunks {
+    for (index, chunk) in scene.chunks.iter().enumerate() {
         let chunk_first = next_frame;
         let chunk_last = chunk_first + chunk.frames as u64 - 1;
         next_frame = chunk_last + 1;
@@ -130,6 +161,7 @@ pub(crate) fn segment_scene(scene: &SceneGrain) -> Vec<Segment> {
             segments.push(Segment {
                 first_frame: chunk_first,
                 last_frame: chunk_last,
+                chunks: index..index + 1,
                 table,
             });
             continue;
@@ -137,6 +169,7 @@ pub(crate) fn segment_scene(scene: &SceneGrain) -> Vec<Segment> {
 
         let open = segments.last_mut().expect("a segment is open");
         open.last_frame = chunk_last;
+        open.chunks.end = index + 1;
         open.table.add(&table);
     }
 
@@ -200,12 +233,17 @@ fn texture_of(stats: &TableSums, edges: &[f32], fine_noise: f64) -> Option<Textu
     let block_to_field = measured_sigma / measured_median;
 
     take_out_fine_noise(&mut corrected, floor, fine_noise);
-    let measured = (measured_coeffs, measured_shift);
-    let (table, table_sigma) = reduced_weights(&corrected, measured, measured_sigma);
+    let measured = TableWeights {
+        quantised: (measured_coeffs, measured_shift),
+        weights: measured_weights,
+        sigma: measured_sigma,
+    };
+    let reduced = reduced_weights(&corrected, measured);
 
     Some(Texture {
-        table,
-        table_sigma,
+        table: reduced.quantised,
+        table_weights: reduced.weights,
+        table_sigma: reduced.sigma,
         block_to_field,
         floor,
     })
@@ -250,26 +288,34 @@ pub(crate) fn take_out_fine_noise(corrected: &mut [f64], floor: f64, fine_noise:
     corrected[0] -= share * corrected[0];
 }
 
-/// The quantised weights solved from the reduced record and their template std.
+/// The weights solved from the reduced record and their template std.
 ///
-/// When the reduced record has no system to solve, the measured weights and std stay.
-fn reduced_weights(corrected: &[f64], measured: Weights, measured_sigma: f64) -> (Weights, f64) {
+/// When the reduced record has no system to solve, or rounds to the measured weights, the measured
+/// weights and std stay.
+fn reduced_weights(corrected: &[f64], measured: TableWeights) -> TableWeights {
     let Some(solved) = yule_walker(corrected) else {
-        return (measured, measured_sigma);
+        return measured;
     };
 
     let reduced = quantise_ar(&solved);
-    if reduced == measured {
-        return (measured, measured_sigma);
+    if reduced == measured.quantised {
+        return measured;
     }
 
     let (coeffs, shift) = reduced;
     let (sigma, _) = template_stats(&coeffs, shift);
 
-    (reduced, sigma)
+    TableWeights {
+        quantised: reduced,
+        weights: solved,
+        sigma,
+    }
 }
 
 /// Fits every scene's segments, borrowing missing strength or texture, and drops what has no donor.
+///
+/// With chroma on, each chroma plane borrows its texture and target the same way. An entry gets
+/// chroma only when both planes have both.
 pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<FittedEntry> {
     let edges = bucket_edges();
     let mut parts = Vec::new();
@@ -277,12 +323,19 @@ pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<Fi
         for segment in segment_scene(scene) {
             let strength = strength_of(&segment.table, &edges);
             let texture = texture_of(&segment.table, &edges, options.fine_noise);
+            let chroma = if options.chroma {
+                segment_chroma(scene, &segment, &edges)
+            } else {
+                Default::default()
+            };
+
             parts.push(Parts {
                 first_frame: segment.first_frame,
                 last_frame: segment.last_frame,
                 scene: scene_index,
                 strength,
                 texture,
+                chroma,
             });
         }
     }
@@ -295,11 +348,43 @@ pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<Fi
             continue;
         };
 
-        let entry = build_entry(&parts[index], &strength, texture, options.fine_noise);
+        let chroma = if options.chroma {
+            borrowed_chroma(&parts, index)
+        } else {
+            None
+        };
+
+        let entry = build_entry(&parts[index], &strength, texture, chroma, options.fine_noise);
         entries.push(entry);
     }
 
     entries
+}
+
+/// The chroma measurements of the scene's chroma chunks the segment covers.
+///
+/// A scene without chroma chunks for the segment gives all of them missing.
+fn segment_chroma(scene: &SceneGrain, segment: &Segment, edges: &[f32]) -> [ChromaParts; 2] {
+    let covered = scene.chroma_chunks.get(segment.chunks.clone());
+    let chunks = covered.unwrap_or_default();
+
+    chroma_parts(chunks, edges)
+}
+
+/// Both chroma planes' texture and target, each borrowed on its own, `None` when any is missing.
+fn borrowed_chroma(parts: &[Parts], index: usize) -> Option<[ChromaFit; 2]> {
+    let cb = borrowed_plane(parts, index, ChromaPlane::Cb)?;
+    let cr = borrowed_plane(parts, index, ChromaPlane::Cr)?;
+
+    Some([cb, cr])
+}
+
+fn borrowed_plane(parts: &[Parts], index: usize, plane: ChromaPlane) -> Option<ChromaFit> {
+    let slot = plane.index();
+    let texture = borrow(parts, index, |part| part.chroma[slot].texture)?;
+    let target = borrow(parts, index, |part| part.chroma[slot].target.clone())?;
+
+    Some(ChromaFit { texture, target })
 }
 
 /// The part's own value, else the nearest donor in its scene, else the nearest in any scene.
@@ -335,11 +420,69 @@ fn borrow<T>(parts: &[Parts], index: usize, value: impl Fn(&Parts) -> Option<T>)
 
 /// The entry for one part.
 ///
+/// Without chroma, luma alone picks the shifts. With chroma, the AR shift is the finest that fits
+/// every plane's weights and the scaling shift the finest that fits every plane's strongest point.
+fn build_entry(
+    part: &Parts,
+    strength: &[BinStrength],
+    texture: Texture,
+    chroma: Option<[ChromaFit; 2]>,
+    fine_noise: f64,
+) -> FittedEntry {
+    let targets = luma_targets(strength, texture, fine_noise);
+    let Some([cb_fit, cr_fit]) = chroma else {
+        let (coeffs, ar_shift) = texture.table;
+        let (points, scaling_shift) = scaling_points(&targets, texture.table_sigma);
+
+        return FittedEntry {
+            first_frame: part.first_frame,
+            last_frame: part.last_frame,
+            ar_coeffs: coeffs,
+            ar_shift,
+            scaling_shift,
+            points,
+            chroma: None,
+        };
+    };
+
+    let (luma_coeffs, luma_shift) = texture.table;
+    let cb_shift = finest_ar_shift(&cb_fit.texture.weights);
+    let cr_shift = finest_ar_shift(&cr_fit.texture.weights);
+    let ar_shift = luma_shift.min(cb_shift).min(cr_shift);
+
+    let (coeffs, sigma_template) = if ar_shift == luma_shift {
+        (luma_coeffs, texture.table_sigma)
+    } else {
+        let coeffs = quantise_at(&texture.table_weights, ar_shift);
+        let (sigma, _) = template_stats(&coeffs, ar_shift);
+        (coeffs, sigma)
+    };
+
+    let cb = chroma_scaling(&cb_fit, ChromaPlane::Cb, ar_shift);
+    let cr = chroma_scaling(&cr_fit, ChromaPlane::Cr, ar_shift);
+    let luma_peak = scaling_peak(&targets, sigma_template);
+    let peak = luma_peak.max(cb.peak()).max(cr.peak());
+    let scaling_shift = finest_scaling_shift(peak);
+    let points = scaling_points_at(&targets, sigma_template, scaling_shift);
+    let cb_entry = cb.entry_at(scaling_shift);
+    let cr_entry = cr.entry_at(scaling_shift);
+
+    FittedEntry {
+        first_frame: part.first_frame,
+        last_frame: part.last_frame,
+        ar_coeffs: coeffs,
+        ar_shift,
+        scaling_shift,
+        points,
+        chroma: Some([cb_entry, cr_entry]),
+    }
+}
+
+/// Luma's strength targets, as `(luma, sigma)` with sigma in normalised units.
+///
 /// Each bin's synthesised variance loses `fine_noise` times the texture's floor share of itself.
-fn build_entry(part: &Parts, strength: &[BinStrength], texture: Texture, fine_noise: f64) -> FittedEntry {
-    let (coeffs, ar_shift) = texture.table;
+fn luma_targets(strength: &[BinStrength], texture: Texture, fine_noise: f64) -> Vec<(u8, f64)> {
     let factor = texture.block_to_field;
-    let sigma_template = texture.table_sigma;
     let fine_share = fine_noise * texture.floor;
 
     let mut chosen: Vec<BinStrength> = strength.to_vec();
@@ -352,7 +495,7 @@ fn build_entry(part: &Parts, strength: &[BinStrength], texture: Texture, fine_no
             .collect();
     }
 
-    let targets: Vec<(u8, f64)> = chosen
+    chosen
         .iter()
         .map(|entry| {
             let sigma_source = entry.source * factor;
@@ -365,16 +508,5 @@ fn build_entry(part: &Parts, strength: &[BinStrength], texture: Texture, fine_no
             let centre = (entry.bin as f64 + 0.5) * 256.0 / LUMA_BINS as f64;
             (centre.round() as u8, variance.sqrt())
         })
-        .collect();
-
-    let (points, scaling_shift) = scaling_points(&targets, sigma_template);
-
-    FittedEntry {
-        first_frame: part.first_frame,
-        last_frame: part.last_frame,
-        ar_coeffs: coeffs,
-        ar_shift,
-        scaling_shift,
-        points,
-    }
+        .collect()
 }

@@ -1,7 +1,14 @@
-use super::chunk::TableSums;
+use super::chunk::{GrainChunk, TableSums};
 use super::consts::{AR_COEFFS, CHROMA_PLANES, MAX_CHROMA_POINTS, MIN_BLOCKS_PER_BIN, MIN_POPULATED_BINS};
-use super::fit::{finest_ar_shift, quantise_at, undo_mean_removal, yule_walker};
-use super::segment::{overall_median, pooled_record};
+use super::fit::{
+    finest_ar_shift,
+    quantise_at,
+    scaling_peak,
+    scaling_points_at,
+    undo_mean_removal,
+    yule_walker,
+};
+use super::segment::{PlaneEntry, overall_median, pooled_record};
 use super::template::{ChromaPlane, chroma_template_stats};
 use crate::noise::colour::{
     COLOUR_BRIGHTNESS_BINS,
@@ -23,6 +30,110 @@ pub(crate) struct ChromaTexture {
     ///
     /// It is read with the weights rounded at their finest AR shift.
     pub block_to_field: f64,
+}
+
+/// A segment's own measurements of one chroma plane, either of which may be missing.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ChromaParts {
+    pub texture: Option<ChromaTexture>,
+    /// The removed grain's block std at up to [MAX_CHROMA_POINTS] lumas, in 8-bit codes.
+    pub target: Option<Vec<(u8, f64)>>,
+}
+
+/// One chroma plane's texture and strength target for a table entry.
+#[derive(Debug, Clone)]
+pub(crate) struct ChromaFit {
+    pub texture: ChromaTexture,
+    /// The removed grain's block std at each luma, in 8-bit codes.
+    pub target: Vec<(u8, f64)>,
+}
+
+/// A chroma plane's weights and whole-field strength targets at an entry's AR shift.
+pub(crate) struct ChromaScaling {
+    coeffs: [i32; AR_COEFFS],
+    /// The whole-field grain std at each luma, in normalised units.
+    targets: Vec<(u8, f64)>,
+    /// The template std of the plane's weights, in 8-bit units.
+    sigma_template: f64,
+}
+
+/// Each chroma plane's own measurements over `chunks`, Cb then Cr.
+pub(crate) fn chroma_parts(chunks: &[GrainChunk], edges: &[f32]) -> [ChromaParts; CHROMA_PLANES] {
+    let mut colour = Vec::new();
+    let mut frames = 0usize;
+    for chunk in chunks {
+        colour.extend_from_slice(&chunk.frame_colour);
+        frames += chunk.frames as usize;
+    }
+
+    let cb = plane_parts(chunks, &colour, frames, ChromaPlane::Cb, edges);
+    let cr = plane_parts(chunks, &colour, frames, ChromaPlane::Cr, edges);
+
+    [cb, cr]
+}
+
+/// One plane's texture from its summed table and its target from the colour fit.
+///
+/// The target needs both the colour fit's levels and the removed share of the table.
+fn plane_parts(
+    chunks: &[GrainChunk],
+    colour: &[f32],
+    frames: usize,
+    plane: ChromaPlane,
+    edges: &[f32],
+) -> ChromaParts {
+    let mut stats = TableSums::zeroed();
+    for chunk in chunks {
+        let sums = chunk.summed_chroma_table(plane.index());
+        stats.add(&sums);
+    }
+
+    let texture = chroma_texture_of(&stats, edges);
+    let levels = chroma_levels(colour, frames, plane);
+    let share = removed_share(&stats, edges);
+    let target = match (levels, share) {
+        // The entry's texture, which may be borrowed, turns these block stds into field stds.
+        (Some(levels), Some(share)) => Some(chroma_targets(&levels, share, 1.0)),
+        _ => None,
+    };
+
+    ChromaParts { texture, target }
+}
+
+/// The plane's weights rounded at `ar_shift`, its template std and its whole-field targets.
+pub(crate) fn chroma_scaling(fit: &ChromaFit, plane: ChromaPlane, ar_shift: u32) -> ChromaScaling {
+    let coeffs = quantise_at(&fit.texture.weights, ar_shift);
+    let (sigma_template, _) = chroma_template_stats(&coeffs, ar_shift, plane);
+    // The targets leave 8-bit codes for the normalised units the luma targets use.
+    let factor = fit.texture.block_to_field / 255.0;
+    let targets = fit
+        .target
+        .iter()
+        .map(|&(luma, block_std)| (luma, block_std * factor))
+        .collect();
+
+    ChromaScaling {
+        coeffs,
+        targets,
+        sigma_template,
+    }
+}
+
+impl ChromaScaling {
+    /// The largest scaling value the plane needs before the scaling shift.
+    pub(crate) fn peak(&self) -> f64 {
+        scaling_peak(&self.targets, self.sigma_template)
+    }
+
+    /// The plane's table values at `scaling_shift`.
+    pub(crate) fn entry_at(&self, scaling_shift: u32) -> PlaneEntry {
+        let points = scaling_points_at(&self.targets, self.sigma_template, scaling_shift);
+
+        PlaneEntry {
+            ar_coeffs: self.coeffs,
+            points,
+        }
+    }
 }
 
 /// The texture solved from the strength groups near the median source std, as luma's is.
