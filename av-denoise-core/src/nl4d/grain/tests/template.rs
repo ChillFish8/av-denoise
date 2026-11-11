@@ -1,6 +1,14 @@
 use crate::nl4d::grain::consts::{AR_COEFFS, AR_OFFSETS, LAGS};
 use crate::nl4d::grain::gaussian::GAUSSIAN_SEQUENCE;
-use crate::nl4d::grain::template::{Av1Random, luma_template, template_seed, template_stats};
+use crate::nl4d::grain::template::{
+    Av1Random,
+    ChromaPlane,
+    chroma_template,
+    chroma_template_stats,
+    luma_template,
+    template_seed,
+    template_stats,
+};
 
 const SCENE_EIGHT: [i32; AR_COEFFS] = [
     0, 0, -4, 6, 1, -1, 0, -1, -1, 4, -19, -7, 0, -2, -3, 3, -21, 61, 15, 1, -2, 5, -22, 71,
@@ -96,4 +104,85 @@ fn template_seeds_stay_sixteen_bit() {
 
     assert_eq!(first_seed, 1000);
     assert_eq!(later_seed, ((1000u32 + 7919 * 23) & 0xFFFF) as u16);
+}
+
+fn raw_chroma_draws(seed: u16, count: usize) -> Vec<i32> {
+    let mut random = Av1Random::new(seed);
+    let mut draws = Vec::with_capacity(count);
+    for _ in 0..count {
+        let index = random.next(11) as usize;
+        let gaussian = GAUSSIAN_SEQUENCE[index] as i32;
+        draws.push((gaussian + 8) >> 4);
+    }
+
+    draws
+}
+
+#[test]
+fn zero_weight_chroma_templates_are_the_raw_gaussian_draws() {
+    for (plane, mask) in [(ChromaPlane::Cb, 0xb524), (ChromaPlane::Cr, 0x49d8)] {
+        let template = chroma_template(&[0; AR_COEFFS], 6, 1000, plane);
+        let expected = raw_chroma_draws(1000 ^ mask, 38 * 44);
+
+        assert_eq!(plane.seed_mask(), mask);
+        assert_eq!(template, expected);
+    }
+}
+
+#[test]
+fn chroma_templates_have_the_420_size() {
+    let cb_template = chroma_template(&SCENE_EIGHT, 7, 1000, ChromaPlane::Cb);
+    let cr_template = chroma_template(&SCENE_EIGHT, 7, 1000, ChromaPlane::Cr);
+
+    assert_eq!(cb_template.len(), 38 * 44);
+    assert_eq!(cr_template.len(), 38 * 44);
+}
+
+#[test]
+fn one_chroma_weight_filters_from_the_left() {
+    let mut coeffs = [0; AR_COEFFS];
+    coeffs[23] = 64;
+    let template = chroma_template(&coeffs, 6, 1000, ChromaPlane::Cb);
+    let raw = raw_chroma_draws(1000 ^ 0xb524, 38 * 44);
+    let at = |values: &[i32], y: usize, x: usize| values[y * 44 + x];
+
+    let first_total = 64 * at(&raw, 3, 2);
+    let first_rounded = (first_total + 32) >> 6;
+    let first_sum = at(&raw, 3, 3) + first_rounded;
+    let first = first_sum.clamp(-128, 127);
+    let second_total = 64 * first;
+    let second_rounded = (second_total + 32) >> 6;
+    let second_sum = at(&raw, 3, 4) + second_rounded;
+    let second = second_sum.clamp(-128, 127);
+
+    assert_eq!(at(&template, 3, 2), at(&raw, 3, 2));
+    assert_eq!(at(&template, 3, 3), first);
+    assert_eq!(at(&template, 3, 4), second);
+    assert_eq!(at(&template, 3, 41), at(&raw, 3, 41));
+}
+
+#[test]
+fn cb_and_cr_templates_differ() {
+    let cb_template = chroma_template(&SCENE_EIGHT, 7, 1000, ChromaPlane::Cb);
+    let cr_template = chroma_template(&SCENE_EIGHT, 7, 1000, ChromaPlane::Cr);
+
+    assert_ne!(cb_template, cr_template);
+}
+
+#[test]
+fn chroma_template_stats_grow_with_correlation() {
+    let (sigma, median) = chroma_template_stats(&SCENE_EIGHT, 7, ChromaPlane::Cb);
+    let (flat_sigma, flat_median) = chroma_template_stats(&[0; AR_COEFFS], 6, ChromaPlane::Cb);
+
+    assert!(sigma.is_finite() && sigma > 0.0, "sigma {sigma}");
+    assert!(median.is_finite() && median > 0.0, "median {median}");
+    assert!(
+        flat_sigma.is_finite() && flat_sigma > 0.0,
+        "flat sigma {flat_sigma}"
+    );
+    assert!(
+        flat_median.is_finite() && flat_median > 0.0,
+        "flat median {flat_median}"
+    );
+    assert!(sigma > flat_sigma, "sigma {sigma} flat sigma {flat_sigma}");
 }
