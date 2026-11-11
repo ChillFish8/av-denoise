@@ -287,9 +287,9 @@ fn textured_grain_alone_has_almost_no_floor() {
 }
 
 #[test]
-fn fine_noise_takes_its_share_of_the_white_part() {
+fn fine_noise_keeps_the_measured_variance() {
     let (field, textured_variance, white_variance) = mixed_field();
-    let expected = textured_variance + 0.5 * white_variance;
+    let expected = textured_variance + white_variance;
 
     let entry = fit_with(&field, 0.5);
     let variances = fitted_variances(&entry);
@@ -297,6 +297,22 @@ fn fine_noise_takes_its_share_of_the_white_part() {
     for variance in variances {
         let error = (variance - expected).abs() / expected;
         assert!(error < 0.1, "variance {variance}, expected {expected}");
+    }
+}
+
+#[test]
+fn fine_noise_keeps_the_decoded_strength() {
+    let (field, _, _) = mixed_field();
+
+    let plain = fit_with(&field, 0.0);
+    let shaped = fit_with(&field, 0.75);
+    let plain_variances = fitted_variances(&plain);
+    let shaped_variances = fitted_variances(&shaped);
+
+    assert_eq!(plain_variances.len(), shaped_variances.len());
+    for (plain_variance, shaped_variance) in plain_variances.iter().zip(&shaped_variances) {
+        let error = (shaped_variance - plain_variance).abs() / plain_variance;
+        assert!(error < 0.03, "shaped {shaped_variance}, plain {plain_variance}");
     }
 }
 

@@ -100,8 +100,6 @@ struct Texture {
     ///
     /// The block stds were measured on all the grain, so this converts them to whole-field stds.
     block_to_field: f64,
-    /// The share of the measured variance in the fine noise floor, between 0 and 1.
-    floor: f64,
 }
 
 /// The texture band's lower edge, as a multiple of the median source std.
@@ -247,7 +245,6 @@ fn texture_of(stats: &TableSums, edges: &[f32], fine_noise: f64) -> Option<Textu
         table_weights: reduced.weights,
         table_sigma: reduced.sigma,
         block_to_field,
-        floor,
     })
 }
 
@@ -356,7 +353,7 @@ pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<Fi
             None
         };
 
-        let entry = build_entry(&parts[index], &strength, texture, chroma, options.fine_noise);
+        let entry = build_entry(&parts[index], &strength, texture, chroma);
         entries.push(entry);
     }
 
@@ -429,9 +426,8 @@ fn build_entry(
     strength: &[BinStrength],
     texture: Texture,
     chroma: Option<[ChromaFit; CHROMA_PLANES]>,
-    fine_noise: f64,
 ) -> FittedEntry {
-    let targets = luma_targets(strength, texture, fine_noise);
+    let targets = luma_targets(strength, texture);
     let Some([cb_fit, cr_fit]) = chroma else {
         let (coeffs, ar_shift) = texture.table;
         let (points, scaling_shift) = scaling_points(&targets, texture.table_sigma);
@@ -482,10 +478,9 @@ fn build_entry(
 
 /// Luma's strength targets, as `(luma, sigma)` with sigma in normalised units.
 ///
-/// Each bin's synthesised variance loses `fine_noise` times the texture's floor share of itself.
-fn luma_targets(strength: &[BinStrength], texture: Texture, fine_noise: f64) -> Vec<(u8, f64)> {
+/// Each bin keeps the variance the denoiser removed.
+fn luma_targets(strength: &[BinStrength], texture: Texture) -> Vec<(u8, f64)> {
     let factor = texture.block_to_field;
-    let fine_share = fine_noise * texture.floor;
 
     let chosen = thinned(strength, MAX_POINTS);
 
@@ -498,9 +493,8 @@ fn luma_targets(strength: &[BinStrength], texture: Texture, fine_noise: f64) -> 
             let kept_variance = sigma_kept * sigma_kept;
             // Only the grain the denoiser removed is synthesised, so the kept grain comes off.
             let removed_variance = (source_variance - kept_variance).max(0.0);
-            let variance = removed_variance * (1.0 - fine_share);
             let centre = (entry.bin as f64 + 0.5) * 256.0 / LUMA_BINS as f64;
-            (centre.round() as u8, variance.sqrt())
+            (centre.round() as u8, removed_variance.sqrt())
         })
         .collect()
 }

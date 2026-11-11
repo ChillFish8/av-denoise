@@ -114,16 +114,18 @@ pub(crate) fn format_table(entries: &[FittedEntry], frame_rate: (u64, u64)) -> S
     text
 }
 
-/// The recommended share of the fine, fresh scan noise taken out of a grain table.
+/// The recommended share of the fine, fresh scan noise moved out of a grain table's texture.
 pub const DEFAULT_FINE_NOISE: f64 = 0.5;
 
 /// How a grain table is fitted.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct FitOptions {
-    /// The share of the fine, fresh scan noise's variance taken out, between 0 and 1.
+    /// The share of the fine, fresh scan noise moved out of the grain's texture, between 0 and 1.
     ///
-    /// The default of 0 keeps everything measured. [DEFAULT_FINE_NOISE] is the recommended share.
+    /// The grain keeps its measured strength and only the texture shifts towards the textured
+    /// grain. The default of 0 leaves the texture as measured. [DEFAULT_FINE_NOISE] is the
+    /// recommended share.
     pub fine_noise: f64,
     /// Whether entries carry Cb and Cr grain as well as luma, off by default.
     ///
@@ -133,7 +135,7 @@ pub struct FitOptions {
 }
 
 impl FitOptions {
-    /// The options with `share` of the fine noise taken out.
+    /// The options with `share` of the fine noise moved out of the texture.
     pub fn with_fine_noise(share: f64) -> Self {
         Self {
             fine_noise: share,

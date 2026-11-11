@@ -70,8 +70,9 @@ the table's first entry to every frame, so they suit a single-scene table only. 
 the same with or without the flag. It is rejected with `--channel-mode chroma`, and a failed run
 leaves no file.
 
-`--fine-noise` on `synthesize av1-fgs` takes a share of the fine, fresh scan noise out of the
-table and keeps the textured grain. It defaults to 0.5, and 0 keeps everything the run measured.
+`--fine-noise` on `synthesize av1-fgs` moves a share of the fine, fresh scan noise out of the
+grain's texture, so the texture leans towards the textured grain. The grain keeps its measured
+strength. It defaults to 0.5, and 0 leaves the texture as the run measured it.
 See [Grain data and `av-denoise synthesize`](TUTORIAL-CLI.md#grain-data-and-av-denoise-synthesize)
 for every option.
 

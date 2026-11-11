@@ -57,9 +57,9 @@ pub struct Av1FgsArgs {
     #[arg(long, value_enum, value_delimiter = ',', default_value = "luma,chroma")]
     pub planes: Vec<GrainPlane>,
 
-    /// The share of the fine, fresh scan noise taken out of the table, between 0 and 1.
+    /// The share of the fine, fresh scan noise moved out of the grain's texture, between 0 and 1.
     ///
-    /// 0 keeps everything measured.
+    /// The grain keeps its measured strength. 0 leaves the texture as measured.
     #[arg(
         long,
         value_name = "AMOUNT",

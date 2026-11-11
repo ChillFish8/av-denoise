@@ -290,7 +290,7 @@ constant frame rate sources and encodes of the run's output.
 | `--input <PATH>`        | The grain data file written by `--export-avds`.                                                                                               | required      |
 | `--output <PATH>`       | Where to write the table.                                                                                                                     | required      |
 | `--planes <PLANES>`     | Which planes get grain, `luma` or `luma,chroma`. Chroma alone is refused.                                                                     | `luma,chroma` |
-| `--fine-noise <AMOUNT>` | The share of the fine, fresh scan noise taken out of the table, between 0 and 1. Textured grain stays. `0` keeps everything the run measured. | `0.5`         |
+| `--fine-noise <AMOUNT>` | The share of the fine, fresh scan noise moved out of the grain's texture, between 0 and 1. Strength stays as measured. `0` moves none.        | `0.5`         |
 
 ```bash
 av-denoise synthesize av1-fgs --input run.avds --output grain.tbl --fine-noise 0.25
