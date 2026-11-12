@@ -1,15 +1,21 @@
-use crate::nl4d::grain::consts::{AR_COEFFS, AR_OFFSETS, CELL, LAGS, TEMPLATE_SEEDS};
+use crate::nl4d::grain::consts::{AR_COEFFS, AR_OFFSETS, CELL, LAGS, STD_MAX, TEMPLATE_SEEDS};
+use crate::nl4d::grain::fit::code_step;
 use crate::nl4d::grain::gaussian::GAUSSIAN_SEQUENCE;
 use crate::nl4d::grain::template::{
     Av1Random,
     ChromaPlane,
+    TemplatePlane,
     chroma_template,
-    chroma_template_stats,
+    curve_cells,
+    even_offsets,
+    high_pass_curve,
+    high_pass_std,
     luma_template,
+    median_high_pass,
     median_of,
-    sample_std,
     template_seed,
-    template_stats,
+    template_sigma,
+    unit_cells,
 };
 
 const SCENE_EIGHT: [i32; AR_COEFFS] = [
@@ -86,17 +92,12 @@ fn zero_weights_give_the_raw_gaussian_template() {
 }
 
 #[test]
-fn template_stats_match_the_reference_port() {
-    let (sigma, median) = template_stats(&SCENE_EIGHT, 7);
-    let (flat_sigma, flat_median) = template_stats(&[0; AR_COEFFS], 6);
+fn template_sigma_matches_the_reference_port() {
+    let sigma = template_sigma(&SCENE_EIGHT, 7, TemplatePlane::Luma);
+    let flat_sigma = template_sigma(&[0; AR_COEFFS], 6, TemplatePlane::Luma);
 
     assert!((sigma - 44.770_018).abs() < 1e-4, "sigma {sigma}");
-    assert!((median - 43.094_649).abs() < 1e-4, "median {median}");
     assert!((flat_sigma - 31.909_499).abs() < 1e-4, "flat sigma {flat_sigma}");
-    assert!(
-        (flat_median - 31.788_979).abs() < 1e-4,
-        "flat median {flat_median}"
-    );
 }
 
 #[test]
@@ -172,19 +173,15 @@ fn cb_and_cr_templates_differ() {
 }
 
 #[test]
-fn chroma_template_stats_grow_with_correlation() {
-    let (sigma, median) = chroma_template_stats(&SCENE_EIGHT, 7, ChromaPlane::Cb);
-    let (flat_sigma, flat_median) = chroma_template_stats(&[0; AR_COEFFS], 6, ChromaPlane::Cb);
+fn chroma_template_sigma_grows_with_correlation() {
+    let cb = TemplatePlane::Chroma(ChromaPlane::Cb);
+    let sigma = template_sigma(&SCENE_EIGHT, 7, cb);
+    let flat_sigma = template_sigma(&[0; AR_COEFFS], 6, cb);
 
     assert!(sigma.is_finite() && sigma > 0.0, "sigma {sigma}");
-    assert!(median.is_finite() && median > 0.0, "median {median}");
     assert!(
         flat_sigma.is_finite() && flat_sigma > 0.0,
         "flat sigma {flat_sigma}"
-    );
-    assert!(
-        flat_median.is_finite() && flat_median > 0.0,
-        "flat median {flat_median}"
     );
     assert!(sigma > flat_sigma, "sigma {sigma} flat sigma {flat_sigma}");
 }
@@ -198,8 +195,8 @@ const CHROMA_INTERIOR_SIZE: usize = 32;
 const BLOCK_SIZE: usize = CELL as usize;
 const BLOCKS_PER_SIDE: usize = CHROMA_INTERIOR_SIZE / BLOCK_SIZE;
 
-/// The sample std of every 8x8 block of a chroma template's 32x32 interior.
-fn interior_block_stds(template: &[i32]) -> Vec<f64> {
+/// The high-pass std of every 8x8 block of a chroma template's 32x32 interior.
+fn interior_high_pass_stds(template: &[i32]) -> Vec<f64> {
     let mut stds = Vec::new();
     for block_y in 0..BLOCKS_PER_SIDE {
         for block_x in 0..BLOCKS_PER_SIDE {
@@ -212,8 +209,8 @@ fn interior_block_stds(template: &[i32]) -> Vec<f64> {
                 block.extend(values.map(|&value| value as f64));
             }
 
-            let block_std = sample_std(&block);
-            stds.push(block_std);
+            let std = high_pass_std(&block);
+            stds.push(std);
         }
     }
 
@@ -221,17 +218,135 @@ fn interior_block_stds(template: &[i32]) -> Vec<f64> {
 }
 
 #[test]
-fn chroma_template_stats_use_8x8_blocks() {
-    let mut block_stds = Vec::new();
+fn unit_cells_are_the_8x8_blocks_of_the_chroma_interior() {
+    let cr = TemplatePlane::Chroma(ChromaPlane::Cr);
+    let mut stds = Vec::new();
     for index in 0..TEMPLATE_SEEDS {
         let seed = template_seed(index);
         let template = chroma_template(&SCENE_EIGHT, 7, seed, ChromaPlane::Cr);
-        let stds = interior_block_stds(&template);
-        block_stds.extend(stds);
+        let interior_stds = interior_high_pass_stds(&template);
+        stds.extend(interior_stds);
     }
 
-    let expected = median_of(&mut block_stds);
-    let (_, median) = chroma_template_stats(&SCENE_EIGHT, 7, ChromaPlane::Cr);
+    let sigma = template_sigma(&SCENE_EIGHT, 7, cr);
+    let expected = median_of(&mut stds) / sigma;
+    let cells = unit_cells(&SCENE_EIGHT, 7, cr);
+    let offsets = even_offsets(cells.len());
+    let median = median_high_pass(&cells, 1.0, &offsets, None);
 
-    assert_eq!(median, expected);
+    assert_eq!(
+        cells.len(),
+        TEMPLATE_SEEDS as usize * BLOCKS_PER_SIDE * BLOCKS_PER_SIDE
+    );
+    assert!((median / expected - 1.0).abs() < 1e-12, "{median} vs {expected}");
+}
+
+#[test]
+fn a_constant_cell_has_no_high_pass() {
+    let cell = [3.0f64; 64];
+
+    assert_eq!(high_pass_std(&cell), 0.0);
+}
+
+/// Offsets spread evenly over one code but in reverse cell order and a quarter step along.
+fn reversed_offsets(count: usize) -> Vec<f64> {
+    let spacing = 1.0 / count as f64;
+
+    (0..count)
+        .map(|index| ((count - 1 - index) as f64 + 0.25) * spacing)
+        .collect()
+}
+
+#[test]
+fn high_pass_curve_recovers_template_grain() {
+    let step = code_step(8);
+    let textures = [([0; AR_COEFFS], 6), (SCENE_EIGHT, 7)];
+    let planes = [TemplatePlane::Luma, TemplatePlane::Chroma(ChromaPlane::Cb)];
+    for (coeffs, shift) in textures {
+        for plane in planes {
+            let curve = high_pass_curve(&coeffs, shift, plane, Some(step));
+            let cells = curve_cells(&coeffs, shift, plane);
+            let offsets = reversed_offsets(cells.len());
+            for codes in [0.3, 0.6, 1.5] {
+                let std = codes * step;
+                let median = median_high_pass(&cells, std, &offsets, Some(step));
+                let recovered = curve.field_std(median);
+
+                let error = (recovered / std - 1.0).abs();
+                assert!(error < 0.03, "{plane:?} {shift} {codes}: {recovered} vs {std}");
+            }
+        }
+    }
+}
+
+#[test]
+fn high_pass_curve_maps_zero_to_zero_and_clamps_above() {
+    let step = code_step(8);
+    let curve = high_pass_curve(&SCENE_EIGHT, 7, TemplatePlane::Luma, Some(step));
+
+    let zero = curve.field_std(0.0);
+    let top = curve.field_std(1.0e3);
+    let higher = curve.field_std(1.0e6);
+    let strongest_reading = curve.field_std(STD_MAX as f64);
+
+    assert_eq!(zero, 0.0);
+    assert!(top.is_finite() && top > 0.0, "{top}");
+    assert_eq!(top, higher);
+    assert!(strongest_reading < top, "{strongest_reading} vs {top}");
+}
+
+#[test]
+fn high_pass_curve_never_falls() {
+    let step = code_step(8);
+    let curve = high_pass_curve(&SCENE_EIGHT, 7, TemplatePlane::Luma, Some(step));
+
+    let mut previous = 0.0;
+    for index in 1..400 {
+        let median = index as f64 * 0.01 * step;
+        let field_std = curve.field_std(median);
+
+        assert!(
+            field_std.is_finite() && field_std >= previous,
+            "{median}: {field_std}"
+        );
+        previous = field_std;
+    }
+}
+
+#[test]
+fn no_bit_depth_gives_a_straight_curve() {
+    let curve = high_pass_curve(&SCENE_EIGHT, 7, TemplatePlane::Luma, None);
+    let cells = unit_cells(&SCENE_EIGHT, 7, TemplatePlane::Luma);
+    let offsets = even_offsets(cells.len());
+    let unit_median = median_high_pass(&cells, 1.0, &offsets, None);
+
+    for median in [0.1 / 255.0, 0.5 / 255.0, 4.0 / 255.0] {
+        let field_std = curve.field_std(median);
+        let expected = median / unit_median;
+
+        assert!(
+            (field_std / expected - 1.0).abs() < 1e-9,
+            "{field_std} vs {expected}"
+        );
+    }
+}
+
+#[test]
+fn ten_bit_rounding_barely_moves_strong_grain() {
+    let ten_bit = code_step(10);
+    let white = [0; AR_COEFFS];
+    let rounded = high_pass_curve(&white, 6, TemplatePlane::Luma, Some(ten_bit));
+    let float = high_pass_curve(&white, 6, TemplatePlane::Luma, None);
+    let median = 0.8 / 255.0;
+    let unrounded_median = (median * median - ten_bit * ten_bit / 12.0).sqrt();
+
+    let rounded_std = rounded.field_std(median);
+    let expected = float.field_std(unrounded_median);
+    let float_std = float.field_std(median);
+
+    assert!(
+        (rounded_std / expected - 1.0).abs() < 0.01,
+        "{rounded_std} vs {expected}"
+    );
+    assert!(float_std / rounded_std < 1.03, "{float_std} vs {rounded_std}");
 }

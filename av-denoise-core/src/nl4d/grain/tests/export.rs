@@ -713,11 +713,13 @@ fn banded_stream(frame_count: u32) -> StillStream {
     }
 }
 
-/// The table [banded_stream] gives over [TABLE_FRAMES] frames.
+/// The table [banded_stream] gives over [TABLE_FRAMES] frames with the default options.
+///
+/// Its source grain of about 2.19 codes on this texture's template scales to about 129.
 const BANDED_TABLE: &str = "filmgrn1
 E 0 20625000 1 7391 1
 \tp 3 8 0 11 0 1 128 192 256 128 192 256
-\tsY 5  72 116 120 116 152 116 184 116 200 116
+\tsY 5  72 128 120 128 152 128 184 127 200 127
 \tsCb 2 0 0 255 0
 \tsCr 2 0 0 255 0
 \tcY 0 0 -1 0 0 0 -1 1 -1 0 0 1 0 0 0 1 0 1 0 -1 0 -1 1 102

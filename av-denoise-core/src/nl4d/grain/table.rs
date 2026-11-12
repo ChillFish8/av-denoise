@@ -140,8 +140,8 @@ pub struct FitOptions {
     pub chroma: bool,
     /// The bit depth the measured video was rounded to, `None` by default.
     ///
-    /// Each strength reading has that rounding taken off before the fit. `None` takes no rounding
-    /// off.
+    /// The curves that turn each strength reading into a grain std round to its codes. `None`
+    /// rounds nothing.
     pub bit_depth: Option<u32>,
     /// A multiple of the source's grain std on every plane, between 0 and [MAX_STRENGTH].
     ///
@@ -175,7 +175,7 @@ impl FitOptions {
         Self { chroma, ..self }
     }
 
-    /// The options with the rounding of `bit_depth`-bit video taken off each strength reading.
+    /// The options with each strength reading calibrated for `bit_depth`-bit video.
     pub fn with_bit_depth(self, bit_depth: u32) -> Self {
         Self {
             bit_depth: Some(bit_depth),

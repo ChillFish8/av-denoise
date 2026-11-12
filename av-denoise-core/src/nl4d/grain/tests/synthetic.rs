@@ -18,6 +18,7 @@ use crate::nl4d::grain::consts::{
 };
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of};
 use crate::nl4d::grain::table::FitOptions;
+use crate::nl4d::grain::template::high_pass_std;
 
 fn splitmix(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -30,6 +31,34 @@ fn splitmix(state: &mut u64) -> u64 {
 fn uniform(state: &mut u64) -> f64 {
     let bits = splitmix(state) >> 11;
     (bits as f64 + 0.5) / (1u64 << 53) as f64
+}
+
+/// The std of the values with their own mean removed.
+pub(super) fn sample_std(values: &[f64]) -> f64 {
+    let count = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / count;
+    let squares: f64 = values.iter().map(|value| (value - mean) * (value - mean)).sum();
+    (squares / (count - 1.0)).sqrt()
+}
+
+/// The high-pass std of every 8x8 cell of a row-major field, in raster order.
+pub(super) fn field_high_pass_stds(field: &[f64], width: usize, height: usize) -> Vec<f64> {
+    let cell = CELL as usize;
+    let mut stds = Vec::new();
+    for cell_y in 0..height / cell {
+        for cell_x in 0..width / cell {
+            let mut values = Vec::with_capacity(cell * cell);
+            for y in 0..cell {
+                let start = (cell_y * cell + y) * width + cell_x * cell;
+                values.extend_from_slice(&field[start..start + cell]);
+            }
+
+            let std = high_pass_std(&values);
+            stds.push(std);
+        }
+    }
+
+    stds
 }
 
 /// Unit-variance Gaussian samples, Box-Muller over a fixed generator.

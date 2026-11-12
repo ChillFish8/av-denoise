@@ -24,9 +24,18 @@ use crate::nl4d::grain::consts::{
     MAX_POINTS,
     STD_BUCKETS,
 };
-use crate::nl4d::grain::fit::{bucket_edges, bucket_of, code_step, hist_median, unrounded_std};
-use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes, segment_scene};
+use crate::nl4d::grain::fit::{
+    bucket_edges,
+    bucket_of,
+    code_step,
+    hist_median,
+    quantise_ar,
+    undo_mean_removal,
+    yule_walker,
+};
+use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes, pooled_record, segment_scene};
 use crate::nl4d::grain::table::FitOptions;
+use crate::nl4d::grain::template::{TemplatePlane, high_pass_curve};
 
 /// A source bucket whose median doubled lands in the first bucket of a strength group.
 const EDGE_BUCKET: usize = 37;
@@ -47,7 +56,7 @@ fn fit_with_chroma(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
     fit_scenes(&scenes, &options)
 }
 
-/// Fits one chunk as its own scene, with rounding taken off at `bit_depth`.
+/// Fits one chunk as its own scene, with its curves rounded at `bit_depth`.
 fn fit_chunk(chunk: GrainChunk, bit_depth: Option<u32>) -> FittedEntry {
     let scene = scene_of(0, vec![chunk]);
     let options = match bit_depth {
@@ -70,6 +79,17 @@ fn effective_points(entry: &FittedEntry) -> Vec<f64> {
         .iter()
         .map(|&(_, value)| value as f64 / scale)
         .collect()
+}
+
+/// The quantised weights of all the grain measured in `chunk`, before any fine noise comes off.
+fn measured_weights(chunk: &GrainChunk) -> ([i32; AR_COEFFS], u32) {
+    let stats = chunk.summed_table();
+    let edges = bucket_edges();
+    let record = pooled_record(&stats, &edges).expect("a pooled record");
+    let corrected = undo_mean_removal(&record);
+    let weights = yule_walker(&corrected).expect("solvable weights");
+
+    quantise_ar(&weights)
 }
 
 /// The median of a bucket's histogram, holding every block in `bucket`.
@@ -527,19 +547,25 @@ fn rounding_comes_off_each_bin_at_eight_bits() {
     let edges = bucket_edges();
     let frame_bucket = bucket_of(0.6 / 255.0, &edges);
     let median = bucket_median(frame_bucket);
-    let unrounded = unrounded_std(median, code_step(8));
-    let expected = unrounded / median;
 
     let chunk = chunk_at(1.0, 300, Some(0.6));
-    let rounded_entry = fit_chunk(chunk.clone(), None);
-    let unrounded_entry = fit_chunk(chunk, Some(8));
-    let rounded_points = effective_points(&rounded_entry);
-    let unrounded_points = effective_points(&unrounded_entry);
+    let (coeffs, shift) = measured_weights(&chunk);
+    let float_entry = fit_chunk(chunk.clone(), None);
+    let eight_bit_entry = fit_chunk(chunk, Some(8));
+    let float_curve = high_pass_curve(&coeffs, shift, TemplatePlane::Luma, None);
+    let eight_bit = Some(code_step(8));
+    let eight_bit_curve = high_pass_curve(&coeffs, shift, TemplatePlane::Luma, eight_bit);
+    let float_std = float_curve.field_std(median);
+    let eight_bit_std = eight_bit_curve.field_std(median);
+    let expected = eight_bit_std / float_std;
+
+    let float_points = effective_points(&float_entry);
+    let eight_bit_points = effective_points(&eight_bit_entry);
 
     assert!(expected < 0.95, "{expected}");
-    assert!(!rounded_points.is_empty());
-    assert_eq!(rounded_points.len(), unrounded_points.len());
-    for (&before, &after) in rounded_points.iter().zip(&unrounded_points) {
+    assert!(!float_points.is_empty());
+    assert_eq!(float_points.len(), eight_bit_points.len());
+    for (&before, &after) in float_points.iter().zip(&eight_bit_points) {
         let ratio = after / before;
         assert!((ratio / expected - 1.0).abs() < 0.02, "{ratio} vs {expected}");
     }
@@ -548,13 +574,13 @@ fn rounding_comes_off_each_bin_at_eight_bits() {
 #[test]
 fn faint_grain_gives_finite_small_points() {
     let chunk = chunk_at(1.0, 300, Some(0.2));
-    let rounded_entry = fit_chunk(chunk.clone(), None);
-    let unrounded_entry = fit_chunk(chunk, Some(8));
-    let rounded_points = effective_points(&rounded_entry);
-    let unrounded_points = effective_points(&unrounded_entry);
+    let float_entry = fit_chunk(chunk.clone(), None);
+    let eight_bit_entry = fit_chunk(chunk, Some(8));
+    let float_points = effective_points(&float_entry);
+    let eight_bit_points = effective_points(&eight_bit_entry);
 
-    assert_eq!(rounded_points.len(), unrounded_points.len());
-    for (&before, &after) in rounded_points.iter().zip(&unrounded_points) {
+    assert_eq!(float_points.len(), eight_bit_points.len());
+    for (&before, &after) in float_points.iter().zip(&eight_bit_points) {
         assert!(after.is_finite() && after > 0.0, "{after}");
         assert!(after < before, "{after} vs {before}");
     }

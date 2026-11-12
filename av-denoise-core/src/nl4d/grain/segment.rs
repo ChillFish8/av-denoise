@@ -31,11 +31,10 @@ use super::fit::{
     scaling_points_at,
     thinned,
     undo_mean_removal,
-    unrounded_std,
     yule_walker,
 };
 use super::table::FitOptions;
-use super::template::{ChromaPlane, template_stats};
+use super::template::{ChromaPlane, CurveCache, TemplatePlane, template_sigma};
 
 /// The grain chunks of one scene, in frame order.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,12 +77,12 @@ pub(crate) struct PlaneEntry {
     pub points: Vec<(u8, u8)>,
 }
 
-/// The one-frame block std of one populated luma bin.
+/// The one-frame high-pass std of one populated luma bin.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BinStrength {
     pub bin: usize,
-    /// The bin's median one-frame block std, with any rounding taken off, in normalised units.
-    pub std: f64,
+    /// The bin's median one-frame high-pass std, in normalised units.
+    pub median: f64,
 }
 
 /// Quantised AR weights and their shift.
@@ -98,10 +97,8 @@ struct Texture {
     table_weights: [f64; AR_COEFFS],
     /// The template std of the table's weights, in 8-bit units.
     table_sigma: f64,
-    /// The measured template's ratio of its whole-field std to its 8x8 block median std.
-    ///
-    /// The block stds were measured on all the grain, so this converts them to whole-field stds.
-    block_to_field: f64,
+    /// The weights of all the measured grain, whose high-pass curve reads its strength.
+    measured: Weights,
 }
 
 /// The texture band's lower edge, as a multiple of the median source std.
@@ -193,15 +190,8 @@ fn drifted(open: &TableSums, chunk: &TableSums, edges: &[f32]) -> bool {
     !(1.0 / DRIFT..=DRIFT).contains(&ratio)
 }
 
-/// Per-bin strength from the one-frame medians, `None` when too few bins are populated.
-///
-/// With `rounding` holding a code step, each median has that rounding taken off by
-/// [unrounded_std].
-pub(crate) fn strength_of(
-    stats: &TableSums,
-    edges: &[f32],
-    rounding: Option<f64>,
-) -> Option<Vec<BinStrength>> {
+/// Per-bin one-frame high-pass medians, `None` when too few bins are populated.
+pub(crate) fn strength_of(stats: &TableSums, edges: &[f32]) -> Option<Vec<BinStrength>> {
     let mut bins = Vec::new();
     for bin in 0..LUMA_BINS {
         let counts = &stats.frame_hist[bin * STD_BUCKETS..(bin + 1) * STD_BUCKETS];
@@ -211,11 +201,7 @@ pub(crate) fn strength_of(
         }
 
         let median = hist_median(counts, edges).expect("bin is populated");
-        let std = match rounding {
-            Some(code_step) => unrounded_std(median, code_step),
-            None => median,
-        };
-        bins.push(BinStrength { bin, std });
+        bins.push(BinStrength { bin, median });
     }
 
     (bins.len() >= MIN_POPULATED_BINS).then_some(bins)
@@ -238,8 +224,7 @@ fn texture_of(stats: &TableSums, edges: &[f32], fine_noise: f64) -> Option<Textu
     let measured_weights = yule_walker(&corrected)?;
     let floor = floor_fraction(&measured_weights);
     let (measured_coeffs, measured_shift) = quantise_ar(&measured_weights);
-    let (measured_sigma, measured_median) = template_stats(&measured_coeffs, measured_shift);
-    let block_to_field = measured_sigma / measured_median;
+    let measured_sigma = template_sigma(&measured_coeffs, measured_shift, TemplatePlane::Luma);
 
     take_out_fine_noise(&mut corrected, floor, fine_noise);
     let measured = TableWeights {
@@ -253,7 +238,7 @@ fn texture_of(stats: &TableSums, edges: &[f32], fine_noise: f64) -> Option<Textu
         table: reduced.quantised,
         table_weights: reduced.weights,
         table_sigma: reduced.sigma,
-        block_to_field,
+        measured: (measured_coeffs, measured_shift),
     })
 }
 
@@ -311,7 +296,7 @@ fn reduced_weights(corrected: &[f64], measured: TableWeights) -> TableWeights {
     }
 
     let (coeffs, shift) = reduced;
-    let (sigma, _) = template_stats(&coeffs, shift);
+    let sigma = template_sigma(&coeffs, shift, TemplatePlane::Luma);
 
     TableWeights {
         quantised: reduced,
@@ -322,19 +307,20 @@ fn reduced_weights(corrected: &[f64], measured: TableWeights) -> TableWeights {
 
 /// Fits every scene's segments, borrowing missing strength or texture, and drops what has no donor.
 ///
-/// Every plane reads its strength from one frame's grain, with the rounding of
-/// [FitOptions::bit_depth] taken off. With chroma on, each chroma plane borrows its texture and
-/// target the same way. An entry gets chroma only when both planes have both.
+/// Every plane reads its strength from one frame's grain through a high-pass curve rounded at
+/// [FitOptions::bit_depth]. With chroma on, each chroma plane borrows its texture and target the
+/// same way. An entry gets chroma only when both planes have both.
 pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<FittedEntry> {
     let edges = bucket_edges();
     let rounding = options.bit_depth.map(code_step);
+    let mut curves = CurveCache::new(rounding);
     let mut parts = Vec::new();
     for (scene_index, scene) in scenes.iter().enumerate() {
         for segment in segment_scene(scene) {
-            let strength = strength_of(&segment.table, &edges, rounding);
+            let strength = strength_of(&segment.table, &edges);
             let texture = texture_of(&segment.table, &edges, options.fine_noise);
             let chroma = if options.chroma {
-                segment_chroma(scene, &segment, &edges, rounding)
+                segment_chroma(scene, &segment, &edges)
             } else {
                 Default::default()
             };
@@ -364,7 +350,14 @@ pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<Fi
             None
         };
 
-        let entry = build_entry(&parts[index], &strength, texture, chroma, options.strength);
+        let entry = build_entry(
+            &parts[index],
+            &strength,
+            texture,
+            chroma,
+            options.strength,
+            &mut curves,
+        );
         entries.push(entry);
     }
 
@@ -374,16 +367,11 @@ pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<Fi
 /// The chroma measurements of the scene's chroma chunks the segment covers.
 ///
 /// A scene without chroma chunks for the segment gives all of them missing.
-fn segment_chroma(
-    scene: &SceneGrain,
-    segment: &Segment,
-    edges: &[f32],
-    rounding: Option<f64>,
-) -> [ChromaParts; CHROMA_PLANES] {
+fn segment_chroma(scene: &SceneGrain, segment: &Segment, edges: &[f32]) -> [ChromaParts; CHROMA_PLANES] {
     let covered = scene.chroma_chunks.get(segment.chunks.clone());
     let chunks = covered.unwrap_or_default();
 
-    chroma_parts(chunks, edges, rounding)
+    chroma_parts(chunks, edges)
 }
 
 /// Both chroma planes' texture and target, each borrowed on its own, `None` when any is missing.
@@ -444,8 +432,9 @@ fn build_entry(
     texture: Texture,
     chroma: Option<[ChromaFit; CHROMA_PLANES]>,
     dial: f64,
+    curves: &mut CurveCache,
 ) -> FittedEntry {
-    let targets = luma_targets(strength, texture, dial);
+    let targets = luma_targets(strength, texture, dial, curves);
     let Some([cb_fit, cr_fit]) = chroma else {
         let (coeffs, ar_shift) = texture.table;
         let (points, scaling_shift) = scaling_points(&targets, texture.table_sigma);
@@ -470,12 +459,12 @@ fn build_entry(
         (luma_coeffs, texture.table_sigma)
     } else {
         let coeffs = quantise_at(&texture.table_weights, ar_shift);
-        let (sigma, _) = template_stats(&coeffs, ar_shift);
+        let sigma = template_sigma(&coeffs, ar_shift, TemplatePlane::Luma);
         (coeffs, sigma)
     };
 
-    let cb = chroma_scaling(&cb_fit, ChromaPlane::Cb, ar_shift, dial);
-    let cr = chroma_scaling(&cr_fit, ChromaPlane::Cr, ar_shift, dial);
+    let cb = chroma_scaling(&cb_fit, ChromaPlane::Cb, ar_shift, dial, curves);
+    let cr = chroma_scaling(&cr_fit, ChromaPlane::Cr, ar_shift, dial, curves);
     let luma_peak = scaling_peak(&targets, sigma_template);
     let peak = luma_peak.max(cb.peak()).max(cr.peak());
     let scaling_shift = finest_scaling_shift(peak);
@@ -496,9 +485,16 @@ fn build_entry(
 
 /// Luma's strength targets, as `(luma, sigma)` with sigma in normalised units.
 ///
-/// Each bin's target is its one-frame block std turned into a whole-field std, times `dial`.
-fn luma_targets(strength: &[BinStrength], texture: Texture, dial: f64) -> Vec<(u8, f64)> {
-    let factor = texture.block_to_field * dial;
+/// Each bin's target is the whole-field std whose grain reads the bin's high-pass median, times
+/// `dial`. The curve is the measured grain's, before any fine noise comes out.
+fn luma_targets(
+    strength: &[BinStrength],
+    texture: Texture,
+    dial: f64,
+    curves: &mut CurveCache,
+) -> Vec<(u8, f64)> {
+    let (coeffs, ar_shift) = texture.measured;
+    let curve = curves.curve(&coeffs, ar_shift, TemplatePlane::Luma);
 
     let chosen = thinned(strength, MAX_POINTS);
 
@@ -506,7 +502,8 @@ fn luma_targets(strength: &[BinStrength], texture: Texture, dial: f64) -> Vec<(u
         .iter()
         .map(|entry| {
             let luma = bin_luma(entry.bin);
-            (luma, entry.std * factor)
+            let field_std = curve.field_std(entry.median);
+            (luma, field_std * dial)
         })
         .collect()
 }

@@ -57,7 +57,7 @@ fn has_chroma_frame_counts(row: &AvdsFrame) -> bool {
 
 /// The AV1 film grain table the rows describe, as `filmgrn1` text.
 ///
-/// The fit takes the rounding of the file's bit depth off each strength reading. Fails when the
+/// The fit reads each strength through curves rounded to the file's bit depth. Fails when the
 /// file's frame rate has a zero part, when the strength is not between 0 and 4, when its bit depth
 /// is not between 1 and 16, when the fine noise share is not between 0 and 1, when the rows hold
 /// frames but none of them has the luma table measurements, or when chroma grain is on and

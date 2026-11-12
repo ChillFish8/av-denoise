@@ -2,6 +2,7 @@ use super::synthetic::{
     ar_field,
     cell_mean_removed_record,
     gaussian_field,
+    sample_std,
     set_frame_count,
     set_source_count,
     table_chunk,
@@ -26,7 +27,7 @@ use crate::nl4d::grain::fit::{
 };
 use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes, take_out_fine_noise};
 use crate::nl4d::grain::table::{FitOptions, build_table};
-use crate::nl4d::grain::template::{sample_std, template_stats};
+use crate::nl4d::grain::template::{TemplatePlane, high_pass_std, template_sigma};
 
 const NTSC: (u64, u64) = (24_000, 1_001);
 const SIZE: usize = 512;
@@ -35,12 +36,12 @@ const PART_STD: f64 = 3.0 / 255.0;
 /// The largest peak over mean a white grain's reduced spectrum may reach. Flat is 1.
 const WHITE_PEAK_BOUND: f64 = 2.0;
 
-/// The table [mixed_field] gave before the fine noise option existed.
+/// The table of [mixed_field] with the default options.
 const MIXED_TABLE: &str = concat!(
     "filmgrn1\n",
     "E 0 9801458 1 7391 1\n",
     "\tp 3 9 0 11 0 1 128 192 256 128 192 256\n",
-    "\tsY 8  72 241 88 241 104 241 120 241 136 241 152 241 168 241 184 241\n",
+    "\tsY 8  72 238 88 238 104 238 120 238 136 238 152 238 168 238 184 238\n",
     "\tsCb 2 0 0 255 0\n",
     "\tsCr 2 0 0 255 0\n",
     "\tcY -5 -7 -7 21 1 -2 -3 -7 -7 -4 48 9 -2 -4 -5 -3 14 98 39 14 9 24 48 110\n",
@@ -108,10 +109,10 @@ fn mixed_field() -> (Vec<f64>, f64, f64) {
     (field, textured_variance, white_variance)
 }
 
-/// The std of every mean-removed 8x8 block the measure kernel reads.
-fn block_stds(field: &[f64]) -> Vec<f64> {
+/// The reading `read` gives of every 8x8 block the measure kernel reads.
+fn block_readings(field: &[f64], read: fn(&[f64]) -> f64) -> Vec<f64> {
     let cell = CELL as usize;
-    let mut stds = Vec::new();
+    let mut readings = Vec::new();
     for cell_top in (0..SIZE - 2 * cell).step_by(cell) {
         for cell_left in (cell..SIZE - 2 * cell).step_by(cell) {
             let mut block = Vec::with_capacity(cell * cell);
@@ -120,31 +121,42 @@ fn block_stds(field: &[f64]) -> Vec<f64> {
                 block.extend_from_slice(row);
             }
 
-            let block_std = sample_std(&block);
-            stds.push(block_std);
+            let reading = read(&block);
+            readings.push(reading);
         }
     }
 
-    stds
+    readings
+}
+
+/// The bucket counts of `readings`.
+fn bucket_counts(readings: &[f64], edges: &[f32]) -> Vec<u32> {
+    let mut counts = vec![0u32; STD_BUCKETS];
+    for &reading in readings {
+        let bucket = bucket_of(reading as f32, edges);
+        counts[bucket] += 1;
+    }
+
+    counts
 }
 
 /// A chunk measured from `field` in luma bins 4 to 11, its record in the median block's group.
 ///
-/// The field's block stds fill both the source and the one-frame histograms.
+/// The field's block stds fill the source histogram and its high-pass stds the one-frame one.
 fn chunk_of(field: &[f64]) -> GrainChunk {
     let edges = bucket_edges();
-    let mut counts = vec![0u32; STD_BUCKETS];
-    let mut stds = block_stds(field);
-    for &std in &stds {
-        let bucket = bucket_of(std as f32, &edges);
-        counts[bucket] += 1;
-    }
+    let mut stds = block_readings(field, sample_std);
+    let high_pass_stds = block_readings(field, high_pass_std);
+    let source_counts = bucket_counts(&stds, &edges);
+    let frame_counts = bucket_counts(&high_pass_stds, &edges);
 
     let mut chunk = table_chunk();
     for bin in 4..12 {
-        for (bucket, &count) in counts.iter().enumerate() {
-            set_source_count(&mut chunk, bin * STD_BUCKETS + bucket, count);
-            set_frame_count(&mut chunk, bin * STD_BUCKETS + bucket, count);
+        let pairs = source_counts.iter().zip(&frame_counts);
+        for (bucket, (&source_count, &frame_count)) in pairs.enumerate() {
+            let index = bin * STD_BUCKETS + bucket;
+            set_source_count(&mut chunk, index, source_count);
+            set_frame_count(&mut chunk, index, frame_count);
         }
     }
 
@@ -198,7 +210,7 @@ fn fit_with(field: &[f64], fine_noise: f64) -> FittedEntry {
 
 /// The whole-field variance each scaling point of `entry` synthesises.
 fn fitted_variances(entry: &FittedEntry) -> Vec<f64> {
-    let (sigma_template, _) = template_stats(&entry.ar_coeffs, entry.ar_shift);
+    let sigma_template = template_sigma(&entry.ar_coeffs, entry.ar_shift, TemplatePlane::Luma);
     let scale = (1u32 << entry.scaling_shift) as f64;
     let mut variances = Vec::with_capacity(entry.points.len());
     for &(_, value) in &entry.points {

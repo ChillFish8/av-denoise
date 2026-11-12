@@ -1,4 +1,11 @@
-use super::synthetic::{ar_field, autocov_of, cell_mean_removed_record, gaussian_field};
+use super::synthetic::{
+    ar_field,
+    autocov_of,
+    cell_mean_removed_record,
+    field_high_pass_stds,
+    gaussian_field,
+    sample_std,
+};
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{
     AR_COEFFS,
@@ -27,10 +34,9 @@ use crate::nl4d::grain::fit::{
     scaling_points,
     scaling_points_at,
     undo_mean_removal,
-    unrounded_std,
     yule_walker,
 };
-use crate::nl4d::grain::template::{median_of, sample_std, template_stats};
+use crate::nl4d::grain::template::{TemplatePlane, high_pass_curve, median_of};
 
 fn set_weight(weights: &mut [f64; AR_COEFFS], offset: (i32, i32), value: f64) {
     let index = AR_OFFSETS
@@ -200,26 +206,15 @@ fn the_finest_scaling_shift_fits_the_peak() {
 #[test]
 fn calibration_recovers_a_known_sigma() {
     let weights = scene_eight_weights();
-    let field = ar_field(&weights, 512, 512, 23);
+    let unit_field = ar_field(&weights, 512, 512, 23);
+    let field: Vec<f64> = unit_field.iter().map(|value| value * 2.0 / 255.0).collect();
     let true_sigma = sample_std(&field);
-    let mut block_stds = Vec::new();
-    for block_y in 0..64 {
-        for block_x in 0..64 {
-            let mut block = Vec::with_capacity(64);
-            for row in 0..8 {
-                let start = (block_y * 8 + row) * 512 + block_x * 8;
-                block.extend_from_slice(&field[start..start + 8]);
-            }
+    let mut high_pass_stds = field_high_pass_stds(&field, 512, 512);
 
-            let block_std = sample_std(&block);
-            block_stds.push(block_std);
-        }
-    }
-
-    let measured = median_of(&mut block_stds);
+    let measured = median_of(&mut high_pass_stds);
     let (quantised, shift) = quantise_ar(&weights);
-    let (sigma_template, template_median) = template_stats(&quantised, shift);
-    let estimate = measured * sigma_template / template_median;
+    let curve = high_pass_curve(&quantised, shift, TemplatePlane::Luma, None);
+    let estimate = curve.field_std(measured);
 
     assert!(
         (estimate / true_sigma - 1.0).abs() < 0.03,
@@ -347,48 +342,6 @@ fn mean_correction_recovers_an_ar_fields_correlation() {
     }
 
     assert!(truth[1] - measured[1] > 0.03, "{} vs {}", measured[1], truth[1]);
-}
-
-#[test]
-fn unrounded_std_of_no_grain_is_zero() {
-    let unrounded = unrounded_std(0.0, 1.0);
-
-    assert_eq!(unrounded, 0.0);
-}
-
-#[test]
-fn unrounded_std_matches_the_rounding_model() {
-    for (measured, expected) in [(0.271, 0.13), (0.577, 0.50), (0.850, 0.80)] {
-        let unrounded = unrounded_std(measured, 1.0);
-
-        assert!((unrounded - expected).abs() < 0.01, "{measured}: {unrounded}");
-    }
-}
-
-#[test]
-fn unrounded_std_of_faint_grain_stays_positive() {
-    let unrounded: Vec<f64> = [0.20, 0.25, 0.28]
-        .iter()
-        .map(|&measured| unrounded_std(measured, 1.0))
-        .collect();
-
-    for &value in &unrounded {
-        assert!(value.is_finite() && value > 0.0, "{unrounded:?}");
-    }
-
-    assert!(
-        unrounded.windows(2).all(|pair| pair[0] < pair[1]),
-        "{unrounded:?}"
-    );
-}
-
-#[test]
-fn ten_bit_rounding_barely_moves_strong_grain() {
-    let step: f64 = 255.0 / 1023.0;
-    let unrounded = unrounded_std(0.80, step);
-    let expected = (0.64 - step * step / 12.0).sqrt();
-
-    assert!((unrounded - expected).abs() < 0.004, "{unrounded} vs {expected}");
 }
 
 #[test]

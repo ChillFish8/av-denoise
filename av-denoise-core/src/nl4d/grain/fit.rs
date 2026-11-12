@@ -17,64 +17,12 @@ const MEAN_REMOVAL_ROUNDS: usize = 20;
 const CELL_SPAN: i32 = CELL as i32 - 1;
 /// Frequencies on each axis of the grid [floor_fraction] reads.
 const SPECTRUM_STEPS: usize = 64;
-/// The most terms of the rounding sum in [unrounded_std].
-const ROUNDING_TERMS: u32 = 256;
-/// The share of the code step squared under which a rounding term ends the sum.
-const ROUNDING_TERM_FLOOR: f64 = 1e-12;
-/// Halvings of the search in [unrounded_std].
-const UNROUNDING_ROUNDS: usize = 60;
 
 /// One code of a `bit_depth`-bit video, in normalised units.
 pub(crate) fn code_step(bit_depth: u32) -> f64 {
     let codes = 2f64.powi(bit_depth as i32) - 1.0;
 
     1.0 / codes
-}
-
-/// The grain std whose block std reads `measured` once rounded to whole codes `code_step` apart.
-///
-/// The model takes Gaussian grain of std `s` on a flat level at a random offset from the code
-/// grid, with every offset equally likely. Rounding then gives a block variance of
-/// `s^2 + q^2 / 12`, with `q` the code step, less the sum over every whole `k` from 1 of
-/// `q^2 * exp(-4 pi^2 k^2 s^2 / q^2) / (2 pi^2 k^2)`. That sum takes most of the `q^2 / 12` back
-/// off faint grain, so faint grain stays above zero. Bisection between 0 and `measured` inverts the
-/// model.
-pub(crate) fn unrounded_std(measured: f64, code_step: f64) -> f64 {
-    let target = measured * measured;
-    let mut low = 0.0f64;
-    let mut high = measured;
-    for _ in 0..UNROUNDING_ROUNDS {
-        let middle = 0.5 * (low + high);
-        let variance = rounded_variance(middle, code_step);
-        if variance < target {
-            low = middle;
-        } else {
-            high = middle;
-        }
-    }
-
-    0.5 * (low + high)
-}
-
-/// The block variance that grain of std `std` reads once rounded to codes `code_step` apart.
-fn rounded_variance(std: f64, code_step: f64) -> f64 {
-    let step_squared = code_step * code_step;
-    let pi_squared = std::f64::consts::PI * std::f64::consts::PI;
-    let decay = 4.0 * pi_squared * std * std / step_squared;
-
-    let mut correction = 0.0;
-    for k in 1..=ROUNDING_TERMS {
-        let k_squared = (k * k) as f64;
-        let falloff = (-decay * k_squared).exp();
-        let term = step_squared * falloff / (2.0 * pi_squared * k_squared);
-        if term < ROUNDING_TERM_FLOOR * step_squared {
-            break;
-        }
-
-        correction += term;
-    }
-
-    std * std + step_squared / 12.0 - correction
 }
 
 /// The 65 std bucket edges, log-spaced between `STD_MIN` and `STD_MAX`.

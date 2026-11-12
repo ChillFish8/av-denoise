@@ -10,24 +10,21 @@ use super::fit::{
     yule_walker,
 };
 use super::segment::{BinStrength, PlaneEntry, bin_luma, pooled_record, strength_of};
-use super::template::{ChromaPlane, chroma_template_stats};
+use super::template::{ChromaPlane, CurveCache, TemplatePlane, template_sigma};
 
 /// A chroma plane's fitted texture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ChromaTexture {
     /// The solved AR weights, before rounding to AV1 integers.
     pub weights: [f64; AR_COEFFS],
-    /// The chroma template's ratio of its whole-field std to its median block std.
-    ///
-    /// It is read with the weights rounded at their finest AR shift.
-    pub block_to_field: f64,
 }
 
 /// A segment's own measurements of one chroma plane, either of which may be missing.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ChromaParts {
     pub texture: Option<ChromaTexture>,
-    /// The grain's one-frame block std at up to [MAX_CHROMA_POINTS] lumas, in normalised units.
+    /// The grain's median one-frame high-pass std at up to [MAX_CHROMA_POINTS] lumas, in
+    /// normalised units.
     pub target: Option<Vec<(u8, f64)>>,
 }
 
@@ -35,7 +32,7 @@ pub(crate) struct ChromaParts {
 #[derive(Debug, Clone)]
 pub(crate) struct ChromaFit {
     pub texture: ChromaTexture,
-    /// The grain's one-frame block std at each luma, in normalised units.
+    /// The grain's median one-frame high-pass std at each luma, in normalised units.
     pub target: Vec<(u8, f64)>,
 }
 
@@ -49,15 +46,9 @@ pub(crate) struct ChromaScaling {
 }
 
 /// Each chroma plane's own measurements over `chunks`, Cb then Cr.
-///
-/// With `rounding` holding a code step, each strength reading has that rounding taken off.
-pub(crate) fn chroma_parts(
-    chunks: &[GrainChunk],
-    edges: &[f32],
-    rounding: Option<f64>,
-) -> [ChromaParts; CHROMA_PLANES] {
-    let cb = plane_parts(chunks, ChromaPlane::Cb, edges, rounding);
-    let cr = plane_parts(chunks, ChromaPlane::Cr, edges, rounding);
+pub(crate) fn chroma_parts(chunks: &[GrainChunk], edges: &[f32]) -> [ChromaParts; CHROMA_PLANES] {
+    let cb = plane_parts(chunks, ChromaPlane::Cb, edges);
+    let cr = plane_parts(chunks, ChromaPlane::Cr, edges);
 
     [cb, cr]
 }
@@ -66,26 +57,21 @@ pub(crate) fn chroma_parts(
 ///
 /// The target reads the one-frame histogram, binned by luma, and thins evenly to
 /// [MAX_CHROMA_POINTS] bins, keeping the first and last.
-fn plane_parts(
-    chunks: &[GrainChunk],
-    plane: ChromaPlane,
-    edges: &[f32],
-    rounding: Option<f64>,
-) -> ChromaParts {
+fn plane_parts(chunks: &[GrainChunk], plane: ChromaPlane, edges: &[f32]) -> ChromaParts {
     let mut stats = TableSums::zeroed();
     for chunk in chunks {
         let sums = chunk.summed_chroma_table(plane.index());
         stats.add(&sums);
     }
 
-    let texture = chroma_texture_of(&stats, edges, plane);
-    let strength = strength_of(&stats, edges, rounding);
+    let texture = chroma_texture_of(&stats, edges);
+    let strength = strength_of(&stats, edges);
     let target = strength.map(|bins| thinned_targets(&bins));
 
     ChromaParts { texture, target }
 }
 
-/// The `(luma, std)` targets of a plane's bins, thinned to [MAX_CHROMA_POINTS].
+/// The `(luma, median)` targets of a plane's bins, thinned to [MAX_CHROMA_POINTS].
 fn thinned_targets(bins: &[BinStrength]) -> Vec<(u8, f64)> {
     let chosen = thinned(bins, MAX_CHROMA_POINTS);
 
@@ -93,22 +79,38 @@ fn thinned_targets(bins: &[BinStrength]) -> Vec<(u8, f64)> {
         .iter()
         .map(|entry| {
             let luma = bin_luma(entry.bin);
-            (luma, entry.std)
+            (luma, entry.median)
         })
         .collect()
 }
 
 /// The plane's weights rounded at `ar_shift`, its template std and its whole-field targets, times
 /// `dial`.
-pub(crate) fn chroma_scaling(fit: &ChromaFit, plane: ChromaPlane, ar_shift: u32, dial: f64) -> ChromaScaling {
+///
+/// Each target is the field std whose grain reads the target's high-pass median on the plane's
+/// template, with the weights rounded at their finest AR shift.
+pub(crate) fn chroma_scaling(
+    fit: &ChromaFit,
+    plane: ChromaPlane,
+    ar_shift: u32,
+    dial: f64,
+    curves: &mut CurveCache,
+) -> ChromaScaling {
+    let template_plane = TemplatePlane::Chroma(plane);
     let coeffs = quantise_at(&fit.texture.weights, ar_shift);
-    let (sigma_template, _) = chroma_template_stats(&coeffs, ar_shift, plane);
-    // The entry's texture, which may be borrowed, turns the block stds into field stds.
-    let factor = fit.texture.block_to_field * dial;
+    let sigma_template = template_sigma(&coeffs, ar_shift, template_plane);
+
+    // The entry's texture, which may be borrowed, turns the medians into field stds.
+    let finest_shift = finest_ar_shift(&fit.texture.weights);
+    let finest_coeffs = quantise_at(&fit.texture.weights, finest_shift);
+    let curve = curves.curve(&finest_coeffs, finest_shift, template_plane);
     let targets = fit
         .target
         .iter()
-        .map(|&(luma, block_std)| (luma, block_std * factor))
+        .map(|&(luma, median)| {
+            let field_std = curve.field_std(median);
+            (luma, field_std * dial)
+        })
         .collect();
 
     ChromaScaling {
@@ -138,22 +140,10 @@ impl ChromaScaling {
 /// The texture solved from the strength groups near the median source std, as luma's is.
 ///
 /// The pooled record has its cell-mean bias undone before the solve.
-pub(crate) fn chroma_texture_of(
-    stats: &TableSums,
-    edges: &[f32],
-    plane: ChromaPlane,
-) -> Option<ChromaTexture> {
+pub(crate) fn chroma_texture_of(stats: &TableSums, edges: &[f32]) -> Option<ChromaTexture> {
     let record = pooled_record(stats, edges)?;
     let corrected = undo_mean_removal(&record);
     let weights = yule_walker(&corrected)?;
 
-    let shift = finest_ar_shift(&weights);
-    let coeffs = quantise_at(&weights, shift);
-    let (field_std, block_std) = chroma_template_stats(&coeffs, shift, plane);
-    let block_to_field = field_std / block_std;
-
-    Some(ChromaTexture {
-        weights,
-        block_to_field,
-    })
+    Some(ChromaTexture { weights })
 }
