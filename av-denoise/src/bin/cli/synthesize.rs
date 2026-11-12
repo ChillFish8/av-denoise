@@ -205,7 +205,7 @@ fn parse_fine_noise(text: &str) -> Result<f64, String> {
 fn parse_strength(text: &str) -> Result<f64, String> {
     let factor: f64 = text.parse().map_err(|_| format!("{text} is not a number"))?;
     if !(0.0..=MAX_STRENGTH).contains(&factor) {
-        return Err(format!("{factor} is not between 0 and 4"));
+        return Err(format!("{factor} is not between 0 and {MAX_STRENGTH}"));
     }
 
     Ok(factor)

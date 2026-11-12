@@ -74,7 +74,7 @@ pub fn av1_table(
 
     let strength = options.strength;
     if !(0.0..=MAX_STRENGTH).contains(&strength) {
-        anyhow::bail!("the grain strength {strength} is not between 0 and 4");
+        anyhow::bail!("the grain strength {strength} is not between 0 and {MAX_STRENGTH}");
     }
 
     let bit_depth = meta.bit_depth;

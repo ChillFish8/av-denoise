@@ -530,7 +530,7 @@ fn strength_reads_the_one_frame_histogram() {
 }
 
 #[test]
-fn the_source_histogram_no_longer_sets_strength() {
+fn the_source_histogram_does_not_set_strength() {
     let low_source = chunk_at(1.0, 300, Some(2.0));
     let high_source = chunk_at(1.5, 300, Some(2.0));
 

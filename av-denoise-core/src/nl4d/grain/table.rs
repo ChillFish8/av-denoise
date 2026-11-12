@@ -190,6 +190,8 @@ impl FitOptions {
 
     /// The options with the fine noise share clamped to 0..=1, NaN read as 0, and the strength
     /// clamped to 0..=[MAX_STRENGTH], NaN read as [DEFAULT_STRENGTH].
+    ///
+    /// A bit depth outside 1..=16 reads as no rounding.
     fn clamped(&self) -> Self {
         let share = self.fine_noise;
         let fine_noise = if share.is_nan() {
@@ -205,9 +207,12 @@ impl FitOptions {
             factor.clamp(0.0, MAX_STRENGTH)
         };
 
+        let bit_depth = self.bit_depth.filter(|depth| (1..=16).contains(depth));
+
         Self {
             fine_noise,
             strength,
+            bit_depth,
             ..self.clone()
         }
     }

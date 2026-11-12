@@ -502,6 +502,22 @@ fn build_table_clamps_the_strength() {
 }
 
 #[test]
+fn build_table_reads_a_bit_depth_past_1_to_16_as_no_rounding() {
+    let scenes = measured_scenes();
+    let unrounded_options = chroma_options();
+    let unrounded = build_table(&scenes, NTSC, &unrounded_options);
+    let build = |bit_depth: u32| {
+        let options = chroma_options().with_bit_depth(bit_depth);
+
+        build_table(&scenes, NTSC, &options)
+    };
+
+    assert_eq!(build(0), unrounded);
+    assert_eq!(build(17), unrounded);
+    assert_ne!(build(8), unrounded);
+}
+
+#[test]
 fn the_default_options_keep_full_strength() {
     let default_options = FitOptions::default();
     let fine_noise_options = FitOptions::with_fine_noise(0.5);

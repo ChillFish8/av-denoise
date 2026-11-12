@@ -22,7 +22,9 @@ const MAX_FIELD_STD: f64 = 1.0;
 /// The fewest cells a curve reads, as many as the luma templates hold.
 ///
 /// The smaller chroma templates repeat their cells, each copy on its own level offsets.
-const CURVE_CELLS: usize = 1536;
+const CURVE_CELLS: usize = TEMPLATE_SEEDS as usize * LUMA_CELLS_PER_TEMPLATE;
+/// The 8x8 cells in one luma template's interior.
+const LUMA_CELLS_PER_TEMPLATE: usize = (LUMA_LAYOUT.interior_size / CELL as usize).pow(2);
 
 /// The size of a grain template and the interior its statistics read.
 #[derive(Copy, Clone)]
