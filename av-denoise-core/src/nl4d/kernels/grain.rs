@@ -9,6 +9,7 @@ use crate::nl4d::grain::consts::{
     CONF_MIN,
     FLAT_RANGE,
     HIST_LEN,
+    LAG_COUNT,
     LUMA_BINS,
     LUMA_HIGH,
     LUMA_LOW,
@@ -30,7 +31,10 @@ const TILE_H: u32 = 11;
 const TILE_LEN: u32 = TILE_W * TILE_H;
 /// The largest horizontal lag.
 const HALO_X: u32 = 6;
-const LAG_LANES: u32 = 46;
+/// The horizontal lags in each lag row below the cell's own, `-HALO_X..=HALO_X`.
+const LAG_ROW_W: u32 = 2 * HALO_X + 1;
+/// The measured lags, each summed by its own thread.
+const LAG_LANES: u32 = LAG_COUNT as u32;
 /// Halving rounds that reduce [THREADS] values to one.
 const REDUCE_ROUNDS: u32 = THREADS.ilog2();
 /// Halving rounds that reduce [REDUCE_THREADS] values to one.
@@ -70,16 +74,31 @@ pub fn grain_save_vectors(
     }
 }
 
-/// The lag lane of a half-plane offset, in the order of [LAGS](crate::nl4d::grain::consts::LAGS).
+/// The vertical offset of lag lane `lane`, in the order of
+/// [LAGS](crate::nl4d::grain::consts::LAGS).
 ///
-/// `dx_index` runs between 0 and 12 and is the horizontal offset plus [HALO_X]. Only half the plane
-/// is measured because a lag and its mirror share one autocovariance.
-const fn lag_lane(dy: u32, dx_index: u32) -> u32 {
-    if dy == 0 {
-        dx_index - HALO_X
-    } else {
-        (HALO_X + 1) + (dy - 1) * (2 * HALO_X + 1) + dx_index
+/// Only half the plane is measured because a lag and its mirror share one autocovariance.
+#[cube]
+fn lag_row(lane: u32) -> u32 {
+    let mut row = 0u32;
+    if lane > HALO_X {
+        let below = lane - (HALO_X + 1);
+        row = 1u32 + below / LAG_ROW_W;
     }
+
+    row
+}
+
+/// The tile column offset of lag lane `lane`, its horizontal offset plus [HALO_X].
+#[cube]
+fn lag_column(lane: u32) -> u32 {
+    let mut column = lane + HALO_X;
+    if lane > HALO_X {
+        let below = lane - (HALO_X + 1);
+        column = below % LAG_ROW_W;
+    }
+
+    column
 }
 
 /// The sample of channel `channel` at pixel `(x, y)` of ring slot `slot`.
@@ -274,7 +293,8 @@ fn neighbour_squares(values: &[f32], local_x: u32, local_y: u32, thread_id: u32)
 /// Every cell writes its partial, the 46 lag sums, pixel count and strength group of its source
 /// grain, as zeros when rejected. The lag sums take the cell's mean source grain off every pixel
 /// and halo neighbour first, so a uniform brightness flicker between the two frames never reaches
-/// them. The strength group keeps cells of outlying grain strength in a record of their own.
+/// them. The strength group keeps cells of outlying grain strength in a record of their own. Only
+/// an accepted cell reads its halo.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
@@ -309,8 +329,8 @@ pub fn grain_measure<N: Size>(
     let mut sums = Shared::<[f32]>::new_slice((SUM_LANES * THREADS) as usize);
     let mut lows = Shared::<[f32]>::new_slice((2 * THREADS) as usize);
     let mut highs = Shared::<[f32]>::new_slice((2 * THREADS) as usize);
-    let mut lags = Shared::<[f32]>::new_slice((LAG_LANES * THREADS) as usize);
     let mut accepted = Shared::<[f32]>::new_slice(1usize);
+    let mut strength_group = Shared::<[f32]>::new_slice(1usize);
     let mut frame_values = Shared::<[f32]>::new_slice(THREADS as usize);
 
     let cells_x = comptime!(width / CELL);
@@ -327,49 +347,7 @@ pub fn grain_measure<N: Size>(
     let y = origin_y + local_y;
     let block = block_for(cell_x, cell_y, blocks_x, blocks_y, step);
     let source_base = source_entry * blocks * 2;
-    let mut group = 0u32;
 
-    // Source grain over the cell and its halo, every coordinate clamped into the frame.
-    let mut fill = thread_id;
-    while fill < TILE_LEN {
-        let tile_x = fill % TILE_W;
-        let tile_y = fill / TILE_W;
-        let raw_x = origin_x as i32 + tile_x as i32 - HALO_X as i32;
-        let read_x = clamp_shift(0u32, raw_x, width);
-        let read_y = clamp_shift(origin_y + tile_y, 0i32, height);
-        tile[fill as usize] = source_grain_at(
-            input,
-            saved_mv,
-            read_x,
-            read_y,
-            slot_t,
-            slot_next,
-            source_base,
-            channel,
-            width,
-            height,
-            blocks_x,
-            blocks_y,
-            step,
-        );
-        fill += THREADS;
-    }
-
-    let own_grain = source_grain_at(
-        input,
-        saved_mv,
-        x,
-        y,
-        slot_t,
-        slot_next,
-        source_base,
-        channel,
-        width,
-        height,
-        blocks_x,
-        blocks_y,
-        step,
-    );
     let clean = out_t[((y * width + x) * channels + channel) as usize];
     let current = channel_at(input, x, y, slot_t, channel, width, height);
     let dx = saved_mv[(source_base + block * 2) as usize];
@@ -377,6 +355,9 @@ pub fn grain_measure<N: Size>(
     let next_x = clamp_shift(x, dx, width);
     let next_y = clamp_shift(y, dy, height);
     let next = channel_at(input, next_x, next_y, slot_next, channel, width, height);
+    let own_grain = (next - current) * std::f32::consts::FRAC_1_SQRT_2;
+    let own_index = local_y * TILE_W + local_x + HALO_X;
+    tile[own_index as usize] = own_grain;
     // The one-frame values sit relative to the cell origin's sample, which keeps them small in f32.
     let origin = channel_at(input, origin_x, origin_y, slot_t, channel, width, height);
     let centred = current - origin;
@@ -434,12 +415,14 @@ pub fn grain_measure<N: Size>(
             && highs[THREADS as usize] <= CLIP_HIGH;
         let passes = usable && interior && confidence >= CONF_MIN && grain_std > STD_MIN;
         accepted[0] = 0.0f32;
+        strength_group[0] = 0.0f32;
 
         if passes {
             accepted[0] = 1.0f32;
             let bucket = bucket_for(grain_std, edges);
             let slot = hist_offset + luma_bin(mean) * STD_BUCKETS as u32 + bucket;
-            group = bucket / BUCKETS_PER_GROUP as u32;
+            let group = bucket / BUCKETS_PER_GROUP as u32;
+            strength_group[0] = group as f32;
             Atomic::fetch_add(&hist[slot as usize], 1i32);
         }
 
@@ -456,51 +439,74 @@ pub fn grain_measure<N: Size>(
     sync_cube();
 
     let take = accepted[0];
-    let grain_mean = sums[0] / THREADS as f32;
-    let centre_index = local_y * TILE_W + local_x + HALO_X;
-    let centre = tile[centre_index as usize] - grain_mean;
+    let is_accepted = take > 0.5f32;
 
-    #[unroll]
-    for dy in 0..4u32 {
-        #[unroll]
-        for dx_index in 0..13u32 {
-            if comptime!(dy > 0 || dx_index >= HALO_X) {
-                let lane = comptime!(lag_lane(dy, dx_index));
-                let neighbour_index = (local_y + dy) * TILE_W + local_x + dx_index;
-                let neighbour = tile[neighbour_index as usize] - grain_mean;
-                lags[(lane * THREADS + thread_id) as usize] = take * centre * neighbour;
+    // Source grain over an accepted cell's halo, clamped into the frame as a guard.
+    if is_accepted {
+        let mut fill = thread_id;
+        while fill < TILE_LEN {
+            let tile_x = fill % TILE_W;
+            let tile_y = fill / TILE_W;
+            let past_left_halo = tile_x >= HALO_X;
+            let before_right_halo = tile_x < HALO_X + CELL;
+            let in_cell = tile_y < CELL && past_left_halo && before_right_halo;
+            if !in_cell {
+                let raw_x = origin_x as i32 + tile_x as i32 - HALO_X as i32;
+                let read_x = clamp_shift(0u32, raw_x, width);
+                let read_y = clamp_shift(origin_y + tile_y, 0i32, height);
+                tile[fill as usize] = source_grain_at(
+                    input,
+                    saved_mv,
+                    read_x,
+                    read_y,
+                    slot_t,
+                    slot_next,
+                    source_base,
+                    channel,
+                    width,
+                    height,
+                    blocks_x,
+                    blocks_y,
+                    step,
+                );
             }
+
+            fill += THREADS;
         }
     }
 
     sync_cube();
 
-    #[unroll]
-    for round in 0..REDUCE_ROUNDS {
-        let lag_stride = comptime!(THREADS >> (round + 1));
-        if thread_id < lag_stride {
+    let grain_mean = sums[0] / THREADS as f32;
+    let cell_index = cell_y * cells_x + cell_x;
+    let base = cell_index * PARTIAL_LEN as u32;
+
+    // Thread `thread_id` sums lag `thread_id` over the cell's pixels.
+    if thread_id < LAG_LANES {
+        let row = lag_row(thread_id);
+        let column = lag_column(thread_id);
+        let mut lag_sum = 0.0f32;
+
+        if is_accepted {
             #[unroll]
-            for index in 0..LAG_LANES {
-                let here = (index * THREADS + thread_id) as usize;
-                let there = (index * THREADS + thread_id + lag_stride) as usize;
-                lags[here] += lags[there];
+            for pixel_y in 0..CELL {
+                #[unroll]
+                for pixel_x in 0..CELL {
+                    let centre_index = comptime!(pixel_y * TILE_W + pixel_x + HALO_X);
+                    let neighbour_index = (pixel_y + row) * TILE_W + pixel_x + column;
+                    let centre = tile[centre_index as usize] - grain_mean;
+                    let neighbour = tile[neighbour_index as usize] - grain_mean;
+                    lag_sum += centre * neighbour;
+                }
             }
         }
 
-        sync_cube();
+        partials[(base + thread_id) as usize] = lag_sum;
     }
 
-    if thread_id == 0 {
-        let cell_index = cell_y * cells_x + cell_x;
-        let base = cell_index * PARTIAL_LEN as u32;
-
-        #[unroll]
-        for index in 0..LAG_LANES {
-            partials[(base + index) as usize] = lags[(index * THREADS) as usize];
-        }
-
+    if thread_id == LAG_LANES {
         partials[(base + LAG_LANES) as usize] = take * THREADS as f32;
-        partials[(base + AUTOCOV_LEN as u32) as usize] = group as f32;
+        partials[(base + AUTOCOV_LEN as u32) as usize] = strength_group[0];
     }
 }
 
