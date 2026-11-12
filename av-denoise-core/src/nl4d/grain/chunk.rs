@@ -10,9 +10,11 @@ pub struct GrainChunk {
     /// A table holds the source histogram, the one-frame histogram and the grouped lag sums. A
     /// chroma frame holds the Cb table and then the Cr table, each in the luma layout. The source
     /// histogram bins a block by the mean of its measured channel, luma or chroma. The one-frame
-    /// histogram bins a luma block the same way and a chroma block by the luma of its colour
-    /// block, and stays empty on a chroma frame whose block luma is not held. Counts are whole
-    /// numbers and lag sums are the GPU's own f32 values. Empty when the table is not measured.
+    /// histogram counts each block's high-pass std, with constant blocks in bucket 0. It bins a
+    /// luma block by its luma mean, as the source histogram does, and a chroma block by the luma
+    /// of its colour block. It stays empty on a chroma frame whose block luma is not held. Counts
+    /// are whole numbers and lag sums are the GPU's own f32 values. Empty when the table is not
+    /// measured.
     pub frame_tables: Vec<f32>,
     /// Each frame's persistence sums in frame order, 24 values per luma frame and 6 per chroma
     /// frame.
@@ -31,7 +33,7 @@ pub struct GrainChunk {
 pub(crate) struct TableSums {
     /// Accepted source block counts, 16 bins of the measured channel's mean by 64 std buckets.
     pub source_hist: Vec<u32>,
-    /// Accepted one-frame block counts, in the same layout.
+    /// Accepted one-frame block counts by high-pass std, in the same layout.
     pub frame_hist: Vec<u32>,
     /// The 46 source lag sums of each strength group.
     pub autocov: Vec<f64>,

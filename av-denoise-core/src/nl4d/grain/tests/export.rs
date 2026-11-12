@@ -717,7 +717,7 @@ fn banded_stream(frame_count: u32) -> StillStream {
 const BANDED_TABLE: &str = "filmgrn1
 E 0 20625000 1 7391 1
 \tp 3 8 0 11 0 1 128 192 256 128 192 256
-\tsY 5  72 129 120 129 152 129 184 128 200 129
+\tsY 5  72 116 120 116 152 116 184 116 200 116
 \tsCb 2 0 0 255 0
 \tsCr 2 0 0 255 0
 \tcY 0 0 -1 0 0 0 -1 1 -1 0 0 1 0 0 0 1 0 1 0 -1 0 -1 1 102
@@ -767,7 +767,8 @@ fn frame_tables_sum_to_the_chunk_measurement() {
 
 /// The same grain field on frames 0 to 3 and flat frames after.
 ///
-/// Only frame 3's pair has grain, and only frames 0 to 3 have one-frame grain.
+/// Only frame 3's pair has grain, and only frames 0 to 3 have one-frame grain. Later frames with a
+/// pair hold constant cells.
 fn grain_leaving_after_frame_3() -> StillStream {
     let size = BANDED_SIZE as usize;
     let field = gaussian_field(size, size, 500);
@@ -811,10 +812,16 @@ fn each_frame_holds_only_its_own_statistics() {
         let (source_counts, rest) = frame_table.split_at(HIST_LEN);
         let (frame_counts, grouped) = rest.split_at(HIST_LEN);
         let has_source = source_counts.iter().chain(grouped).any(|&value| value != 0.0);
-        let has_frame = frame_counts.iter().any(|&value| value != 0.0);
+        let (frame_bins, _) = frame_counts.as_chunks::<STD_BUCKETS>();
+        let has_frame = frame_bins
+            .iter()
+            .any(|bin| bin[1..].iter().any(|&value| value != 0.0));
+        let has_constant = frame_bins.iter().any(|bin| bin[0] != 0.0);
+        let paired_flat = index > LONE_FRAME as usize && index + 1 < LONE_FRAMES as usize;
 
         assert_eq!(has_source, index == LONE_FRAME as usize, "frame {index}");
         assert_eq!(has_frame, index <= LONE_FRAME as usize, "frame {index}");
+        assert_eq!(has_constant, paired_flat, "frame {index}");
     }
 
     let summed = chunk.summed_table();

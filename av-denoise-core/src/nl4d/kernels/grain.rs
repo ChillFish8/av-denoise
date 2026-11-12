@@ -35,9 +35,13 @@ const LAG_LANES: u32 = 46;
 const REDUCE_ROUNDS: u32 = THREADS.ilog2();
 /// Halving rounds that reduce [REDUCE_THREADS] values to one.
 const CHUNK_ROUNDS: u32 = REDUCE_THREADS.ilog2();
-/// Shared lanes for sums of the grain, its square, the clean sample, the centred source sample and
-/// its square.
-const SUM_LANES: u32 = 5;
+/// Shared lanes for sums of the grain, its square, the clean sample and the source's squared
+/// neighbour differences.
+const SUM_LANES: u32 = 4;
+/// Turns a cell's summed squared neighbour differences into a variance.
+///
+/// Each axis has 56 pairs, and half a pair's squared difference reads one sample's variance.
+const HIGH_PASS_DIVISOR: f32 = 224.0;
 
 /// Copies one neighbour's motion vectors and confidence into saved ring entry `entry`.
 ///
@@ -225,19 +229,41 @@ fn std_of(sum: f32, sum_sq: f32) -> f32 {
     f32::sqrt(f32::max(variance, 0.0f32))
 }
 
+/// The squared differences from one pixel of a row-major cell to its right and down neighbours.
+///
+/// A pixel on the cell's right column or bottom row skips the neighbour it lacks.
+#[cube]
+fn neighbour_squares(values: &[f32], local_x: u32, local_y: u32, thread_id: u32) -> f32 {
+    let here = values[thread_id as usize];
+    let mut total = 0.0f32;
+
+    if local_x + 1 < CELL {
+        let right = values[(thread_id + 1) as usize] - here;
+        total += right * right;
+    }
+
+    if local_y + 1 < CELL {
+        let down = values[(thread_id + CELL) as usize] - here;
+        total += down * down;
+    }
+
+    total
+}
+
 /// Measures one completed frame's source grain and one-frame grain over one 8x8 cell.
 ///
 /// Launch one `CELL x CELL` cube per cell. Every sample is read from channel `channel`. Source
 /// grain is the motion-compensated difference of the noisy ring slots `slot_t` and `slot_next`,
 /// divided by sqrt 2 so it carries one frame's grain std. `source_entry` picks the difference's
-/// saved vectors and confidence. One-frame grain is the cell's own std in slot `slot_t`, with its
-/// mean taken off. A zero `has_source` rejects every cell.
+/// saved vectors and confidence. One-frame grain is the high-pass std of slot `slot_t` over the
+/// cell, the square root of half the mean squared neighbour difference averaged over both axes.
+/// A constant cell reads 0. A zero `has_source` rejects every cell.
 ///
 /// Every cell needs a flat `out_t`, a mean inside the luma band when `luma_band` is set, and no
 /// source pixel of `t` or `t + 1` near clipping. A source cell must also sit off the left, right
 /// and bottom edges, so its lag halo never reads a clamped pixel, and needs a confident vector and
-/// a grain std above the floor. A one-frame cell needs only a std above the floor, and with a
-/// colour grid a set `has_luma_means`.
+/// a grain std above the floor. A one-frame cell needs nothing more, except a set
+/// `has_luma_means` with a colour grid.
 ///
 /// Each accepted cell adds one count to its brightness bin and std bucket of the frame's
 /// histograms, which start at `hist_offset` in `hist`. The first `HIST_LEN` counts are for source
@@ -285,6 +311,7 @@ pub fn grain_measure<N: Size>(
     let mut highs = Shared::<[f32]>::new_slice((2 * THREADS) as usize);
     let mut lags = Shared::<[f32]>::new_slice((LAG_LANES * THREADS) as usize);
     let mut accepted = Shared::<[f32]>::new_slice(1usize);
+    let mut frame_values = Shared::<[f32]>::new_slice(THREADS as usize);
 
     let cells_x = comptime!(width / CELL);
     let cells_y = comptime!(height / CELL);
@@ -350,15 +377,18 @@ pub fn grain_measure<N: Size>(
     let next_x = clamp_shift(x, dx, width);
     let next_y = clamp_shift(y, dy, height);
     let next = channel_at(input, next_x, next_y, slot_next, channel, width, height);
-    // The cell origin's sample comes off first, so the f32 sums of squares keep their precision.
+    // The one-frame values sit relative to the cell origin's sample, which keeps them small in f32.
     let origin = channel_at(input, origin_x, origin_y, slot_t, channel, width, height);
     let centred = current - origin;
+    frame_values[thread_id as usize] = centred;
+    sync_cube();
+
+    let high_pass = neighbour_squares(&frame_values, local_x, local_y, thread_id);
 
     sums[thread_id as usize] = own_grain;
     sums[(THREADS + thread_id) as usize] = own_grain * own_grain;
     sums[(2 * THREADS + thread_id) as usize] = clean;
-    sums[(3 * THREADS + thread_id) as usize] = centred;
-    sums[(4 * THREADS + thread_id) as usize] = centred * centred;
+    sums[(3 * THREADS + thread_id) as usize] = high_pass;
     lows[thread_id as usize] = clean;
     lows[(THREADS + thread_id) as usize] = f32::min(current, next);
     highs[thread_id as usize] = clean;
@@ -392,7 +422,8 @@ pub fn grain_measure<N: Size>(
         let count = THREADS as f32;
         let grain_std = std_of(sums[0], sums[THREADS as usize]);
         let mean = sums[(2 * THREADS) as usize] / count;
-        let frame_std = std_of(sums[(3 * THREADS) as usize], sums[(4 * THREADS) as usize]);
+        let frame_variance = sums[(3 * THREADS) as usize] / HIGH_PASS_DIVISOR;
+        let frame_std = f32::sqrt(frame_variance);
         let range = highs[0] - lows[0];
         let interior = cell_x >= 1 && cell_x + 2 <= cells_x && cell_y + 2 <= cells_y;
         let confidence = saved_conf[(source_entry * blocks + block) as usize];
@@ -412,7 +443,7 @@ pub fn grain_measure<N: Size>(
             Atomic::fetch_add(&hist[slot as usize], 1i32);
         }
 
-        let frame_passes = usable && frame_std > STD_MIN && means_ready(has_luma_means, means_blocks_x);
+        let frame_passes = usable && means_ready(has_luma_means, means_blocks_x);
         if frame_passes {
             let bucket = bucket_for(frame_std, edges);
             let bin = frame_bin(luma_means, mean, cell_x, cell_y, means_blocks_x);

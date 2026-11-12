@@ -634,6 +634,87 @@ fn a_one_frame_cell_needs_no_motion_confidence() {
     assert_eq!(frame as usize, PLAIN.cells());
 }
 
+/// A flat scene whose source frame `t` takes `pattern(x, y)` at every pixel.
+fn patterned_scene(pattern: impl Fn(u32, u32) -> f32) -> Scene {
+    let mut scene = flat_scene((0, 0), &[]);
+    let width = PLAIN.width;
+
+    for y in 0..PLAIN.height {
+        for x in 0..width {
+            let index = (y * width + x) as usize;
+            scene.source_t[index] = pattern(x, y);
+        }
+    }
+
+    scene
+}
+
+/// Moves a patterned scene onto channel 1, binned by a colour grid of [LEFT_LUMA] blocks.
+fn chroma_of(scene: Scene) -> Scene {
+    let chroma = on_channel(scene, 1, false);
+    with_luma_means(chroma, true, |_, _| LEFT_LUMA)
+}
+
+/// The geometric middle of std bucket `bucket`, clear of both its edges.
+fn bucket_middle(bucket: usize) -> f32 {
+    let edges = bucket_edges();
+    let product = edges[bucket] * edges[bucket + 1];
+    product.sqrt()
+}
+
+/// Checks every one-frame cell of the frame landed in std bucket `bucket`.
+fn assert_frame_cells_in_bucket(hist: &[u32], bucket: usize) {
+    let (bins, _) = hist[HIST_LEN..].as_chunks::<STD_BUCKETS>();
+    let in_bucket: u32 = bins.iter().map(|bin| bin[bucket]).sum();
+    let frame = frame_total(hist);
+
+    assert_eq!(frame as usize, PLAIN.cells());
+    assert_eq!(in_bucket, frame, "{bins:?}");
+}
+
+#[test]
+fn one_frame_hist_counts_a_constant_cell_in_bucket_0() {
+    let luma = patterned_scene(|_, _| 0.5);
+    let constant = patterned_scene(|_, _| 0.5);
+    let chroma = chroma_of(constant);
+
+    let luma_hist = assert_matches_mirror(&luma);
+    let chroma_hist = assert_matches_mirror(&chroma);
+
+    assert_frame_cells_in_bucket(&luma_hist, 0);
+    assert_frame_cells_in_bucket(&chroma_hist, 0);
+}
+
+#[test]
+fn one_frame_hist_bins_the_high_pass_of_a_checkerboard() {
+    let bucket = 40;
+    let amplitude = bucket_middle(bucket) / std::f32::consts::SQRT_2;
+    let checkerboard = |x: u32, y: u32| {
+        let sign = if (x + y).is_multiple_of(2) { 1.0 } else { -1.0 };
+        0.5 + sign * amplitude
+    };
+    let luma = patterned_scene(checkerboard);
+    let pattern = patterned_scene(checkerboard);
+    let chroma = chroma_of(pattern);
+
+    let luma_hist = assert_matches_mirror(&luma);
+    let chroma_hist = assert_matches_mirror(&chroma);
+
+    assert_frame_cells_in_bucket(&luma_hist, bucket);
+    assert_frame_cells_in_bucket(&chroma_hist, bucket);
+}
+
+#[test]
+fn one_frame_hist_bins_a_ramp_by_its_slope() {
+    let bucket = 40;
+    let slope = 2.0 * bucket_middle(bucket);
+    let ramp = |x: u32, _| 0.5 + slope * ((x % 8) as f32 - 3.5);
+    let scene = patterned_scene(ramp);
+    let hist = assert_matches_mirror(&scene);
+
+    assert_frame_cells_in_bucket(&hist, bucket);
+}
+
 #[test]
 fn chroma_frame_hist_bins_by_the_luma_means() {
     let scene = two_level_chroma_scene(true);

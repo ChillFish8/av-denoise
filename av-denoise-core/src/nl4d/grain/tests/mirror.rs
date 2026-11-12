@@ -106,6 +106,33 @@ fn stats_of(values: &[f32]) -> BlockStats {
     }
 }
 
+/// The high-pass std of one row-major cell, from the squared differences of its neighbour pairs.
+///
+/// Each axis has 56 pairs, and half each pair's squared difference reads one sample's variance, so
+/// the variance is the summed squares over 224.
+fn high_pass_of(values: &[f32]) -> f32 {
+    let cell = CELL as usize;
+    let mut sum_sq = 0.0f32;
+
+    for y in 0..cell {
+        for x in 0..cell {
+            let here = values[y * cell + x];
+            if x + 1 < cell {
+                let right = values[y * cell + x + 1] - here;
+                sum_sq += right * right;
+            }
+
+            if y + 1 < cell {
+                let down = values[(y + 1) * cell + x] - here;
+                sum_sq += down * down;
+            }
+        }
+    }
+
+    let variance = sum_sq / 224.0;
+    variance.sqrt()
+}
+
 fn range_of(values: &[f32]) -> (f32, f32) {
     let low = values.iter().copied().fold(f32::INFINITY, f32::min);
     let high = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -218,11 +245,10 @@ pub(super) fn mirror_measure(frame: &MirrorFrame, edges: &[f32]) -> MirrorRecord
                 add_lag_sums(frame, cell_left, cell_top, grain_stats.mean, record);
             }
 
-            let frame_stats = stats_of(&centred);
+            let frame_std = high_pass_of(&centred);
             let bin = frame_bin(frame, cell_x, cell_y, clean_stats.mean);
-            let frame_ok = shared_ok && frame_stats.std > STD_MIN;
-            if frame_ok && let Some(bin) = bin {
-                let slot = hist_slot(bin, frame_stats.std, edges);
+            if shared_ok && let Some(bin) = bin {
+                let slot = hist_slot(bin, frame_std, edges);
                 hist[HIST_LEN + slot] += 1;
             }
         }
