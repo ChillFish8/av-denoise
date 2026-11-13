@@ -4,6 +4,7 @@ mod fine_noise;
 mod fit;
 mod kernels;
 mod mirror;
+mod modes;
 mod persistence;
 mod repeat;
 mod report;

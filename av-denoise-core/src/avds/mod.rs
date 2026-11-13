@@ -35,7 +35,15 @@ pub use self::synthesize::{
 };
 pub use self::write::{AvdsWriter, write_avds};
 use crate::{ChromaLayout, ChromaSiting};
-pub use crate::{DEFAULT_FINE_NOISE, DEFAULT_STRENGTH, FitOptions, MAX_STRENGTH};
+pub use crate::{
+    DEFAULT_FINE_NOISE,
+    DEFAULT_STRENGTH,
+    FitOptions,
+    GrainMode,
+    GrainRun,
+    MAX_STRENGTH,
+    StaticGrain,
+};
 
 /// The file format version a writer stamps on every file.
 pub const AVDS_VERSION: &str = "1";

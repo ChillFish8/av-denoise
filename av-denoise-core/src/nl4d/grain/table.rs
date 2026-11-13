@@ -1,6 +1,8 @@
 use std::fmt::Write;
+use std::ops::RangeInclusive;
 
 use super::consts::{AR_COEFFS, CHROMA_PLANES};
+use super::modes::StaticGrain;
 use super::segment::{FittedEntry, PlaneEntry, SceneGrain, fit_scenes};
 
 /// Grain table timestamps count 100 ns ticks.
@@ -148,6 +150,12 @@ pub struct FitOptions {
     /// [DEFAULT_STRENGTH] matches the source and 0 writes no grain. The multiple is applied before
     /// the shared scaling shift is chosen.
     pub strength: f64,
+    /// How frozen grain is chosen, detected from the measurements by default.
+    pub static_grain: StaticGrain,
+    /// Scenes whose grain is frozen, counting scenes in frame order, each range including both ends.
+    pub static_scenes: Vec<RangeInclusive<u64>>,
+    /// Output frames whose grain is frozen, each range including both ends.
+    pub static_frames: Vec<RangeInclusive<u64>>,
 }
 
 impl Default for FitOptions {
@@ -157,6 +165,9 @@ impl Default for FitOptions {
             chroma: false,
             bit_depth: None,
             strength: DEFAULT_STRENGTH,
+            static_grain: StaticGrain::Detect,
+            static_scenes: Vec::new(),
+            static_frames: Vec::new(),
         }
     }
 }
@@ -186,6 +197,27 @@ impl FitOptions {
     /// The options with the grain at `strength` times the source's.
     pub fn with_strength(self, strength: f64) -> Self {
         Self { strength, ..self }
+    }
+
+    /// The options with frozen grain chosen by `static_grain`.
+    pub fn with_static_grain(self, static_grain: StaticGrain) -> Self {
+        Self { static_grain, ..self }
+    }
+
+    /// The options with the grain of `static_scenes` frozen.
+    pub fn with_static_scenes(self, static_scenes: Vec<RangeInclusive<u64>>) -> Self {
+        Self {
+            static_scenes,
+            ..self
+        }
+    }
+
+    /// The options with the grain of `static_frames` frozen.
+    pub fn with_static_frames(self, static_frames: Vec<RangeInclusive<u64>>) -> Self {
+        Self {
+            static_frames,
+            ..self
+        }
     }
 
     /// The options with the fine noise share clamped to 0..=1, NaN read as 0, and the strength

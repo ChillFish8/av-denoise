@@ -48,8 +48,11 @@ pub use self::nl4d::grain::{
     FrameGrain,
     GrainChunk,
     GrainChunks,
+    GrainMode,
+    GrainRun,
     MAX_STRENGTH,
     SceneGrain,
+    StaticGrain,
     build_table,
     frame_rows,
 };
