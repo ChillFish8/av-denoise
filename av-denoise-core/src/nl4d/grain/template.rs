@@ -37,9 +37,12 @@ struct TemplateLayout {
     interior_size: usize,
 }
 
+/// The number of columns in a luma grain template.
+pub(crate) const LUMA_TEMPLATE_COLS: usize = 82;
+
 const LUMA_LAYOUT: TemplateLayout = TemplateLayout {
     rows: 73,
-    cols: 82,
+    cols: LUMA_TEMPLATE_COLS,
     interior_start: 9,
     interior_size: 64,
 };

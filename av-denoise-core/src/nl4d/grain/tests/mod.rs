@@ -5,6 +5,7 @@ mod fit;
 mod kernels;
 mod mirror;
 mod persistence;
+mod repeat;
 mod report;
 mod seeds;
 mod segment;

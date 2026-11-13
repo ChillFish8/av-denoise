@@ -5,6 +5,8 @@ mod export;
 mod fit;
 mod gaussian;
 mod persistence;
+#[cfg_attr(not(test), expect(dead_code, reason = "only tests use the repeat score"))]
+mod repeat;
 mod report;
 #[cfg_attr(not(test), expect(dead_code, reason = "only tests read the seed list"))]
 mod seeds;
