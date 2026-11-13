@@ -173,16 +173,16 @@ with `--temporal-radius` and `--spatial-radius`.
 <details>
 <summary><b>Expert flags</b>. For calibration and debugging, not everyday tuning.</summary>
 
-| Flag                                                                 | What it does                                                                                                                                                                                                                                                      | Default             |
-|----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
-| `--refine <N>`                                                       | Half-width of the window searched around each neighbour frame's motion-predicted position, between 1 and 4. Raise it when motion tracking lands close but not exact.                                                                                              | `2`                 |
-| `--sigma <f>`                                                        | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely.                                                                                                                                                                              | measured            |
-| `--thsad-scale <f>`                                                  | How badly a neighbour frame may match before its patches stop being trusted.                                                                                                                                                                                      | `1.0`               |
-| `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. A volume left short of frames by the skip makes its group filter from the centre frame alone.                                                                                    | `0.05`              |
-| `--no-noise-map`                                                     | Turns off the luma noise map, which scales the luma threshold by how noisy each brightness level and colour is. Also turns off the luma colour gains.                                                                                                                                                          | map on              |
-| `--no-pooled-threshold`                                              | Turns off the pooled threshold, which judges each frequency together with its neighbours so faint texture survives.                                                                                                                                               | pooling on          |
-| `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. NL4D always tracks motion, so these are always live.                                                                                                                                                                                      | `16`, `8`, `4`, `2` |
-| `--mc-max-search-escalation <N>`                                     | Widest radius a motion block that matched badly searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns the wider search off.                                                                                                              | from `--preset`     |
+| Flag                                                                 | What it does                                                                                                                                                                      | Default             |
+|----------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
+| `--refine <N>`                                                       | Half-width of the window searched around each neighbour frame's motion-predicted position, between 1 and 4. Raise it when motion tracking lands close but not exact.              | `2`                 |
+| `--sigma <f>`                                                        | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely.                                                                                              | measured            |
+| `--thsad-scale <f>`                                                  | How badly a neighbour frame may match before its patches stop being trusted.                                                                                                      | `1.0`               |
+| `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. A volume left short of frames by the skip makes its group filter from the centre frame alone. | `0.05`              |
+| `--no-noise-map`                                                     | Turns off the luma noise map, which scales the luma threshold by how noisy each brightness level and colour is. Also turns off the luma colour gains.                             | map on              |
+| `--no-pooled-threshold`                                              | Turns off the pooled threshold, which judges each frequency together with its neighbours so faint texture survives.                                                               | pooling on          |
+| `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. NL4D always tracks motion, so these are always live.                                                                                                      | `16`, `8`, `4`, `2` |
+| `--mc-max-search-escalation <N>`                                     | Widest radius a motion block that matched badly searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns the wider search off.                              | from `--preset`     |
 
 </details>
 
@@ -263,8 +263,10 @@ File input via `--input noisy.mkv` needs no such flag.
 ## Grain data and `av-denoise synthesize`
 
 `--export-avds` on `nl4d` measures the source's grain while it denoises, and writes every
-measurement to a grain data file with one row per output frame. The file is Parquet, so any
-Parquet reader can open it.
+measurement to a `.avds` grain data file with one row per output frame. 
+
+> [!TIP]
+> The file is Parquet, so any Parquet reader can open it.
 
 ```bash
 av-denoise nl4d --input noisy.mkv --export-avds run.avds > /dev/null
@@ -276,15 +278,19 @@ can try different options without denoising again.
 ### `synthesize av1-fgs`
 
 Writes an AV1 film grain table for all of the source's grain, as one frame shows it. Add it to a
-finished AV1 encode with `regrain apply --static-grain`, which the table needs to hold static grain
-still. SVT-AV1 `--fgs-table` and `grav1synth apply` apply only its first entry, so they suit a
-single-scene table only.
+finished AV1 encode with [regrain](https://github.com/Rabbit-Company/regrain) via `regrain apply --static-grain`, 
+it should be noted that `--static-grain` is still required even if your source has dynamic/moving grain, 
+the synthesize command already handles that and does not want `regrain` overwriting the behaviour it decides.
+
+> [!CAUTION]
+> SVT-AV1 `--fgs-table` and `grav1synth apply` apply only its first entry, so they will not apply correctly to your
+> encode.
 
 Grain that stays the same from frame to frame is detected and held still. The command logs which
 frames it treats as fresh and which as frozen.
 
 The table holds luma and chroma grain by default. Chroma grain needs 4:2:0 video from a run that
-denoised chroma. Otherwise the command warns and writes luma grain only.
+denoised chroma. Otherwise, the command will log a warning and write luma grain only.
 
 The table's timestamps count the run's output frames from 0 at the source frame rate. It fits
 constant frame rate sources and encodes of the run's output.
@@ -301,6 +307,8 @@ constant frame rate sources and encodes of the run's output.
 | `--static-scenes <SCENES>` | Scenes whose grain is static, comma-separated. Each is a scene number or a `first:last` range, as `synthesize report` prints them.     | none          |
 | `--static-frames <FRAMES>` | Frames whose grain is static, comma-separated. Each is a frame number or a `first:last` range, counting output frames from 0.          | none          |
 
+
+_Example command producing a grain table with grain at about 80% strength from what the measurement read:_
 ```bash
 av-denoise synthesize av1-fgs --input run.avds --output grain.tbl --fine-noise 0.25 --strength 0.8
 ```
@@ -322,7 +330,7 @@ av-denoise synthesize report --input run.avds --output grain.jsonl
 
 ## Reading the grain report
 
-`synthesize report` writes one JSON object per output frame, one per line, in frame order.
+`synthesize report` writes a NDJSON file, one frame per line, in frame order.
 It describes the grain in the source, not what the denoiser removed.
 
 ```json
@@ -339,23 +347,18 @@ It describes the grain in the source, not what the denoiser removed.
 | `strength_cr` | The same for the Cr plane. `null` when chroma is not denoised.                                                                    |
 | `persistence` | Eight entries, for 1 to 8 frames away. Each is the share of grain unchanged that far before and after the frame, between 0 and 1. |
 
-Grain is measured in flat areas of luma, at the same screen position with no motion compensation.
-The chroma strengths come from flat areas of each chroma plane, between each frame and its neighbours.
-Grain fixed to the screen reads as persistent, and texture carried by a pan reads as moving.
+A reading is `null` when fewer than 200 cells could be measured at the given temporal distance. 
+The window may be truncated if the frames would lay beyond the boundaries of the scene the current frame
+resides, this means you will likely see part of the window be `null` just after and before a scene cut.
 
-A reading is `null` when fewer than 200 flat cells back it at that distance. A side of the window
-counts only when that frame is in the same scene. A scene shorter than 9 frames never fills the
-last entries, and a single-frame scene is all `null`. Very busy, black or blown-out frames can also
-be `null`.
+### How to read the `persistence` field
 
-The level and fall of the curve tell the grain apart:
+The persistence field tells us roughly how much of the grain from the current frame remained after the Nth subsequent
+frame, fast moving grain will typically have near 0 persisting grain from the prior frame left over.
 
-- Moving grain is already near 0 at the first entry.
-- Slow grain starts high and falls over a few frames.
-- Static grain stays high to the last entry.
-- Grain held for N frames then replaced reads about `(N - 1) / N` at the first entry and falls to near 0 by entry N.
+On the flip side, slow moving grain will start high on the N + 1 frames, and fall off after
+a few frames within the window. Static grain will start high and continue to be high across the window.
 
-A source that repeats a whole frame, grain included, reads as persistent for that pair.
 Real readings never reach exactly 0 or 1. Anything fixed in a held shot, such as compression
 residue, adds a little persistence to moving grain, and part of a flat area's grain is always fresh.
 
