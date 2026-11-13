@@ -2,7 +2,7 @@ use std::fmt::Write;
 use std::ops::RangeInclusive;
 
 use super::consts::{AR_COEFFS, CHROMA_PLANES};
-use super::modes::StaticGrain;
+use super::modes::{GrainRun, StaticGrain, grain_runs};
 use super::segment::{FittedEntry, PlaneEntry, SceneGrain, fit_scenes};
 
 /// Grain table timestamps count 100 ns ticks.
@@ -241,17 +241,33 @@ impl FitOptions {
     }
 }
 
-/// Fits every scene and returns the `filmgrn1` table text.
+/// A fitted grain table and the runs it was written from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GrainTable {
+    /// The `filmgrn1` text.
+    pub text: String,
+    /// Every frame's mode, as runs in frame order.
+    pub runs: Vec<GrainRun>,
+}
+
+/// Fits every scene into a `filmgrn1` table, with its frames split into fresh and frozen runs.
 ///
 /// `frame_rate` is `(numerator, denominator)` frames per second. Entries follow the output's frame
 /// timeline from 0. The fine noise share is clamped to 0..=1, and NaN reads as 0. The strength is
-/// clamped to 0..=[MAX_STRENGTH], and NaN reads as [DEFAULT_STRENGTH].
-pub fn build_table(scenes: &[SceneGrain], frame_rate: (u64, u64), options: &FitOptions) -> String {
+/// clamped to 0..=[MAX_STRENGTH], and NaN reads as [DEFAULT_STRENGTH]. A declared static range that
+/// ends before it starts or runs past the clip is refused.
+pub fn build_table(
+    scenes: &[SceneGrain],
+    frame_rate: (u64, u64),
+    options: &FitOptions,
+) -> Result<GrainTable, anyhow::Error> {
     let mut sorted: Vec<&SceneGrain> = scenes.iter().collect();
     sorted.sort_by_key(|scene| scene.first_frame);
 
     let clamped = options.clamped();
-    let entries = fit_scenes(&sorted, &clamped);
+    let runs = grain_runs(scenes, &clamped)?;
+    let entries = fit_scenes(&sorted, &clamped, &runs);
+    let text = format_table(&entries, frame_rate);
 
-    format_table(&entries, frame_rate)
+    Ok(GrainTable { text, runs })
 }

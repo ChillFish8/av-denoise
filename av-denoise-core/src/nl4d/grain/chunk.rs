@@ -86,6 +86,12 @@ impl GrainChunk {
     }
 }
 
+impl Default for TableSums {
+    fn default() -> Self {
+        Self::zeroed()
+    }
+}
+
 impl TableSums {
     pub(crate) fn zeroed() -> Self {
         Self {

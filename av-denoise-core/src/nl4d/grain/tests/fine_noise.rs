@@ -3,11 +3,13 @@ use super::synthetic::{
     cell_mean_removed_record,
     entries_starting_at,
     entry_count,
+    fresh_runs,
     gaussian_field,
     sample_std,
     set_frame_count,
     set_source_count,
     table_chunk,
+    table_text,
 };
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{
@@ -29,7 +31,7 @@ use crate::nl4d::grain::fit::{
     yule_walker,
 };
 use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes, take_out_fine_noise};
-use crate::nl4d::grain::table::{FitOptions, build_table};
+use crate::nl4d::grain::table::FitOptions;
 use crate::nl4d::grain::template::{TemplatePlane, high_pass_std, seed_sigma};
 
 const NTSC: (u64, u64) = (24_000, 1_001);
@@ -213,8 +215,9 @@ fn floor_of(field: &[f64]) -> f64 {
 fn fit_with(field: &[f64], fine_noise: f64) -> FittedEntry {
     let scenes = scenes_of(field);
     let options = FitOptions::with_fine_noise(fine_noise);
+    let runs = fresh_runs(&scenes);
     let scenes: Vec<&SceneGrain> = scenes.iter().collect();
-    let mut entries = fit_scenes(&scenes, &options);
+    let mut entries = fit_scenes(&scenes, &options, &runs);
 
     assert_eq!(entries.len(), CHUNK_FRAMES as usize);
     entries.remove(0)
@@ -268,7 +271,7 @@ fn zero_fine_noise_leaves_the_table_unchanged() {
     let scenes = scenes_of(&field);
     let options = FitOptions::default();
 
-    let text = build_table(&scenes, NTSC, &options);
+    let text = table_text(&scenes, NTSC, &options);
     let head = entries_starting_at(&text, &[0, 12], NTSC);
 
     assert_eq!(options.fine_noise, 0.0);
@@ -420,13 +423,13 @@ fn build_table_clamps_the_fine_noise_share() {
     let scenes = scenes_of(&field);
     let none = FitOptions::with_fine_noise(0.0);
     let full = FitOptions::with_fine_noise(1.0);
-    let none_table = build_table(&scenes, NTSC, &none);
-    let full_table = build_table(&scenes, NTSC, &full);
+    let none_table = table_text(&scenes, NTSC, &none);
+    let full_table = table_text(&scenes, NTSC, &full);
 
     for (share, expected) in [(-0.5, &none_table), (f64::NAN, &none_table), (1.5, &full_table)] {
         let options = FitOptions::with_fine_noise(share);
 
-        let table = build_table(&scenes, NTSC, &options);
+        let table = table_text(&scenes, NTSC, &options);
 
         assert_eq!(&table, expected, "share {share}");
     }

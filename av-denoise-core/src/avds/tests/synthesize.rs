@@ -153,9 +153,9 @@ fn av1_fgs_from_the_file_matches_the_direct_table() {
     let direct_options = options_for(&meta, &options);
 
     let table = av1_table(&meta, rows, &options).expect("the table builds");
-    let direct = build_table(&scenes, meta.frame_rate, &direct_options);
+    let direct = build_table(&scenes, meta.frame_rate, &direct_options).expect("the table builds");
 
-    assert_eq!(table, direct);
+    assert_eq!(table, direct.text);
 }
 
 #[test]
@@ -185,10 +185,10 @@ fn outputs_from_their_groups_match_the_direct_outputs() {
 
     let table = av1_table(&meta, table_rows, &options).expect("the table builds");
     let report = report_rows(report_rows_read);
-    let direct_table = build_table(&scenes, meta.frame_rate, &direct_options);
+    let direct_table = build_table(&scenes, meta.frame_rate, &direct_options).expect("the table builds");
     let direct_report = frame_rows(&scenes);
 
-    assert_eq!(table, direct_table);
+    assert_eq!(table, direct_table.text);
     assert_eq!(report, direct_report);
 }
 
@@ -214,11 +214,11 @@ fn short_scenes_synthesize_like_the_direct_path() {
     let direct_options = options_for(&meta, &options);
 
     let table = av1_table(&meta, rows.clone(), &options).expect("the table builds");
-    let direct_table = build_table(&scenes, meta.frame_rate, &direct_options);
+    let direct_table = build_table(&scenes, meta.frame_rate, &direct_options).expect("the table builds");
     let report = report_rows(rows);
     let direct_report = frame_rows(&scenes);
 
-    assert_eq!(table, direct_table);
+    assert_eq!(table, direct_table.text);
     assert_eq!(report, direct_report);
 }
 
@@ -301,7 +301,7 @@ fn av1_fgs_with_chroma_from_the_file_matches_the_direct_table() {
     let (_, chroma_rows) = read_avds_groups(file, &AV1_CHROMA_TABLE_GROUPS).expect("the file reads");
 
     let table = av1_table(&meta, chroma_rows, &options).expect("the table builds");
-    let direct = build_table(&scenes, meta.frame_rate, &direct_options);
+    let direct = build_table(&scenes, meta.frame_rate, &direct_options).expect("the table builds");
 
     assert_eq!(
         AV1_CHROMA_TABLE_GROUPS,
@@ -310,7 +310,7 @@ fn av1_fgs_with_chroma_from_the_file_matches_the_direct_table() {
     let cb_points = effective_points(&table, &["sCb"]);
 
     assert!(cb_points.iter().any(|&point| point > 0.0), "{table}");
-    assert_eq!(table, direct);
+    assert_eq!(table, direct.text);
 }
 
 #[test]

@@ -6,20 +6,52 @@ use crate::nl4d::grain::consts::{
     BUCKETS_PER_GROUP,
     CELL,
     CHUNK_FRAMES,
+    FRAME_RECORD_LEN,
     FRAME_TABLE_LEN,
     HIST_LEN,
     LAG_COUNT,
+    LAG_RECORD_LEN,
     LAGS,
     LUMA_BINS,
     MAX_LAG_X,
     MAX_LAG_Y,
+    PERSISTENCE_LAGS,
     STD_BUCKETS,
     STRENGTH_GROUPS,
 };
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of};
+use crate::nl4d::grain::modes::{GrainRun, StaticGrain, grain_runs};
 use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes};
-use crate::nl4d::grain::table::{FitOptions, boundary_ticks};
+use crate::nl4d::grain::table::{FitOptions, boundary_ticks, build_table};
 use crate::nl4d::grain::template::high_pass_std;
+
+/// One frame's persistence sums, laid out as in [GrainChunk::frame_records].
+pub(super) type Record = [f64; FRAME_RECORD_LEN];
+
+/// The 1-frame and 8-frame persistence of frozen grain.
+pub(super) const FROZEN_GRAIN: (f64, f64) = (0.70, 0.52);
+/// The 1-frame and 8-frame persistence of fresh grain.
+pub(super) const FRESH_GRAIN: (f64, f64) = (0.05, 0.01);
+
+/// 1000 cells and an auto sum of 1 on every lag, `lag_one` kept on lags 1 to 7 and `lag_eight` on
+/// lag 8.
+pub(super) fn record(lag_one: f64, lag_eight: f64) -> Record {
+    let mut record = [0.0; FRAME_RECORD_LEN];
+    for lag_index in 0..PERSISTENCE_LAGS {
+        let start = lag_index * LAG_RECORD_LEN;
+        let cross_sum = if lag_index + 1 == PERSISTENCE_LAGS {
+            lag_eight
+        } else {
+            lag_one
+        };
+
+        record[start] = 1000.0;
+        record[start + 1] = 1.0;
+        record[start + 2] = cross_sum;
+    }
+
+    record
+}
 
 fn splitmix(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -246,6 +278,18 @@ pub(super) fn chunk_in_bucket(bucket: usize, blocks_per_bin: u32) -> GrainChunk 
 /// The one-frame blocks sit at `frame_codes` in the same bins, or with the source blocks when it is
 /// `None`. The record goes into the strength group of the source blocks' bucket.
 pub(super) fn chunk_at(std_codes: f32, blocks_per_bin: u32, frame_codes: Option<f32>) -> GrainChunk {
+    let record = grain_record();
+
+    chunk_with_record(std_codes, blocks_per_bin, frame_codes, &record)
+}
+
+/// A chunk as [chunk_at] builds it, with `record` as its AR record.
+pub(super) fn chunk_with_record(
+    std_codes: f32,
+    blocks_per_bin: u32,
+    frame_codes: Option<f32>,
+    record: &[f64],
+) -> GrainChunk {
     let edges = bucket_edges();
     let bucket = bucket_of(std_codes / 255.0, &edges);
     let mut chunk = chunk_in_bucket(bucket, blocks_per_bin);
@@ -256,8 +300,7 @@ pub(super) fn chunk_at(std_codes: f32, blocks_per_bin: u32, frame_codes: Option<
         set_frame_count(&mut chunk, bin * STD_BUCKETS + frame_bucket, blocks_per_bin);
     }
 
-    let record = grain_record();
-    add_group_record(&mut chunk, bucket / BUCKETS_PER_GROUP, &record);
+    add_group_record(&mut chunk, bucket / BUCKETS_PER_GROUP, record);
 
     chunk
 }
@@ -326,10 +369,25 @@ pub(super) fn entry_count(text: &str) -> usize {
     text.lines().filter(|line| line.starts_with('E')).count()
 }
 
-/// Fits the scenes with every measured part of the grain kept.
+/// The `filmgrn1` text of the scenes' table.
+pub(super) fn table_text(scenes: &[SceneGrain], frame_rate: (u64, u64), options: &FitOptions) -> String {
+    let table = build_table(scenes, frame_rate, options).expect("the table should build");
+
+    table.text
+}
+
+/// The scenes' runs with no grain frozen, one fresh run over every frame.
+pub(super) fn fresh_runs(scenes: &[SceneGrain]) -> Vec<GrainRun> {
+    let options = FitOptions::default().with_static_grain(StaticGrain::Off);
+
+    grain_runs(scenes, &options).expect("nothing is declared")
+}
+
+/// Fits the scenes with every measured part of the grain kept, all of it fresh.
 pub(super) fn fit_measured(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
     let options = FitOptions::default();
+    let runs = fresh_runs(scenes);
     let scenes: Vec<&SceneGrain> = scenes.iter().collect();
 
-    fit_scenes(&scenes, &options)
+    fit_scenes(&scenes, &options, &runs)
 }

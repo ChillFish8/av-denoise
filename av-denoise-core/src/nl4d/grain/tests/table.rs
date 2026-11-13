@@ -5,11 +5,12 @@ use super::synthetic::{
     entries_starting_at,
     entry_count,
     table_chunk,
+    table_text,
 };
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{AR_COEFFS, CHUNK_FRAMES};
 use crate::nl4d::grain::segment::{FittedEntry, PlaneEntry, SceneGrain};
-use crate::nl4d::grain::table::{FitOptions, boundary_ticks, build_table, format_table};
+use crate::nl4d::grain::table::{FitOptions, boundary_ticks, format_table};
 
 const NTSC: (u64, u64) = (24_000, 1_001);
 /// The frame count of [measured_scenes].
@@ -204,8 +205,8 @@ fn luma_tables_match_the_stored_table() {
     let default_options = FitOptions::default();
     let fine_noise_options = FitOptions::with_fine_noise(0.5);
 
-    let table = build_table(&scenes, NTSC, &default_options);
-    let fine_noise_table = build_table(&scenes, NTSC, &fine_noise_options);
+    let table = table_text(&scenes, NTSC, &default_options);
+    let fine_noise_table = table_text(&scenes, NTSC, &fine_noise_options);
     let head = entries_starting_at(&table, &PINNED_FRAMES, NTSC);
     let fine_noise_head = entries_starting_at(&fine_noise_table, &PINNED_FRAMES, NTSC);
 
@@ -220,7 +221,7 @@ fn chroma_on_entries_carry_both_planes() {
     let scenes = measured_scenes();
     let options = chroma_options();
 
-    let table = build_table(&scenes, NTSC, &options);
+    let table = table_text(&scenes, NTSC, &options);
     let entries = entry_lines(&table);
 
     assert_eq!(entries.len(), MEASURED_FRAMES);
@@ -249,8 +250,8 @@ fn chroma_entries_follow_luma_segments() {
     let off_options = FitOptions::default();
     let on_options = chroma_options();
 
-    let off_table = build_table(&scenes, NTSC, &off_options);
-    let on_table = build_table(&scenes, NTSC, &on_options);
+    let off_table = table_text(&scenes, NTSC, &off_options);
+    let on_table = table_text(&scenes, NTSC, &on_options);
 
     assert_eq!(entry_lines(&on_table), entry_lines(&off_table));
 }
@@ -264,8 +265,8 @@ fn a_scene_without_any_chroma_data_zeros_both_planes() {
 
     let on_options = chroma_options();
     let off_options = FitOptions::default();
-    let on_table = build_table(&scenes, NTSC, &on_options);
-    let off_table = build_table(&scenes, NTSC, &off_options);
+    let on_table = table_text(&scenes, NTSC, &on_options);
+    let off_table = table_text(&scenes, NTSC, &off_options);
 
     for prefix in ["sCb ", "sCr "] {
         let lines = lines_named(&on_table, prefix);
@@ -373,7 +374,7 @@ fn a_gap_between_entries_is_left_empty() {
 #[test]
 fn no_entries_writes_header_only() {
     let options = FitOptions::default();
-    let text = build_table(&[], NTSC, &options);
+    let text = table_text(&[], NTSC, &options);
 
     assert_eq!(text, "filmgrn1\n");
 }
@@ -405,7 +406,7 @@ fn scenes_are_sorted_before_fitting() {
     let scenes = vec![later, earlier];
     let options = FitOptions::default();
 
-    let text = build_table(&scenes, NTSC, &options);
+    let text = table_text(&scenes, NTSC, &options);
     let starts = entry_lines(&text);
 
     assert_eq!(starts.len(), 2 * CHUNK_FRAMES as usize);
@@ -419,8 +420,8 @@ fn the_strength_dial_halves_every_scaling_point() {
     let full_options = chroma_options();
     let half_options = chroma_options().with_strength(0.5);
 
-    let full = build_table(&scenes, NTSC, &full_options);
-    let half = build_table(&scenes, NTSC, &half_options);
+    let full = table_text(&scenes, NTSC, &full_options);
+    let half = table_text(&scenes, NTSC, &half_options);
     let full_shifts = scaling_shifts(&full);
     let half_shifts = scaling_shifts(&half);
 
@@ -458,8 +459,8 @@ fn strength_zero_writes_zero_scaling_values() {
     let full_options = chroma_options();
     let zero_options = chroma_options().with_strength(0.0);
 
-    let full = build_table(&scenes, NTSC, &full_options);
-    let zero = build_table(&scenes, NTSC, &zero_options);
+    let full = table_text(&scenes, NTSC, &full_options);
+    let zero = table_text(&scenes, NTSC, &zero_options);
 
     for prefix in ["sY ", "sCb ", "sCr "] {
         let full_planes = table_points(&full, prefix);
@@ -482,8 +483,8 @@ fn a_strong_dial_lowers_the_shared_scaling_shift() {
     let full_options = chroma_options();
     let strong_options = chroma_options().with_strength(4.0);
 
-    let full = build_table(&scenes, NTSC, &full_options);
-    let strong = build_table(&scenes, NTSC, &strong_options);
+    let full = table_text(&scenes, NTSC, &full_options);
+    let strong = table_text(&scenes, NTSC, &strong_options);
     let full_shifts = scaling_shifts(&full);
     let strong_shifts = scaling_shifts(&strong);
 
@@ -517,7 +518,7 @@ fn build_table_clamps_the_strength() {
     let build = |strength: f64| {
         let options = chroma_options().with_strength(strength);
 
-        build_table(&scenes, NTSC, &options)
+        table_text(&scenes, NTSC, &options)
     };
 
     assert_eq!(build(f64::NAN), build(1.0));
@@ -529,11 +530,11 @@ fn build_table_clamps_the_strength() {
 fn build_table_reads_a_bit_depth_past_1_to_16_as_no_rounding() {
     let scenes = measured_scenes();
     let unrounded_options = chroma_options();
-    let unrounded = build_table(&scenes, NTSC, &unrounded_options);
+    let unrounded = table_text(&scenes, NTSC, &unrounded_options);
     let build = |bit_depth: u32| {
         let options = chroma_options().with_bit_depth(bit_depth);
 
-        build_table(&scenes, NTSC, &options)
+        table_text(&scenes, NTSC, &options)
     };
 
     assert_eq!(build(0), unrounded);

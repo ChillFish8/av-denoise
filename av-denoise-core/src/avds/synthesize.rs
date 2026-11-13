@@ -101,9 +101,9 @@ pub fn av1_table(
 
     let scenes = scenes_from_rows(rows);
     let depth_options = options.clone().with_bit_depth(meta.bit_depth);
-    let table = build_table(&scenes, meta.frame_rate, &depth_options);
+    let table = build_table(&scenes, meta.frame_rate, &depth_options)?;
 
-    Ok(table)
+    Ok(table.text)
 }
 
 /// The per-frame grain report the rows describe.

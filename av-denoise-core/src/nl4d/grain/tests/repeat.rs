@@ -1,5 +1,5 @@
 use crate::nl4d::grain::consts::AR_COEFFS;
-use crate::nl4d::grain::repeat::{block_offsets, calmest_seed, fft, repeat_score};
+use crate::nl4d::grain::repeat::{SeedScores, block_offsets, fft, kept_lags, repeat_score};
 use crate::nl4d::grain::seeds::FGSE_SEEDS;
 
 const NINETY_ONE_DAYS: [i32; AR_COEFFS] = [
@@ -62,8 +62,9 @@ fn fft_then_inverse_returns_the_input() {
 
 #[test]
 fn a_repeating_seed_scores_above_a_calm_one() {
-    let calm = repeat_score(&NINETY_ONE_DAYS, 8, 24239);
-    let repeating = repeat_score(&NINETY_ONE_DAYS, 8, 14889);
+    let kept = kept_lags();
+    let calm = repeat_score(&NINETY_ONE_DAYS, 8, 24239, &kept);
+    let repeating = repeat_score(&NINETY_ONE_DAYS, 8, 14889, &kept);
 
     assert!((calm - 0.0741).abs() < 0.005, "got {calm}");
     assert!((repeating - 0.229).abs() < 0.01, "got {repeating}");
@@ -71,21 +72,31 @@ fn a_repeating_seed_scores_above_a_calm_one() {
 
 #[test]
 fn the_calmest_seed_is_a_listed_seed_with_a_low_score() {
-    let seed = calmest_seed(&NINETY_ONE_DAYS, 8, &[]).expect("the list is not exhausted");
+    let mut scores = SeedScores::new();
+
+    let seed = scores
+        .calmest(&NINETY_ONE_DAYS, 8, &[])
+        .expect("the list is not exhausted");
 
     assert!([64774, 60537].contains(&seed), "got {seed}");
 }
 
 #[test]
 fn taken_seeds_are_skipped() {
-    let first = calmest_seed(&NINETY_ONE_DAYS, 8, &[]).expect("a seed");
-    let second = calmest_seed(&NINETY_ONE_DAYS, 8, &[first]).expect("a seed");
+    let mut scores = SeedScores::new();
+
+    let first = scores.calmest(&NINETY_ONE_DAYS, 8, &[]).expect("a seed");
+    let second = scores.calmest(&NINETY_ONE_DAYS, 8, &[first]).expect("a seed");
+    let again = scores.calmest(&NINETY_ONE_DAYS, 8, &[]).expect("a seed");
 
     assert_ne!(first, second);
+    assert_eq!(first, again);
     assert!(FGSE_SEEDS.contains(&second));
 }
 
 #[test]
 fn an_exhausted_list_gives_no_seed() {
-    assert_eq!(calmest_seed(&NINETY_ONE_DAYS, 8, &FGSE_SEEDS), None);
+    let mut scores = SeedScores::new();
+
+    assert_eq!(scores.calmest(&NINETY_ONE_DAYS, 8, &FGSE_SEEDS), None);
 }

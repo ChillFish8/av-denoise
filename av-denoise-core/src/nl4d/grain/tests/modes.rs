@@ -1,5 +1,6 @@
 use std::ops::RangeInclusive;
 
+use super::synthetic::{FRESH_GRAIN, FROZEN_GRAIN, Record, record};
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{CHUNK_FRAMES, FRAME_RECORD_LEN, LAG_RECORD_LEN, PERSISTENCE_LAGS};
 use crate::nl4d::grain::modes::GrainMode::{Fresh, Frozen};
@@ -14,11 +15,6 @@ use crate::nl4d::grain::modes::{
 use crate::nl4d::grain::report::frame_rows;
 use crate::nl4d::grain::segment::SceneGrain;
 use crate::nl4d::grain::table::FitOptions;
-
-type Record = [f64; FRAME_RECORD_LEN];
-
-const FROZEN_GRAIN: (f64, f64) = (0.70, 0.52);
-const FRESH_GRAIN: (f64, f64) = (0.05, 0.01);
 
 /// A declaration of the one range `start..=end`.
 fn declared(start: u64, end: u64) -> Vec<RangeInclusive<u64>> {
@@ -35,26 +31,6 @@ fn marks(parts: &[(bool, usize)]) -> Vec<bool> {
     }
 
     marked
-}
-
-/// 1000 cells and an auto sum of 1 on every lag, `lag_one` kept on lags 1 to 7 and `lag_eight` on
-/// lag 8.
-fn record(lag_one: f64, lag_eight: f64) -> Record {
-    let mut record = [0.0; FRAME_RECORD_LEN];
-    for lag_index in 0..PERSISTENCE_LAGS {
-        let start = lag_index * LAG_RECORD_LEN;
-        let cross_sum = if lag_index + 1 == PERSISTENCE_LAGS {
-            lag_eight
-        } else {
-            lag_one
-        };
-
-        record[start] = 1000.0;
-        record[start + 1] = 1.0;
-        record[start + 2] = cross_sum;
-    }
-
-    record
 }
 
 fn unreadable() -> Record {

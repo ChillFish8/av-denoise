@@ -57,7 +57,9 @@ struct Span {
 
 /// The runs of fresh and frozen frames over every frame of every scene, in frame order.
 ///
-/// Declared frames and scenes are frozen on top of what `options.static_grain` chooses.
+/// Frames are counted from each chunk's frame count, so frames without persistence readings are
+/// covered too and declared ranges are checked against them. Declared frames and scenes are frozen
+/// on top of what `options.static_grain` chooses.
 pub(crate) fn grain_runs(
     scenes: &[SceneGrain],
     options: &FitOptions,

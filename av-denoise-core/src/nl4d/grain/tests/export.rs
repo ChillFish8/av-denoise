@@ -5,7 +5,14 @@ use cubecl::server::Handle;
 
 use super::mirror::{StillStream, mirror_still_chunks};
 use super::snapshot::{ColourRun, HEIGHT as COLOUR_RUN_HEIGHT, WIDTH as COLOUR_RUN_WIDTH};
-use super::synthetic::{ar_field, entries_starting_at, entry_count, gaussian_field, left_weights};
+use super::synthetic::{
+    ar_field,
+    entries_starting_at,
+    entry_count,
+    gaussian_field,
+    left_weights,
+    table_text,
+};
 use crate::bench_api::HostIo;
 use crate::engine::align::StorageAlign;
 use crate::motion::{LumaMotionRing, MotionCtx, RingRole, SharedMotion, Subsampling};
@@ -26,7 +33,7 @@ use crate::nl4d::grain::consts::{
 };
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of, hist_median};
 use crate::nl4d::grain::segment::SceneGrain;
-use crate::nl4d::grain::{FitOptions, GrainExport, GrainGeometry, GrainParts, MeasuredPlanes, build_table};
+use crate::nl4d::grain::{FitOptions, GrainExport, GrainGeometry, GrainParts, MeasuredPlanes};
 use crate::nl4d::snapshot::LastFields;
 use crate::nl4d::{Nl4dDenoiser, Nl4dOptions, Nl4dParams};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
@@ -850,7 +857,7 @@ fn a_table_from_frame_tables_matches_the_chunk_table() {
     };
 
     let options = FitOptions::default();
-    let table = build_table(&[scene], FRAME_RATE, &options);
+    let table = table_text(&[scene], FRAME_RATE, &options);
     let head = entries_starting_at(&table, &[0, 25], FRAME_RATE);
 
     assert_eq!(entry_count(&table), TABLE_FRAMES as usize);

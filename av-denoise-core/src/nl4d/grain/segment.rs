@@ -1,6 +1,14 @@
 use std::ops::Range;
 
-use super::chroma::{ChromaFit, ChromaParts, ChromaScaling, chroma_parts, chroma_scaling};
+use super::chroma::{
+    ChromaFit,
+    ChromaParts,
+    ChromaScaling,
+    ChromaTexture,
+    chroma_parts,
+    chroma_scaling,
+    chroma_texture_of,
+};
 use super::chunk::{GrainChunk, TableSums};
 use super::consts::{
     AR_COEFFS,
@@ -33,6 +41,8 @@ use super::fit::{
     undo_mean_removal,
     yule_walker,
 };
+use super::modes::{GrainMode, GrainRun};
+use super::repeat::SeedScores;
 use super::seeds::{SeedSigmas, fresh_seed};
 use super::table::FitOptions;
 use super::template::{ChromaPlane, CurveCache, TemplatePlane};
@@ -114,10 +124,29 @@ struct Parts {
     first_frame: u64,
     last_frame: u64,
     scene: usize,
+    /// The segment's summed luma table statistics.
+    table: TableSums,
     strength: Option<Vec<BinStrength>>,
     texture: Option<Texture>,
     /// The Cb and then the Cr plane's own measurements, all missing when chroma is off.
     chroma: [ChromaParts; CHROMA_PLANES],
+}
+
+/// A frozen run's textures, pooled over every segment with a frame in the run.
+///
+/// A plane is `None` only when no segment has a texture for it.
+struct RunTexture {
+    luma: Option<Texture>,
+    /// The Cb and then the Cr plane's pooled texture.
+    chroma: [Option<ChromaTexture>; CHROMA_PLANES],
+}
+
+/// The frames of one part that lie in one run.
+struct Piece {
+    first_frame: u64,
+    last_frame: u64,
+    /// The position of the frozen run the piece lies in, `None` for fresh frames.
+    frozen_run: Option<usize>,
 }
 
 /// The table's rounded weights and the solved weights behind them.
@@ -312,30 +341,81 @@ fn reduced_weights(corrected: &[f64], measured: TableWeights) -> TableWeights {
 ///
 /// Every plane reads its strength from one frame's grain through a high-pass curve rounded at
 /// [FitOptions::bit_depth]. With chroma on, each chroma plane borrows its texture and target the
-/// same way. An entry gets chroma only when both planes have both. Every fitted frame gets its own
-/// entry and seed.
-pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<FittedEntry> {
+/// same way. An entry gets chroma only when both planes have both.
+///
+/// Each segment is cut at the edges of `runs`, which cover every frame of every scene's chunks. A
+/// fresh frame gets its own entry and seed. A frozen run holds one seed and one texture per plane,
+/// with one entry per segment.
+pub(crate) fn fit_scenes(
+    scenes: &[&SceneGrain],
+    options: &FitOptions,
+    runs: &[GrainRun],
+) -> Vec<FittedEntry> {
     let mut sigmas = SeedSigmas::new();
 
-    fit_scenes_with(scenes, options, &mut sigmas)
+    fit_scenes_with(scenes, options, runs, &mut sigmas)
 }
 
 /// Fits as [fit_scenes] does, reading each seed's template strength through `sigmas`.
 pub(crate) fn fit_scenes_with(
     scenes: &[&SceneGrain],
     options: &FitOptions,
+    runs: &[GrainRun],
     sigmas: &mut SeedSigmas,
 ) -> Vec<FittedEntry> {
     let edges = bucket_edges();
     let rounding = options.bit_depth.map(code_step);
     let mut curves = CurveCache::new(rounding);
+    let parts = parts_of(scenes, options, &edges);
+    let run_textures = run_textures(&parts, runs, options, &edges);
+
+    let mut scores = SeedScores::new();
+    let mut run_seeds = vec![None; runs.len()];
+    let mut taken = Vec::new();
+    let mut entries = Vec::new();
+    for index in 0..parts.len() {
+        let Some(strength) = borrow(&parts, index, |part| part.strength.clone()) else {
+            continue;
+        };
+
+        let part = &parts[index];
+        let pieces = pieces_of(part.first_frame, part.last_frame, runs);
+        for piece in pieces {
+            let run_texture = piece.frozen_run.and_then(|run| run_textures[run].as_ref());
+            let plan = piece_plan(&parts, index, &strength, run_texture, options, &mut curves);
+            let Some(plan) = plan else {
+                continue;
+            };
+
+            match piece.frozen_run {
+                Some(run) => {
+                    let seed = run_seed(&mut run_seeds[run], &plan, &mut taken, &mut scores);
+                    let entry = seeded_entry(&plan, piece.first_frame, piece.last_frame, seed, sigmas);
+                    entries.push(entry);
+                },
+                None => {
+                    for frame in piece.first_frame..=piece.last_frame {
+                        let seed = fresh_seed(frame);
+                        let entry = seeded_entry(&plan, frame, frame, seed, sigmas);
+                        entries.push(entry);
+                    }
+                },
+            }
+        }
+    }
+
+    entries
+}
+
+/// Every scene's segments with their own measurements, in frame order.
+fn parts_of(scenes: &[&SceneGrain], options: &FitOptions, edges: &[f32]) -> Vec<Parts> {
     let mut parts = Vec::new();
     for (scene_index, scene) in scenes.iter().enumerate() {
         for segment in segment_scene(scene) {
-            let strength = strength_of(&segment.table, &edges);
-            let texture = texture_of(&segment.table, &edges, options.fine_noise);
+            let strength = strength_of(&segment.table, edges);
+            let texture = texture_of(&segment.table, edges, options.fine_noise);
             let chroma = if options.chroma {
-                segment_chroma(scene, &segment, &edges)
+                segment_chroma(scene, &segment, edges)
             } else {
                 Default::default()
             };
@@ -344,6 +424,7 @@ pub(crate) fn fit_scenes_with(
                 first_frame: segment.first_frame,
                 last_frame: segment.last_frame,
                 scene: scene_index,
+                table: segment.table,
                 strength,
                 texture,
                 chroma,
@@ -351,30 +432,158 @@ pub(crate) fn fit_scenes_with(
         }
     }
 
-    let mut entries = Vec::new();
-    for index in 0..parts.len() {
-        let strength = borrow(&parts, index, |part| part.strength.clone());
-        let texture = borrow(&parts, index, |part| part.texture);
-        let (Some(strength), Some(texture)) = (strength, texture) else {
-            continue;
-        };
+    parts
+}
 
-        let chroma = if options.chroma {
-            borrowed_chroma(&parts, index)
-        } else {
-            None
-        };
+/// Each run's pooled textures, `None` for fresh runs.
+fn run_textures(
+    parts: &[Parts],
+    runs: &[GrainRun],
+    options: &FitOptions,
+    edges: &[f32],
+) -> Vec<Option<RunTexture>> {
+    runs.iter()
+        .map(|run| {
+            let frozen = run.mode == GrainMode::Frozen;
+            frozen.then(|| run_texture(parts, run, options, edges))
+        })
+        .collect()
+}
 
-        let plan = entry_plan(&strength, texture, chroma, options.strength, &mut curves);
-        let part = &parts[index];
-        for frame in part.first_frame..=part.last_frame {
-            let seed = fresh_seed(frame);
-            let entry = seeded_entry(&plan, frame, frame, seed, sigmas);
-            entries.push(entry);
+/// The textures of every frame in `run`, solved from the summed tables of every part with a frame
+/// in it.
+///
+/// A plane whose pooled solve gives nothing borrows once for the whole run, as the run's first part
+/// would. It is `None` only when no part has a texture to give.
+fn run_texture(parts: &[Parts], run: &GrainRun, options: &FitOptions, edges: &[f32]) -> RunTexture {
+    let in_run = |part: &Parts| part.first_frame <= run.last_frame && part.last_frame >= run.first_frame;
+    let mut luma = TableSums::zeroed();
+    let mut chroma = [TableSums::zeroed(), TableSums::zeroed()];
+    let covered = parts.iter().filter(|part| in_run(part));
+    for part in covered {
+        luma.add(&part.table);
+        for (sums, plane) in chroma.iter_mut().zip(&part.chroma) {
+            sums.add(&plane.table);
         }
     }
 
-    entries
+    let first_part = parts.iter().position(in_run);
+    let pooled_luma = texture_of(&luma, edges, options.fine_noise);
+    let luma_texture = match (pooled_luma, first_part) {
+        (Some(pooled), _) => Some(pooled),
+        (None, Some(first)) => borrow(parts, first, |part| part.texture),
+        (None, None) => None,
+    };
+
+    let [cb_sums, cr_sums] = &chroma;
+    let cb = run_plane_texture(parts, first_part, ChromaPlane::Cb, cb_sums, edges);
+    let cr = run_plane_texture(parts, first_part, ChromaPlane::Cr, cr_sums, edges);
+
+    RunTexture {
+        luma: luma_texture,
+        chroma: [cb, cr],
+    }
+}
+
+/// One chroma plane's texture for a run, pooled from `sums` or borrowed as the run's first part
+/// would.
+fn run_plane_texture(
+    parts: &[Parts],
+    first_part: Option<usize>,
+    plane: ChromaPlane,
+    sums: &TableSums,
+    edges: &[f32],
+) -> Option<ChromaTexture> {
+    let slot = plane.index();
+    let pooled = chroma_texture_of(sums, edges);
+
+    match (pooled, first_part) {
+        (Some(pooled), _) => Some(pooled),
+        (None, Some(first)) => borrow(parts, first, |part| part.chroma[slot].texture),
+        (None, None) => None,
+    }
+}
+
+/// The frames `first_frame..=last_frame` cut at every run edge, in frame order.
+fn pieces_of(first_frame: u64, last_frame: u64, runs: &[GrainRun]) -> Vec<Piece> {
+    let overlapping = runs
+        .iter()
+        .enumerate()
+        .filter(|(_, run)| run.first_frame <= last_frame && run.last_frame >= first_frame);
+
+    let mut pieces = Vec::new();
+    for (run_index, run) in overlapping {
+        let frozen = run.mode == GrainMode::Frozen;
+        pieces.push(Piece {
+            first_frame: run.first_frame.max(first_frame),
+            last_frame: run.last_frame.min(last_frame),
+            frozen_run: frozen.then_some(run_index),
+        });
+    }
+
+    let covered: u64 = pieces
+        .iter()
+        .map(|piece| piece.last_frame - piece.first_frame + 1)
+        .sum();
+    debug_assert_eq!(
+        covered,
+        last_frame - first_frame + 1,
+        "the runs cover every frame"
+    );
+
+    pieces
+}
+
+/// The plan of one piece of part `index`, `None` when no texture can be found.
+///
+/// A frozen piece takes its run's textures in place of the part's own or borrowed ones.
+fn piece_plan(
+    parts: &[Parts],
+    index: usize,
+    strength: &[BinStrength],
+    run_texture: Option<&RunTexture>,
+    options: &FitOptions,
+    curves: &mut CurveCache,
+) -> Option<EntryPlan> {
+    let pooled_luma = run_texture.and_then(|pooled| pooled.luma);
+    let texture = match pooled_luma {
+        Some(pooled) => pooled,
+        None => borrow(parts, index, |part| part.texture)?,
+    };
+
+    let chroma = if options.chroma {
+        let pooled_chroma = run_texture.map(|pooled| pooled.chroma);
+        borrowed_chroma(parts, index, pooled_chroma)
+    } else {
+        None
+    };
+
+    let plan = entry_plan(strength, texture, chroma, options.strength, curves);
+
+    Some(plan)
+}
+
+/// The seed a frozen run holds, picked on its first entry.
+///
+/// The run takes the calmest seed for the plan's weights that no earlier run holds. Once every
+/// listed seed is held, it takes the calmest of all of them.
+fn run_seed(held: &mut Option<u16>, plan: &EntryPlan, taken: &mut Vec<u16>, scores: &mut SeedScores) -> u16 {
+    if let Some(seed) = *held {
+        return seed;
+    }
+
+    let untaken = scores.calmest(&plan.ar_coeffs, plan.ar_shift, taken);
+    let seed = match untaken {
+        Some(seed) => seed,
+        None => scores
+            .calmest(&plan.ar_coeffs, plan.ar_shift, &[])
+            .expect("the seed list has seeds"),
+    };
+
+    taken.push(seed);
+    *held = Some(seed);
+
+    seed
 }
 
 /// The chroma measurements of the scene's chroma chunks the segment covers.
@@ -388,16 +597,31 @@ fn segment_chroma(scene: &SceneGrain, segment: &Segment, edges: &[f32]) -> [Chro
 }
 
 /// Both chroma planes' texture and target, each borrowed on its own, `None` when any is missing.
-fn borrowed_chroma(parts: &[Parts], index: usize) -> Option<[ChromaFit; CHROMA_PLANES]> {
-    let cb = borrowed_plane(parts, index, ChromaPlane::Cb)?;
-    let cr = borrowed_plane(parts, index, ChromaPlane::Cr)?;
+///
+/// A plane with a `pooled` texture takes it in place of its own or borrowed one.
+fn borrowed_chroma(
+    parts: &[Parts],
+    index: usize,
+    pooled: Option<[Option<ChromaTexture>; CHROMA_PLANES]>,
+) -> Option<[ChromaFit; CHROMA_PLANES]> {
+    let [pooled_cb, pooled_cr] = pooled.unwrap_or_default();
+    let cb = borrowed_plane(parts, index, ChromaPlane::Cb, pooled_cb)?;
+    let cr = borrowed_plane(parts, index, ChromaPlane::Cr, pooled_cr)?;
 
     Some([cb, cr])
 }
 
-fn borrowed_plane(parts: &[Parts], index: usize, plane: ChromaPlane) -> Option<ChromaFit> {
+fn borrowed_plane(
+    parts: &[Parts],
+    index: usize,
+    plane: ChromaPlane,
+    pooled: Option<ChromaTexture>,
+) -> Option<ChromaFit> {
     let slot = plane.index();
-    let texture = borrow(parts, index, |part| part.chroma[slot].texture)?;
+    let texture = match pooled {
+        Some(texture) => texture,
+        None => borrow(parts, index, |part| part.chroma[slot].texture)?,
+    };
     let target = borrow(parts, index, |part| part.chroma[slot].target.clone())?;
 
     Some(ChromaFit { texture, target })

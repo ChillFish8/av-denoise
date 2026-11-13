@@ -30,6 +30,7 @@ pub use av_denoise_core::{
     GrainChunks,
     GrainMode,
     GrainRun,
+    GrainTable,
     HqParams,
     KERNEL_HASH,
     MotionCompensationMode,

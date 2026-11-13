@@ -94,11 +94,11 @@ fn run(config: &ParityConfig, entries: &mut Entries) {
             chroma_chunks: grain.chroma,
         };
         let options = FitOptions::default();
-        let table = build_table(&[scene], (24, 1), &options);
+        let table = build_table(&[scene], (24, 1), &options).expect("the grain table builds");
         let config_name = config.name.to_string();
         let label = "grain".to_string();
         let key = (config_name, label);
-        let table_bytes = table.as_bytes();
+        let table_bytes = table.text.as_bytes();
         let hash = fixture::hash(table_bytes);
         let value = format!("{hash:016x}");
         entries.insert(key, value);

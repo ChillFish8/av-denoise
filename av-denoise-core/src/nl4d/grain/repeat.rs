@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use crate::nl4d::grain::consts::AR_COEFFS;
@@ -119,7 +120,7 @@ fn wrapped_offset(index: usize) -> i64 {
 }
 
 /// The autocorrelation indices that lie far enough from zero lag to count as a repeat.
-fn kept_lags() -> Vec<usize> {
+pub(crate) fn kept_lags() -> Vec<usize> {
     let mut kept = Vec::new();
     for row in 0..FIELD_SIZE {
         let dy = wrapped_offset(row);
@@ -154,7 +155,11 @@ fn build_field(template: &[i32], seed: u16) -> Vec<f64> {
     field
 }
 
-fn score_with_lags(coeffs: &[i32; AR_COEFFS], ar_shift: u32, seed: u16, kept: &[usize]) -> f64 {
+/// How strongly a frame of grain built from one seed repeats itself.
+///
+/// A frame is made of 32x32 blocks cut from the seed's template. This is the largest
+/// autocorrelation at the `kept` lags plus twice their 99.9th percentile. Lower is calmer.
+pub(crate) fn repeat_score(coeffs: &[i32; AR_COEFFS], ar_shift: u32, seed: u16, kept: &[usize]) -> f64 {
     let template = luma_template(coeffs, ar_shift, seed);
     let mut real = build_field(&template, seed);
     let mean = real.iter().sum::<f64>() / real.len() as f64;
@@ -180,30 +185,58 @@ fn score_with_lags(coeffs: &[i32; AR_COEFFS], ar_shift: u32, seed: u16, kept: &[
     largest + 2.0 * values[tail_index]
 }
 
-/// How strongly a frame of grain built from one seed repeats itself.
-///
-/// A frame is made of 32x32 blocks cut from the seed's template. This is the largest
-/// autocorrelation far from zero lag plus twice its 99.9th percentile. Lower is calmer.
-pub(crate) fn repeat_score(coeffs: &[i32; AR_COEFFS], ar_shift: u32, seed: u16) -> f64 {
-    let kept = kept_lags();
+/// Quantised AR weights and their shift.
+type Weights = ([i32; AR_COEFFS], u32);
 
-    score_with_lags(coeffs, ar_shift, seed, &kept)
+/// A cache of every listed seed's repeat score, kept per set of AR weights.
+#[derive(Debug, Default)]
+pub(crate) struct SeedScores {
+    /// Each listed seed's score, in list order.
+    scores: HashMap<Weights, Vec<f64>>,
 }
 
-/// The listed seed with the lowest repeat score that is not in `taken`.
-///
-/// The earlier seed in the list wins a tie.
-pub(crate) fn calmest_seed(coeffs: &[i32; AR_COEFFS], ar_shift: u32, taken: &[u16]) -> Option<u16> {
-    let kept = kept_lags();
-
-    let mut best: Option<(f64, u16)> = None;
-    let candidates = FGSE_SEEDS.iter().filter(|seed| !taken.contains(seed));
-    for &seed in candidates {
-        let score = score_with_lags(coeffs, ar_shift, seed, &kept);
-        if best.is_none_or(|(best_score, _)| score < best_score) {
-            best = Some((score, seed));
-        }
+impl SeedScores {
+    pub(crate) fn new() -> Self {
+        Self::default()
     }
 
-    best.map(|(_, seed)| seed)
+    /// The listed seed with the lowest repeat score that is not in `taken`.
+    ///
+    /// The earlier seed in the list wins a tie. Every seed is scored the first time a set of
+    /// weights is asked for.
+    pub(crate) fn calmest(&mut self, coeffs: &[i32; AR_COEFFS], ar_shift: u32, taken: &[u16]) -> Option<u16> {
+        let all_taken = FGSE_SEEDS.iter().all(|seed| taken.contains(seed));
+        if all_taken {
+            return None;
+        }
+
+        let key = (*coeffs, ar_shift);
+        let scores = self
+            .scores
+            .entry(key)
+            .or_insert_with(|| list_scores(coeffs, ar_shift));
+
+        let mut best: Option<(f64, u16)> = None;
+        let candidates = FGSE_SEEDS
+            .iter()
+            .zip(scores.iter())
+            .filter(|(seed, _)| !taken.contains(seed));
+        for (&seed, &score) in candidates {
+            if best.is_none_or(|(best_score, _)| score < best_score) {
+                best = Some((score, seed));
+            }
+        }
+
+        best.map(|(_, seed)| seed)
+    }
+}
+
+/// The repeat score of every listed seed, in list order.
+fn list_scores(coeffs: &[i32; AR_COEFFS], ar_shift: u32) -> Vec<f64> {
+    let kept = kept_lags();
+
+    FGSE_SEEDS
+        .iter()
+        .map(|&seed| repeat_score(coeffs, ar_shift, seed, &kept))
+        .collect()
 }

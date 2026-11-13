@@ -8,6 +8,7 @@ use super::synthetic::{
     chunk_in_bucket,
     clear_pixels,
     fit_measured,
+    fresh_runs,
     gaussian_field,
     grain_record,
     keep_frame_bins,
@@ -44,9 +45,10 @@ const EDGE_BUCKET: usize = 37;
 /// Fits the scenes with chroma on and every measured part of the grain kept.
 fn fit_with_chroma(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
     let options = chroma_options();
+    let runs = fresh_runs(scenes);
     let scenes: Vec<&SceneGrain> = scenes.iter().collect();
 
-    fit_scenes(&scenes, &options)
+    fit_scenes(&scenes, &options, &runs)
 }
 
 /// Fits one chunk as its own scene, with its curves rounded at `bit_depth`, and gives its first
@@ -58,7 +60,8 @@ fn fit_chunk(chunk: GrainChunk, bit_depth: Option<u32>) -> FittedEntry {
         None => FitOptions::default(),
     };
 
-    let mut entries = fit_scenes(&[&scene], &options);
+    let runs = fresh_runs(std::slice::from_ref(&scene));
+    let mut entries = fit_scenes(&[&scene], &options, &runs);
     assert_eq!(entries.len(), CHUNK_FRAMES as usize);
 
     entries.remove(0)

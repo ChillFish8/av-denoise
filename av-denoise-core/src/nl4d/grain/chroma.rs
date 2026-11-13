@@ -23,6 +23,8 @@ pub(crate) struct ChromaTexture {
 /// A segment's own measurements of one chroma plane, either of which may be missing.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ChromaParts {
+    /// The plane's summed table statistics.
+    pub table: TableSums,
     pub texture: Option<ChromaTexture>,
     /// The grain's median one-frame high-pass std at up to [MAX_CHROMA_POINTS] lumas, in
     /// normalised units.
@@ -69,7 +71,11 @@ fn plane_parts(chunks: &[GrainChunk], plane: ChromaPlane, edges: &[f32]) -> Chro
     let strength = strength_of(&stats, edges);
     let target = strength.map(|bins| thinned_targets(&bins));
 
-    ChromaParts { texture, target }
+    ChromaParts {
+        table: stats,
+        texture,
+        target,
+    }
 }
 
 /// The `(luma, median)` targets of a plane's bins, thinned to [MAX_CHROMA_POINTS].

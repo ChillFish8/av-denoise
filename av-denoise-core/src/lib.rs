@@ -50,6 +50,7 @@ pub use self::nl4d::grain::{
     GrainChunks,
     GrainMode,
     GrainRun,
+    GrainTable,
     MAX_STRENGTH,
     SceneGrain,
     StaticGrain,
