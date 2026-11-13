@@ -6,6 +6,8 @@ mod fit;
 mod gaussian;
 mod persistence;
 mod report;
+#[cfg_attr(not(test), expect(dead_code, reason = "only tests read the seed list"))]
+mod seeds;
 mod segment;
 pub(crate) mod snapshot;
 mod table;

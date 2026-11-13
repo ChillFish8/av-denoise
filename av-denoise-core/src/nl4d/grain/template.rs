@@ -190,6 +190,19 @@ pub(crate) fn template_sigma(coeffs: &[i32; AR_COEFFS], ar_shift: u32, plane: Te
     population_std(&samples)
 }
 
+/// The grain std of the one template these weights and `seed` make on `plane`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only tests read a single seed's strength")
+)]
+pub(crate) fn seed_sigma(coeffs: &[i32; AR_COEFFS], ar_shift: u32, plane: TemplatePlane, seed: u16) -> f64 {
+    let layout = plane.layout();
+    let template = plane.template(coeffs, ar_shift, seed);
+    let interior = interior_of(&template, layout);
+
+    population_std(&interior)
+}
+
 /// Field stds and the median one-frame high-pass std that template grain reads at each.
 #[derive(Debug, Clone)]
 pub(crate) struct HighPassCurve {

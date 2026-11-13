@@ -6,6 +6,7 @@ mod kernels;
 mod mirror;
 mod persistence;
 mod report;
+mod seeds;
 mod segment;
 mod snapshot;
 mod synthetic;
