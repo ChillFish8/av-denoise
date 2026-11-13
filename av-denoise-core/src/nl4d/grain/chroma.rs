@@ -9,8 +9,9 @@ use super::fit::{
     undo_mean_removal,
     yule_walker,
 };
+use super::seeds::SeedSigmas;
 use super::segment::{BinStrength, PlaneEntry, bin_luma, pooled_record, strength_of};
-use super::template::{ChromaPlane, CurveCache, TemplatePlane, template_sigma};
+use super::template::{ChromaPlane, CurveCache, TemplatePlane};
 
 /// A chroma plane's fitted texture.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,11 +39,11 @@ pub(crate) struct ChromaFit {
 
 /// A chroma plane's weights and whole-field strength targets at an entry's AR shift.
 pub(crate) struct ChromaScaling {
+    plane: ChromaPlane,
     coeffs: [i32; AR_COEFFS],
+    ar_shift: u32,
     /// The whole-field grain std at each luma, in normalised units.
     targets: Vec<(u8, f64)>,
-    /// The template std of the plane's weights, in 8-bit units.
-    sigma_template: f64,
 }
 
 /// Each chroma plane's own measurements over `chunks`, Cb then Cr.
@@ -84,8 +85,7 @@ fn thinned_targets(bins: &[BinStrength]) -> Vec<(u8, f64)> {
         .collect()
 }
 
-/// The plane's weights rounded at `ar_shift`, its template std and its whole-field targets, times
-/// `dial`.
+/// The plane's weights rounded at `ar_shift` and its whole-field targets, times `dial`.
 ///
 /// Each target is the field std whose grain reads the target's high-pass median on the plane's
 /// template, with the weights rounded at their finest AR shift.
@@ -98,7 +98,6 @@ pub(crate) fn chroma_scaling(
 ) -> ChromaScaling {
     let template_plane = TemplatePlane::Chroma(plane);
     let coeffs = quantise_at(&fit.texture.weights, ar_shift);
-    let sigma_template = template_sigma(&coeffs, ar_shift, template_plane);
 
     // The entry's texture, which may be borrowed, turns the medians into field stds.
     let finest_shift = finest_ar_shift(&fit.texture.weights);
@@ -114,21 +113,30 @@ pub(crate) fn chroma_scaling(
         .collect();
 
     ChromaScaling {
+        plane,
         coeffs,
+        ar_shift,
         targets,
-        sigma_template,
     }
 }
 
 impl ChromaScaling {
-    /// The largest scaling value the plane needs before the scaling shift.
-    pub(crate) fn peak(&self) -> f64 {
-        scaling_peak(&self.targets, self.sigma_template)
+    /// The template std, in 8-bit units, of the plane's weights drawn from `seed`.
+    pub(crate) fn seed_sigma(&self, seed: u16, sigmas: &mut SeedSigmas) -> f64 {
+        let template_plane = TemplatePlane::Chroma(self.plane);
+
+        sigmas.sigma(&self.coeffs, self.ar_shift, template_plane, seed)
     }
 
-    /// The plane's table values at `scaling_shift`.
-    pub(crate) fn entry_at(&self, scaling_shift: u32) -> PlaneEntry {
-        let points = scaling_points_at(&self.targets, self.sigma_template, scaling_shift);
+    /// The largest scaling value the plane needs before the scaling shift, for a template std of
+    /// `sigma_template`.
+    pub(crate) fn peak(&self, sigma_template: f64) -> f64 {
+        scaling_peak(&self.targets, sigma_template)
+    }
+
+    /// The plane's table values at `scaling_shift`, for a template std of `sigma_template`.
+    pub(crate) fn entry_at(&self, sigma_template: f64, scaling_shift: u32) -> PlaneEntry {
+        let points = scaling_points_at(&self.targets, sigma_template, scaling_shift);
 
         PlaneEntry {
             ar_coeffs: self.coeffs,

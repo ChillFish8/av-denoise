@@ -17,7 +17,8 @@ use crate::nl4d::grain::consts::{
     STRENGTH_GROUPS,
 };
 use crate::nl4d::grain::fit::{bucket_edges, bucket_of};
-use crate::nl4d::grain::table::FitOptions;
+use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes};
+use crate::nl4d::grain::table::{FitOptions, boundary_ticks};
 use crate::nl4d::grain::template::high_pass_std;
 
 fn splitmix(state: &mut u64) -> u64 {
@@ -292,4 +293,43 @@ pub(super) fn chroma_options() -> FitOptions {
     let options = FitOptions::default();
 
     options.with_chroma(true)
+}
+
+/// The header of a `filmgrn1` table and only the entries that start at one of `frames`.
+pub(super) fn entries_starting_at(text: &str, frames: &[u64], frame_rate: (u64, u64)) -> String {
+    let starts: Vec<String> = frames
+        .iter()
+        .map(|&frame| {
+            let ticks = boundary_ticks(frame, frame_rate);
+            format!("E {ticks} ")
+        })
+        .collect();
+
+    let mut kept = String::new();
+    let mut keeping = true;
+    for line in text.lines() {
+        if line.starts_with('E') {
+            keeping = starts.iter().any(|start| line.starts_with(start.as_str()));
+        }
+
+        if keeping {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+
+    kept
+}
+
+/// The number of entries in a `filmgrn1` table.
+pub(super) fn entry_count(text: &str) -> usize {
+    text.lines().filter(|line| line.starts_with('E')).count()
+}
+
+/// Fits the scenes with every measured part of the grain kept.
+pub(super) fn fit_measured(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
+    let options = FitOptions::default();
+    let scenes: Vec<&SceneGrain> = scenes.iter().collect();
+
+    fit_scenes(&scenes, &options)
 }

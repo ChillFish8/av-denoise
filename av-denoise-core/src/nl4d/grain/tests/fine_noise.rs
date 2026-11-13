@@ -1,6 +1,8 @@
 use super::synthetic::{
     ar_field,
     cell_mean_removed_record,
+    entries_starting_at,
+    entry_count,
     gaussian_field,
     sample_std,
     set_frame_count,
@@ -14,6 +16,7 @@ use crate::nl4d::grain::consts::{
     AUTOCOV_LEN,
     BUCKETS_PER_GROUP,
     CELL,
+    CHUNK_FRAMES,
     HIST_LEN,
     STD_BUCKETS,
 };
@@ -27,7 +30,7 @@ use crate::nl4d::grain::fit::{
 };
 use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes, take_out_fine_noise};
 use crate::nl4d::grain::table::{FitOptions, build_table};
-use crate::nl4d::grain::template::{TemplatePlane, high_pass_std, template_sigma};
+use crate::nl4d::grain::template::{TemplatePlane, high_pass_std, seed_sigma};
 
 const NTSC: (u64, u64) = (24_000, 1_001);
 const SIZE: usize = 512;
@@ -36,12 +39,20 @@ const PART_STD: f64 = 3.0 / 255.0;
 /// The largest peak over mean a white grain's reduced spectrum may reach. Flat is 1.
 const WHITE_PEAK_BOUND: f64 = 2.0;
 
-/// The table of [mixed_field] with the default options.
+/// The entries at frames 0 and 12 of the table of [mixed_field] with the default options.
 const MIXED_TABLE: &str = concat!(
     "filmgrn1\n",
-    "E 0 9801458 1 7391 1\n",
+    "E 0 208541 1 4 1\n",
     "\tp 3 9 0 11 0 1 128 192 256 128 192 256\n",
-    "\tsY 8  72 238 88 238 104 238 120 238 136 238 152 238 168 238 184 238\n",
+    "\tsY 8  72 242 88 242 104 242 120 242 136 242 152 242 168 242 184 242\n",
+    "\tsCb 2 0 0 255 0\n",
+    "\tsCr 2 0 0 255 0\n",
+    "\tcY -5 -7 -7 21 1 -2 -3 -7 -7 -4 48 9 -2 -4 -5 -3 14 98 39 14 9 24 48 110\n",
+    "\tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n",
+    "\tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n",
+    "E 4796458 5213541 1 65466 1\n",
+    "\tp 3 9 0 11 0 1 128 192 256 128 192 256\n",
+    "\tsY 8  72 243 88 243 104 243 120 243 136 243 152 243 168 243 184 243\n",
     "\tsCb 2 0 0 255 0\n",
     "\tsCr 2 0 0 255 0\n",
     "\tcY -5 -7 -7 21 1 -2 -3 -7 -7 -4 48 9 -2 -4 -5 -3 14 98 39 14 9 24 48 110\n",
@@ -198,19 +209,20 @@ fn floor_of(field: &[f64]) -> f64 {
     floor_fraction(&weights)
 }
 
+/// The first frame's entry of `field`'s fit.
 fn fit_with(field: &[f64], fine_noise: f64) -> FittedEntry {
     let scenes = scenes_of(field);
     let options = FitOptions::with_fine_noise(fine_noise);
     let scenes: Vec<&SceneGrain> = scenes.iter().collect();
     let mut entries = fit_scenes(&scenes, &options);
 
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), CHUNK_FRAMES as usize);
     entries.remove(0)
 }
 
-/// The whole-field variance each scaling point of `entry` synthesises.
+/// The whole-field variance each scaling point of `entry` synthesises from its seed.
 fn fitted_variances(entry: &FittedEntry) -> Vec<f64> {
-    let sigma_template = template_sigma(&entry.ar_coeffs, entry.ar_shift, TemplatePlane::Luma);
+    let sigma_template = seed_sigma(&entry.ar_coeffs, entry.ar_shift, TemplatePlane::Luma, entry.seed);
     let scale = (1u32 << entry.scaling_shift) as f64;
     let mut variances = Vec::with_capacity(entry.points.len());
     for &(_, value) in &entry.points {
@@ -257,9 +269,11 @@ fn zero_fine_noise_leaves_the_table_unchanged() {
     let options = FitOptions::default();
 
     let text = build_table(&scenes, NTSC, &options);
+    let head = entries_starting_at(&text, &[0, 12], NTSC);
 
     assert_eq!(options.fine_noise, 0.0);
-    assert_eq!(text, MIXED_TABLE);
+    assert_eq!(entry_count(&text), CHUNK_FRAMES as usize);
+    assert_eq!(head, MIXED_TABLE);
 }
 
 #[test]

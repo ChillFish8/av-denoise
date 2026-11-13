@@ -8,6 +8,7 @@ mod modes;
 mod persistence;
 mod repeat;
 mod report;
+mod runs;
 mod seeds;
 mod segment;
 mod snapshot;

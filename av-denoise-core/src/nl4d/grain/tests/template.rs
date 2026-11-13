@@ -13,8 +13,8 @@ use crate::nl4d::grain::template::{
     luma_template,
     median_high_pass,
     median_of,
+    seed_sigma,
     template_seed,
-    template_sigma,
     unit_cells,
 };
 
@@ -91,13 +91,59 @@ fn zero_weights_give_the_raw_gaussian_template() {
     assert_eq!(template[..8], [-22, 17, 50, -18, -18, -44, 27, 6]);
 }
 
+/// The columns of a luma template.
+const LUMA_COLS: usize = 82;
+/// The first row and column of a luma template's interior.
+const LUMA_INTERIOR_START: usize = 9;
+/// The side length of a luma template's interior.
+const LUMA_INTERIOR_SIZE: usize = 64;
+
+/// The population std of every sample in the square interiors of `templates`.
+fn pooled_interior_std(templates: &[Vec<i32>], cols: usize, start: usize, size: usize) -> f64 {
+    let mut samples = Vec::new();
+    for template in templates {
+        for row in start..start + size {
+            let row_start = row * cols + start;
+            let values = template[row_start..row_start + size].iter();
+            samples.extend(values.map(|&value| value as f64));
+        }
+    }
+
+    let count = samples.len() as f64;
+    let mean = samples.iter().sum::<f64>() / count;
+    let squares: f64 = samples.iter().map(|value| (value - mean) * (value - mean)).sum();
+
+    (squares / count).sqrt()
+}
+
+/// The pooled luma interior std of the calibration seeds' templates.
+fn calibration_luma_std(coeffs: &[i32; AR_COEFFS], ar_shift: u32) -> f64 {
+    let templates: Vec<Vec<i32>> = (0..TEMPLATE_SEEDS)
+        .map(|index| {
+            let seed = template_seed(index);
+            luma_template(coeffs, ar_shift, seed)
+        })
+        .collect();
+
+    pooled_interior_std(&templates, LUMA_COLS, LUMA_INTERIOR_START, LUMA_INTERIOR_SIZE)
+}
+
 #[test]
-fn template_sigma_matches_the_reference_port() {
-    let sigma = template_sigma(&SCENE_EIGHT, 7, TemplatePlane::Luma);
-    let flat_sigma = template_sigma(&[0; AR_COEFFS], 6, TemplatePlane::Luma);
+fn calibration_templates_match_the_reference_port() {
+    let sigma = calibration_luma_std(&SCENE_EIGHT, 7);
+    let flat_sigma = calibration_luma_std(&[0; AR_COEFFS], 6);
 
     assert!((sigma - 44.770_018).abs() < 1e-4, "sigma {sigma}");
     assert!((flat_sigma - 31.909_499).abs() < 1e-4, "flat sigma {flat_sigma}");
+}
+
+#[test]
+fn seed_sigma_keeps_its_recorded_value() {
+    let sigma = seed_sigma(&SCENE_EIGHT, 7, TemplatePlane::Luma, 1000);
+    let flat_sigma = seed_sigma(&[0; AR_COEFFS], 6, TemplatePlane::Luma, 1000);
+
+    assert!((sigma - 44.128_652).abs() < 1e-4, "sigma {sigma}");
+    assert!((flat_sigma - 31.928_815).abs() < 1e-4, "flat sigma {flat_sigma}");
 }
 
 #[test]
@@ -172,11 +218,23 @@ fn cb_and_cr_templates_differ() {
     assert_ne!(cb_template, cr_template);
 }
 
+/// The mean [seed_sigma] of the first four calibration seeds.
+fn mean_seed_sigma(coeffs: &[i32; AR_COEFFS], ar_shift: u32, plane: TemplatePlane) -> f64 {
+    let total: f64 = (0..4)
+        .map(|index| {
+            let seed = template_seed(index);
+            seed_sigma(coeffs, ar_shift, plane, seed)
+        })
+        .sum();
+
+    total / 4.0
+}
+
 #[test]
-fn chroma_template_sigma_grows_with_correlation() {
+fn chroma_seed_sigma_grows_with_correlation() {
     let cb = TemplatePlane::Chroma(ChromaPlane::Cb);
-    let sigma = template_sigma(&SCENE_EIGHT, 7, cb);
-    let flat_sigma = template_sigma(&[0; AR_COEFFS], 6, cb);
+    let sigma = mean_seed_sigma(&SCENE_EIGHT, 7, cb);
+    let flat_sigma = mean_seed_sigma(&[0; AR_COEFFS], 6, cb);
 
     assert!(sigma.is_finite() && sigma > 0.0, "sigma {sigma}");
     assert!(
@@ -221,14 +279,21 @@ fn interior_high_pass_stds(template: &[i32]) -> Vec<f64> {
 fn unit_cells_are_the_8x8_blocks_of_the_chroma_interior() {
     let cr = TemplatePlane::Chroma(ChromaPlane::Cr);
     let mut stds = Vec::new();
+    let mut templates = Vec::new();
     for index in 0..TEMPLATE_SEEDS {
         let seed = template_seed(index);
         let template = chroma_template(&SCENE_EIGHT, 7, seed, ChromaPlane::Cr);
         let interior_stds = interior_high_pass_stds(&template);
         stds.extend(interior_stds);
+        templates.push(template);
     }
 
-    let sigma = template_sigma(&SCENE_EIGHT, 7, cr);
+    let sigma = pooled_interior_std(
+        &templates,
+        CHROMA_COLS,
+        CHROMA_INTERIOR_START,
+        CHROMA_INTERIOR_SIZE,
+    );
     let expected = median_of(&mut stds) / sigma;
     let cells = unit_cells(&SCENE_EIGHT, 7, cr);
     let offsets = even_offsets(cells.len());

@@ -7,6 +7,7 @@ use super::synthetic::{
     chunk_at,
     chunk_in_bucket,
     clear_pixels,
+    fit_measured,
     gaussian_field,
     grain_record,
     keep_frame_bins,
@@ -35,18 +36,10 @@ use crate::nl4d::grain::fit::{
 };
 use crate::nl4d::grain::segment::{FittedEntry, SceneGrain, fit_scenes, pooled_record, segment_scene};
 use crate::nl4d::grain::table::FitOptions;
-use crate::nl4d::grain::template::{TemplatePlane, high_pass_curve};
+use crate::nl4d::grain::template::{ChromaPlane, TemplatePlane, high_pass_curve, seed_sigma};
 
 /// A source bucket whose median doubled lands in the first bucket of a strength group.
 const EDGE_BUCKET: usize = 37;
-
-/// Fits the scenes with every measured part of the grain kept.
-fn fit_measured(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
-    let options = FitOptions::default();
-    let scenes: Vec<&SceneGrain> = scenes.iter().collect();
-
-    fit_scenes(&scenes, &options)
-}
 
 /// Fits the scenes with chroma on and every measured part of the grain kept.
 fn fit_with_chroma(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
@@ -56,7 +49,8 @@ fn fit_with_chroma(scenes: &[SceneGrain]) -> Vec<FittedEntry> {
     fit_scenes(&scenes, &options)
 }
 
-/// Fits one chunk as its own scene, with its curves rounded at `bit_depth`.
+/// Fits one chunk as its own scene, with its curves rounded at `bit_depth`, and gives its first
+/// frame's entry.
 fn fit_chunk(chunk: GrainChunk, bit_depth: Option<u32>) -> FittedEntry {
     let scene = scene_of(0, vec![chunk]);
     let options = match bit_depth {
@@ -65,9 +59,58 @@ fn fit_chunk(chunk: GrainChunk, bit_depth: Option<u32>) -> FittedEntry {
     };
 
     let mut entries = fit_scenes(&[&scene], &options);
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), CHUNK_FRAMES as usize);
 
     entries.remove(0)
+}
+
+/// The entry of `entries` that starts at `frame`.
+fn entry_at(entries: &[FittedEntry], frame: u64) -> &FittedEntry {
+    entries
+        .iter()
+        .find(|entry| entry.first_frame == frame)
+        .expect("an entry at the frame")
+}
+
+/// The whole-field std each point decodes to at the entry's own seed, with half a scaling step.
+///
+/// `plane` is `None` for luma, else the chroma plane whose points are read.
+fn decoded_stds(entry: &FittedEntry, plane: Option<ChromaPlane>) -> Vec<(f64, f64)> {
+    let (coeffs, points, template_plane) = match plane {
+        None => (&entry.ar_coeffs, &entry.points, TemplatePlane::Luma),
+        Some(chroma_plane) => {
+            let planes = entry.chroma.as_ref().expect("both chroma planes");
+            let plane_entry = &planes[chroma_plane.index()];
+            let template_plane = TemplatePlane::Chroma(chroma_plane);
+            (&plane_entry.ar_coeffs, &plane_entry.points, template_plane)
+        },
+    };
+
+    let sigma_template = seed_sigma(coeffs, entry.ar_shift, template_plane, entry.seed);
+    let scale = (1u32 << entry.scaling_shift) as f64;
+    let step = sigma_template / (255.0 * scale);
+
+    points
+        .iter()
+        .map(|&(_, value)| (value as f64 * step, 0.5 * step))
+        .collect()
+}
+
+/// Whether two entries' points decode to the same strength, within their rounding.
+fn same_strength(first: &FittedEntry, second: &FittedEntry, plane: Option<ChromaPlane>) -> bool {
+    let first_stds = decoded_stds(first, plane);
+    let second_stds = decoded_stds(second, plane);
+    if first_stds.len() != second_stds.len() {
+        return false;
+    }
+
+    first_stds
+        .iter()
+        .zip(&second_stds)
+        .all(|(&(first_std, first_half), &(second_std, second_half))| {
+            let gap = (first_std - second_std).abs();
+            gap <= first_half + second_half + 1e-12
+        })
 }
 
 /// Each luma point's scaling value over two to the scaling shift.
@@ -262,27 +305,34 @@ fn a_fitted_entry_has_points_and_weights() {
 
     let entries = fit_measured(&scenes);
 
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), CHUNK_FRAMES as usize);
     assert_eq!(entries[0].points.len(), 8);
     assert!(entries[0].ar_coeffs.iter().any(|&coeff| coeff != 0));
 }
 
+/// The chunks around the thin one read different one-frame strengths, so one segment over all three
+/// gives frames 24 and 72 the same strength.
 #[test]
 fn a_thin_chunk_never_gets_its_own_entry() {
     let first_chunk = chunk_at(1.0, 300, None);
-    let before_thin = chunk_at(3.0, 300, None);
+    let before_thin = chunk_at(3.0, 300, Some(3.0));
     let thin = table_chunk();
-    let after_thin = chunk_at(3.0, 300, None);
+    let after_thin = chunk_at(3.0, 300, Some(4.0));
     let second_chunks = vec![before_thin, thin, after_thin];
     let first_scene = scene_of(0, vec![first_chunk]);
     let second_scene = scene_of(24, second_chunks);
     let scenes = vec![first_scene, second_scene];
 
     let entries = fit_measured(&scenes);
+    let first = entry_at(&entries, 0);
+    let before = entry_at(&entries, 24);
+    let after = entry_at(&entries, 24 + 2 * CHUNK_FRAMES as u64);
+    let last = entries.last().expect("entries");
 
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[1].first_frame, 24);
-    assert_eq!(entries[1].last_frame, 24 + 3 * CHUNK_FRAMES as u64 - 1);
+    assert_eq!(entries.len(), 4 * CHUNK_FRAMES as usize);
+    assert_eq!(last.last_frame, 24 + 3 * CHUNK_FRAMES as u64 - 1);
+    assert!(same_strength(before, after, None));
+    assert!(!same_strength(first, before, None));
 }
 
 #[test]
@@ -295,9 +345,10 @@ fn missing_texture_borrows_from_the_nearest_segment() {
     let scenes = vec![first_scene, second_scene];
 
     let entries = fit_measured(&scenes);
+    let borrower = entry_at(&entries, 24);
 
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[1].ar_coeffs, entries[0].ar_coeffs);
+    assert_eq!(entries.len(), 2 * CHUNK_FRAMES as usize);
+    assert_eq!(borrower.ar_coeffs, entries[0].ar_coeffs);
 }
 
 #[test]
@@ -309,9 +360,10 @@ fn sparse_scene_borrows_from_a_neighbouring_scene() {
     let scenes = vec![first_scene, second_scene];
 
     let entries = fit_measured(&scenes);
+    let borrower = entry_at(&entries, 24);
 
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[1].points, entries[0].points);
+    assert_eq!(entries.len(), 2 * CHUNK_FRAMES as usize);
+    assert!(same_strength(borrower, &entries[0], None));
 }
 
 #[test]
@@ -363,7 +415,7 @@ fn a_group_overlapping_the_band_edge_gives_the_texture() {
     let scene = scene_of(0, vec![chunk]);
     let entries = fit_measured(&[scene]);
 
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), CHUNK_FRAMES as usize);
     assert!(entries[0].ar_coeffs.iter().any(|&coeff| coeff != 0));
 }
 
@@ -391,11 +443,12 @@ fn a_sparse_segment_borrows_from_its_own_scene_first() {
     let scenes = vec![first_scene, second_scene];
 
     let entries = fit_measured(&scenes);
+    let second_narrow = entry_at(&entries, 2 * CHUNK_FRAMES as u64);
+    let next_scene = entry_at(&entries, 3 * CHUNK_FRAMES as u64);
 
-    assert_eq!(entries.len(), 4);
-    assert_eq!(entries[2].first_frame, 2 * CHUNK_FRAMES as u64);
-    assert_eq!(entries[2].points, entries[0].points);
-    assert_ne!(entries[2].points, entries[3].points);
+    assert_eq!(entries.len(), 4 * CHUNK_FRAMES as usize);
+    assert!(same_strength(second_narrow, &entries[0], None));
+    assert!(!same_strength(second_narrow, next_scene, None));
 }
 
 #[test]
@@ -437,12 +490,21 @@ fn a_segment_without_chroma_borrows_from_its_neighbour() {
     };
 
     let entries = fit_with_chroma(&[scene]);
+    let steady_entry = &entries[0];
+    let drifted_entry = entry_at(&entries, CHUNK_FRAMES as u64);
+    let steady_planes = steady_entry.chroma.as_ref().expect("both chroma planes");
+    let drifted_planes = drifted_entry.chroma.as_ref().expect("both chroma planes");
 
-    assert_eq!(entries.len(), 3);
-    assert!(entries[0].chroma.is_some());
-    assert_eq!(entries[1].chroma, entries[0].chroma);
-    assert_eq!(entries[1].ar_shift, entries[0].ar_shift);
-    assert_eq!(entries[1].scaling_shift, entries[0].scaling_shift);
+    assert_eq!(entries.len(), 3 * CHUNK_FRAMES as usize);
+    assert_eq!(drifted_entry.ar_shift, steady_entry.ar_shift);
+    for plane in [ChromaPlane::Cb, ChromaPlane::Cr] {
+        let slot = plane.index();
+        assert_eq!(drifted_planes[slot].ar_coeffs, steady_planes[slot].ar_coeffs);
+        assert!(
+            same_strength(drifted_entry, steady_entry, Some(plane)),
+            "{plane:?}"
+        );
+    }
 }
 
 #[test]

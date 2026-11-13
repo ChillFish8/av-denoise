@@ -1,10 +1,21 @@
-use super::synthetic::{chroma_chunk, chroma_options, chunk_at, table_chunk};
+use super::synthetic::{
+    chroma_chunk,
+    chroma_options,
+    chunk_at,
+    entries_starting_at,
+    entry_count,
+    table_chunk,
+};
 use crate::nl4d::grain::chunk::GrainChunk;
-use crate::nl4d::grain::consts::AR_COEFFS;
+use crate::nl4d::grain::consts::{AR_COEFFS, CHUNK_FRAMES};
 use crate::nl4d::grain::segment::{FittedEntry, PlaneEntry, SceneGrain};
 use crate::nl4d::grain::table::{FitOptions, boundary_ticks, build_table, format_table};
 
 const NTSC: (u64, u64) = (24_000, 1_001);
+/// The frame count of [measured_scenes].
+const MEASURED_FRAMES: usize = 6 * CHUNK_FRAMES as usize;
+/// The first frame of each segment of [measured_scenes] and frame 100, mid-segment.
+const PINNED_FRAMES: [u64; 5] = [0, 24, 72, 100, 120];
 
 /// A scene whose chroma chunks repeat its luma tables, one-frame counts included, for both planes.
 fn scene_with_chroma(first_frame: u64, chunks: Vec<GrainChunk>) -> SceneGrain {
@@ -37,60 +48,69 @@ fn measured_scenes() -> Vec<SceneGrain> {
     vec![first, second, third]
 }
 
-/// The table of [measured_scenes] with the default options.
+/// The entries at [PINNED_FRAMES] of the table of [measured_scenes] with the default options.
 const HEAD_TABLE: &str = "filmgrn1\n\
-    E 0 9801457 1 7391 1\n\
+    E 0 208541 1 4 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 132 88 132 104 132 120 132 136 132 152 132 168 132 184 132\n\
+    \tsY 8  72 135 88 135 104 135 120 135 136 135 152 135 168 135 184 135\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
     \tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
-    E 9801458 29821457 1 8628 1\n\
+    E 9801458 10218541 1 64384 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 80 88 80 104 80 120 80 136 80 152 80 168 80 184 80\n\
+    \tsY 8  72 81 88 81 104 81 120 81 136 81 152 81 168 81 184 81\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
     \tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
-    E 29821458 49841457 1 9865 1\n\
+    E 29821458 30238541 1 15 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 34 88 34 104 34 120 34 136 34 152 34 168 34 184 34\n\
+    \tsY 8  72 35 88 35 104 35 120 35 136 35 152 35 168 35 184 35\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
     \tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
-    E 49841458 59851458 1 11102 1\n\
+    E 41499792 41916874 1 64448 1\n\
     \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 34 88 34 104 34 120 34 136 34 152 34 168 34 184 34\n\
+    \tsY 8  72 33 88 33 104 33 120 33 136 33 152 33 168 33 184 33\n\
+    \tsCb 2 0 0 255 0\n\
+    \tsCr 2 0 0 255 0\n\
+    \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
+    \tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
+    \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
+    E 49841458 50258541 1 54 1\n\
+    \tp 3 8 0 11 0 1 128 192 256 128 192 256\n\
+    \tsY 8  72 33 88 33 104 33 120 33 136 33 152 33 168 33 184 33\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 2 1 1 3 1 1 3 2 2 3 2 2 4 3 1 2 3 2 2 2 4 1 3 106\n\
     \tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n";
 
-/// The table of [measured_scenes] with half the fine noise moved out of the texture.
+/// The entries at [PINNED_FRAMES] of the table of [measured_scenes] with half the fine noise moved
+/// out of the texture.
 const HEAD_FINE_NOISE_TABLE: &str = "filmgrn1\n\
-    E 0 9801457 1 7391 1\n\
+    E 0 208541 1 4 1\n\
     \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 124 88 124 104 124 120 124 136 124 152 124 168 124 184 124\n\
+    \tsY 8  72 126 88 126 104 126 120 126 136 126 152 126 168 126 184 126\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\
     \tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
-    E 9801458 29821457 1 8628 1\n\
+    E 9801458 10218541 1 64384 1\n\
     \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 75 88 75 104 75 120 75 136 75 152 75 168 75 184 75\n\
+    \tsY 8  72 76 88 76 104 76 120 76 136 76 152 76 168 76 184 76\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\
     \tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
-    E 29821458 49841457 1 9865 1\n\
+    E 29821458 30238541 1 15 1\n\
     \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
     \tsY 8  72 32 88 32 104 32 120 32 136 32 152 32 168 32 184 32\n\
     \tsCb 2 0 0 255 0\n\
@@ -98,22 +118,31 @@ const HEAD_FINE_NOISE_TABLE: &str = "filmgrn1\n\
     \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\
     \tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
-    E 49841458 59851458 1 11102 1\n\
+    E 41499792 41916874 1 64448 1\n\
     \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
-    \tsY 8  72 32 88 32 104 32 120 32 136 32 152 32 168 32 184 32\n\
+    \tsY 8  72 31 88 31 104 31 120 31 136 31 152 31 168 31 184 31\n\
+    \tsCb 2 0 0 255 0\n\
+    \tsCr 2 0 0 255 0\n\
+    \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\
+    \tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
+    \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
+    E 49841458 50258541 1 54 1\n\
+    \tp 3 7 0 11 0 1 128 192 256 128 192 256\n\
+    \tsY 8  72 31 88 31 104 31 120 31 136 31 152 31 168 31 184 31\n\
     \tsCb 2 0 0 255 0\n\
     \tsCr 2 0 0 255 0\n\
     \tcY 1 0 0 2 0 0 2 1 1 2 1 1 2 2 1 1 2 1 1 0 3 1 -8 71\n\
     \tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n\
     \tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128\n";
 
-fn entry(first_frame: u64, last_frame: u64) -> FittedEntry {
+fn entry(first_frame: u64, last_frame: u64, seed: u16) -> FittedEntry {
     let mut ar_coeffs = [0i32; AR_COEFFS];
     ar_coeffs[23] = 71;
 
     FittedEntry {
         first_frame,
         last_frame,
+        seed,
         ar_coeffs,
         ar_shift: 7,
         scaling_shift: 11,
@@ -177,9 +206,13 @@ fn luma_tables_match_the_stored_table() {
 
     let table = build_table(&scenes, NTSC, &default_options);
     let fine_noise_table = build_table(&scenes, NTSC, &fine_noise_options);
+    let head = entries_starting_at(&table, &PINNED_FRAMES, NTSC);
+    let fine_noise_head = entries_starting_at(&fine_noise_table, &PINNED_FRAMES, NTSC);
 
-    assert_eq!(table, HEAD_TABLE);
-    assert_eq!(fine_noise_table, HEAD_FINE_NOISE_TABLE);
+    assert_eq!(entry_count(&table), MEASURED_FRAMES);
+    assert_eq!(entry_count(&fine_noise_table), MEASURED_FRAMES);
+    assert_eq!(head, HEAD_TABLE);
+    assert_eq!(fine_noise_head, HEAD_FINE_NOISE_TABLE);
 }
 
 #[test]
@@ -190,7 +223,7 @@ fn chroma_on_entries_carry_both_planes() {
     let table = build_table(&scenes, NTSC, &options);
     let entries = entry_lines(&table);
 
-    assert_eq!(entries.len(), 4);
+    assert_eq!(entries.len(), MEASURED_FRAMES);
     for prefix in ["sCb ", "sCr "] {
         let lines = lines_named(&table, prefix);
         assert_eq!(lines.len(), entries.len());
@@ -236,7 +269,7 @@ fn a_scene_without_any_chroma_data_zeros_both_planes() {
 
     for prefix in ["sCb ", "sCr "] {
         let lines = lines_named(&on_table, prefix);
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), MEASURED_FRAMES);
         assert!(
             lines.iter().all(|line| line.ends_with(" 2 0 0 255 0")),
             "{lines:?}"
@@ -248,7 +281,7 @@ fn a_scene_without_any_chroma_data_zeros_both_planes() {
 
 #[test]
 fn the_luma_coefficient_of_chroma_is_zero() {
-    let mut chroma_entry = entry(0, 23);
+    let mut chroma_entry = entry(0, 23, 7391);
     let mut cb_coeffs = [0i32; AR_COEFFS];
     cb_coeffs[23] = 40;
     let cb = PlaneEntry {
@@ -292,7 +325,7 @@ fn boundaries_sit_half_a_frame_early() {
 
 #[test]
 fn entries_end_one_tick_before_the_next_start() {
-    let entries = [entry(0, 23), entry(24, 47)];
+    let entries = [entry(0, 23, 7391), entry(24, 47, 8628)];
     let text = format_table(&entries, NTSC);
     let starts = entry_lines(&text);
 
@@ -303,7 +336,7 @@ fn entries_end_one_tick_before_the_next_start() {
 
 #[test]
 fn the_last_entry_ends_half_a_frame_after_its_last_frame() {
-    let entries = [entry(0, 23)];
+    let entries = [entry(0, 23, 7391)];
     let text = format_table(&entries, NTSC);
     let first = text.lines().nth(1).expect("an entry line");
 
@@ -312,7 +345,7 @@ fn the_last_entry_ends_half_a_frame_after_its_last_frame() {
 
 #[test]
 fn an_entry_has_the_exact_format() {
-    let entries = [entry(0, 23)];
+    let entries = [entry(0, 23, 7391)];
     let text = format_table(&entries, NTSC);
     let expected = "filmgrn1\n\
         E 0 9801458 1 7391 1\n\
@@ -329,21 +362,12 @@ fn an_entry_has_the_exact_format() {
 
 #[test]
 fn a_gap_between_entries_is_left_empty() {
-    let entries = [entry(0, 23), entry(48, 71)];
+    let entries = [entry(0, 23, 7391), entry(48, 71, 8628)];
     let text = format_table(&entries, NTSC);
     let starts = entry_lines(&text);
 
     assert_eq!(starts[0], "E 0 9801458 1 7391 1");
     assert!(starts[1].starts_with("E 19811458 "));
-}
-
-#[test]
-fn the_54th_entry_seed_wraps_at_16_bits() {
-    let entries: Vec<FittedEntry> = (0..54).map(|index| entry(index * 2, index * 2)).collect();
-    let text = format_table(&entries, NTSC);
-    let starts = entry_lines(&text);
-
-    assert!(starts[53].ends_with(" 1 7416 1"));
 }
 
 #[test]
@@ -356,8 +380,8 @@ fn no_entries_writes_header_only() {
 
 #[test]
 fn reruns_are_byte_identical() {
-    let first_entries = [entry(0, 23), entry(24, 47)];
-    let second_entries = [entry(0, 23), entry(24, 47)];
+    let first_entries = [entry(0, 23, 7391), entry(24, 47, 8628)];
+    let second_entries = [entry(0, 23, 7391), entry(24, 47, 8628)];
     let first = format_table(&first_entries, NTSC);
     let second = format_table(&second_entries, NTSC);
 
@@ -384,9 +408,9 @@ fn scenes_are_sorted_before_fitting() {
     let text = build_table(&scenes, NTSC, &options);
     let starts = entry_lines(&text);
 
-    assert_eq!(starts.len(), 2);
+    assert_eq!(starts.len(), 2 * CHUNK_FRAMES as usize);
     assert!(starts[0].starts_with("E 0 "));
-    assert!(starts[1].starts_with("E 9801458 "));
+    assert!(starts[CHUNK_FRAMES as usize].starts_with("E 9801458 "));
 }
 
 #[test]

@@ -7,8 +7,6 @@ use super::segment::{FittedEntry, PlaneEntry, SceneGrain, fit_scenes};
 
 /// Grain table timestamps count 100 ns ticks.
 const TICKS_PER_SECOND: u128 = 10_000_000;
-const SEED_BASE: u64 = 7391;
-const SEED_STEP: u64 = 1237;
 /// The scaling line values of a chroma plane without grain.
 const ZEROED_SCALING: &str = "2 0 0 255 0";
 
@@ -24,13 +22,6 @@ pub(crate) fn boundary_ticks(frame: u64, frame_rate: (u64, u64)) -> u64 {
     let divisor = 2 * numerator as u128;
 
     ((scaled + divisor / 2) / divisor) as u64
-}
-
-/// The seed for the entry at `index` in the written table.
-fn seed_for(index: usize) -> u16 {
-    let mixed = SEED_BASE + SEED_STEP * index as u64;
-
-    (mixed & 0xFFFF) as u16
 }
 
 fn join_values<T: ToString>(values: &[T]) -> String {
@@ -88,7 +79,7 @@ pub(crate) fn format_table(entries: &[FittedEntry], frame_rate: (u64, u64)) -> S
             .is_some_and(|next| next.first_frame == entry.last_frame + 1);
         let end = if touches_next { own_end - 1 } else { own_end };
 
-        let seed = seed_for(index);
+        let seed = entry.seed;
         let points = join_points(&entry.points);
         let point_count = entry.points.len();
         let coeffs = join_values(&entry.ar_coeffs);

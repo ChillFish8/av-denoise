@@ -52,6 +52,7 @@ impl SeedSigmas {
             .or_insert_with(|| seed_sigma(coeffs, ar_shift, plane, seed))
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.sigmas.len()
     }

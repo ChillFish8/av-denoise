@@ -5,7 +5,7 @@ use cubecl::server::Handle;
 
 use super::mirror::{StillStream, mirror_still_chunks};
 use super::snapshot::{ColourRun, HEIGHT as COLOUR_RUN_HEIGHT, WIDTH as COLOUR_RUN_WIDTH};
-use super::synthetic::{ar_field, gaussian_field, left_weights};
+use super::synthetic::{ar_field, entries_starting_at, entry_count, gaussian_field, left_weights};
 use crate::bench_api::HostIo;
 use crate::engine::align::StorageAlign;
 use crate::motion::{LumaMotionRing, MotionCtx, RingRole, SharedMotion, Subsampling};
@@ -713,13 +713,22 @@ fn banded_stream(frame_count: u32) -> StillStream {
     }
 }
 
-/// The table [banded_stream] gives over [TABLE_FRAMES] frames with the default options.
+/// The entries at frames 0 and 25 of the table [banded_stream] gives over [TABLE_FRAMES] frames
+/// with the default options.
 ///
-/// Its source grain of about 2.19 codes on this texture's template scales to about 129.
+/// Its source grain of about 2.19 codes on each seed's template scales to about 130.
 const BANDED_TABLE: &str = "filmgrn1
-E 0 20625000 1 7391 1
+E 0 208332 1 4 1
 \tp 3 8 0 11 0 1 128 192 256 128 192 256
-\tsY 5  72 128 120 128 152 128 184 127 200 127
+\tsY 5  72 130 120 130 152 130 184 130 200 130
+\tsCb 2 0 0 255 0
+\tsCr 2 0 0 255 0
+\tcY 0 0 -1 0 0 0 -1 1 -1 0 0 1 0 0 0 1 0 1 0 -1 0 -1 1 102
+\tcCb 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128
+\tcCr 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -128
+E 10208333 10624999 1 65333 1
+\tp 3 8 0 11 0 1 128 192 256 128 192 256
+\tsY 5  72 129 120 129 152 129 184 129 200 129
 \tsCb 2 0 0 255 0
 \tsCr 2 0 0 255 0
 \tcY 0 0 -1 0 0 0 -1 1 -1 0 0 1 0 0 0 1 0 1 0 -1 0 -1 1 102
@@ -842,8 +851,10 @@ fn a_table_from_frame_tables_matches_the_chunk_table() {
 
     let options = FitOptions::default();
     let table = build_table(&[scene], FRAME_RATE, &options);
+    let head = entries_starting_at(&table, &[0, 25], FRAME_RATE);
 
-    assert_eq!(table, BANDED_TABLE);
+    assert_eq!(entry_count(&table), TABLE_FRAMES as usize);
+    assert_eq!(head, BANDED_TABLE);
 }
 
 /// Flat chroma frames with fresh grain at [SIGMA] on Cb and [CR_SIGMA] on Cr, and flat outputs.

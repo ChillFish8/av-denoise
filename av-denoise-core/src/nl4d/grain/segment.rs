@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use super::chroma::{ChromaFit, ChromaParts, chroma_parts, chroma_scaling};
+use super::chroma::{ChromaFit, ChromaParts, ChromaScaling, chroma_parts, chroma_scaling};
 use super::chunk::{GrainChunk, TableSums};
 use super::consts::{
     AR_COEFFS,
@@ -33,8 +33,9 @@ use super::fit::{
     undo_mean_removal,
     yule_walker,
 };
+use super::seeds::{SeedSigmas, fresh_seed};
 use super::table::FitOptions;
-use super::template::{ChromaPlane, CurveCache, TemplatePlane, template_sigma};
+use super::template::{ChromaPlane, CurveCache, TemplatePlane};
 
 /// The grain chunks of one scene, in frame order.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +63,8 @@ pub(crate) struct Segment {
 pub(crate) struct FittedEntry {
     pub first_frame: u64,
     pub last_frame: u64,
+    /// The seed the decoder draws every plane's grain template from.
+    pub seed: u16,
     pub ar_coeffs: [i32; AR_COEFFS],
     pub ar_shift: u32,
     pub scaling_shift: u32,
@@ -95,8 +98,6 @@ struct Texture {
     table: Weights,
     /// The solved weights the table's weights are rounded from.
     table_weights: [f64; AR_COEFFS],
-    /// The template std of the table's weights, in 8-bit units.
-    table_sigma: f64,
     /// The weights of all the measured grain, whose high-pass curve reads its strength.
     measured: Weights,
 }
@@ -119,12 +120,21 @@ struct Parts {
     chroma: [ChromaParts; CHROMA_PLANES],
 }
 
-/// The table's rounded weights, the solved weights behind them and their template std.
+/// The table's rounded weights and the solved weights behind them.
 #[derive(Debug, Clone, Copy)]
 struct TableWeights {
     quantised: Weights,
     weights: [f64; AR_COEFFS],
-    sigma: f64,
+}
+
+/// One part's table values that hold for every seed.
+pub(crate) struct EntryPlan {
+    ar_coeffs: [i32; AR_COEFFS],
+    ar_shift: u32,
+    /// Luma's whole-field strength targets, as `(luma, sigma)` with sigma in normalised units.
+    targets: Vec<(u8, f64)>,
+    /// The Cb and then the Cr plane, `None` when the entry has no chroma grain.
+    chroma: Option<[ChromaScaling; CHROMA_PLANES]>,
 }
 
 /// The std median over every bin of a histogram.
@@ -223,22 +233,19 @@ fn texture_of(stats: &TableSums, edges: &[f32], fine_noise: f64) -> Option<Textu
     let mut corrected = undo_mean_removal(&record);
     let measured_weights = yule_walker(&corrected)?;
     let floor = floor_fraction(&measured_weights);
-    let (measured_coeffs, measured_shift) = quantise_ar(&measured_weights);
-    let measured_sigma = template_sigma(&measured_coeffs, measured_shift, TemplatePlane::Luma);
+    let measured_quantised = quantise_ar(&measured_weights);
 
     take_out_fine_noise(&mut corrected, floor, fine_noise);
     let measured = TableWeights {
-        quantised: (measured_coeffs, measured_shift),
+        quantised: measured_quantised,
         weights: measured_weights,
-        sigma: measured_sigma,
     };
     let reduced = reduced_weights(&corrected, measured);
 
     Some(Texture {
         table: reduced.quantised,
         table_weights: reduced.weights,
-        table_sigma: reduced.sigma,
-        measured: (measured_coeffs, measured_shift),
+        measured: measured_quantised,
     })
 }
 
@@ -281,10 +288,10 @@ pub(crate) fn take_out_fine_noise(corrected: &mut [f64], floor: f64, fine_noise:
     corrected[0] -= share * corrected[0];
 }
 
-/// The weights solved from the reduced record and their template std.
+/// The weights solved from the reduced record.
 ///
 /// When the reduced record has no system to solve, or rounds to the measured weights, the measured
-/// weights and std stay.
+/// weights stay.
 fn reduced_weights(corrected: &[f64], measured: TableWeights) -> TableWeights {
     let Some(solved) = yule_walker(corrected) else {
         return measured;
@@ -295,13 +302,9 @@ fn reduced_weights(corrected: &[f64], measured: TableWeights) -> TableWeights {
         return measured;
     }
 
-    let (coeffs, shift) = reduced;
-    let sigma = template_sigma(&coeffs, shift, TemplatePlane::Luma);
-
     TableWeights {
         quantised: reduced,
         weights: solved,
-        sigma,
     }
 }
 
@@ -309,8 +312,20 @@ fn reduced_weights(corrected: &[f64], measured: TableWeights) -> TableWeights {
 ///
 /// Every plane reads its strength from one frame's grain through a high-pass curve rounded at
 /// [FitOptions::bit_depth]. With chroma on, each chroma plane borrows its texture and target the
-/// same way. An entry gets chroma only when both planes have both.
+/// same way. An entry gets chroma only when both planes have both. Every fitted frame gets its own
+/// entry and seed.
 pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<FittedEntry> {
+    let mut sigmas = SeedSigmas::new();
+
+    fit_scenes_with(scenes, options, &mut sigmas)
+}
+
+/// Fits as [fit_scenes] does, reading each seed's template strength through `sigmas`.
+pub(crate) fn fit_scenes_with(
+    scenes: &[&SceneGrain],
+    options: &FitOptions,
+    sigmas: &mut SeedSigmas,
+) -> Vec<FittedEntry> {
     let edges = bucket_edges();
     let rounding = options.bit_depth.map(code_step);
     let mut curves = CurveCache::new(rounding);
@@ -350,15 +365,13 @@ pub(crate) fn fit_scenes(scenes: &[&SceneGrain], options: &FitOptions) -> Vec<Fi
             None
         };
 
-        let entry = build_entry(
-            &parts[index],
-            &strength,
-            texture,
-            chroma,
-            options.strength,
-            &mut curves,
-        );
-        entries.push(entry);
+        let plan = entry_plan(&strength, texture, chroma, options.strength, &mut curves);
+        let part = &parts[index];
+        for frame in part.first_frame..=part.last_frame {
+            let seed = fresh_seed(frame);
+            let entry = seeded_entry(&plan, frame, frame, seed, sigmas);
+            entries.push(entry);
+        }
     }
 
     entries
@@ -421,62 +434,93 @@ fn borrow<T>(parts: &[Parts], index: usize, value: impl Fn(&Parts) -> Option<T>)
     None
 }
 
-/// The entry for one part.
+/// The seed-independent values of one part's entries.
 ///
-/// Without chroma, luma alone picks the shifts. With chroma, the AR shift is the finest that fits
-/// every plane's weights and the scaling shift the finest that fits every plane's strongest point.
-/// Every plane's targets are `dial` times the measured ones before the shifts are chosen.
-fn build_entry(
-    part: &Parts,
+/// Without chroma, luma's weights are the table's own. With chroma, the AR shift is the finest that
+/// fits every plane's weights. Every plane's targets are `dial` times the measured ones.
+fn entry_plan(
     strength: &[BinStrength],
     texture: Texture,
     chroma: Option<[ChromaFit; CHROMA_PLANES]>,
     dial: f64,
     curves: &mut CurveCache,
-) -> FittedEntry {
+) -> EntryPlan {
     let targets = luma_targets(strength, texture, dial, curves);
+    let (luma_coeffs, luma_shift) = texture.table;
     let Some([cb_fit, cr_fit]) = chroma else {
-        let (coeffs, ar_shift) = texture.table;
-        let (points, scaling_shift) = scaling_points(&targets, texture.table_sigma);
+        return EntryPlan {
+            ar_coeffs: luma_coeffs,
+            ar_shift: luma_shift,
+            targets,
+            chroma: None,
+        };
+    };
+
+    let cb_shift = finest_ar_shift(&cb_fit.texture.weights);
+    let cr_shift = finest_ar_shift(&cr_fit.texture.weights);
+    let ar_shift = luma_shift.min(cb_shift).min(cr_shift);
+    let ar_coeffs = if ar_shift == luma_shift {
+        luma_coeffs
+    } else {
+        quantise_at(&texture.table_weights, ar_shift)
+    };
+
+    let cb = chroma_scaling(&cb_fit, ChromaPlane::Cb, ar_shift, dial, curves);
+    let cr = chroma_scaling(&cr_fit, ChromaPlane::Cr, ar_shift, dial, curves);
+
+    EntryPlan {
+        ar_coeffs,
+        ar_shift,
+        targets,
+        chroma: Some([cb, cr]),
+    }
+}
+
+/// The entry over `first_frame..=last_frame` whose grain the decoder draws from `seed`.
+///
+/// Each plane's points scale its targets by the std of that seed's template. Without chroma, luma
+/// alone picks the scaling shift. With chroma, the scaling shift is the finest that fits every
+/// plane's strongest point.
+fn seeded_entry(
+    plan: &EntryPlan,
+    first_frame: u64,
+    last_frame: u64,
+    seed: u16,
+    sigmas: &mut SeedSigmas,
+) -> FittedEntry {
+    let luma_sigma = sigmas.sigma(&plan.ar_coeffs, plan.ar_shift, TemplatePlane::Luma, seed);
+    let Some([cb, cr]) = &plan.chroma else {
+        let (points, scaling_shift) = scaling_points(&plan.targets, luma_sigma);
 
         return FittedEntry {
-            first_frame: part.first_frame,
-            last_frame: part.last_frame,
-            ar_coeffs: coeffs,
-            ar_shift,
+            first_frame,
+            last_frame,
+            seed,
+            ar_coeffs: plan.ar_coeffs,
+            ar_shift: plan.ar_shift,
             scaling_shift,
             points,
             chroma: None,
         };
     };
 
-    let (luma_coeffs, luma_shift) = texture.table;
-    let cb_shift = finest_ar_shift(&cb_fit.texture.weights);
-    let cr_shift = finest_ar_shift(&cr_fit.texture.weights);
-    let ar_shift = luma_shift.min(cb_shift).min(cr_shift);
-
-    let (coeffs, sigma_template) = if ar_shift == luma_shift {
-        (luma_coeffs, texture.table_sigma)
-    } else {
-        let coeffs = quantise_at(&texture.table_weights, ar_shift);
-        let sigma = template_sigma(&coeffs, ar_shift, TemplatePlane::Luma);
-        (coeffs, sigma)
-    };
-
-    let cb = chroma_scaling(&cb_fit, ChromaPlane::Cb, ar_shift, dial, curves);
-    let cr = chroma_scaling(&cr_fit, ChromaPlane::Cr, ar_shift, dial, curves);
-    let luma_peak = scaling_peak(&targets, sigma_template);
-    let peak = luma_peak.max(cb.peak()).max(cr.peak());
+    let cb_sigma = cb.seed_sigma(seed, sigmas);
+    let cr_sigma = cr.seed_sigma(seed, sigmas);
+    let luma_peak = scaling_peak(&plan.targets, luma_sigma);
+    let cb_peak = cb.peak(cb_sigma);
+    let cr_peak = cr.peak(cr_sigma);
+    let peak = luma_peak.max(cb_peak).max(cr_peak);
     let scaling_shift = finest_scaling_shift(peak);
-    let points = scaling_points_at(&targets, sigma_template, scaling_shift);
-    let cb_entry = cb.entry_at(scaling_shift);
-    let cr_entry = cr.entry_at(scaling_shift);
+    let points = scaling_points_at(&plan.targets, luma_sigma, scaling_shift);
+    let cb_entry = cb.entry_at(cb_sigma, scaling_shift);
+    let cr_entry = cr.entry_at(cr_sigma, scaling_shift);
 
     FittedEntry {
-        first_frame: part.first_frame,
-        last_frame: part.last_frame,
-        ar_coeffs: coeffs,
-        ar_shift,
+        first_frame,
+        last_frame,
+        seed,
+        ar_coeffs: plan.ar_coeffs,
+        ar_shift: plan.ar_shift,
         scaling_shift,
         points,
         chroma: Some([cb_entry, cr_entry]),

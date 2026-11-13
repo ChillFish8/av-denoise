@@ -11,7 +11,8 @@ use crate::nl4d::grain::fit::{
     undo_mean_removal,
     yule_walker,
 };
-use crate::nl4d::grain::template::{ChromaPlane, CurveCache, TemplatePlane, high_pass_curve, template_sigma};
+use crate::nl4d::grain::seeds::SeedSigmas;
+use crate::nl4d::grain::template::{ChromaPlane, CurveCache, TemplatePlane, high_pass_curve, seed_sigma};
 
 #[test]
 fn chroma_texture_matches_the_luma_fit_of_the_same_sums() {
@@ -45,6 +46,7 @@ fn chroma_scaling_reads_its_own_plane_curve_at_the_finest_shift() {
     let ar_shift = 6;
     let coeffs = quantise_at(&texture.weights, ar_shift);
     let step = Some(code_step(8));
+    let seed = 4;
 
     for plane in [ChromaPlane::Cb, ChromaPlane::Cr] {
         let template_plane = TemplatePlane::Chroma(plane);
@@ -52,11 +54,15 @@ fn chroma_scaling_reads_its_own_plane_curve_at_the_finest_shift() {
         let scaling = chroma_scaling(&fit, plane, ar_shift, 1.0, &mut curves);
         let curve = high_pass_curve(&finest_coeffs, finest_shift, template_plane, step);
         let field_std = curve.field_std(median);
-        let sigma_template = template_sigma(&coeffs, ar_shift, template_plane);
+        let mut sigmas = SeedSigmas::new();
+        let plane_sigma = scaling.seed_sigma(seed, &mut sigmas);
+        let sigma_template = seed_sigma(&coeffs, ar_shift, template_plane, seed);
         let expected = field_std * 255.0 / sigma_template;
+        let peak = scaling.peak(plane_sigma);
 
         assert!(finest_shift > ar_shift);
-        assert!((scaling.peak() / expected - 1.0).abs() < 1e-12, "{plane:?}");
+        assert_eq!(plane_sigma, sigma_template);
+        assert!((peak / expected - 1.0).abs() < 1e-12, "{plane:?}");
     }
 }
 

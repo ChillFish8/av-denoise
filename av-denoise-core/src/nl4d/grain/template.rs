@@ -183,21 +183,7 @@ pub(crate) fn template_seed(index: u32) -> u16 {
     ((1000 + 7919 * index) & 0xFFFF) as u16
 }
 
-/// The grain std of these weights' templates on `plane`.
-///
-/// It reads the interior of [TEMPLATE_SEEDS] templates.
-pub(crate) fn template_sigma(coeffs: &[i32; AR_COEFFS], ar_shift: u32, plane: TemplatePlane) -> f64 {
-    let interiors = template_interiors(coeffs, ar_shift, plane);
-    let samples = interiors.concat();
-
-    population_std(&samples)
-}
-
 /// The grain std of the one template these weights and `seed` make on `plane`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only tests read a single seed's strength")
-)]
 pub(crate) fn seed_sigma(coeffs: &[i32; AR_COEFFS], ar_shift: u32, plane: TemplatePlane, seed: u16) -> f64 {
     let layout = plane.layout();
     let template = plane.template(coeffs, ar_shift, seed);
