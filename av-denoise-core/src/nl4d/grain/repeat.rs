@@ -232,11 +232,33 @@ impl SeedScores {
 }
 
 /// The repeat score of every listed seed, in list order.
+///
+/// The seeds are scored in parallel across the available cores.
 fn list_scores(coeffs: &[i32; AR_COEFFS], ar_shift: u32) -> Vec<f64> {
     let kept = kept_lags();
+    let workers = std::thread::available_parallelism().map_or(1, usize::from);
+    let chunk_size = FGSE_SEEDS.len().div_ceil(workers).max(1);
+    let kept = kept.as_slice();
 
-    FGSE_SEEDS
-        .iter()
-        .map(|&seed| repeat_score(coeffs, ar_shift, seed, &kept))
-        .collect()
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = FGSE_SEEDS
+            .chunks(chunk_size)
+            .map(|seeds| {
+                scope.spawn(move || {
+                    seeds
+                        .iter()
+                        .map(|&seed| repeat_score(coeffs, ar_shift, seed, kept))
+                        .collect::<Vec<f64>>()
+                })
+            })
+            .collect();
+
+        let mut scores = Vec::with_capacity(FGSE_SEEDS.len());
+        for handle in handles {
+            let chunk_scores = handle.join().expect("a seed scoring worker panicked");
+            scores.extend(chunk_scores);
+        }
+
+        scores
+    })
 }

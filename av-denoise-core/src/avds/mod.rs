@@ -41,6 +41,7 @@ pub use crate::{
     FitOptions,
     GrainMode,
     GrainRun,
+    GrainTable,
     MAX_STRENGTH,
     StaticGrain,
 };

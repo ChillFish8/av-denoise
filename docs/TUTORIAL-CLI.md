@@ -102,13 +102,13 @@ The tables below cover the flags worth reaching for. Each subcommand's
 
 These are global, so they work on either side of the subcommand.
 
-| Flag                            | What it does                                                                                      | Default       |
-|---------------------------------|---------------------------------------------------------------------------------------------------|---------------|
-| `--preset <veryfast..veryslow>` | Speed vs quality for `nlmeans`, see the ladder below. `nl4d` runs `base` and `slow`.              | `base`        |
-| `--channel-mode <luma,chroma>`  | Which planes to clean.                                                                            | `luma,chroma` |
-| `-A, --accelerators <list>`     | Backends to try, in order. Comma-separated, for example `cuda,vulkan`.                            | `vulkan`      |
-| `-d, --device <spec>`           | `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]`, or `cpu`.                             | `default`     |
-| `--progress`                    | Draws a progress bar. Off by default, because anything else writing to the terminal scrambles it. | off           |
+| Flag                               | What it does                                                                                                     | Default       |
+|------------------------------------|------------------------------------------------------------------------------------------------------------------|---------------|
+| `--preset <veryfast..veryslow>`    | Speed vs quality for `nlmeans`, see the ladder below. `nl4d` runs `base` and `slow`.                             | `base`        |
+| `--channel-mode <luma,chroma>`     | Which planes to clean.                                                                                           | `luma,chroma` |
+| `-A, --accelerators <list>`        | Backends to try, in order. Comma-separated, for example `cuda,vulkan`.                                           | `vulkan`      |
+| `-d, --device <spec>`              | `default`, `discrete[:N]`, `integrated[:N]`, `virtual[:N]`, or `cpu`.                                            | `default`     |
+| `--progress`                       | Draws a progress bar. Off by default, because anything else writing to the terminal scrambles it.                | off           |
 
 Both subcommands also take:
 
@@ -281,7 +281,7 @@ still. SVT-AV1 `--fgs-table` and `grav1synth apply` apply only its first entry, 
 single-scene table only.
 
 Grain that stays the same from frame to frame is detected and held still. The command logs which
-frames it treats as fresh and which as static.
+frames it treats as fresh and which as frozen.
 
 The table holds luma and chroma grain by default. Chroma grain needs 4:2:0 video from a run that
 denoised chroma. Otherwise the command warns and writes luma grain only.
@@ -289,17 +289,17 @@ denoised chroma. Otherwise the command warns and writes luma grain only.
 The table's timestamps count the run's output frames from 0 at the source frame rate. It fits
 constant frame rate sources and encodes of the run's output.
 
-| Flag                    | What it does                                                                                                                                  | Default       |
-|-------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|---------------|
-| `--input <PATH>`        | The grain data file written by `--export-avds`.                                                                                               | required      |
-| `--output <PATH>`       | Where to write the table.                                                                                                                     | required      |
-| `--planes <PLANES>`     | Which planes get grain, `luma` or `luma,chroma`. Chroma alone is refused.                                                                     | `luma,chroma` |
-| `--fine-noise <AMOUNT>` | The share of the fine, fresh scan noise moved out of the grain's texture, between 0 and 1. Strength stays as measured. `0` moves none.        | `0.5`         |
-| `--strength <FACTOR>`   | A multiple of the source's grain, between 0 and 4. `1` matches the source. A lower value suits an encode that keeps some grain itself.        | `1`           |
-| `--static`              | Treat the whole clip's grain as static, one pattern held on every frame.                                                                      | off           |
-| `--no-static`           | Turn static grain detection off, so only declared scenes and frames are static.                                                               | off           |
-| `--static-scenes <SCENES>` | Scenes whose grain is static, comma-separated. Each is a scene number or a `first:last` range, as `synthesize report` prints them.           | none          |
-| `--static-frames <FRAMES>` | Frames whose grain is static, comma-separated. Each is a frame number or a `first:last` range, counting output frames from 0.                 | none          |
+| Flag                       | What it does                                                                                                                           | Default       |
+|----------------------------|----------------------------------------------------------------------------------------------------------------------------------------|---------------|
+| `--input <PATH>`           | The grain data file written by `--export-avds`.                                                                                        | required      |
+| `--output <PATH>`          | Where to write the table.                                                                                                              | required      |
+| `--planes <PLANES>`        | Which planes get grain, `luma` or `luma,chroma`. Chroma alone is refused.                                                              | `luma,chroma` |
+| `--fine-noise <AMOUNT>`    | The share of the fine, fresh scan noise moved out of the grain's texture, between 0 and 1. Strength stays as measured. `0` moves none. | `0.5`         |
+| `--strength <FACTOR>`      | A multiple of the source's grain, between 0 and 4. `1` matches the source. A lower value suits an encode that keeps some grain itself. | `1`           |
+| `--static`                 | Treat the whole clip's grain as static, one pattern held on every frame.                                                               | off           |
+| `--no-static`              | Turn static grain detection off, so only declared scenes and frames are static.                                                        | off           |
+| `--static-scenes <SCENES>` | Scenes whose grain is static, comma-separated. Each is a scene number or a `first:last` range, as `synthesize report` prints them.     | none          |
+| `--static-frames <FRAMES>` | Frames whose grain is static, comma-separated. Each is a frame number or a `first:last` range, counting output frames from 0.          | none          |
 
 ```bash
 av-denoise synthesize av1-fgs --input run.avds --output grain.tbl --fine-noise 0.25 --strength 0.8
