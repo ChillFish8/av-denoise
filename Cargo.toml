@@ -7,7 +7,6 @@ version = "0.7.0-alpha1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/ChillFish8/av-denoise"
-readme = "README.md"
 
 [workspace.dependencies]
 anyhow = "1"
