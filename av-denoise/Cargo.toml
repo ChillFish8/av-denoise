@@ -32,7 +32,7 @@ required-features = ["binary"]
 [dependencies]
 av-denoise-core.workspace = true
 anyhow.workspace = true
-bon.workspace = true
+bon = "3"
 cubecl.workspace = true
 etcetera = "0.11"
 serde = { version = "1", features = ["derive"] }

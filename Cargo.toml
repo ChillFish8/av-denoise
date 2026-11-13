@@ -17,7 +17,6 @@ thiserror = "2"
 tracing = "0.1"
 strum = "0.28"
 strum_macros = "0.28"
-bon = "3"
 arrow-array = "60.1.0"
 arrow-schema = "60.1.0"
 parquet = { version = "60.1.0", default-features = false, features = ["arrow", "zstd"] }

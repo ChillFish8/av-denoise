@@ -409,7 +409,6 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
- "bon",
  "clap",
  "cubecl",
  "cubecl-environment",
