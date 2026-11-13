@@ -35,6 +35,8 @@ denoising tools.
   - Please be aware that due to VS API limitations the NLMeans-HQ and NL4D algorithms are limited and
     performance is suboptimal from what it could be. For best performance we recommend using the CLI and then feeding
     the output into VS separately.
+- **AV1 FGS generation** - Rebuild the grain removed during denoising using av-denoise's grain synthesizer producing
+  more accurate, closer matching grain to the original source.
 
 ---
 

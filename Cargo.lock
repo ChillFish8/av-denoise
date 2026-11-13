@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "av-denoise"
-version = "0.6.1"
+version = "0.7.0-alpha1"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "av-denoise-core"
-version = "0.6.1"
+version = "0.7.0-alpha1"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "av-denoise-vs"
-version = "0.6.1"
+version = "0.7.0-alpha1"
 dependencies = [
  "anyhow",
  "av-denoise",
