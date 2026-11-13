@@ -265,6 +265,10 @@ fn synthesize_av1_fgs_matches_the_measured_table() {
         planes: vec![GrainPlane::Luma],
         fine_noise: 0.0,
         strength: 1.0,
+        static_grain: false,
+        no_static: false,
+        static_scenes: Vec::new(),
+        static_frames: Vec::new(),
     };
     let kind = SynthesizeKind::Av1Fgs(av1_fgs);
     let args = SynthesizeArgs { kind };

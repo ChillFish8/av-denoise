@@ -6,6 +6,8 @@ use crate::avds::{
     AvdsGroup,
     AvdsMeta,
     FitOptions,
+    GrainMode,
+    GrainRun,
     PlanesMeasured,
     REPORT_GROUPS,
     av1_table,
@@ -19,9 +21,12 @@ use crate::nl4d::grain::consts::{
     AUTOCOV_LEN,
     BUCKETS_PER_GROUP,
     CHUNK_FRAMES,
+    FRAME_RECORD_LEN,
     FRAME_TABLE_LEN,
     HIST_LEN,
     LAG_COUNT,
+    LAG_RECORD_LEN,
+    PERSISTENCE_LAGS,
     STD_BUCKETS,
 };
 use crate::{ChromaLayout, GrainChunk, SceneGrain, build_table, frame_rows};
@@ -155,7 +160,7 @@ fn av1_fgs_from_the_file_matches_the_direct_table() {
     let table = av1_table(&meta, rows, &options).expect("the table builds");
     let direct = build_table(&scenes, meta.frame_rate, &direct_options).expect("the table builds");
 
-    assert_eq!(table, direct.text);
+    assert_eq!(table, direct);
 }
 
 #[test]
@@ -188,7 +193,7 @@ fn outputs_from_their_groups_match_the_direct_outputs() {
     let direct_table = build_table(&scenes, meta.frame_rate, &direct_options).expect("the table builds");
     let direct_report = frame_rows(&scenes);
 
-    assert_eq!(table, direct_table.text);
+    assert_eq!(table, direct_table);
     assert_eq!(report, direct_report);
 }
 
@@ -218,7 +223,7 @@ fn short_scenes_synthesize_like_the_direct_path() {
     let report = report_rows(rows);
     let direct_report = frame_rows(&scenes);
 
-    assert_eq!(table, direct_table.text);
+    assert_eq!(table, direct_table);
     assert_eq!(report, direct_report);
 }
 
@@ -287,7 +292,7 @@ fn an_empty_file_gives_an_empty_table() {
 
     let table = av1_table(&meta, Vec::new(), &options).expect("the table builds");
 
-    assert_eq!(table, "filmgrn1\n");
+    assert_eq!(table.text, "filmgrn1\n");
 }
 
 #[test]
@@ -303,14 +308,10 @@ fn av1_fgs_with_chroma_from_the_file_matches_the_direct_table() {
     let table = av1_table(&meta, chroma_rows, &options).expect("the table builds");
     let direct = build_table(&scenes, meta.frame_rate, &direct_options).expect("the table builds");
 
-    assert_eq!(
-        AV1_CHROMA_TABLE_GROUPS,
-        [AvdsGroup::Table, AvdsGroup::ChromaTable]
-    );
-    let cb_points = effective_points(&table, &["sCb"]);
+    let cb_points = effective_points(&table.text, &["sCb"]);
 
-    assert!(cb_points.iter().any(|&point| point > 0.0), "{table}");
-    assert_eq!(table, direct.text);
+    assert!(cb_points.iter().any(|&point| point > 0.0), "{}", table.text);
+    assert_eq!(table, direct);
 }
 
 #[test]
@@ -325,8 +326,8 @@ fn av1_table_takes_rounding_from_the_bit_depth() {
 
     let eight_bit_table = av1_table(&eight_bit, rows.clone(), &options).expect("the table builds");
     let ten_bit_table = av1_table(&ten_bit, rows, &options).expect("the table builds");
-    let eight_bit_points = effective_points(&eight_bit_table, &ALL_PLANES);
-    let ten_bit_points = effective_points(&ten_bit_table, &ALL_PLANES);
+    let eight_bit_points = effective_points(&eight_bit_table.text, &ALL_PLANES);
+    let ten_bit_points = effective_points(&ten_bit_table.text, &ALL_PLANES);
 
     assert_ne!(eight_bit_table, ten_bit_table);
     assert_eq!(eight_bit_points.len(), ten_bit_points.len());
@@ -440,4 +441,123 @@ fn av1_table_refuses_a_strength_past_four() {
 
         assert!(error.to_string().contains("the grain strength"), "got {error}");
     }
+}
+
+#[test]
+fn the_table_groups_read_persistence() {
+    assert!(AV1_TABLE_GROUPS.contains(&AvdsGroup::Persistence));
+    assert!(AV1_CHROMA_TABLE_GROUPS.contains(&AvdsGroup::Persistence));
+}
+
+/// One frame's persistence sums with 1000 cells, `lag_one` on lags 1 to 7 and `lag_eight` on lag 8.
+fn persistence_record(lag_one: f64, lag_eight: f64) -> Vec<f64> {
+    let mut record = vec![0.0; FRAME_RECORD_LEN];
+    for lag_index in 0..PERSISTENCE_LAGS {
+        let start = lag_index * LAG_RECORD_LEN;
+        let cross_sum = if lag_index + 1 == PERSISTENCE_LAGS {
+            lag_eight
+        } else {
+            lag_one
+        };
+
+        record[start] = 1000.0;
+        record[start + 1] = 1.0;
+        record[start + 2] = cross_sum;
+    }
+
+    record
+}
+
+/// The rows of a table-only scene, without persistence.
+fn rows_without_persistence() -> Vec<AvdsFrame> {
+    let scenes = vec![grain_scene()];
+    let mut rows = rows_from_scenes(&scenes);
+    for row in &mut rows {
+        row.persistence = None;
+    }
+
+    rows
+}
+
+fn entry_lines(table: &str) -> usize {
+    table.lines().filter(|line| line.starts_with("E ")).count()
+}
+
+#[test]
+fn rows_without_persistence_write_an_all_fresh_table() {
+    let rows = rows_without_persistence();
+    let meta = sample_meta(rows.len() as u64);
+    let last_frame = rows.len() as u64 - 1;
+    let options = FitOptions::default();
+
+    let table = av1_table(&meta, rows.clone(), &options).expect("the table builds");
+
+    let expected_runs = [GrainRun {
+        first_frame: 0,
+        last_frame,
+        mode: GrainMode::Fresh,
+    }];
+    assert_eq!(table.runs, expected_runs);
+    assert_eq!(entry_lines(&table.text), rows.len());
+}
+
+#[test]
+fn rows_without_persistence_still_honour_declared_frames() {
+    let rows = rows_without_persistence();
+    let meta = sample_meta(rows.len() as u64);
+    let last_frame = rows.len() as u64 - 1;
+    let frozen_frames = 10..=19;
+    let options = FitOptions::default().with_static_frames(vec![frozen_frames]);
+
+    let table = av1_table(&meta, rows, &options).expect("the table builds");
+
+    let expected_runs = [
+        GrainRun {
+            first_frame: 0,
+            last_frame: 9,
+            mode: GrainMode::Fresh,
+        },
+        GrainRun {
+            first_frame: 10,
+            last_frame: 19,
+            mode: GrainMode::Frozen,
+        },
+        GrainRun {
+            first_frame: 20,
+            last_frame,
+            mode: GrainMode::Fresh,
+        },
+    ];
+    assert_eq!(table.runs, expected_runs);
+}
+
+#[test]
+fn frozen_rows_write_one_held_seed() {
+    let mut rows = rows_without_persistence();
+    let frozen_record = persistence_record(0.70, 0.52);
+    for row in &mut rows {
+        row.persistence = Some(frozen_record.clone());
+    }
+    let meta = sample_meta(rows.len() as u64);
+    let last_frame = rows.len() as u64 - 1;
+    let options = FitOptions::default();
+
+    let table = av1_table(&meta, rows, &options).expect("the table builds");
+
+    let expected_runs = [GrainRun {
+        first_frame: 0,
+        last_frame,
+        mode: GrainMode::Frozen,
+    }];
+    assert_eq!(table.runs, expected_runs);
+
+    let seeds: Vec<&str> = table
+        .text
+        .lines()
+        .filter(|line| line.starts_with("E "))
+        .filter_map(|line| line.split_whitespace().nth(4))
+        .collect();
+    assert_eq!(seeds.len(), 1);
+    assert_eq!(entry_lines(&table.text), 1);
+    assert!(seeds.iter().all(|seed| *seed == seeds[0]), "got {seeds:?}");
 }

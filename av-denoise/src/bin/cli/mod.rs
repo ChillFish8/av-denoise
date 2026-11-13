@@ -7,6 +7,9 @@ mod nlmeans;
 mod synthesize;
 mod tune;
 
+#[cfg(test)]
+mod tests;
+
 use std::path::PathBuf;
 
 pub use av_denoise::Preset;

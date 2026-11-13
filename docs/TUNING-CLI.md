@@ -64,12 +64,17 @@ during the run, to a grain data file at PATH. `av-denoise synthesize av1-fgs` th
 into an AV1 film grain table, which describes all of the source's grain on each plane, as one
 frame shows it. The table leaves nothing out for the grain the output keeps, since an encode
 removes most of it. `--planes luma` leaves chroma grain out, and so does a source that is not
-4:2:0 or a run that did not denoise chroma. Add it to a finished AV1 encode with `regrain apply`,
-which applies each scene's entry. The decoder then adds matching grain back, so the encode stays
-clean while the picture keeps its grain. SVT-AV1's `--fgs-table` and `grav1synth apply` apply only
-the table's first entry to every frame, so they suit a single-scene table only. The y4m output is
-the same with or without the flag. It is rejected with `--channel-mode chroma`, and a failed run
-leaves no file.
+4:2:0 or a run that did not denoise chroma. Add the table to a finished AV1 encode with
+`regrain apply --static-grain`, which the table needs to hold static grain still. The decoder then
+adds matching grain back, so the encode stays clean while the picture keeps its grain. SVT-AV1's
+`--fgs-table` and `grav1synth apply` apply only the table's first entry to every frame, so they
+suit a single-scene table only. The y4m output is the same with or without the flag. It is
+rejected with `--channel-mode chroma`, and a failed run leaves no file.
+
+Grain that stays the same from frame to frame is detected and held still. These
+`synthesize av1-fgs` flags change that. `--static` holds the whole clip, `--no-static` turns
+detection off, and `--static-scenes` and `--static-frames` declare scenes and frames of static
+grain.
 
 `--fine-noise` on `synthesize av1-fgs` moves a share of the fine, fresh scan noise out of the
 grain's texture, so the texture leans towards the textured grain. The grain keeps its measured
