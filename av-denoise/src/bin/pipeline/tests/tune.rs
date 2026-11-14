@@ -3,11 +3,9 @@
 use std::io::{Cursor, Read};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use av_denoise::tune::{BudgetRequest, SearchMode, TuneOutcome, TuneRequest, is_tuned};
 use av_denoise::{PlaneOptions, TuningMode, install_compilation_cache_at};
-use av_denoise_core::tune::{TUNE_UNKNOWN, tuning_budget};
 use avtbx_bestsource::IndexCache;
 
 use super::{
@@ -40,7 +38,7 @@ fn run_clip(bytes: Vec<u8>, tuning: TuningMode, tune_budget: Option<f64>) -> Vec
         workers: 2,
         frame_budget_bytes: 1 << 30,
         visible: false,
-        grain_table: None,
+        avds: None,
         tune_budget,
         timing_report: false,
         shared_device: false,
@@ -91,27 +89,15 @@ fn is_json(entry: &std::fs::DirEntry) -> bool {
 }
 
 #[test]
-fn a_pipe_without_a_length_asks_for_the_unknown_length_budget() {
-    let clip = multi_scene_clip(3);
-    let reader = y4m_reader(clip);
-    let opened = open_y4m(reader).expect("the clip opens");
+fn a_run_without_a_set_budget_tunes_in_full() {
+    let request = run_budget(None);
 
-    let frame_time = Duration::from_millis(1);
-
-    let request = run_budget(None, &opened.info);
-    let budget = tuning_budget(request, frame_time).expect("an unknown length is affordable");
-
-    assert_eq!(request, BudgetRequest::Automatic { frames: None });
-    assert_eq!(budget.total, TUNE_UNKNOWN);
+    assert_eq!(request, BudgetRequest::Full);
 }
 
 #[test]
-fn a_set_budget_overrides_the_automatic_one() {
-    let clip = multi_scene_clip(3);
-    let reader = y4m_reader(clip);
-    let opened = open_y4m(reader).expect("the clip opens");
-
-    let request = run_budget(Some(12.5), &opened.info);
+fn a_set_budget_overrides_the_full_one() {
+    let request = run_budget(Some(12.5));
 
     assert_eq!(request, BudgetRequest::Seconds(12.5));
 }

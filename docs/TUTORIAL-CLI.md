@@ -3,7 +3,7 @@
 Welcome to the tutorial for using av-denoise in CLI form! This is the primary way we recommend using av-denoise
 as it has full control over the input stream allowing us to make use of more optimisations and algorithms to
 bring you a better denoising experience.
- 
+
 ## Installation
 
 By default, when compiling only the `vulkan` feature is enabled, since that is typically the default accelerators
@@ -22,6 +22,7 @@ The following (non-accelerator) features are available:
     * This pulls in BestSource as a hard dependency. You must install FFmpeg (libavcodec and libavformat 63.1 or
       newer, libavutil 61.1 or newer) and xxHash 0.8 or newer, and `pkg-config` must be able to find them.
     * BestSource saves an index beside each source file so later runs open faster. Use `--no-index-cache` to disable it.
+- `avds` - Reads and writes `.avds` grain data files. `binary` turns it on.
 - `static-bestsource` - Enables `binary` and links BestSource statically. It reads the library from
   `BESTSOURCE_LIB_DIR` and FFmpeg from `PKG_CONFIG_PATH`. `just static-deps` builds both with vcpkg and
   `just build-static` builds the binary against them.
@@ -30,7 +31,7 @@ The following (non-accelerator) features are available:
 
 Each [GitHub release](https://github.com/ChillFish8/av-denoise/releases) carries a prebuilt CLI for
 Linux x86, Windows x86 and macOS on Apple Silicon. BestSource and FFmpeg are linked statically, so
-it is not required to have FFmpeg installed on your host system, however, the JIT will still 
+it is not required to have FFmpeg installed on your host system, however, the JIT will still
 attempt to dynamically load the CUDA headers and compiler system from your system if you attempt to use
 CUDA.
 
@@ -39,7 +40,7 @@ CUDA.
 This builds the binary with the default accelerators enabled (`vulkan`)
 
 ```bash
-cargo install --locked av-denoise --features binary
+cargo install --locked --git https://github.com/ChillFish8/av-denoise.git av-denoise --features binary
 ```
 
 ### From source
@@ -51,40 +52,6 @@ git clone https://github.com/ChillFish8/av-denoise.git
 cargo build --release --features binary
 cp ./target/release/av-denoise ./av-denoise
 ```
-
-### Container images
-
-Images are published to GHCR for each accelerator backend, one image per backend:
-
-```
-ghcr.io/chillfish8/av-denoise:vulkan-<version>
-ghcr.io/chillfish8/av-denoise:cuda-<version>
-ghcr.io/chillfish8/av-denoise:rocm-<version>
-```
-
-Stable releases also get a `<backend>-<major>.<minor>` and a `<backend>-latest` tag. Pre-releases only get
-the exact `<backend>-<version>` tag, so an alpha has to be pinned by its full version.
-
-The binary is the entrypoint, so flags are passed straight to the container. The GPU comes from the host, which
-means the devices have to be handed in and the input has to be mounted. Output is y4m on stdout, same as the
-bare binary.
-
-```bash
-docker run --rm \
-    --device /dev/kfd --device /dev/dri \
-    --group-add video --group-add render \
-    -v "$PWD:/in:ro" \
-    ghcr.io/chillfish8/av-denoise:vulkan-0.6.1 \
-    nl4d --input /in/noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
-```
-
-The `cuda` image needs the NVIDIA Container Toolkit and `--gpus all` instead of the `/dev/kfd` and `/dev/dri`
-devices. The `rocm` image takes the same devices as `vulkan` shown above.
-
-> [!TIP]
-> The JIT recompiles its kernels on every fresh container. Mount a volume and point
-> `AV_DENOISE_COMPILATION_CACHE` at it to keep that cost to the first run.
 
 
 ## Binary usage
@@ -160,28 +127,28 @@ NL4D runs the `base` and `slow` presets. `slow` widens the search for motion blo
 fails, up to `--mc-max-search-escalation` (8), and runs slower. Otherwise, trade speed for quality
 with `--temporal-radius` and `--spatial-radius`.
 
-| Flag                               | What it does                                                                                                                                                                                                                    | Default                  |
-|------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
-| `--temporal-radius <N>`            | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                                  | `2`                      |
-| `--lambda-ht <f>`                  | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                           | 4.158 luma, 3.234 chroma |
-| `--lambda-ht-scale <f>`            | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                                 | `1.0`                    |
-| `--spatial-radius <N>`             | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                                  | `9`                      |
-| `--sigma-scale <f>`                | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                               | `1.0`                    |
-| `--unstable-export-av1-fgs <PATH>` | Unstable, and may change between releases. Writes an AV1 film grain table to add with `regrain apply`, which applies each scene's entry. SVT-AV1 `--fgs-table` and `grav1synth apply` apply only its first entry, so they suit a single-scene table only. Needs luma to be denoised. | off                      |
+| Flag                               | What it does                                                                                                                                                                                                                                                                         | Default                  |
+|------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
+| `--temporal-radius <N>`            | How many neighbouring frames to search on each side, between 1 and 8. More frames means more patches to group.                                                                                                                                                                       | `2`                      |
+| `--lambda-ht <f>`                  | How aggressively small transform coefficients are zeroed out. Higher removes more noise and more fine detail with it. `--luma-lambda-ht` and `--chroma-lambda-ht` override one plane.                                                                                                | 4.158 luma, 3.234 chroma |
+| `--lambda-ht-scale <f>`            | Multiplies the `--lambda-ht` in effect for each plane. The main quality dial, since luma and chroma start from different defaults and this moves both together.                                                                                                                      | `1.0`                    |
+| `--spatial-radius <N>`             | Half-width of the candidate search inside the centre frame, between 1 and 16. Most of the search work goes here, since the window covers `(2N+1)^2` positions.                                                                                                                       | `9`                      |
+| `--sigma-scale <f>`                | Nudges the measured noise level, the same dial NLMeans spells `--hq-sigma-scale`.                                                                                                                                                                                                    | `1.0`                    |
+| `--export-avds <PATH>`             | Writes every grain measurement of the run to a grain data file, one row per output frame. See [Grain data and `av-denoise synthesize`](#grain-data-and-av-denoise-synthesize). Needs luma to be denoised.                                                                            | off                      |
 
 <details>
-<summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
+<summary><b>Expert flags</b>. For calibration and debugging, not everyday tuning.</summary>
 
-| Flag                                                                 | What it does                                                                                                                                                                                                                                                      | Default             |
-|----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
-| `--refine <N>`                                                       | Half-width of the window searched around each neighbour frame's motion-predicted position, between 1 and 4. Raise it when motion tracking lands close but not exact.                                                                                              | `2`                 |
-| `--sigma <f>`                                                        | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely.                                                                                                                                                                              | measured            |
-| `--thsad-scale <f>`                                                  | How badly a neighbour frame may match before its patches stop being trusted.                                                                                                                                                                                      | `1.0`               |
-| `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. A volume left short of frames by the skip makes its group filter from the centre frame alone.                                                                                    | `0.05`              |
-| `--no-noise-map`                                                     | Turns off the luma noise map, which scales the luma threshold by how noisy each brightness level and colour is. Also turns off the luma colour gains.                                                                                                                                                          | map on              |
-| `--no-pooled-threshold`                                              | Turns off the pooled threshold, which judges each frequency together with its neighbours so faint texture survives.                                                                                                                                               | pooling on          |
-| `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. NL4D always tracks motion, so these are always live.                                                                                                                                                                                      | `16`, `8`, `4`, `2` |
-| `--mc-max-search-escalation <N>`                                     | Widest radius a motion block that matched badly searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns the wider search off.                                                                                                              | from `--preset`     |
+| Flag                                                                 | What it does                                                                                                                                                                      | Default             |
+|----------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
+| `--refine <N>`                                                       | Half-width of the window searched around each neighbour frame's motion-predicted position, between 1 and 4. Raise it when motion tracking lands close but not exact.              | `2`                 |
+| `--sigma <f>`                                                        | Pins the noise level in 8-bit units, turning the per-scene measurement off entirely.                                                                                              | measured            |
+| `--thsad-scale <f>`                                                  | How badly a neighbour frame may match before its patches stop being trusted.                                                                                                      | `1.0`               |
+| `--c-min <f>`                                                        | Confidence floor below which a whole neighbour block is skipped rather than scored. A volume left short of frames by the skip makes its group filter from the centre frame alone. | `0.05`              |
+| `--no-noise-map`                                                     | Turns off the luma noise map, which scales the luma threshold by how noisy each brightness level and colour is. Also turns off the luma colour gains.                             | map on              |
+| `--no-pooled-threshold`                                              | Turns off the pooled threshold, which judges each frequency together with its neighbours so faint texture survives.                                                               | pooling on          |
+| `--mc-blksize`, `--mc-overlap`, `--mc-search`, `--mc-pyramid-levels` | Motion-search geometry. NL4D always tracks motion, so these are always live.                                                                                                      | `16`, `8`, `4`, `2` |
+| `--mc-max-search-escalation <N>`                                     | Widest radius a motion block that matched badly searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns the wider search off.                              | from `--preset`     |
 
 </details>
 
@@ -214,7 +181,7 @@ which runs slower.
 | `--prefilter <mode>`    | Compares patches against a cleaned reference instead of the noisy input. `nlm[:<scale>]` or `bilateral:<sigma_s>,<sigma_r>`. Costs one extra GPU pass per frame.                               | `none`          |
 
 <details>
-<summary><b>Expert flags</b> — calibration and debugging, not everyday tuning</summary>
+<summary><b>Expert flags</b>. For calibration and debugging, not everyday tuning.</summary>
 
 | Flag                                                                 | What it does                                                                                                                                                                       | Default             |
 |----------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------|
@@ -230,6 +197,7 @@ which runs slower.
 | `--mc-max-search-escalation <N>`                                     | Widest radius a badly matched motion block searches again with, between `--mc-search` and 8. Equal to `--mc-search` turns it off. Only used with `--motion-compensation`.          | from `--preset`     |
 
 </details>
+
 ---
 
 ## Piped input and high bit depth
@@ -255,6 +223,115 @@ ffmpeg -i noisy.mkv -pix_fmt yuv420p10le -strict -1 -f yuv4mpegpipe - \
 ```
 
 File input via `--input noisy.mkv` needs no such flag.
+
+---
+
+## Grain data and `av-denoise synthesize`
+
+`--export-avds` on `nl4d` measures the source's grain while it denoises, and writes every
+measurement to a `.avds` grain data file with one row per output frame. 
+
+> [!TIP]
+> The file is Parquet, so any Parquet reader can open it.
+
+```bash
+av-denoise nl4d --input noisy.mkv --export-avds run.avds > /dev/null
+```
+
+`av-denoise synthesize` builds grain outputs from that file. It needs no GPU and no source, so you
+can try different options without denoising again.
+
+### `synthesize av1-fgs`
+
+Writes an AV1 film grain table for all of the source's grain, as one frame shows it. Add it to a
+finished AV1 encode with [regrain](https://github.com/Rabbit-Company/regrain) via `regrain apply --static-grain`, 
+it should be noted that `--static-grain` is still required even if your source has dynamic/moving grain, 
+the synthesize command already handles that and does not want `regrain` overwriting the behaviour it decides.
+
+> [!CAUTION]
+> SVT-AV1 `--fgs-table` and `grav1synth apply` apply only its first entry, so they will not apply correctly to your
+> encode.
+
+Grain that stays the same from frame to frame is detected and held still. The command logs which
+frames it treats as fresh and which as frozen.
+
+The table holds luma and chroma grain by default. Chroma grain needs 4:2:0 video from a run that
+denoised chroma. Otherwise, the command will log a warning and write luma grain only.
+
+The table's timestamps count the run's output frames from 0 at the source frame rate. It fits
+constant frame rate sources and encodes of the run's output.
+
+| Flag                       | What it does                                                                                                                           | Default       |
+|----------------------------|----------------------------------------------------------------------------------------------------------------------------------------|---------------|
+| `--input <PATH>`           | The grain data file written by `--export-avds`.                                                                                        | required      |
+| `--output <PATH>`          | Where to write the table.                                                                                                              | required      |
+| `--planes <PLANES>`        | Which planes get grain, `luma` or `luma,chroma`. Chroma alone is refused.                                                              | `luma,chroma` |
+| `--fine-noise <AMOUNT>`    | The share of the fine, fresh scan noise moved out of the grain's texture, between 0 and 1. Strength stays as measured. `0` moves none. | `0.5`         |
+| `--strength <FACTOR>`      | A multiple of the source's grain, between 0 and 4. `1` matches the source. A lower value suits an encode that keeps some grain itself. | `1`           |
+| `--static`                 | Treat the whole clip's grain as static, one pattern held on every frame.                                                               | off           |
+| `--no-static`              | Turn static grain detection off, so only declared scenes and frames are static.                                                        | off           |
+| `--static-scenes <SCENES>` | Scenes whose grain is static, comma-separated. Each is a scene number or a `first:last` range, as `synthesize report` prints them.     | none          |
+| `--static-frames <FRAMES>` | Frames whose grain is static, comma-separated. Each is a frame number or a `first:last` range, counting output frames from 0.          | none          |
+
+
+_Example command producing a grain table with grain at about 80% strength from what the measurement read:_
+```bash
+av-denoise synthesize av1-fgs --input run.avds --output grain.tbl --fine-noise 0.25 --strength 0.8
+```
+
+### `synthesize report`
+
+Writes the per-frame grain report. See [Reading the grain report](#reading-the-grain-report).
+
+| Flag              | What it does                                    | Default  |
+|-------------------|-------------------------------------------------|----------|
+| `--input <PATH>`  | The grain data file written by `--export-avds`. | required |
+| `--output <PATH>` | Where to write the report.                      | required |
+
+```bash
+av-denoise synthesize report --input run.avds --output grain.jsonl
+```
+
+---
+
+## Reading the grain report
+
+`synthesize report` writes a NDJSON file, one frame per line, in frame order.
+It describes the grain in the source, not what the denoiser removed.
+
+```json
+{"frame":120,"scene":3,"cells":19804,"strength":0.93,"strength_cb":0.41,"strength_cr":0.38,"persistence":[0.62,0.46,0.34,0.27,0.23,0.21,0.2,0.2]}
+```
+
+| Key           | Meaning                                                                                                                           |
+|---------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| `frame`       | Output frame index, starting at 0.                                                                                                |
+| `scene`       | Index of the scene av-denoise cut, in frame order. Encoders may cut their own scenes, so treat it as a hint.                      |
+| `cells`       | How many 8x8 cells the reading rests on, counting the frame before and after.                                                     |
+| `strength`    | The grain standard deviation in 8-bit code values, whatever the bit depth.                                                        |
+| `strength_cb` | The same for the Cb plane. `null` when chroma is not denoised, such as with `--channel-mode luma`.                                |
+| `strength_cr` | The same for the Cr plane. `null` when chroma is not denoised.                                                                    |
+| `persistence` | Eight entries, for 1 to 8 frames away. Each is the share of grain unchanged that far before and after the frame, between 0 and 1. |
+
+A reading is `null` when fewer than 200 cells could be measured at the given temporal distance. 
+The window may be truncated if the frames would lay beyond the boundaries of the scene the current frame
+resides, this means you will likely see part of the window be `null` just after and before a scene cut.
+
+### How to read the `persistence` field
+
+The persistence field tells us roughly how much of the grain from the current frame remained after the Nth subsequent
+frame, fast moving grain will typically have near 0 persisting grain from the prior frame left over.
+
+On the flip side, slow moving grain will start high on the N + 1 frames, and fall off after
+a few frames within the window. Static grain will start high and continue to be high across the window.
+
+Real readings never reach exactly 0 or 1. Anything fixed in a held shot, such as compression
+residue, adds a little persistence to moving grain, and part of a flat area's grain is always fresh.
+
+To summarise a scene, take the median of each `persistence` entry over its rows, skipping `null`.
+As a starting point, a first entry under 0.4 suggests moving grain. Otherwise, a last entry under
+0.34 suggests slow grain, and anything higher suggests static grain.
+
 ---
 
 ## [Tuning guide](TUNING-CLI.md)
@@ -348,12 +425,12 @@ av-denoise --accelerators vulkan --device discrete:1 nl4d --input noisy.mkv \
 ```
 
 <details>
-<summary><b>Advanced examples</b> — fixed variant, manual per-plane strength, explicit backends</summary>
+<summary><b>Advanced examples</b>. Fixed variant, manual per-plane strength and explicit backends.</summary>
 
 These pin `--preset veryfast` to select the `fast` variant, which makes `--strength` an absolute
 value rather than the noise multiplier NLMeans-HQ applies. That trades away the per-scene
 measurement, so treat them as calibration and debugging recipes rather than a starting point. If
-your goal is a better-looking result, the dials above are the ones to reach for first — see
+your goal is a better-looking result, the dials above are the ones to reach for first. See
 [What not to touch in NLMeans](TUNING-CLI.md#what-not-to-touch-in-nlmeans).
 
 **Y/UV Denoise - ROCm/Vulkan - On GPU 1 - Light Denoise - Spatial - strength=luma:0.3,choma:0.6**

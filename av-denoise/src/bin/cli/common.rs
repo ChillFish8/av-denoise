@@ -78,7 +78,9 @@ pub struct CommonArgs {
     #[arg(long)]
     pub deterministic: bool,
 
-    /// How many seconds tuning may take, instead of a share of the clip's estimated encode time.
+    /// How many seconds tuning may take, instead of one complete pass.
+    ///
+    /// A budget too short to finish leaves the configuration to be tuned again on a later run.
     ///
     /// Takes a finite number between 0 and 86400.
     #[arg(long, value_name = "SECONDS", allow_negative_numbers = true, value_parser = parse_tune_budget)]

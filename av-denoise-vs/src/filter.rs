@@ -59,8 +59,6 @@ impl State {
 pub struct Denoise<'core> {
     source: Node<'core>,
     layout: FrameLayout,
-    /// The budget for the tuning pass on the first request, sized for the whole clip.
-    tuning_budget: BudgetRequest,
     geometry: StreamGeometry,
     /// Requests `get_frame_initial` has registered, kept apart from [State] so registering one never
     /// waits on GPU work.
@@ -129,8 +127,8 @@ impl<'core> Denoise<'core> {
         let tuning_pending = !is_tuned(&plane_options, layout);
         if tuning_pending {
             tracing::warn!(
-                "no tuning results are stored for this device, so the first frame is slow while av-denoise \
-                 tunes. Run `av-denoise tune` with the same options beforehand to avoid it"
+                "no tuning results are stored for this device, so av-denoise tunes once before the first \
+                 frame. Run `av-denoise tune` with the same options beforehand to avoid the wait"
             );
         }
 
@@ -152,11 +150,6 @@ impl<'core> Denoise<'core> {
             last_frame,
         };
 
-        let clip_frames = last_frame as u64 + 1;
-        let tuning_budget = BudgetRequest::Automatic {
-            frames: Some(clip_frames),
-        };
-
         let planner = StreamPlanner::new(geometry);
         let state = State {
             denoiser,
@@ -169,7 +162,6 @@ impl<'core> Denoise<'core> {
         Ok(Self {
             source,
             layout,
-            tuning_budget,
             geometry,
             outstanding: Mutex::new(Outstanding::default()),
             state: Mutex::new(state),
@@ -261,7 +253,7 @@ impl<'core> Denoise<'core> {
             force: false,
             mode: SearchMode::Families,
         };
-        let report = state.denoiser.tune(&window, self.tuning_budget, &request)?;
+        let report = state.denoiser.tune(&window, BudgetRequest::Full, &request)?;
 
         match report.outcome {
             TuneOutcome::Tuned => tracing::warn!(

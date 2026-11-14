@@ -1,8 +1,17 @@
+mod chroma;
 mod export;
+mod fine_noise;
 mod fit;
 mod kernels;
 mod mirror;
+mod modes;
+mod persistence;
+mod repeat;
+mod report;
+mod runs;
+mod seeds;
 mod segment;
+mod snapshot;
 mod synthetic;
 mod table;
 mod template;

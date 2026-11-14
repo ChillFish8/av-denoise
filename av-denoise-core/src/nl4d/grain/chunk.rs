@@ -1,37 +1,128 @@
-use super::consts::{HIST_LEN, LAG_COUNT, STRENGTH_GROUPS};
+use super::consts::{AUTOCOV_LEN, CHROMA_PLANES, FRAME_TABLE_LEN, HIST_LEN, LAG_COUNT, STRENGTH_GROUPS};
 
-/// The grain statistics of up to `CHUNK_FRAMES` consecutive completed frames of one scene.
+/// The grain statistics of up to 24 consecutive completed frames of one scene.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GrainChunk {
     /// How many completed frames the chunk covers.
     pub frames: u32,
-    /// Accepted source block counts, 16 luma bins by 64 std buckets.
+    /// Each frame's table statistics in frame order, 2800 values per luma frame.
+    ///
+    /// A table holds the source histogram, the one-frame histogram and the grouped lag sums. A
+    /// chroma frame holds the Cb table and then the Cr table, each in the luma layout. The source
+    /// histogram bins a block by the mean of its measured channel, luma or chroma. The one-frame
+    /// histogram counts each block's high-pass std, with constant blocks in bucket 0. It bins a
+    /// luma block by its luma mean, as the source histogram does, and a chroma block by the luma
+    /// of its colour block. It stays empty on a chroma frame whose block luma is not held. Counts
+    /// are whole numbers and lag sums are the GPU's own f32 values. Empty when the table is not
+    /// measured.
+    pub frame_tables: Vec<f32>,
+    /// Each frame's persistence sums in frame order, 24 values per luma frame and 6 per chroma
+    /// frame.
+    pub frame_records: Vec<f64>,
+    /// Each frame's noise reading, 30 values per frame, empty when the reading is off.
+    pub frame_noise: Vec<f32>,
+    /// Each frame's colour fit, 1974 values per plane per frame, empty when the colour model is
+    /// off.
+    ///
+    /// Each plane holds its log grain table, its log gain table and its fit header in turn.
+    pub frame_colour: Vec<f32>,
+}
+
+/// Summed table statistics of one or more frames, the inputs the table fit reads.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TableSums {
+    /// Accepted source block counts, 16 bins of the measured channel's mean by 64 std buckets.
     pub source_hist: Vec<u32>,
-    /// Accepted kept-grain block counts, in the same layout.
-    pub kept_hist: Vec<u32>,
-    /// The 46 source autocovariance sums of each strength group, in normalised units squared.
+    /// Accepted one-frame block counts by high-pass std, in the same layout.
+    pub frame_hist: Vec<u32>,
+    /// The 46 source lag sums of each strength group.
     pub autocov: Vec<f64>,
     /// How many source pixels each strength group's sums cover.
     pub pixels: Vec<f64>,
+}
+
+/// The grain chunks drained from each plane group, in frame order.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GrainChunks {
+    /// Chunks measured on luma.
+    pub luma: Vec<GrainChunk>,
+    /// Chunks measured on the two chroma planes.
+    pub chroma: Vec<GrainChunk>,
 }
 
 impl GrainChunk {
     pub fn empty() -> Self {
         Self {
             frames: 0,
+            frame_tables: Vec::new(),
+            frame_records: Vec::new(),
+            frame_noise: Vec::new(),
+            frame_colour: Vec::new(),
+        }
+    }
+
+    /// The chunk's table statistics, the sum of its frames.
+    pub(crate) fn summed_table(&self) -> TableSums {
+        let mut sums = TableSums::zeroed();
+        let (frame_tables, _) = self.frame_tables.as_chunks::<FRAME_TABLE_LEN>();
+        for frame_table in frame_tables {
+            sums.add_frame(frame_table);
+        }
+
+        sums
+    }
+
+    /// The chunk's table statistics of chroma plane `plane`, 0 for Cb and 1 for Cr, summed over
+    /// its frames.
+    pub(crate) fn summed_chroma_table(&self, plane: usize) -> TableSums {
+        let mut sums = TableSums::zeroed();
+        let (frame_tables, _) = self.frame_tables.as_chunks::<FRAME_TABLE_LEN>();
+        let plane_tables = frame_tables.iter().skip(plane).step_by(CHROMA_PLANES);
+        for plane_table in plane_tables {
+            sums.add_frame(plane_table);
+        }
+
+        sums
+    }
+}
+
+impl Default for TableSums {
+    fn default() -> Self {
+        Self::zeroed()
+    }
+}
+
+impl TableSums {
+    pub(crate) fn zeroed() -> Self {
+        Self {
             source_hist: vec![0; HIST_LEN],
-            kept_hist: vec![0; HIST_LEN],
+            frame_hist: vec![0; HIST_LEN],
             autocov: vec![0.0; STRENGTH_GROUPS * LAG_COUNT],
             pixels: vec![0.0; STRENGTH_GROUPS],
         }
     }
 
-    pub fn merge(&mut self, other: &GrainChunk) {
-        self.frames += other.frames;
+    pub(crate) fn add(&mut self, other: &TableSums) {
         add_counts(&mut self.source_hist, &other.source_hist);
-        add_counts(&mut self.kept_hist, &other.kept_hist);
+        add_counts(&mut self.frame_hist, &other.frame_hist);
         add_sums(&mut self.autocov, &other.autocov);
         add_sums(&mut self.pixels, &other.pixels);
+    }
+
+    /// Adds one frame's table statistics, laid out as in [GrainChunk::frame_tables].
+    fn add_frame(&mut self, frame_table: &[f32; FRAME_TABLE_LEN]) {
+        let (source_counts, rest) = frame_table.split_at(HIST_LEN);
+        let (frame_counts, grouped) = rest.split_at(HIST_LEN);
+        add_whole_counts(&mut self.source_hist, source_counts);
+        add_whole_counts(&mut self.frame_hist, frame_counts);
+
+        let (records, _) = grouped.as_chunks::<AUTOCOV_LEN>();
+        let (targets, _) = self.autocov.as_chunks_mut::<LAG_COUNT>();
+        let groups = targets.iter_mut().zip(self.pixels.iter_mut());
+        for ((target, pixels), record) in groups.zip(records) {
+            add_frame_sums(target, &record[..LAG_COUNT]);
+            *pixels += record[LAG_COUNT] as f64;
+        }
     }
 
     pub fn source_blocks(&self) -> u64 {
@@ -50,8 +141,22 @@ fn add_counts(target: &mut [u32], extra: &[u32]) {
     }
 }
 
+/// Adds counts held as whole `f32` values.
+fn add_whole_counts(target: &mut [u32], extra: &[f32]) {
+    for (count, &more) in target.iter_mut().zip(extra.iter()) {
+        *count += more as u32;
+    }
+}
+
 fn add_sums(target: &mut [f64], extra: &[f64]) {
     for (sum, more) in target.iter_mut().zip(extra.iter()) {
         *sum += more;
+    }
+}
+
+/// Adds one frame's f32 sums into f64 totals.
+fn add_frame_sums(target: &mut [f64], extra: &[f32]) {
+    for (sum, &more) in target.iter_mut().zip(extra.iter()) {
+        *sum += more as f64;
     }
 }

@@ -20,7 +20,7 @@ use crate::error::Error;
 #[cfg(test)]
 use crate::motion::ModelRing;
 use crate::motion::{LumaMotionRing, PairModelProducer};
-use crate::nl4d::grain::GrainChunk;
+use crate::nl4d::grain::GrainChunks;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::noise::colour::ColourCells;
 use crate::noise::colour::{ColourBlocks, ColourGrid};
@@ -537,15 +537,21 @@ impl Engine for PlanarEngine {
         self.lead().max_held_frames()
     }
 
-    fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, Error> {
+    fn drain_grain_chunks(&mut self) -> Result<GrainChunks, Error> {
         self.check_usable()?;
 
-        let luma = self.luma.as_deref_mut();
-        let Some(luma) = luma.filter(|pass| !pass.guides_only()) else {
-            return Ok(Vec::new());
-        };
+        let mut drained = GrainChunks::default();
 
-        luma.drain_grain_chunks()
+        let luma = self.luma.as_deref_mut();
+        if let Some(luma) = luma.filter(|pass| !pass.guides_only()) {
+            drained.luma = luma.drain_grain_chunks()?;
+        }
+
+        if let Some(chroma) = self.chroma.as_deref_mut() {
+            drained.chroma = chroma.drain_grain_chunks()?;
+        }
+
+        Ok(drained)
     }
 
     fn timing(&mut self) -> PassTimings {

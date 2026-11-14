@@ -1,8 +1,17 @@
-use super::synthetic::{ar_field, autocov_of, cell_mean_removed_record, gaussian_field};
+use super::synthetic::{
+    ar_field,
+    autocov_of,
+    cell_mean_removed_record,
+    field_high_pass_stds,
+    gaussian_field,
+    sample_std,
+};
 use crate::nl4d::grain::chunk::GrainChunk;
 use crate::nl4d::grain::consts::{
     AR_COEFFS,
     AR_OFFSETS,
+    AUTOCOV_LEN,
+    FRAME_TABLE_LEN,
     HIST_LEN,
     LAG_COUNT,
     LAGS,
@@ -14,14 +23,20 @@ use crate::nl4d::grain::consts::{
 use crate::nl4d::grain::fit::{
     bucket_edges,
     bucket_of,
+    code_step,
+    finest_ar_shift,
+    finest_scaling_shift,
     hist_median,
     measured_lane,
     quantise_ar,
+    quantise_at,
+    scaling_peak,
     scaling_points,
+    scaling_points_at,
     undo_mean_removal,
     yule_walker,
 };
-use crate::nl4d::grain::template::{median_of, sample_std, template_stats};
+use crate::nl4d::grain::template::{TemplatePlane, high_pass_curve, median_of};
 
 fn set_weight(weights: &mut [f64; AR_COEFFS], offset: (i32, i32), value: f64) {
     let index = AR_OFFSETS
@@ -134,28 +149,72 @@ fn quantise_picks_the_finest_shift_that_fits() {
 }
 
 #[test]
-fn calibration_recovers_a_known_sigma() {
-    let weights = scene_eight_weights();
-    let field = ar_field(&weights, 512, 512, 23);
-    let true_sigma = sample_std(&field);
-    let mut block_stds = Vec::new();
-    for block_y in 0..64 {
-        for block_x in 0..64 {
-            let mut block = Vec::with_capacity(64);
-            for row in 0..8 {
-                let start = (block_y * 8 + row) * 512 + block_x * 8;
-                block.extend_from_slice(&field[start..start + 8]);
-            }
+fn quantise_ar_matches_its_parts() {
+    let expected_shifts = [(0.2, 9), (0.4, 8), (0.7, 7), (1.5, 6), (3.0, 6)];
+    for (value, expected_shift) in expected_shifts {
+        let mut weights = [0.0f64; AR_COEFFS];
+        weights[0] = -0.1;
+        weights[23] = value;
 
-            let block_std = sample_std(&block);
-            block_stds.push(block_std);
-        }
+        let shift = finest_ar_shift(&weights);
+        let coeffs = quantise_at(&weights, shift);
+        let whole = quantise_ar(&weights);
+
+        assert_eq!(shift, expected_shift, "weight {value}");
+        assert_eq!(whole, (coeffs, shift), "weight {value}");
     }
 
-    let measured = median_of(&mut block_stds);
+    let mut overflowing = [0.0f64; AR_COEFFS];
+    overflowing[0] = 3.0;
+    overflowing[1] = -3.0;
+    let (coeffs, _) = quantise_ar(&overflowing);
+
+    assert_eq!(coeffs[0], 127);
+    assert_eq!(coeffs[1], -128);
+}
+
+#[test]
+fn scaling_points_match_their_parts() {
+    let point_sets = [
+        vec![(24u8, 1.0f64 / 255.0), (120u8, 2.0f64 / 255.0)],
+        vec![(40u8, 6.0f64 / 255.0), (200u8, 9.0f64 / 255.0)],
+        vec![
+            (16u8, 20.0f64 / 255.0),
+            (80u8, 30.0f64 / 255.0),
+            (240u8, 3.0f64 / 255.0),
+        ],
+        vec![(128u8, 90.0f64 / 255.0)],
+    ];
+    for points in point_sets {
+        let peak = scaling_peak(&points, 40.0);
+        let shift = finest_scaling_shift(peak);
+        let parts = scaling_points_at(&points, 40.0, shift);
+        let whole = scaling_points(&points, 40.0);
+
+        assert_eq!(whole, (parts, shift), "points {points:?}");
+    }
+}
+
+#[test]
+fn the_finest_scaling_shift_fits_the_peak() {
+    assert_eq!(finest_scaling_shift(0.1), 11);
+    assert_eq!(finest_scaling_shift(0.4), 9);
+    assert_eq!(finest_scaling_shift(0.9), 8);
+    assert_eq!(finest_scaling_shift(2.0), 8);
+}
+
+#[test]
+fn calibration_recovers_a_known_sigma() {
+    let weights = scene_eight_weights();
+    let unit_field = ar_field(&weights, 512, 512, 23);
+    let field: Vec<f64> = unit_field.iter().map(|value| value * 2.0 / 255.0).collect();
+    let true_sigma = sample_std(&field);
+    let mut high_pass_stds = field_high_pass_stds(&field, 512, 512);
+
+    let measured = median_of(&mut high_pass_stds);
     let (quantised, shift) = quantise_ar(&weights);
-    let (sigma_template, template_median) = template_stats(&quantised, shift);
-    let estimate = measured * sigma_template / template_median;
+    let curve = high_pass_curve(&quantised, shift, TemplatePlane::Luma, None);
+    let estimate = curve.field_std(measured);
 
     assert!(
         (estimate / true_sigma - 1.0).abs() < 0.03,
@@ -174,30 +233,45 @@ fn scaling_points_use_the_finest_shift_under_255() {
 }
 
 #[test]
-fn chunks_merge_by_adding() {
-    let mut first = GrainChunk::empty();
-    first.frames = 3;
-    first.source_hist[5] = 2;
-    first.autocov[LAG_COUNT] = 1.5;
-    first.pixels[1] = 10.0;
+fn a_chunk_sums_its_frames() {
+    let group_one_zero_lag = 2 * HIST_LEN + AUTOCOV_LEN;
+    let group_one_pixels = group_one_zero_lag + LAG_COUNT;
+    let second_frame = FRAME_TABLE_LEN;
+    let third_frame = 2 * FRAME_TABLE_LEN;
 
-    let mut second = GrainChunk::empty();
-    second.frames = 4;
-    second.source_hist[5] = 1;
-    second.kept_hist[2] = 7;
-    second.autocov[LAG_COUNT] = 0.5;
-    second.pixels[1] = 6.0;
+    let mut chunk = GrainChunk::empty();
+    chunk.frames = 3;
+    chunk.frame_tables = vec![0.0; 3 * FRAME_TABLE_LEN];
+    chunk.frame_tables[5] = 2.0;
+    chunk.frame_tables[group_one_zero_lag] = 1.5;
+    chunk.frame_tables[group_one_pixels] = 10.0;
+    chunk.frame_tables[second_frame + 5] = 1.0;
+    chunk.frame_tables[second_frame + group_one_pixels] = 6.0;
+    chunk.frame_tables[third_frame + HIST_LEN + 2] = 7.0;
+    chunk.frame_tables[third_frame + group_one_zero_lag] = 0.5;
 
-    first.merge(&second);
+    let summed = chunk.summed_table();
 
-    assert_eq!(first.frames, 7);
-    assert_eq!(first.source_hist[5], 3);
-    assert_eq!(first.kept_hist[2], 7);
-    assert_eq!(first.group_autocov(1)[0], 2.0);
-    assert_eq!(first.pixels[1], 16.0);
-    assert_eq!(first.pixels.len(), STRENGTH_GROUPS);
-    assert_eq!(first.source_hist.len(), HIST_LEN);
-    assert_eq!(first.source_blocks(), 3);
+    assert_eq!(summed.source_hist[5], 3);
+    assert_eq!(summed.frame_hist[2], 7);
+    assert_eq!(summed.group_autocov(1)[0], 2.0);
+    assert_eq!(summed.pixels[1], 16.0);
+    assert_eq!(summed.pixels.len(), STRENGTH_GROUPS);
+    assert_eq!(summed.source_hist.len(), HIST_LEN);
+    assert_eq!(summed.source_blocks(), 3);
+}
+
+#[test]
+fn a_chunk_without_tables_sums_to_zero() {
+    let mut chunk = GrainChunk::empty();
+    chunk.frames = 5;
+
+    let summed = chunk.summed_table();
+
+    assert_eq!(summed.source_hist, vec![0; HIST_LEN]);
+    assert_eq!(summed.frame_hist, vec![0; HIST_LEN]);
+    assert_eq!(summed.autocov, vec![0.0; STRENGTH_GROUPS * LAG_COUNT]);
+    assert_eq!(summed.pixels, vec![0.0; STRENGTH_GROUPS]);
 }
 
 /// The record's lag sums divided by its zero lag.
@@ -268,4 +342,11 @@ fn mean_correction_recovers_an_ar_fields_correlation() {
     }
 
     assert!(truth[1] - measured[1] > 0.03, "{} vs {}", measured[1], truth[1]);
+}
+
+#[test]
+fn the_code_step_of_eight_bits_is_one_code() {
+    let step = code_step(8);
+
+    assert_eq!(step, 1.0 / 255.0);
 }

@@ -28,8 +28,9 @@ clippy backend="vulkan" *ARGS:
         -*) args=("$backend" "${args[@]}"); backend=vulkan ;;
     esac
     features=(--no-default-features --features "$backend")
+    core_features=(--no-default-features --features "$backend,avds")
     host_features=(--no-default-features --features "$backend,binary")
-    cargo clippy -p av-denoise-core "${features[@]}" --all-targets "${args[@]}"
+    cargo clippy -p av-denoise-core "${core_features[@]}" --all-targets "${args[@]}"
     cargo clippy -p av-denoise "${host_features[@]}" --all-targets "${args[@]}"
     cargo clippy -p av-denoise-vs "${features[@]}" --all-targets "${args[@]}"
 
@@ -123,8 +124,8 @@ test-rust backend="vulkan":
         cargo nextest run --release -p av-denoise-core --no-default-features --features {{backend}} --profile tuning "${threads[@]}"
         exit 0
     fi
-    cargo nextest run --release -p av-denoise-core --features vulkan
-    cargo nextest run --release -p av-denoise-core --features vulkan --profile tuning
+    cargo nextest run --release -p av-denoise-core --features vulkan,avds
+    cargo nextest run --release -p av-denoise-core --features vulkan,avds --profile tuning
     cargo nextest run --release -p av-denoise --features vulkan,binary
     cargo nextest run --release -p av-denoise --features vulkan,binary --profile tuning
     cargo nextest run --release -p av-denoise-vs --features vulkan

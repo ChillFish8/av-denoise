@@ -2,6 +2,8 @@
 #![cfg_attr(docsrs, doc(auto_cfg))]
 #![doc = include_str!("../README.md")]
 
+#[cfg(feature = "avds")]
+pub mod avds;
 #[doc(hidden)]
 pub mod bench_api;
 mod collab;
@@ -39,7 +41,22 @@ pub use self::engine::{
 pub use self::error::Error;
 pub use self::kernel_cache::prepare_kernel_cache;
 pub use self::nl4d::Nl4dOptions;
-pub use self::nl4d::grain::{GrainChunk, SceneGrain, build_table};
+pub use self::nl4d::grain::{
+    DEFAULT_FINE_NOISE,
+    DEFAULT_STRENGTH,
+    FitOptions,
+    FrameGrain,
+    GrainChunk,
+    GrainChunks,
+    GrainMode,
+    GrainRun,
+    GrainTable,
+    MAX_STRENGTH,
+    SceneGrain,
+    StaticGrain,
+    build_table,
+    frame_rows,
+};
 pub use self::nlmeans::{
     DEFAULT_PILOT_STRENGTH_SCALE,
     DenoisingMode,

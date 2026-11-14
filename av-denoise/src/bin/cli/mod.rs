@@ -4,7 +4,11 @@ mod list_devices;
 mod motion;
 mod nl4d;
 mod nlmeans;
+mod synthesize;
 mod tune;
+
+#[cfg(test)]
+mod tests;
 
 use std::path::PathBuf;
 
@@ -20,6 +24,9 @@ pub use self::list_devices::run_list_devices;
 pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
+#[cfg(all(test, feature = "vulkan"))]
+pub use self::synthesize::{Av1FgsArgs, GrainPlane, ReportArgs, SynthesizeKind, report_text};
+pub use self::synthesize::{SynthesizeArgs, run_synthesize};
 pub use self::tune::{TuneArgs, run_tune};
 
 /// The options a denoising run takes.
@@ -28,8 +35,8 @@ pub struct RunOptions {
     pub planes: PlaneOptions,
     /// Whether to draw the denoising progress bar.
     pub progress: bool,
-    /// Where to write the AV1 film grain table, when one was asked for.
-    pub grain_table: Option<PathBuf>,
+    /// Where to write the grain data file, when one was asked for.
+    pub avds: Option<PathBuf>,
     /// Seconds tuning may take, when the user set a budget.
     pub tune_budget: Option<f64>,
     /// Whether to print the timing report at the end of the run.
@@ -75,6 +82,9 @@ pub fn resolve_channel_intent(modes: &[CliChannelMode]) -> Result<ChannelIntent,
     Ok(intent)
 }
 
+/// The help heading of the global options that set up denoising.
+const DENOISE_OPTIONS: &str = "Denoise options";
+
 #[derive(Debug, Parser)]
 #[command(about = "Fast and efficient video denoising", long_about = None, version)]
 pub struct Args {
@@ -91,7 +101,13 @@ pub struct Args {
     /// `nl4d` runs `base`, the default, and `slow`. `slow` raises the
     /// motion search escalation ceiling to 8, so badly matched motion
     /// blocks search again with a wider window.
-    #[arg(long, env = "AVD_PRESET", default_value = "base", global = true)]
+    #[arg(
+        long,
+        env = "AVD_PRESET",
+        default_value = "base",
+        global = true,
+        help_heading = DENOISE_OPTIONS
+    )]
     pub preset: Preset,
 
     /// Which hardware backends to try, in order of preference.
@@ -106,7 +122,8 @@ pub struct Args {
         env = "AVD_ACCELERATORS",
         value_delimiter = ',',
         default_values_t = get_default_accelerators(),
-        global = true
+        global = true,
+        help_heading = DENOISE_OPTIONS
     )]
     pub accelerators: Vec<Accelerator>,
 
@@ -124,7 +141,14 @@ pub struct Args {
     /// `cpu` picks a software device where the platform offers one,
     /// such as lavapipe under Vulkan. It is for testing the pipeline,
     /// not for real encodes.
-    #[arg(short, long, env = "AVD_DEVICE", default_value = "default", global = true)]
+    #[arg(
+        short,
+        long,
+        env = "AVD_DEVICE",
+        default_value = "default",
+        global = true,
+        help_heading = DENOISE_OPTIONS
+    )]
     pub device: Device,
 
     /// Which planes of the video to clean (comma-separated).
@@ -142,7 +166,8 @@ pub struct Args {
         value_enum,
         value_delimiter = ',',
         default_value = "luma,chroma",
-        global = true
+        global = true,
+        help_heading = DENOISE_OPTIONS
     )]
     pub channel_mode: Vec<CliChannelMode>,
 
@@ -153,7 +178,7 @@ pub struct Args {
     /// output is usually piped into, scrambles it.
     ///
     /// The bar is only drawn when stderr is a terminal.
-    #[arg(long, env = "AVD_PROGRESS", global = true)]
+    #[arg(long, env = "AVD_PROGRESS", global = true, help_heading = DENOISE_OPTIONS)]
     pub progress: bool,
 
     #[command(subcommand)]
@@ -189,6 +214,13 @@ pub enum Command {
     /// start. Running this once beforehand, with the same options and a representative clip,
     /// moves that cost out of the encode. `--show` prints what is stored and `--clear` deletes it.
     Tune(TuneArgs),
+
+    /// Build grain outputs from a grain data file written by `--export-avds`.
+    ///
+    /// Each output is its own subcommand. `synthesize` reads only the file, so it runs without a
+    /// GPU and can be run again with other options without denoising again. The denoise options
+    /// have no effect here.
+    Synthesize(SynthesizeArgs),
 
     /// List the devices each backend can see on this machine.
     ///

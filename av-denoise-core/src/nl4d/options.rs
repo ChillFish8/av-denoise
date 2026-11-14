@@ -54,10 +54,13 @@ pub struct Nl4dOptions {
     pub noise_map: bool,
     /// See [Nl4dParams::pooled_threshold](crate::nl4d::Nl4dParams::pooled_threshold).
     pub pooled_threshold: bool,
-    /// Whether the denoiser measures the source's film grain for an AV1 grain table.
+    /// Whether the denoiser keeps every grain measurement per frame for a grain data file.
     ///
-    /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
-    pub grain_export: bool,
+    /// The luma pass measures the grain table statistics, the strength and the persistence. The
+    /// chroma pass measures each chroma plane's strength. Both keep each frame's noise reading and
+    /// colour fit, and the report rows come from the luma pass. Measured chunks stay on the GPU
+    /// until drained, so callers drain after each flush.
+    pub grain_data: bool,
     /// How many frames on each side of the centre frame the temporal window reaches, in `1..=8`.
     pub temporal_radius: u32,
 }
@@ -82,7 +85,7 @@ impl Default for Nl4dOptions {
             field_lambda: defaults.field_lambda,
             noise_map: defaults.noise_map,
             pooled_threshold: defaults.pooled_threshold,
-            grain_export: defaults.grain_export,
+            grain_data: defaults.grain_data,
             temporal_radius: 2,
         }
     }
@@ -177,6 +180,6 @@ pub(crate) fn resolve_params(options: &Nl4dOptions, channels: ChannelMode) -> Re
         field_lambda: options.field_lambda,
         noise_map: options.noise_map,
         pooled_threshold: options.pooled_threshold,
-        grain_export: options.grain_export,
+        grain_data: options.grain_data,
     })
 }

@@ -6,7 +6,7 @@
 //!
 //! - [Nl4d], the engine
 //! - [Nl4dOptions] and the per-preset defaults it is built from
-//! - film grain measurement for AV1 grain tables
+//! - per-frame film grain measurements for a grain data file and AV1 grain tables
 
 mod collab_pass;
 pub(crate) mod denoiser;

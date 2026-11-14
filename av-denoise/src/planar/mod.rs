@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use av_denoise_core::tune::{TuningConfig, TuningFrame, tune_frames};
-use av_denoise_core::{ChromaLayout, ChromaSiting, DenoisingMode, EngineSpec, GrainChunk, WindowSpan};
+use av_denoise_core::{ChromaLayout, ChromaSiting, DenoisingMode, EngineSpec, GrainChunks, WindowSpan};
 use cubecl::prelude::Client;
 
 pub use self::reseed::ReseedWindow;
@@ -512,12 +512,12 @@ impl PlanarDenoiser {
         Ok(received.map(Planes::from_buffers))
     }
 
-    /// Reads back the luma grain chunks measured since the last call, in frame order.
+    /// Reads back each plane group's grain chunks measured since the last call, in frame order.
     ///
     /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
-    pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, anyhow::Error> {
+    pub fn drain_grain_chunks(&mut self) -> Result<GrainChunks, anyhow::Error> {
         let Some(host) = self.host.as_mut() else {
-            return Ok(Vec::new());
+            return Ok(GrainChunks::default());
         };
 
         let chunks = host.drain_grain_chunks()?;
