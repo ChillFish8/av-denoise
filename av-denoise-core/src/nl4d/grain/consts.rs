@@ -70,17 +70,18 @@ pub(crate) const PERSIST_CELLS_PER_THREAD: u32 = 4;
 pub(crate) const PERSIST_BLOCK_CELLS: u32 = PERSIST_CELLS_PER_THREAD * PERSIST_THREADS;
 /// The sign of each pixel in each projection, bit `y * 8 + x` set where the pixel counts plus one.
 ///
-/// Each pattern has 32 set bits, and no two are equal or complementary. Each pattern ignores a
-/// cell's mean and its horizontal and vertical slope.
+/// Each pattern is an 8x8 Walsh function that changes sign at least 4 times along each axis. Each
+/// ignores a cell's mean, slopes and curves, so the smooth shading of a held drawing barely counts
+/// as grain that persists.
 pub(crate) const PATTERNS: [u64; PROJECTIONS] = [
-    0x7866_974C_A28F_35D2,
-    0x235B_8DA5_D0DE_5C91,
-    0xC95E_0BA4_E0DF_D207,
-    0xDC58_6702_1D7D_FA18,
-    0x3E14_CCEC_2BB9_13D1,
-    0xC379_12DD_286E_55C6,
-    0x1277_D975_0989_CEE4,
-    0x56D2_61D7_728A_23AD,
+    0x9966_6699_9966_6699,
+    0x9669_6996_6996_9669,
+    0xA55A_A55A_5AA5_5AA5,
+    0xAA55_AA55_AA55_AA55,
+    0xA55A_5AA5_A55A_5AA5,
+    0x9966_9966_6699_6699,
+    0xAA55_55AA_55AA_AA55,
+    0x9669_9669_9669_9669,
 ];
 
 /// Fewest one-frame blocks for a luma bin to give a strength reading.

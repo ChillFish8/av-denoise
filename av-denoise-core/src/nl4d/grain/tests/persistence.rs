@@ -563,6 +563,24 @@ fn every_pattern_is_balanced_ramp_free_and_distinct() {
 }
 
 #[test]
+fn every_pattern_ignores_curved_shading() {
+    for index in 0..PATTERNS.len() {
+        let mut x_curve = 0.0;
+        let mut y_curve = 0.0;
+        for y in 0..CELL {
+            for x in 0..CELL {
+                let sign = pattern_sign(index, x, y);
+                x_curve += sign * (x * x) as f64;
+                y_curve += sign * (y * y) as f64;
+            }
+        }
+
+        assert_eq!(x_curve, 0.0, "pattern {index}");
+        assert_eq!(y_curve, 0.0, "pattern {index}");
+    }
+}
+
+#[test]
 fn projections_and_flags_match_the_mirror() {
     let client = make_client();
     let grain = unit_grain(21);

@@ -9,11 +9,11 @@ use super::table::FitOptions;
 /// Frames in the median that smooths the 1-frame persistence.
 const SMOOTHING_WINDOW: usize = 48;
 /// The smoothed 1-frame persistence below which a frame's grain is fresh.
-const FRESH_BELOW: f64 = 0.40;
+const FRESH_BELOW: f64 = 0.30;
 /// Fewest frames for a run between two runs of the other kind to stay.
 const SHORTEST_RUN: usize = 24;
 /// The 8-frame over 1-frame persistence at or above which a held run is frozen.
-const FROZEN_RATIO: f64 = 0.60;
+const FROZEN_RATIO: f64 = 0.47;
 /// The furthest a change of mode moves to reach a scene cut, in frames.
 const CUT_REACH: u64 = 24;
 

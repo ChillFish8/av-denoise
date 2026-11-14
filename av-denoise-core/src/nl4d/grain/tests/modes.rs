@@ -135,10 +135,26 @@ fn slow_grain_is_fresh() {
 
 #[test]
 fn a_ratio_of_exactly_the_threshold_is_frozen() {
-    let records = repeated((0.50, 0.30), 200);
+    let records = repeated((0.50, 0.235), 200);
     let clip = single_scene(&records);
 
     assert_eq!(detected(&clip), vec![(0, 199, Frozen)]);
+}
+
+#[test]
+fn frozen_grain_that_fades_by_eight_frames_is_frozen() {
+    let records = repeated((0.46, 0.26), 200);
+    let clip = single_scene(&records);
+
+    assert_eq!(detected(&clip), vec![(0, 199, Frozen)]);
+}
+
+#[test]
+fn a_held_drawing_under_fresh_grain_is_fresh() {
+    let records = repeated((0.31, 0.12), 200);
+    let clip = single_scene(&records);
+
+    assert_eq!(detected(&clip), vec![(0, 199, Fresh)]);
 }
 
 #[test]
