@@ -12,7 +12,6 @@ exclude = [
     "scripts/",
     ".idea/",
     "cubecl.toml",
-    "docker/",
     ".github/",
     "Justfile",
     "src/noise/tests/clips/"

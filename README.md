@@ -61,11 +61,6 @@ denoising tools.
 
 ### [Installation for VapourSynth](https://github.com/ChillFish8/av-denoise/blob/HEAD/av-denoise-vs/README.md#installing)
 
-### [Container images](https://github.com/ChillFish8/av-denoise/blob/HEAD/docs/TUTORIAL-CLI.md#container-images)
-
-Images are published to GHCR as `ghcr.io/chillfish8/av-denoise:<backend>-<version>`, one per accelerator
-backend (`vulkan`, `cuda`, `rocm`).
-
 ### As a library
 
 ```bash
@@ -146,9 +141,8 @@ This primarily has the following impacts:
 
 - The `rocm` backend requires the AMD HIP compiler and headers, typically vendored via the ROCm dev SDK.
 - The `cuda` backend requires the NVIDIA CUDA headers and nvcc, typically vendored via the CUDA devel toolkit.
-- The `vulkan` and `metal` backends should "just work" on non-containerised hosts. If you are building for
-  docker, then the vulkan backend requires `vulkan-icd-loader` and then the relevant GPU specific driver,
-  i.e. `vulkan-radeon` or `vulkan-intel`.
+- The `vulkan` and `metal` backends should "just work" on most hosts. On a minimal system, the vulkan backend
+  requires `vulkan-icd-loader` and then the relevant GPU specific driver, i.e. `vulkan-radeon` or `vulkan-intel`.
 
 Since both the CUDA and ROCm backends are very heavy in terms of dependencies, I recommend just using the `vulkan`
 backend for those devices. It should be more or less the same performance, without all the library headache.
@@ -167,7 +161,7 @@ compiles its kernels once into its own subdirectory, and subdirectories left by 
 without use.
 
 - `AV_DENOISE_COMPILATION_CACHE=/some/dir` puts the compiled-kernel and autotune caches somewhere else, which is
-  what CI runs and containers use to keep the cache on a mounted volume. It overrides whatever is in `cubecl.toml`.
+  what CI runs use to keep the cache on a persistent volume. It overrides whatever is in `cubecl.toml`.
 - `AV_DENOISE_COMPILATION_CACHE=off` disables caching entirely. Use this when benchmarking, because a warm cache
   hides the compilation cost a first run pays. Kernel tuning results live in the cache too, so with caching off
   every run tunes from scratch and stores nothing.

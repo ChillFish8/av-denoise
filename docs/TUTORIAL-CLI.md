@@ -53,40 +53,6 @@ cargo build --release --features binary
 cp ./target/release/av-denoise ./av-denoise
 ```
 
-### Container images
-
-Images are published to GHCR for each accelerator backend, one image per backend:
-
-```
-ghcr.io/chillfish8/av-denoise:vulkan-<version>
-ghcr.io/chillfish8/av-denoise:cuda-<version>
-ghcr.io/chillfish8/av-denoise:rocm-<version>
-```
-
-Stable releases also get a `<backend>-<major>.<minor>` and a `<backend>-latest` tag. Pre-releases only get
-the exact `<backend>-<version>` tag, so an alpha has to be pinned by its full version.
-
-The binary is the entrypoint, so flags are passed straight to the container. The GPU comes from the host, which
-means the devices have to be handed in and the input has to be mounted. Output is y4m on stdout, same as the
-bare binary.
-
-```bash
-docker run --rm \
-    --device /dev/kfd --device /dev/dri \
-    --group-add video --group-add render \
-    -v "$PWD:/in:ro" \
-    ghcr.io/chillfish8/av-denoise:vulkan-0.6.1 \
-    nl4d --input /in/noisy.mkv \
-  | ffmpeg -f yuv4mpegpipe -i - -c:v ffv1 clean.mkv
-```
-
-The `cuda` image needs the NVIDIA Container Toolkit and `--gpus all` instead of the `/dev/kfd` and `/dev/dri`
-devices. The `rocm` image takes the same devices as `vulkan` shown above.
-
-> [!TIP]
-> The JIT recompiles its kernels on every fresh container. Mount a volume and point
-> `AV_DENOISE_COMPILATION_CACHE` at it to keep that cost to the first run.
-
 
 ## Binary usage
 
