@@ -23,7 +23,7 @@ pub use self::list_devices::run_list_devices;
 pub use self::motion::MotionArgs;
 pub use self::nl4d::Nl4dArgs;
 pub use self::nlmeans::NlmeansArgs;
-#[cfg(test)]
+#[cfg(all(test, feature = "vulkan"))]
 pub use self::synthesize::{Av1FgsArgs, GrainPlane, ReportArgs, SynthesizeKind, report_text};
 pub use self::synthesize::{SynthesizeArgs, run_synthesize};
 pub use self::tune::{TuneArgs, run_tune};
