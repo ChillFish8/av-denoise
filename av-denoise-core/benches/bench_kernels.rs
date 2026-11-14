@@ -28,7 +28,14 @@ use kernels::distance_ref::DistanceRefBench;
 use kernels::egress::{EgressBench, EgressFormat};
 use kernels::finish::FinishBench;
 use kernels::fused_window::{WindowBench, WindowKernel};
-use kernels::grain::{GRAIN_SIZES, GrainMeasureBench, GrainReducePartialsBench, GrainSaveVectorsBench};
+use kernels::grain::{
+    GRAIN_SIZES,
+    GrainMeasureBench,
+    GrainPersistBench,
+    GrainProjectBench,
+    GrainReducePartialsBench,
+    GrainSaveVectorsBench,
+};
 use kernels::horizontal_sum::HSumBench;
 use kernels::horizontal_sum_pair::HSumPairBench;
 use kernels::ingest::{IngestBench, IngestFormat};
@@ -438,8 +445,28 @@ fn run_all(backend: &str, client: Client) {
         run(GrainMeasureBench {
             client: client.clone(),
             size,
+            chroma: false,
+        });
+        run(GrainMeasureBench {
+            client: client.clone(),
+            size,
+            chroma: true,
         });
         run(GrainReducePartialsBench {
+            client: client.clone(),
+            size,
+        });
+        run(GrainProjectBench {
+            client: client.clone(),
+            size,
+            chroma: false,
+        });
+        run(GrainProjectBench {
+            client: client.clone(),
+            size,
+            chroma: true,
+        });
+        run(GrainPersistBench {
             client: client.clone(),
             size,
         });

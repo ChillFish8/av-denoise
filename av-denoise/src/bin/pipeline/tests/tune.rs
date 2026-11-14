@@ -38,7 +38,7 @@ fn run_clip(bytes: Vec<u8>, tuning: TuningMode, tune_budget: Option<f64>) -> Vec
         workers: 2,
         frame_budget_bytes: 1 << 30,
         visible: false,
-        grain_table: None,
+        avds: None,
         tune_budget,
         timing_report: false,
         shared_device: false,

@@ -433,14 +433,13 @@ fn ragged_quarters_never_reach_a_bin() {
 fn no_curve_without_a_sample() {
     for (accepted, sampled) in [(40, false), (46, true)] {
         let mut frame = CurveFrame::new(640, 360, 29);
-        let block_count = frame.blocks.len();
         let moving_quarter = binned_quarter(12, 0.5);
 
         // Moving blocks carry quarters that would fill bin 12 if they were ever binned.
-        for position in accepted..block_count {
+        for slot in frame.blocks.iter_mut().skip(accepted) {
             let mut block = BlockSpec::uniform(4.0 * STATIC_GATE, 3.0 / 255.0, 0.2);
             block.quarters = [moving_quarter; 4];
-            frame.blocks[position] = block;
+            *slot = block;
         }
 
         for bin in [2, 6, 10] {

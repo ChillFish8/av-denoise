@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use super::grain::{GrainChunk, GrainExport, GrainGeometry};
+use super::grain::{GrainChunk, GrainExport, GrainGeometry, GrainParts, MeasuredPlanes, PassSources};
 use super::params::Nl4dParams;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
 use crate::collab::geometry::ref_count;
@@ -17,6 +17,7 @@ use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, PrefilterMode, 
 use crate::noise::NoiseConsumer;
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::noise::NoiseSnapshot;
+use crate::noise::colour::{ColourFit, ColourSource};
 use crate::tune::{KernelSelector, PipelineProfile, check_plane_size};
 
 /// Which accumulator regions a pass zeroes before scattering.
@@ -112,7 +113,7 @@ pub struct Nl4dDenoiser {
     stream_start: StreamStart,
     /// The field buffers the last pass handed the fused kernel.
     pub(super) last_fields: Option<LastFields>,
-    /// Present only when grain export is on.
+    /// Present only with grain data on.
     grain: Option<GrainExport>,
     /// Whether the passes run only the front's motion and noise machinery and scatter nothing.
     pub(super) guides_only: bool,
@@ -122,8 +123,9 @@ pub struct Nl4dDenoiser {
 ///
 /// The front end is sized at the grouping radius, as `new` sets it. `accum` holds as many elements
 /// as the frame ring, and `wsum`, `outputs` and `group_weight` hold fewer. The grain's saved vectors
-/// span one more frame than the motion field, so they are counted here. With `reads_luma_motion`,
-/// the front end is sized as one that refines luma motion.
+/// span one more frame than the motion field, so they are counted here, as are the grain's
+/// persistence history and partials. With `reads_luma_motion`, the front end is sized as one that
+/// refines luma motion.
 pub(crate) fn buffer_sizes(
     client: &Client,
     params: &Nl4dParams,
@@ -137,14 +139,33 @@ pub(crate) fn buffer_sizes(
     let front = front_buffer_sizes(client, &nlm_params, width, height, reads_luma_motion);
     let mut buffers = front.buffers;
 
-    let exports_grain = params.grain_export && nlm_params.channels != ChannelMode::Chroma;
-    if let (true, Some(blocks)) = (exports_grain, front.motion_blocks) {
+    if let (true, Some(blocks)) = (params.grain_data, front.motion_blocks) {
         let ring_frames = 1 + 2 * u64::from(params.temporal_radius);
         let saved_mv = blocks.checked_mul(2 * ring_frames);
         buffers.push(("grain saved vectors", saved_mv));
     }
 
+    if let Some(planes) = grain_planes(params, nlm_params.channels) {
+        let (history, partials) = planes.buffer_lens(width, height);
+        buffers.push(("grain persistence history", Some(history)));
+        buffers.push(("grain persistence partials", Some(partials)));
+    }
+
     buffers
+}
+
+/// The planes a pass over `channels` measures grain on, `None` without grain data.
+fn grain_planes(params: &Nl4dParams, channels: ChannelMode) -> Option<MeasuredPlanes> {
+    if !params.grain_data {
+        return None;
+    }
+
+    let planes = match channels {
+        ChannelMode::Luma => MeasuredPlanes::Luma,
+        ChannelMode::Chroma => MeasuredPlanes::Chroma,
+    };
+
+    Some(planes)
 }
 
 impl DeviceTimed for Nl4dDenoiser {
@@ -169,7 +190,7 @@ impl Nl4dDenoiser {
     ///
     /// With `guides_only`, every pass runs only the front's motion and noise machinery. The passes
     /// still count towards the regions they complete, so the denoiser keeps its emit order. It then
-    /// allocates no filter buffers, f16 search ring, grain export or luma noise map.
+    /// allocates no filter buffers, f16 search ring, grain measurement or luma noise map.
     pub fn with_kernels(
         client: &Client,
         mut params: Nl4dParams,
@@ -276,8 +297,13 @@ impl Nl4dDenoiser {
         let wsum = client.empty(wsum_bytes);
         let outputs = [client.empty(output_bytes), client.empty(output_bytes)];
 
-        let exports_grain = params.grain_export && channels != ChannelMode::Chroma && !guides_only;
-        let grain = if exports_grain {
+        let measured_planes = grain_planes(&params, channels).filter(|_| !guides_only);
+        let reads_noise = front.reading_history().is_some();
+        let grain = if let Some(planes) = measured_planes {
+            let parts = GrainParts {
+                planes,
+                noise: reads_noise,
+            };
             let motion_ctx = front.motion_ctx();
             let geometry = GrainGeometry {
                 width,
@@ -288,7 +314,7 @@ impl Nl4dDenoiser {
                 step: motion_ctx.step,
                 ring_frames,
             };
-            let export = GrainExport::new(client, geometry);
+            let export = GrainExport::new(client, geometry, parts);
             Some(export)
         } else {
             None
@@ -358,14 +384,14 @@ impl Nl4dDenoiser {
             for centre in 0..radius {
                 let view = self.machinery_at(centre)?;
                 self.run_pass(&view, clear)?;
-                self.save_grain_vectors(view.centre_slot, centre, 2 * radius);
+                self.keep_pass_grain(view.centre_slot, centre, 2 * radius);
                 clear = AccumClear::Nothing;
             }
         }
 
         let view = self.machinery_at(radius)?;
         self.run_pass(&view, clear)?;
-        self.save_grain_vectors(view.centre_slot, radius, 2 * radius);
+        self.keep_pass_grain(view.centre_slot, radius, 2 * radius);
 
         if self.passes_run <= radius {
             return Ok(None);
@@ -549,7 +575,7 @@ impl Nl4dDenoiser {
         for centre in centres {
             let view = self.machinery_at(centre)?;
             self.run_pass(&view, clear)?;
-            self.save_grain_vectors(view.centre_slot, centre, last_real);
+            self.keep_pass_grain(view.centre_slot, centre, last_real);
             clear = AccumClear::Nothing;
         }
 
@@ -612,7 +638,7 @@ impl Nl4dDenoiser {
         self.front.noise_snapshot()
     }
 
-    /// Reads back the grain chunks measured since the last call. Empty when export is off.
+    /// Reads back the grain chunks measured since the last call. Empty with grain data off.
     ///
     /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
     pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, anyhow::Error> {
@@ -626,7 +652,7 @@ impl Nl4dDenoiser {
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-    pub(crate) fn has_grain_export(&self) -> bool {
+    pub(crate) fn has_grain_data(&self) -> bool {
         self.grain.is_some()
     }
 
@@ -671,11 +697,12 @@ impl Nl4dDenoiser {
         pushes.min(2 * self.temporal_radius as usize)
     }
 
-    /// Saves the last pass's vectors from the centre to the next frame for grain export.
+    /// Keeps what the last pass filtered its centre frame with, for the grain measurement.
     ///
-    /// `centre` is the pass's logical ring position and `last_real` the last logical position
-    /// holding a real frame.
-    fn save_grain_vectors(&mut self, centre_slot: u32, centre: u32, last_real: u32) {
+    /// It saves the vectors from the centre to the next frame and copies the noise reading and
+    /// colour fit the pass read. `centre` is the pass's logical ring position and `last_real` the
+    /// last logical position holding a real frame.
+    fn keep_pass_grain(&mut self, centre_slot: u32, centre: u32, last_real: u32) {
         let Some(grain) = self.grain.as_mut() else {
             return;
         };
@@ -689,6 +716,33 @@ impl Nl4dDenoiser {
         let next_neighbour = (centre < last_real).then_some(centre);
         let client = self.front.compute_client();
         grain.save_vectors(client, fields, centre_slot, next_neighbour);
+
+        let sources = PassSources {
+            history: self.front.reading_history(),
+            centre_frame: self.front.slot_frame(centre_slot),
+            colour: self.front.colour_fit(),
+        };
+        grain.keep_snapshots(client, &sources, centre_slot);
+    }
+
+    /// Pools the grain into colour cells with the block means `source` holds, and keeps each
+    /// frame's colour fit when the grain is measured.
+    ///
+    /// A chroma grain measurement also bins its one-frame cells by the luma of those blocks.
+    pub(crate) fn measure_colour(&mut self, source: ColourSource) {
+        let measures_chroma = self.channels == ChannelMode::Chroma;
+        if measures_chroma && let Some(grain) = self.grain.as_mut() {
+            let luma_source = source.clone();
+            grain.keep_luma_means(luma_source);
+        }
+
+        self.front.measure_colour(source);
+
+        let planes = self.front.colour_fit().map(ColourFit::planes);
+        let client = self.front.compute_client();
+        if let (Some(grain), Some(planes)) = (self.grain.as_mut(), planes) {
+            grain.keep_colour(client, planes);
+        }
     }
 
     /// Measures the grain of the frame just normalised into `output_slot`.
@@ -699,7 +753,16 @@ impl Nl4dDenoiser {
 
         let client = self.front.compute_client();
         let input = self.front.input_ring();
-        grain.measure(client, input, &self.outputs, slot_t, slot_next, output_slot);
+        let stream_frame = self.front.slot_frame(slot_t);
+        grain.measure(
+            client,
+            input,
+            &self.outputs,
+            slot_t,
+            slot_next,
+            output_slot,
+            stream_frame,
+        );
     }
 
     /// Normalises the accumulator region at `region_slot` into the next output buffer.

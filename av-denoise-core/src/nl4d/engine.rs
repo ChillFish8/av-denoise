@@ -24,9 +24,9 @@ use crate::nlmeans::ChannelMode;
 use crate::nlmeans::denoiser::{check_u32_indexable, lookahead_depth_for};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::noise::NoiseSnapshot;
-#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
-use crate::noise::colour::ColourCells;
 use crate::noise::colour::ColourSource;
+#[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+use crate::noise::colour::{ColourCells, ColourFit};
 use crate::tune::{EngineKernels, KernelSelector};
 
 /// The frames an engine at `temporal_radius` holds with a noise look-ahead `lookahead` deep.
@@ -237,6 +237,21 @@ impl Nl4d {
         self.inner.noise_snapshot()
     }
 
+    /// The stream frame the middle pass is centred on, `None` before the ring fills.
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub(crate) fn centre_frame_for_test(&self) -> Option<u32> {
+        let front = &self.inner.front;
+        let ready = front.window_ready();
+
+        ready.then(|| front.centre_frame())
+    }
+
+    /// The grain model the last pass read, `None` without the colour model.
+    #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
+    pub(crate) fn colour_fit_for_test(&self) -> Option<&ColourFit> {
+        self.inner.front.colour_fit()
+    }
+
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
     pub(crate) fn fail_through_guard_for_test(&mut self) -> Result<(), Error> {
         let failure = Err(anyhow::anyhow!("forced failure"));
@@ -391,7 +406,7 @@ impl FramePass for Nl4d {
             return;
         }
 
-        self.inner.front.measure_colour(source);
+        self.inner.measure_colour(source);
     }
 
     #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]

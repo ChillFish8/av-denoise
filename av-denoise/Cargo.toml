@@ -32,7 +32,7 @@ required-features = ["binary"]
 [dependencies]
 av-denoise-core.workspace = true
 anyhow.workspace = true
-bon.workspace = true
+bon = "3"
 cubecl.workspace = true
 etcetera = "0.11"
 serde = { version = "1", features = ["derive"] }
@@ -66,7 +66,10 @@ tracing-indicatif = { version = "0.3", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
 
 [dev-dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
 clap = { version = "4", features = ["derive"] }
+parquet.workspace = true
 tempfile = "3"
 cubecl-environment = { workspace = true }
 wgpu = "30"
@@ -76,7 +79,10 @@ vulkan = ["av-denoise-core/vulkan", "cubecl/vulkan", "dep:wgpu"]
 metal = ["av-denoise-core/metal", "cubecl/metal"]
 cuda = ["av-denoise-core/cuda", "cubecl/cuda"]
 rocm = ["av-denoise-core/rocm", "cubecl/hip"]
+# Reading and writing `.avds` grain data files.
+avds = ["av-denoise-core/avds"]
 binary = [
+    "avds",
     "bytesize",
     "clap",
     "crossbeam-channel",

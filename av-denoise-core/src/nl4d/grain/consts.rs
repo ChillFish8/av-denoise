@@ -13,6 +13,8 @@ pub(crate) const STRENGTH_GROUPS: usize = 16;
 pub(crate) const BUCKETS_PER_GROUP: usize = STD_BUCKETS / STRENGTH_GROUPS;
 /// One autocovariance record per strength group.
 pub(crate) const GROUPED_AUTOCOV_LEN: usize = STRENGTH_GROUPS * AUTOCOV_LEN;
+/// Values in one frame's table statistics, the two histograms, the grouped lag sums and pixels.
+pub(crate) const FRAME_TABLE_LEN: usize = 2 * HIST_LEN + GROUPED_AUTOCOV_LEN;
 /// One cell's autocovariance record followed by its strength group.
 pub(crate) const PARTIAL_LEN: usize = AUTOCOV_LEN + 1;
 /// Threads per cube that reduce one lane of every cell's partial.
@@ -29,7 +31,7 @@ pub(crate) const AR_OFFSETS: [(i32, i32); AR_COEFFS] = ar_offset_table();
 
 // A measured block needs a motion confidence of at least CONF_MIN, a denoised range below
 // FLAT_RANGE, a denoised mean between LUMA_LOW and LUMA_HIGH, no pixel past CLIP_LOW or CLIP_HIGH,
-// and a grain std above STD_MIN.
+// and a grain std above STD_MIN. A chroma persistence cell skips the luma band.
 pub(crate) const FLAT_RANGE: f32 = 5.0 / 255.0;
 pub(crate) const LUMA_LOW: f32 = 20.0 / 255.0;
 pub(crate) const LUMA_HIGH: f32 = 235.0 / 255.0;
@@ -40,9 +42,51 @@ pub(crate) const STD_MIN: f32 = 0.05 / 255.0;
 /// The top std bucket edge.
 pub(crate) const STD_MAX: f32 = 32.0 / 255.0;
 
-/// Fewest blocks for a luma bin to give a strength reading.
+/// The furthest frame back a persistence reading compares. Every lag from 1 to this is measured.
+pub(crate) const PERSISTENCE_LAGS: usize = 8;
+/// Values in one lag's part of a frame record, the cell count, the auto sum and the cross sum.
+pub(crate) const LAG_RECORD_LEN: usize = 3;
+/// Values in one frame's record, one part per lag.
+pub(crate) const FRAME_RECORD_LEN: usize = LAG_RECORD_LEN * PERSISTENCE_LAGS;
+/// The furthest frame back a chroma persistence reading compares, lag 1 only.
+pub(crate) const CHROMA_LAGS: usize = 1;
+/// The chroma planes a chroma record holds, Cb then Cr.
+pub(crate) const CHROMA_PLANES: usize = 2;
+/// Values in one chroma frame's record, each chroma plane's lag parts in turn.
+pub(crate) const CHROMA_RECORD_LEN: usize = CHROMA_PLANES * CHROMA_LAGS * LAG_RECORD_LEN;
+/// Fewest cells for a frame to give a reading.
+pub(crate) const MIN_FRAME_CELLS: f64 = 200.0;
+/// Projections kept of each cell's source pixels.
+pub(crate) const PROJECTIONS: usize = 8;
+/// Completed frames the persistence history holds.
+pub(crate) const HISTORY_FRAMES: u32 = 9;
+/// Values kept of each cell per history frame, the projections and then the flat flag.
+pub(crate) const HISTORY_ENTRY_LEN: usize = PROJECTIONS + 1;
+/// Threads per cube that add one block of cells at one lag.
+pub(crate) const PERSIST_THREADS: u32 = 256;
+/// Cells each persisting thread adds.
+pub(crate) const PERSIST_CELLS_PER_THREAD: u32 = 4;
+/// Cells one persisting cube adds.
+pub(crate) const PERSIST_BLOCK_CELLS: u32 = PERSIST_CELLS_PER_THREAD * PERSIST_THREADS;
+/// The sign of each pixel in each projection, bit `y * 8 + x` set where the pixel counts plus one.
 ///
-/// A bin's kept reading counts as 0 below it.
+/// Each pattern is an 8x8 Walsh function that changes sign at least 4 times along each axis. Each
+/// ignores a cell's mean, slopes and curves, so the smooth shading of a held drawing barely counts
+/// as grain that persists.
+pub(crate) const PATTERNS: [u64; PROJECTIONS] = [
+    0x9966_6699_9966_6699,
+    0x9669_6996_6996_9669,
+    0xA55A_A55A_5AA5_5AA5,
+    0xAA55_AA55_AA55_AA55,
+    0xA55A_5AA5_A55A_5AA5,
+    0x9966_9966_6699_6699,
+    0xAA55_55AA_55AA_AA55,
+    0x9669_9669_9669_9669,
+];
+
+/// Fewest one-frame blocks for a luma bin to give a strength reading.
+///
+/// A bin with fewer one-frame blocks is left out of the segment's strength.
 pub(crate) const MIN_BLOCKS_PER_BIN: u64 = 200;
 /// Fewest readable luma bins for a segment to have its own strength.
 pub(crate) const MIN_POPULATED_BINS: usize = 3;
@@ -58,6 +102,8 @@ pub(crate) const MIN_CHUNK_BLOCKS: u64 = 2_000;
 pub(crate) const TEMPLATE_SEEDS: u32 = 24;
 /// AV1 allows at most 14 luma scaling points.
 pub(crate) const MAX_POINTS: usize = 14;
+/// AV1 allows at most 10 scaling points per chroma plane.
+pub(crate) const MAX_CHROMA_POINTS: usize = 10;
 
 const fn lag_table() -> [(i32, i32); LAG_COUNT] {
     let mut table = [(0, 0); LAG_COUNT];

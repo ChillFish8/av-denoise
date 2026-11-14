@@ -13,6 +13,7 @@ use av_denoise::{
     ChromaLayout,
     DenoiserError,
     DenoiserOptions,
+    FitOptions,
     HostDenoiser,
     PlanarDenoiser,
     Planes,
@@ -85,17 +86,19 @@ fn run(config: &ParityConfig, entries: &mut Entries) {
         record_planes(entries, config.name, &label, planes);
     }
 
-    let chunks = denoiser.drain_grain_chunks().expect("grain");
-    if !chunks.is_empty() {
+    let grain = denoiser.drain_grain_chunks().expect("grain");
+    if !grain.luma.is_empty() {
         let scene = SceneGrain {
             first_frame: 0,
-            chunks,
+            chunks: grain.luma,
+            chroma_chunks: grain.chroma,
         };
-        let table = build_table(&[scene], (24, 1));
+        let options = FitOptions::default();
+        let table = build_table(&[scene], (24, 1), &options).expect("the grain table builds");
         let config_name = config.name.to_string();
         let label = "grain".to_string();
         let key = (config_name, label);
-        let table_bytes = table.as_bytes();
+        let table_bytes = table.text.as_bytes();
         let hash = fixture::hash(table_bytes);
         let value = format!("{hash:016x}");
         entries.insert(key, value);

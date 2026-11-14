@@ -1,0 +1,708 @@
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use arrow_array::{ArrayRef, Int32Array, RecordBatch};
+use arrow_schema::{DataType, Field, Schema};
+use av_denoise::avds::{
+    AV1_CHROMA_TABLE_GROUPS,
+    AV1_TABLE_GROUPS,
+    AvdsFrame,
+    AvdsMeta,
+    PlanesMeasured,
+    av1_table,
+    write_avds,
+};
+use av_denoise::{ChromaLayout, ChromaSiting, FitOptions, FrameGrain, StaticGrain};
+use clap::Parser;
+use parquet::arrow::ArrowWriter;
+
+use crate::cli::synthesize::{
+    Av1FgsArgs,
+    GrainPlane,
+    ReportArgs,
+    SynthesizeArgs,
+    SynthesizeKind,
+    read_file,
+    report_text,
+    run_synthesize,
+};
+use crate::cli::{Args, Command};
+
+/// A Parquet file of one integer column, with none of a grain data file's metadata.
+fn write_foreign_parquet(path: &Path) {
+    let field = Field::new("value", DataType::Int32, false);
+    let schema = Schema::new(vec![field]);
+    let schema = Arc::new(schema);
+    let values = Int32Array::from(vec![1, 2, 3]);
+    let column: ArrayRef = Arc::new(values);
+    let columns = vec![column];
+    let batch = RecordBatch::try_new(schema.clone(), columns).expect("the batch builds");
+
+    let file = File::create(path).expect("the file is created");
+    let mut writer = ArrowWriter::try_new(file, schema, None).expect("the writer opens");
+    writer.write(&batch).expect("the rows are written");
+    writer.close().expect("the file closes");
+}
+
+/// The luma bins and std buckets of a table's histograms.
+const LUMA_BINS: usize = 16;
+const STD_BUCKETS: usize = 64;
+/// The strength groups of a table, each a record of lag sums then a pixel count.
+const STRENGTH_GROUPS: usize = 16;
+const BUCKETS_PER_GROUP: usize = STD_BUCKETS / STRENGTH_GROUPS;
+const LAG_SUMS: usize = 46;
+const RECORD_LEN: usize = LAG_SUMS + 1;
+/// Values in one plane's frame table, two histograms and the grouped records.
+const HISTOGRAM_LEN: usize = LUMA_BINS * STD_BUCKETS;
+const TABLE_LEN: usize = 2 * HISTOGRAM_LEN + STRENGTH_GROUPS * RECORD_LEN;
+
+/// The luma bins the table's blocks sit in, and the std bucket they share.
+const BLOCK_BINS: std::ops::Range<usize> = 4..12;
+const BLOCK_BUCKET: usize = 24;
+const BLOCKS_PER_BIN: f32 = 200.0;
+/// The pixels of one measured 8x8 block.
+const CELL_PIXELS: f32 = 64.0;
+
+/// The chroma rows a test file holds.
+#[derive(Debug, Clone, Copy)]
+enum ChromaRows {
+    Missing,
+    Measured,
+    /// Chroma tables whose one-frame histograms are empty.
+    WithoutOneFrame,
+}
+
+/// `planes` tables of uncorrelated grain with the variance `variance`.
+///
+/// The source blocks always fill the source histogram, and the one-frame histogram too when
+/// `one_frame` is set.
+fn table_values(variance: f32, planes: usize, one_frame: bool) -> Vec<f32> {
+    let pixels = BLOCKS_PER_BIN * BLOCK_BINS.len() as f32 * CELL_PIXELS;
+    let group = BLOCK_BUCKET / BUCKETS_PER_GROUP;
+    let group_start = 2 * HISTOGRAM_LEN + group * RECORD_LEN;
+    let mut values = vec![0.0; planes * TABLE_LEN];
+
+    for plane in 0..planes {
+        let start = plane * TABLE_LEN;
+        for bin in BLOCK_BINS {
+            let slot = start + bin * STD_BUCKETS + BLOCK_BUCKET;
+            values[slot] = BLOCKS_PER_BIN;
+            if one_frame {
+                values[HISTOGRAM_LEN + slot] = BLOCKS_PER_BIN;
+            }
+        }
+
+        values[start + group_start] = variance * pixels;
+        values[start + group_start + LAG_SUMS] = pixels;
+    }
+
+    values
+}
+
+fn table_row(frame: u64, chroma: ChromaRows) -> AvdsFrame {
+    let chroma_table = match chroma {
+        ChromaRows::Missing => None,
+        ChromaRows::Measured => Some(table_values(0.0005, 2, true)),
+        ChromaRows::WithoutOneFrame => Some(table_values(0.0005, 2, false)),
+    };
+    let table = table_values(0.001, 1, true);
+
+    AvdsFrame {
+        frame,
+        scene: 0,
+        first_of_scene: frame == 0,
+        table: Some(table),
+        chroma_table,
+        persistence: None,
+        chroma_persistence: None,
+        noise: None,
+        chroma_noise: None,
+        colour: None,
+        chroma_colour: None,
+    }
+}
+
+/// Writes a 4:2:0 grain data file of `frames` frames, with the chroma rows `chroma` asks for.
+fn write_avds_file(path: &Path, frames: u64, chroma: ChromaRows) {
+    let meta = AvdsMeta {
+        writer: "av-denoise test".to_owned(),
+        frame_rate: (24, 1),
+        width: 64,
+        height: 48,
+        bit_depth: 10,
+        subsampling: ChromaLayout::Yuv420,
+        chroma_siting: ChromaSiting::Left,
+        frames,
+        planes_measured: PlanesMeasured::LumaChroma,
+    };
+    let rows: Vec<AvdsFrame> = (0..frames).map(|frame| table_row(frame, chroma)).collect();
+
+    let file = File::create(path).expect("the file is created");
+    write_avds(file, &meta, &rows).expect("the file is written");
+}
+
+#[derive(Clone, Default)]
+struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut buffer = self.0.lock().expect("the sink is not poisoned");
+        buffer.extend_from_slice(bytes);
+
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The log text written while `work` runs.
+fn capture_log<T>(work: impl FnOnce() -> T) -> String {
+    let sink = LogSink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, work);
+
+    let buffer = sink.0.lock().expect("the sink is not poisoned");
+
+    String::from_utf8_lossy(&buffer).into_owned()
+}
+
+fn temporary_of(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".tmp");
+
+    PathBuf::from(name)
+}
+
+fn av1_fgs(input: PathBuf, output: PathBuf, planes: Vec<GrainPlane>) -> SynthesizeArgs {
+    let av1_fgs = Av1FgsArgs {
+        input,
+        output,
+        planes,
+        fine_noise: 0.0,
+        strength: 1.0,
+        static_grain: false,
+        no_static: false,
+        static_scenes: Vec::new(),
+        static_frames: Vec::new(),
+    };
+    let kind = SynthesizeKind::Av1Fgs(av1_fgs);
+
+    SynthesizeArgs { kind }
+}
+
+fn parse(extra: &[&str]) -> Result<Args, clap::Error> {
+    let mut argv = vec!["av-denoise", "synthesize"];
+    argv.extend_from_slice(extra);
+
+    Args::try_parse_from(argv)
+}
+
+fn parsed_av1_fgs(extra: &[&str]) -> Av1FgsArgs {
+    let args = parse(extra).expect("the arguments parse");
+    let Command::Synthesize(synthesize) = args.command else {
+        panic!("expected synthesize");
+    };
+    let SynthesizeKind::Av1Fgs(av1_fgs) = synthesize.kind else {
+        panic!("expected av1-fgs");
+    };
+
+    av1_fgs
+}
+
+#[test]
+fn planes_default_to_luma_and_chroma() {
+    let av1_fgs = parsed_av1_fgs(&["av1-fgs", "--input", "run.avds", "--output", "grain.tbl"]);
+
+    assert_eq!(av1_fgs.input, PathBuf::from("run.avds"));
+    assert_eq!(av1_fgs.output, PathBuf::from("grain.tbl"));
+    assert_eq!(av1_fgs.planes, [GrainPlane::Luma, GrainPlane::Chroma]);
+    assert_eq!(av1_fgs.fine_noise, 0.5);
+}
+
+#[test]
+fn planes_reach_the_fit_options() {
+    let both = [GrainPlane::Luma, GrainPlane::Chroma];
+    let reversed = [GrainPlane::Chroma, GrainPlane::Luma];
+    let luma = [GrainPlane::Luma];
+
+    for (planes, chroma) in [(&both[..], true), (&reversed[..], true), (&luma[..], false)] {
+        let args = av1_fgs(PathBuf::new(), PathBuf::new(), planes.to_vec());
+        let SynthesizeKind::Av1Fgs(av1_fgs) = args.kind else {
+            panic!("expected av1-fgs");
+        };
+
+        let options = av1_fgs.fit_options().expect("the planes are accepted");
+
+        assert_eq!(options.chroma, chroma);
+    }
+}
+
+#[test]
+fn fine_noise_reaches_the_fit_options() {
+    let extra = ["av1-fgs", "--input", "a", "--output", "b", "--fine-noise", "0.6"];
+    let av1_fgs = parsed_av1_fgs(&extra);
+
+    let options = av1_fgs.fit_options().expect("luma is accepted");
+
+    assert_eq!(options.fine_noise, 0.6);
+}
+
+#[test]
+fn av1_fgs_parses_planes_and_fine_noise() {
+    let extra = [
+        "av1-fgs",
+        "--input",
+        "run.avds",
+        "--output",
+        "grain.tbl",
+        "--planes",
+        "luma,chroma",
+        "--fine-noise",
+        "0.75",
+    ];
+    let av1_fgs = parsed_av1_fgs(&extra);
+
+    assert_eq!(av1_fgs.planes, [GrainPlane::Luma, GrainPlane::Chroma]);
+    assert_eq!(av1_fgs.fine_noise, 0.75);
+}
+
+#[test]
+fn report_text_has_one_line_per_row_in_order() {
+    let rows: Vec<FrameGrain> = (0..3)
+        .map(|frame| FrameGrain {
+            frame,
+            scene: 0,
+            cells: 0,
+            strength: None,
+            strength_cb: None,
+            strength_cr: None,
+            persistence: [None; 8],
+        })
+        .collect();
+
+    let text = report_text(&rows).expect("the rows encode");
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert!(text.ends_with('\n'));
+    assert_eq!(lines.len(), 3);
+
+    for (index, line) in lines.iter().enumerate() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("each line is JSON");
+        let object = value.as_object().expect("each line is an object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let persistence = object["persistence"].as_array().expect("persistence is a list");
+
+        let expected_keys = [
+            "cells",
+            "frame",
+            "persistence",
+            "scene",
+            "strength",
+            "strength_cb",
+            "strength_cr",
+        ];
+        assert_eq!(keys, expected_keys);
+        assert_eq!(object["frame"], index as u64);
+        assert_eq!(persistence.len(), 8);
+    }
+}
+
+#[test]
+fn report_parses_its_paths() {
+    let args =
+        parse(&["report", "--input", "run.avds", "--output", "report.jsonl"]).expect("the arguments parse");
+    let Command::Synthesize(synthesize) = args.command else {
+        panic!("expected synthesize");
+    };
+    let SynthesizeKind::Report(report) = synthesize.kind else {
+        panic!("expected report");
+    };
+
+    assert_eq!(report.input, PathBuf::from("run.avds"));
+    assert_eq!(report.output, PathBuf::from("report.jsonl"));
+}
+
+#[test]
+fn fine_noise_outside_zero_to_one_is_refused() {
+    for amount in ["-0.1", "1.5", "lots", "NaN"] {
+        let extra = ["av1-fgs", "--input", "a", "--output", "b", "--fine-noise", amount];
+        let error = parse(&extra).expect_err("the amount is refused");
+        let message = error.to_string();
+
+        assert!(message.contains("--fine-noise"), "got {message}");
+    }
+
+    let edges = ["0", "1"];
+    for amount in edges {
+        let extra = ["av1-fgs", "--input", "a", "--output", "b", "--fine-noise", amount];
+        let parsed = parse(&extra);
+
+        assert!(parsed.is_ok(), "{amount} is refused");
+    }
+}
+
+#[test]
+fn strength_defaults_to_one() {
+    let av1_fgs = parsed_av1_fgs(&["av1-fgs", "--input", "a", "--output", "b"]);
+
+    assert_eq!(av1_fgs.strength, 1.0);
+}
+
+#[test]
+fn strength_reaches_the_fit_options() {
+    let extra = ["av1-fgs", "--input", "a", "--output", "b", "--strength", "0.5"];
+    let av1_fgs = parsed_av1_fgs(&extra);
+
+    let options = av1_fgs.fit_options().expect("luma is accepted");
+
+    assert_eq!(options.strength, 0.5);
+}
+
+#[test]
+fn strength_outside_zero_to_four_is_refused() {
+    for factor in ["4.5", "-1"] {
+        let extra = ["av1-fgs", "--input", "a", "--output", "b", "--strength", factor];
+        let error = parse(&extra).expect_err("the factor is refused");
+        let message = error.to_string();
+
+        assert!(message.contains("between 0 and 4"), "got {message}");
+    }
+}
+
+#[test]
+fn strength_must_be_a_number() {
+    let extra = ["av1-fgs", "--input", "a", "--output", "b", "--strength", "strong"];
+    let error = parse(&extra).expect_err("the factor is refused");
+    let message = error.to_string();
+
+    assert!(message.contains("is not a number"), "got {message}");
+}
+
+#[test]
+fn chroma_alone_is_refused() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let input = dir.path().join("run.avds");
+    let output = dir.path().join("grain.tbl");
+
+    let args = av1_fgs(input, output.clone(), vec![GrainPlane::Chroma]);
+    let error = run_synthesize(&args).expect_err("chroma alone is refused");
+    let message = error.to_string();
+
+    assert!(message.contains("--planes needs luma"), "got {message}");
+    assert!(!output.exists());
+    assert!(!temporary_of(&output).exists());
+}
+
+#[test]
+fn a_luma_only_file_writes_the_luma_table_and_warns() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let input = dir.path().join("run.avds");
+    let both_output = dir.path().join("both.tbl");
+    let luma_output = dir.path().join("luma.tbl");
+    write_avds_file(&input, 40, ChromaRows::Missing);
+    let both_planes = vec![GrainPlane::Luma, GrainPlane::Chroma];
+    let both_args = av1_fgs(input.clone(), both_output.clone(), both_planes);
+    let luma_args = av1_fgs(input, luma_output.clone(), vec![GrainPlane::Luma]);
+
+    let warnings = capture_log(|| run_synthesize(&both_args).expect("the table is written"));
+    run_synthesize(&luma_args).expect("the table is written");
+
+    let both = std::fs::read_to_string(both_output).expect("the table is written");
+    let luma = std::fs::read_to_string(luma_output).expect("the table is written");
+
+    assert_ne!(luma, "filmgrn1\n");
+    assert_eq!(both, luma);
+    assert!(warnings.contains("chroma grain is not written"), "got {warnings}");
+}
+
+#[test]
+fn a_file_without_one_frame_chroma_writes_the_luma_table_and_warns() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let input = dir.path().join("run.avds");
+    let both_output = dir.path().join("both.tbl");
+    let luma_output = dir.path().join("luma.tbl");
+    write_avds_file(&input, 40, ChromaRows::WithoutOneFrame);
+    let both_planes = vec![GrainPlane::Luma, GrainPlane::Chroma];
+    let both_args = av1_fgs(input.clone(), both_output.clone(), both_planes);
+    let luma_args = av1_fgs(input, luma_output.clone(), vec![GrainPlane::Luma]);
+
+    let warnings = capture_log(|| run_synthesize(&both_args).expect("the table is written"));
+    run_synthesize(&luma_args).expect("the table is written");
+
+    let both = std::fs::read_to_string(both_output).expect("the table is written");
+    let luma = std::fs::read_to_string(luma_output).expect("the table is written");
+
+    assert_ne!(luma, "filmgrn1\n");
+    assert_eq!(both, luma);
+    assert!(
+        warnings.contains("no one-frame chroma measurements"),
+        "got {warnings}"
+    );
+}
+
+#[test]
+fn luma_planes_match_the_luma_only_table() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let input = dir.path().join("run.avds");
+    let output = dir.path().join("grain.tbl");
+    write_avds_file(&input, 40, ChromaRows::Measured);
+    let args = av1_fgs(input.clone(), output.clone(), vec![GrainPlane::Luma]);
+    run_synthesize(&args).expect("the table is written");
+
+    let (meta, rows) = read_file(&input, &AV1_TABLE_GROUPS).expect("the file reads");
+    let options = FitOptions::with_fine_noise(0.0);
+    let expected = av1_table(&meta, rows, &options).expect("the table builds");
+
+    let written = std::fs::read_to_string(output).expect("the table is written");
+    assert_eq!(written, expected.text);
+}
+
+#[test]
+fn chroma_planes_match_the_chroma_table() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let input = dir.path().join("run.avds");
+    let output = dir.path().join("grain.tbl");
+    write_avds_file(&input, 40, ChromaRows::Measured);
+    let both_planes = vec![GrainPlane::Luma, GrainPlane::Chroma];
+    let args = av1_fgs(input.clone(), output.clone(), both_planes);
+    run_synthesize(&args).expect("the table is written");
+
+    let (meta, rows) = read_file(&input, &AV1_CHROMA_TABLE_GROUPS).expect("the file reads");
+    let options = FitOptions::with_fine_noise(0.0).with_chroma(true);
+    let expected = av1_table(&meta, rows, &options).expect("the table builds");
+    let (_, luma_rows) = read_file(&input, &AV1_TABLE_GROUPS).expect("the file reads");
+    let luma_options = FitOptions::with_fine_noise(0.0);
+    let luma_only = av1_table(&meta, luma_rows, &luma_options).expect("the table builds");
+
+    let written = std::fs::read_to_string(output).expect("the table is written");
+
+    assert_eq!(written, expected.text);
+    assert_ne!(written, luma_only.text);
+    for prefix in ["\tsCb ", "\tsCr "] {
+        let line = written
+            .lines()
+            .find(|line| line.starts_with(prefix))
+            .expect("the table has the plane's scaling line");
+        let values: Vec<&str> = line.split_whitespace().skip(2).collect();
+        let has_strength = values.iter().skip(1).step_by(2).any(|value| *value != "0");
+
+        assert!(has_strength, "got {line}");
+    }
+}
+
+#[test]
+fn a_foreign_parquet_file_is_refused_and_writes_nothing() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let input = dir.path().join("foreign.parquet");
+    let table = dir.path().join("grain.tbl");
+    let report = dir.path().join("report.jsonl");
+    write_foreign_parquet(&input);
+
+    let table_args = av1_fgs(input.clone(), table.clone(), vec![GrainPlane::Luma]);
+    let table_error = run_synthesize(&table_args).expect_err("the file is refused");
+    let report_args = ReportArgs {
+        input,
+        output: report.clone(),
+    };
+    let kind = SynthesizeKind::Report(report_args);
+    let report_args = SynthesizeArgs { kind };
+    let report_error = run_synthesize(&report_args).expect_err("the file is refused");
+
+    let table_message = format!("{table_error:#}");
+    let report_message = format!("{report_error:#}");
+
+    assert!(
+        table_message.contains("no avds.version metadata"),
+        "got {table_message}"
+    );
+    assert!(
+        report_message.contains("no avds.version metadata"),
+        "got {report_message}"
+    );
+    assert!(!table.exists());
+    assert!(!temporary_of(&table).exists());
+    assert!(!report.exists());
+    assert!(!temporary_of(&report).exists());
+}
+
+#[test]
+fn an_unwritable_output_fails_before_reading() {
+    let input = PathBuf::from("/nonexistent-directory/run.avds");
+    let table = PathBuf::from("/nonexistent-directory/grain.tbl");
+    let report = PathBuf::from("/nonexistent-directory/report.jsonl");
+
+    let table_args = av1_fgs(input.clone(), table, vec![GrainPlane::Luma]);
+    let table_error = run_synthesize(&table_args).expect_err("cannot write there");
+    let report_args = ReportArgs {
+        input,
+        output: report,
+    };
+    let kind = SynthesizeKind::Report(report_args);
+    let report_args = SynthesizeArgs { kind };
+    let report_error = run_synthesize(&report_args).expect_err("cannot write there");
+
+    let table_message = table_error.to_string();
+    let report_message = report_error.to_string();
+
+    assert!(
+        table_message.contains("unable to create the grain table"),
+        "got {table_message}"
+    );
+    assert!(
+        report_message.contains("unable to create the grain report"),
+        "got {report_message}"
+    );
+}
+
+const BASE: [&str; 5] = ["av1-fgs", "--input", "a", "--output", "b"];
+
+fn base_with<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+    let mut argv = BASE.to_vec();
+    argv.extend_from_slice(extra);
+
+    argv
+}
+
+fn static_options(extra: &[&str]) -> FitOptions {
+    let argv = base_with(extra);
+    let av1_fgs = parsed_av1_fgs(&argv);
+
+    av1_fgs.fit_options().expect("the options build")
+}
+
+#[test]
+fn static_flags_default_to_detection() {
+    let options = static_options(&[]);
+
+    assert_eq!(options.static_grain, StaticGrain::Detect);
+    assert!(options.static_scenes.is_empty());
+    assert!(options.static_frames.is_empty());
+}
+
+#[test]
+fn static_and_no_static_map_to_all_and_off() {
+    let all = static_options(&["--static"]);
+    let off = static_options(&["--no-static"]);
+
+    assert_eq!(all.static_grain, StaticGrain::All);
+    assert_eq!(off.static_grain, StaticGrain::Off);
+}
+
+#[test]
+fn static_ranges_parse_as_inclusive_pairs() {
+    let scenes = static_options(&["--static-scenes", "0:1,39"]);
+    let frames = static_options(&["--static-frames", "400:500,8322:8340"]);
+
+    assert_eq!(scenes.static_scenes, [0..=1, 39..=39]);
+    assert_eq!(frames.static_frames, [400..=500, 8322..=8340]);
+}
+
+#[test]
+fn a_reversed_range_is_refused() {
+    let argv = base_with(&["--static-frames", "500:400"]);
+
+    let error = parse(&argv).expect_err("the range is refused");
+    let message = error.to_string();
+
+    assert!(message.contains("ends before it starts"), "got {message}");
+}
+
+#[test]
+fn a_malformed_range_is_refused() {
+    for text in ["a:b", "1:2:3", ""] {
+        let frames = base_with(&["--static-frames", text]);
+        let scenes = base_with(&["--static-scenes", text]);
+
+        let frame_error = parse(&frames).expect_err("the range is refused");
+        let scene_error = parse(&scenes).expect_err("the range is refused");
+        let frame_message = frame_error.to_string();
+        let scene_message = scene_error.to_string();
+
+        assert!(
+            frame_message.contains("is not a frame range"),
+            "got {frame_message}"
+        );
+        assert!(
+            scene_message.contains("is not a scene range"),
+            "got {scene_message}"
+        );
+    }
+}
+
+#[test]
+fn static_conflicts_with_no_static_and_with_ranges() {
+    let others: [&[&str]; 3] = [
+        &["--no-static"],
+        &["--static-scenes", "1"],
+        &["--static-frames", "1"],
+    ];
+
+    for other in others {
+        let mut extra = vec!["--static"];
+        extra.extend_from_slice(other);
+        let argv = base_with(&extra);
+
+        let error = parse(&argv).expect_err("the flags conflict");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+}
+
+#[test]
+fn no_static_combines_with_ranges() {
+    let options = static_options(&["--no-static", "--static-scenes", "2", "--static-frames", "5:9"]);
+
+    assert_eq!(options.static_grain, StaticGrain::Off);
+    assert_eq!(options.static_scenes, vec![2..=2]);
+    assert_eq!(options.static_frames, vec![5..=9]);
+}
+
+#[test]
+fn a_range_past_the_end_fails_and_writes_nothing() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let input = dir.path().join("run.avds");
+    let output = dir.path().join("grain.tbl");
+    write_avds_file(&input, 40, ChromaRows::Missing);
+    let mut args = av1_fgs(input, output.clone(), vec![GrainPlane::Luma]);
+    let SynthesizeKind::Av1Fgs(av1_fgs) = &mut args.kind else {
+        panic!("expected av1-fgs");
+    };
+    let past_the_end = 30..=40;
+    av1_fgs.static_frames = vec![past_the_end];
+
+    let error = run_synthesize(&args).expect_err("the range is refused");
+    let message = format!("{error:#}");
+
+    assert!(message.contains("past the last frame 39"), "got {message}");
+    assert!(!output.exists());
+    assert!(!temporary_of(&output).exists());
+}
+
+#[test]
+fn the_runs_are_logged() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let input = dir.path().join("run.avds");
+    let output = dir.path().join("grain.tbl");
+    write_avds_file(&input, 40, ChromaRows::Missing);
+    let mut args = av1_fgs(input, output, vec![GrainPlane::Luma]);
+    let SynthesizeKind::Av1Fgs(av1_fgs) = &mut args.kind else {
+        panic!("expected av1-fgs");
+    };
+    av1_fgs.no_static = true;
+    let frozen_frames = 10..=19;
+    av1_fgs.static_frames = vec![frozen_frames];
+
+    let log = capture_log(|| run_synthesize(&args).expect("the table is written"));
+
+    assert!(log.contains("frames 0 to 9 fresh"), "got {log}");
+    assert!(log.contains("frames 10 to 19 frozen"), "got {log}");
+    assert!(log.contains("frames 20 to 39 fresh"), "got {log}");
+}

@@ -340,13 +340,13 @@ mod tests {
     }
 
     #[test]
-    fn grain_export_gives_a_different_key() {
-        let exporting_options = crate::Nl4dOptions {
-            grain_export: true,
+    fn grain_data_gives_a_different_key() {
+        let measuring_options = crate::Nl4dOptions {
+            grain_data: true,
             ..crate::Nl4dOptions::default()
         };
-        let exporting = PlaneOptions {
-            algorithm: crate::Algorithm::Nl4d(exporting_options),
+        let measuring = PlaneOptions {
+            algorithm: crate::Algorithm::Nl4d(measuring_options),
             ..options()
         };
 
@@ -358,9 +358,9 @@ mod tests {
 
         let test_layout = layout();
         let plain_key = kernel_key(&plain, test_layout);
-        let exporting_key = kernel_key(&exporting, test_layout);
+        let measuring_key = kernel_key(&measuring, test_layout);
 
-        assert_ne!(plain_key, exporting_key);
+        assert_ne!(plain_key, measuring_key);
     }
 
     #[test]

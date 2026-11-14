@@ -12,15 +12,25 @@ pub mod testing;
 pub mod tune;
 pub mod warmup;
 
+#[cfg(feature = "avds")]
+pub use av_denoise_core::avds;
 pub use av_denoise_core::{
     ChromaLayout,
     ChromaSiting,
+    DEFAULT_FINE_NOISE,
     DEFAULT_PILOT_STRENGTH_SCALE,
+    DEFAULT_STRENGTH,
     DenoisingMode,
     DevicePlane,
     EdgePadding,
     Error as EngineError,
+    FitOptions,
+    FrameGrain,
     GrainChunk,
+    GrainChunks,
+    GrainMode,
+    GrainRun,
+    GrainTable,
     HqParams,
     KERNEL_HASH,
     MotionCompensationMode,
@@ -36,8 +46,10 @@ pub use av_denoise_core::{
     Preset,
     SampleFormat,
     SceneGrain,
+    StaticGrain,
     WindowSpan,
     build_table,
+    frame_rows,
     nlmeans_search_radius_for,
     nlmeans_temporal_radius_for,
     nlmeans_variant_for,

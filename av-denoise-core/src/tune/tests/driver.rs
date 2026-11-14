@@ -618,13 +618,13 @@ fn a_tuned_set_matches_a_fresh_one_built_from_its_result() {
 }
 
 #[test]
-fn a_tuned_grain_export_set_drains_only_the_real_streams_grain() {
+fn a_tuned_grain_data_set_drains_only_the_real_streams_grain() {
     let store = tempfile::tempdir().unwrap();
     let config = auto_config(store.path(), BudgetRequest::Full);
     let device = crate::testing::test_device();
     let client = device.client();
     let nl4d = Nl4dOptions {
-        grain_export: true,
+        grain_data: true,
         ..Nl4dOptions::default()
     };
     let specs = nl4d_specs(nl4d);
@@ -638,9 +638,11 @@ fn a_tuned_grain_export_set_drains_only_the_real_streams_grain() {
 
     for index in 0..specs.len() {
         let tuned_engine = &mut set.engines_mut()[index];
-        let tuned_chunks = tuned_engine.drain_grain_chunks().expect("the tuned grain drains");
+        let tuned_grain = tuned_engine.drain_grain_chunks().expect("the tuned grain drains");
         let fresh_engine = &mut fresh.engines_mut()[index];
-        let fresh_chunks = fresh_engine.drain_grain_chunks().expect("the fresh grain drains");
+        let fresh_grain = fresh_engine.drain_grain_chunks().expect("the fresh grain drains");
+        let tuned_chunks = tuned_grain.luma;
+        let fresh_chunks = fresh_grain.luma;
 
         let tuned_frames: u32 = tuned_chunks.iter().map(|chunk| chunk.frames).sum();
         let fresh_frames: u32 = fresh_chunks.iter().map(|chunk| chunk.frames).sum();

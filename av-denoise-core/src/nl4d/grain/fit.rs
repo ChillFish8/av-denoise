@@ -15,6 +15,15 @@ use super::consts::{
 const MEAN_REMOVAL_ROUNDS: usize = 20;
 /// The largest offset between two pixels of one cell, on either axis.
 const CELL_SPAN: i32 = CELL as i32 - 1;
+/// Frequencies on each axis of the grid [floor_fraction] reads.
+const SPECTRUM_STEPS: usize = 64;
+
+/// One code of a `bit_depth`-bit video, in normalised units.
+pub(crate) fn code_step(bit_depth: u32) -> f64 {
+    let codes = 2f64.powi(bit_depth as i32) - 1.0;
+
+    1.0 / codes
+}
 
 /// The 65 std bucket edges, log-spaced between `STD_MIN` and `STD_MAX`.
 pub(crate) fn bucket_edges() -> [f32; STD_BUCKETS + 1] {
@@ -206,21 +215,94 @@ fn solve(mut matrix: Vec<[f64; AR_COEFFS + 1]>) -> Option<[f64; AR_COEFFS]> {
     finite.then_some(solution)
 }
 
+/// The share of a texture's variance a flat, white floor accounts for, between 0 and 1.
+///
+/// White noise adds the same power at every frequency, so the floor is the lowest point of the
+/// weights' [ar_spectrum]. The share is that floor over the spectrum's mean. Coarse grain has almost
+/// no power at the finest frequencies, so its lowest point and share are close to 0.
+pub(crate) fn floor_fraction(coeffs: &[f64; AR_COEFFS]) -> f64 {
+    let spectrum = ar_spectrum(coeffs);
+    let lowest = spectrum.iter().copied().fold(f64::INFINITY, f64::min);
+    let total: f64 = spectrum.iter().sum();
+
+    let mean = total / spectrum.len() as f64;
+    let fraction = lowest / mean;
+    if !fraction.is_finite() {
+        return 0.0;
+    }
+
+    fraction.clamp(0.0, 1.0)
+}
+
+/// The power of unit noise through the AR filter on a grid of [SPECTRUM_STEPS] by
+/// [SPECTRUM_STEPS] frequencies, row by row.
+pub(crate) fn ar_spectrum(coeffs: &[f64; AR_COEFFS]) -> Vec<f64> {
+    let step = std::f64::consts::TAU / SPECTRUM_STEPS as f64;
+    let mut spectrum = Vec::with_capacity(SPECTRUM_STEPS * SPECTRUM_STEPS);
+
+    for row in 0..SPECTRUM_STEPS {
+        for col in 0..SPECTRUM_STEPS {
+            let frequency_y = row as f64 * step;
+            let frequency_x = col as f64 * step;
+            let power = ar_power(coeffs, frequency_y, frequency_x);
+            spectrum.push(power);
+        }
+    }
+
+    spectrum
+}
+
+/// The power of unit noise through the AR filter at one spatial frequency.
+fn ar_power(coeffs: &[f64; AR_COEFFS], frequency_y: f64, frequency_x: f64) -> f64 {
+    let mut real = 1.0;
+    let mut imaginary = 0.0;
+    for (&(dy, dx), &coeff) in AR_OFFSETS.iter().zip(coeffs) {
+        let phase = frequency_y * dy as f64 + frequency_x * dx as f64;
+        real -= coeff * phase.cos();
+        imaginary -= coeff * phase.sin();
+    }
+
+    let gain = real * real + imaginary * imaginary;
+
+    1.0 / gain
+}
+
 /// Rounds the weights to AV1 integers with the finest shift that keeps each in a signed byte.
 ///
 /// AV1 allows an AR shift between 6 and 9. Weights that overflow at a shift of 6 are clamped.
 pub(crate) fn quantise_ar(coeffs: &[f64; AR_COEFFS]) -> ([i32; AR_COEFFS], u32) {
-    for shift in [9u32, 8, 7, 6] {
+    let shift = finest_ar_shift(coeffs);
+    let quantised = quantise_at(coeffs, shift);
+
+    (quantised, shift)
+}
+
+/// The finest AR shift between 6 and 9 at which every rounded weight fits a signed byte.
+///
+/// Weights that overflow at every shift give 6.
+pub(crate) fn finest_ar_shift(coeffs: &[f64; AR_COEFFS]) -> u32 {
+    for shift in [9u32, 8, 7] {
         let scale = (1u32 << shift) as f64;
-        let quantised = coeffs.map(|coeff| (coeff * scale).round() as i32);
-        let fits = quantised.iter().all(|&value| (-128..=127).contains(&value));
+        let fits = coeffs.iter().all(|&coeff| {
+            let rounded = (coeff * scale).round() as i32;
+            (-128..=127).contains(&rounded)
+        });
         if fits {
-            return (quantised, shift);
+            return shift;
         }
     }
 
-    let clamped = coeffs.map(|coeff| ((coeff * 64.0).round() as i32).clamp(-128, 127));
-    (clamped, 6)
+    6
+}
+
+/// Rounds the weights to AV1 integers at `shift`, clamped to a signed byte.
+pub(crate) fn quantise_at(coeffs: &[f64; AR_COEFFS], shift: u32) -> [i32; AR_COEFFS] {
+    let scale = (1u32 << shift) as f64;
+
+    coeffs.map(|coeff| {
+        let rounded = (coeff * scale).round() as i32;
+        rounded.clamp(-128, 127)
+    })
 }
 
 /// Turns per-bin target sigmas into AV1 scaling points and the scaling shift.
@@ -230,26 +312,66 @@ pub(crate) fn quantise_ar(coeffs: &[f64; AR_COEFFS]) -> ([i32; AR_COEFFS], u32) 
 /// 11 and a byte per scaling value, so the finest shift that fits the largest value wins and
 /// values past 255 are capped.
 pub(crate) fn scaling_points(points: &[(u8, f64)], sigma_template: f64) -> (Vec<(u8, u8)>, u32) {
-    let raw: Vec<f64> = points
-        .iter()
-        .map(|&(_, sigma)| sigma * 255.0 / sigma_template)
-        .collect();
-    let largest = raw.iter().copied().fold(0.0f64, f64::max);
+    let peak = scaling_peak(points, sigma_template);
+    let shift = finest_scaling_shift(peak);
+    let scaled = scaling_points_at(points, sigma_template, shift);
 
-    let mut shift = 8u32;
-    for candidate in [11u32, 10, 9, 8] {
-        if largest * (1u32 << candidate) as f64 <= 255.0 {
-            shift = candidate;
-            break;
+    (scaled, shift)
+}
+
+/// The scaling value one sigma needs before the scaling shift.
+fn raw_scaling(sigma: f64, sigma_template: f64) -> f64 {
+    sigma * 255.0 / sigma_template
+}
+
+/// The largest scaling value the points need before the scaling shift, at least 0.
+pub(crate) fn scaling_peak(points: &[(u8, f64)], sigma_template: f64) -> f64 {
+    points
+        .iter()
+        .map(|&(_, sigma)| raw_scaling(sigma, sigma_template))
+        .fold(0.0f64, f64::max)
+}
+
+/// The finest scaling shift between 8 and 11 at which `peak` stays within a byte.
+///
+/// A peak past a byte at every shift gives 8.
+pub(crate) fn finest_scaling_shift(peak: f64) -> u32 {
+    for shift in [11u32, 10, 9] {
+        if peak * (1u32 << shift) as f64 <= 255.0 {
+            return shift;
         }
     }
 
-    let factor = (1u32 << shift) as f64;
-    let scaled = points
-        .iter()
-        .zip(raw.iter())
-        .map(|(&(luma, _), &value)| (luma, (value * factor).round().min(255.0) as u8))
-        .collect();
+    8
+}
 
-    (scaled, shift)
+/// The scaling points at `shift`, with values past 255 capped.
+pub(crate) fn scaling_points_at(points: &[(u8, f64)], sigma_template: f64, shift: u32) -> Vec<(u8, u8)> {
+    let factor = (1u32 << shift) as f64;
+
+    points
+        .iter()
+        .map(|&(luma, sigma)| {
+            let value = raw_scaling(sigma, sigma_template);
+            let scaled = (value * factor).round().min(255.0) as u8;
+            (luma, scaled)
+        })
+        .collect()
+}
+
+/// At most `limit` of the values, evenly spaced and keeping the first and last.
+pub(crate) fn thinned<T: Copy>(values: &[T], limit: usize) -> Vec<T> {
+    if values.len() <= limit {
+        return values.to_vec();
+    }
+
+    let last = (values.len() - 1) as f64;
+    let steps = (limit - 1) as f64;
+
+    (0..limit)
+        .map(|point| {
+            let position = (point as f64 * last / steps).round() as usize;
+            values[position]
+        })
+        .collect()
 }

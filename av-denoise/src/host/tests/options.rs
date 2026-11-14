@@ -182,9 +182,9 @@ fn other_algorithm_options_pass_through_untouched() {
 }
 
 #[test]
-fn grain_is_only_exported_from_luma() {
+fn grain_data_reaches_both_plane_groups() {
     let nl4d = Nl4dOptions {
-        grain_export: true,
+        grain_data: true,
         ..Nl4dOptions::default()
     };
     let options = DenoiserOptions::builder()
@@ -203,6 +203,6 @@ fn grain_is_only_exported_from_luma() {
         panic!("expected an nl4d spec cleaning both plane groups");
     };
 
-    assert!(luma.grain_export);
-    assert!(!chroma.grain_export);
+    assert!(luma.grain_data);
+    assert!(chroma.grain_data);
 }

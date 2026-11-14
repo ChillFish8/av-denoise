@@ -23,7 +23,7 @@ pub use self::spec::EngineSpec;
 pub(crate) use self::spec::PassSpec;
 pub use self::timing::EngineTiming;
 use crate::error::Error;
-use crate::nl4d::grain::GrainChunk;
+use crate::nl4d::grain::{GrainChunk, GrainChunks};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 use crate::noise::colour::ColourCells;
 use crate::noise::colour::ColourSource;
@@ -198,8 +198,8 @@ pub trait Engine: Send {
     /// The most frames the engine holds before it emits one.
     fn max_held_frames(&self) -> usize;
 
-    /// Reads back the luma film grain measured since the last call, in frame order.
-    fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, Error>;
+    /// Reads back the film grain each plane group measured since the last call, in frame order.
+    fn drain_grain_chunks(&mut self) -> Result<GrainChunks, Error>;
 
     /// Device time each pass has spent so far.
     ///

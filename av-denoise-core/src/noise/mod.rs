@@ -42,8 +42,28 @@ pub(crate) use self::derived::{
     NoiseConsumer,
 };
 pub(crate) use self::fold::{FoldSettings, NoiseSettings};
-pub(crate) use self::history::{NOISE_WINDOW_LEN, NOISE_WINDOW_RADIUS, WindowBounds, history_capacity};
-pub(crate) use self::reading::{TAG_QUARTER, TAG_RHO};
+pub(crate) use self::history::{
+    NOISE_WINDOW_LEN,
+    NOISE_WINDOW_RADIUS,
+    ReadingHistory,
+    WindowBounds,
+    history_capacity,
+};
+#[cfg(feature = "avds")]
+pub(crate) use self::reading::{
+    READING_ACCEPTED,
+    READING_CURVE_VALID,
+    READING_IMMERKAER_LOW,
+    READING_POPULATED_BINS,
+    READING_QUARTER_MEDIAN,
+    READING_RATIOS,
+    READING_RHO,
+    READING_SAMPLE_VALID_BASE,
+    READING_SIGMA,
+    READING_SIGMA_LOW,
+    READING_STATIC_FRACTION,
+};
+pub(crate) use self::reading::{READING_WORDS, TAG_QUARTER, TAG_RHO};
 #[cfg(all(test, any(feature = "vulkan", feature = "metal")))]
 pub(crate) use self::snapshot::NoiseSnapshot;
 pub(crate) use self::spatial::IMMERKAER_LANES;

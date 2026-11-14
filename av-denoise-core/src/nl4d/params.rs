@@ -73,11 +73,14 @@ pub struct Nl4dParams {
     /// Faint texture spreads over several neighbouring frequencies, so it survives where each
     /// coefficient alone would fall under the threshold. On by default.
     pub pooled_threshold: bool,
-    /// Whether the denoiser measures the source's film grain for an AV1 grain table.
+    /// Whether the denoiser keeps every grain measurement per frame for a grain data file.
     ///
-    /// Off by default. Only a denoiser that filters luma measures. It never changes the output.
-    /// Measured chunks stay on the GPU until drained, so callers drain after each flush.
-    pub grain_export: bool,
+    /// Off by default. A luma denoiser measures the grain table statistics, the strength and the
+    /// persistence. A chroma denoiser measures each chroma plane's strength. Both keep each frame's
+    /// noise reading and colour fit, and the report rows come from the luma denoiser. It never
+    /// changes the output. Measured chunks stay on the GPU until drained, so callers drain after
+    /// each flush.
+    pub grain_data: bool,
 }
 
 impl Default for Nl4dParams {
@@ -106,7 +109,7 @@ impl Default for Nl4dParams {
             field_lambda: DEFAULT_FIELD_LAMBDA,
             noise_map: true,
             pooled_threshold: true,
-            grain_export: false,
+            grain_data: false,
         }
     }
 }

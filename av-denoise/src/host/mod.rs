@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use av_denoise_core::{DevicePlane, Engine, EngineSpec, GrainChunk, PlaneSource, WindowSpan};
+use av_denoise_core::{DevicePlane, Engine, EngineSpec, GrainChunks, PlaneSource, WindowSpan};
 use cubecl::prelude::Client;
 use cubecl::server::Handle;
 
@@ -394,10 +394,10 @@ impl HostDenoiser {
         PlanarTiming::new(calls, self.output_wait, self.frames_emitted, passes)
     }
 
-    /// Reads back the luma grain chunks measured since the last call, in frame order.
+    /// Reads back each plane group's grain chunks measured since the last call, in frame order.
     ///
-    /// Empty unless grain export is on.
-    pub fn drain_grain_chunks(&mut self) -> Result<Vec<GrainChunk>, DenoiserError> {
+    /// Empty unless grain data is on.
+    pub fn drain_grain_chunks(&mut self) -> Result<GrainChunks, DenoiserError> {
         if self.poisoned {
             return Err(DenoiserError::Poisoned);
         }
