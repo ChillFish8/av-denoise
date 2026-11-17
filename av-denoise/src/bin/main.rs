@@ -9,7 +9,7 @@ mod warm_start;
 mod y4m_format;
 
 use avtbx_bestsource::IndexCache;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use tracing_subscriber::EnvFilter;
 
 use self::cli::{Args, Command, InputSource, RunOptions, run_list_devices, run_synthesize, run_tune};
@@ -87,6 +87,13 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Generate shell completions.
+    if let Command::Completions { shell } = &args.command {
+        let mut cmd = Args::command();
+        clap_complete::generate(*shell, &mut cmd, "av-denoise", &mut std::io::stdout());
+        return Ok(());
+    }
+
     // Synthesizing reads only the grain data file and opens no device.
     if let Command::Synthesize(synthesize) = &args.command {
         return run_synthesize(synthesize);
@@ -136,6 +143,8 @@ fn run_command(args: &Args) -> anyhow::Result<()> {
         Command::Tune(_) => unreachable!(),
         // Handled before the kernel cache is installed.
         Command::Synthesize(_) => unreachable!(),
+        // Handled above, before any denoising options are built.
+        Command::Completions { .. } => unreachable!(),
     };
 
     run_input(&opts, input, cache, workers, frame_budget)

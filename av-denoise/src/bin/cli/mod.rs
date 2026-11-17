@@ -16,6 +16,7 @@ pub use av_denoise::Preset;
 use av_denoise::accelerate::{Accelerator, get_default_accelerators};
 use av_denoise::{ChannelIntent, Device, PlaneOptions};
 use clap::{Parser, Subcommand};
+use clap_complete::Shell;
 
 pub use self::common::CommonArgs;
 pub use self::input::InputSource;
@@ -230,4 +231,10 @@ pub enum Command {
     /// Ordinals are counted per backend, so the same row under two
     /// backends is not always the same physical card.
     ListDevices,
+
+    /// Generate shell completions for the given shell.
+    ///
+    /// Prints the completion script to stdout. Redirect to a file
+    /// or source directory as needed by your shell.
+    Completions { shell: Shell },
 }
