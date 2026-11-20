@@ -100,6 +100,14 @@ impl ChannelMode {
             ChannelMode::Chroma => 2,
         }
     }
+
+    /// The offset that moves an f32 sample of this channel to between 0 and 1.
+    pub fn float_bias(self) -> f32 {
+        match self {
+            ChannelMode::Luma => 0.0,
+            ChannelMode::Chroma => 0.5,
+        }
+    }
 }
 
 /// Parameters for the quality-focused `nlmeans-hq` variant.

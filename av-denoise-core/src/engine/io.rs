@@ -11,6 +11,8 @@ pub(crate) struct IngestTarget<'a> {
     pub offset: u32,
     pub pixels: u32,
     pub channels: u32,
+    /// The offset added to every f32 sample. Integer formats ignore it.
+    pub bias: f32,
 }
 
 /// The handle bound for plane `index`, falling back to `placeholder` for planes the kernel never reads.
@@ -55,6 +57,7 @@ pub(crate) fn ingest(
                     BufferArg::from_raw_parts(plane_1.clone(), plane_len),
                     ring,
                     target.offset,
+                    target.bias,
                     target.pixels,
                     target.channels,
                     total_threads,
@@ -91,6 +94,8 @@ pub(crate) struct EgressSource<'a> {
     pub frame: &'a Handle,
     pub pixels: u32,
     pub channels: u32,
+    /// The offset subtracted from every f32 sample. Integer formats ignore it.
+    pub bias: f32,
 }
 
 /// Queues the write of `source` into `planes`.
@@ -121,6 +126,7 @@ pub(crate) fn egress(
                     frame,
                     BufferArg::from_raw_parts(plane_0.clone(), plane_len),
                     BufferArg::from_raw_parts(plane_1.clone(), plane_len),
+                    source.bias,
                     source.pixels,
                     source.channels,
                     total_threads,

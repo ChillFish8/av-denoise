@@ -282,6 +282,7 @@ fn read_frame(
         frame,
         pixels,
         channels: channels.count(),
+        bias: channels.float_bias(),
     };
 
     egress(client, source, &planes, SampleFormat::F32, placeholder);

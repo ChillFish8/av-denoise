@@ -3,15 +3,9 @@ use cubecl::server::Handle;
 
 pub(super) use crate::engine::align::StorageAlign;
 use crate::engine::{DevicePlane, IngestTarget, SampleFormat, ingest};
+use crate::nlmeans::ChannelMode;
 #[cfg(feature = "vulkan")]
-use crate::nlmeans::{
-    ChannelMode,
-    DenoisingMode,
-    NlmDenoiser,
-    NlmeansAlgorithm,
-    NlmeansOptions,
-    resolve_params,
-};
+use crate::nlmeans::{DenoisingMode, NlmDenoiser, NlmeansAlgorithm, NlmeansOptions, resolve_params};
 use crate::noise::tests::read_temporal_stats_slot;
 use crate::noise::{
     NOISE_CHANNELS,
@@ -235,6 +229,28 @@ pub(crate) fn upload_planes(client: &Client, frame: &[f32], channels: usize) -> 
         .collect()
 }
 
+/// The f32 bias an engine applies to a frame of `channel_count` channels.
+fn boundary_bias(channel_count: usize) -> f32 {
+    match channel_count {
+        2 => ChannelMode::Chroma.float_bias(),
+        _ => ChannelMode::Luma.float_bias(),
+    }
+}
+
+/// Moves fixture samples between 0 and 1 into the f32 input range.
+pub(crate) fn centre(frame: &[f32], channel_count: usize) -> Vec<f32> {
+    let bias = boundary_bias(channel_count);
+    frame.iter().map(|sample| sample - bias).collect()
+}
+
+/// Moves f32 output samples back to between 0 and 1.
+pub(crate) fn uncentre(frame: &mut [f32], channel_count: usize) {
+    let bias = boundary_bias(channel_count);
+    for sample in frame {
+        *sample += bias;
+    }
+}
+
 pub(crate) fn read_interleaved(client: &Client, planes: &[Handle]) -> Vec<f32> {
     let channels: Vec<Vec<f32>> = planes
         .iter()
@@ -268,6 +284,7 @@ pub(crate) fn normalise_with_ingest(client: &Client, codes: &[u8], width: u32, h
         offset: 0,
         pixels,
         channels: 1,
+        bias: 0.0,
     };
 
     ingest(client, &planes, SampleFormat::U8, &placeholder, target);

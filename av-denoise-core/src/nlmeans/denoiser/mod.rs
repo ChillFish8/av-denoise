@@ -503,6 +503,7 @@ impl NlmDenoiser {
             offset: slot as u32 * frame_len,
             pixels,
             channels,
+            bias: self.params.channels.float_bias(),
         };
 
         ingest(&self.client, planes, format, &self.placeholder, target);

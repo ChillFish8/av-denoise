@@ -172,6 +172,7 @@ impl Nlmeans {
             frame,
             pixels,
             channels: channels.count(),
+            bias: channels.float_bias(),
         };
         let client = self.front.compute_client();
         let placeholder = self.front.placeholder();

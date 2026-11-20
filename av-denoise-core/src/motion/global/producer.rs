@@ -34,6 +34,7 @@ use crate::motion::{
     run_analyse,
     thsad,
 };
+use crate::nlmeans::ChannelMode;
 use crate::noise::{DERIVED_SAD_FLOOR, DERIVED_WORDS};
 use crate::tune::KernelSelector;
 use crate::tune::gpu::{bind, zeroed_words};
@@ -313,6 +314,7 @@ impl PairModelProducer {
             offset: 0,
             pixels,
             channels: 1,
+            bias: ChannelMode::Luma.float_bias(),
         };
         let planes = [*luma];
 

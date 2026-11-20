@@ -81,6 +81,7 @@ fn run_ingest(width: u32, height: u32, channels: u32, format: SampleFormat) -> (
         offset: frame_len as u32,
         pixels: pixels as u32,
         channels,
+        bias: 0.0,
     };
 
     ingest(&client, &planes, format, &placeholder, target);
@@ -137,16 +138,41 @@ fn ingest_u16_at_depth_16_across_many_cubes_matches_the_host_oracle() {
 
 #[test]
 fn ingest_f32_copies_samples_across_many_cubes() {
-    run_f32_ingest(300, 3);
+    assert_f32_ingest_copies(300, 3);
 }
 
 #[test]
 fn ingest_f32_copies_samples() {
-    run_f32_ingest(4, 3);
+    assert_f32_ingest_copies(4, 3);
 }
 
-fn run_f32_ingest(width: u32, height: u32) {
-    let client = client();
+#[test]
+fn ingest_f32_adds_the_bias() {
+    let width = 4;
+    let height = 3;
+    let pixels = (width * height) as usize;
+    let channel_values: Vec<Vec<f32>> = (0..2)
+        .map(|channel| {
+            let mut values: Vec<f32> = (0..pixels)
+                .map(|pixel| (pixel + channel * 100) as f32 * 0.01 - 0.5)
+                .collect();
+            values[..4].copy_from_slice(&[-0.6, 0.0, 0.5, 1.2]);
+
+            values
+        })
+        .collect();
+
+    let actual = run_f32_ingest(&channel_values, width, height, 0.5);
+
+    for pixel in 0..pixels {
+        for channel in 0..2 {
+            let expected = channel_values[channel][pixel] + 0.5;
+            assert_eq!(actual[pixel * 2 + channel], expected);
+        }
+    }
+}
+
+fn assert_f32_ingest_copies(width: u32, height: u32) {
     let pixels = (width * height) as usize;
     let channel_values: Vec<Vec<f32>> = (0..2)
         .map(|channel| {
@@ -158,6 +184,20 @@ fn run_f32_ingest(width: u32, height: u32) {
             values
         })
         .collect();
+
+    let actual = run_f32_ingest(&channel_values, width, height, 0.0);
+
+    for pixel in 0..pixels {
+        for channel in 0..2 {
+            assert_eq!(actual[pixel * 2 + channel], channel_values[channel][pixel]);
+        }
+    }
+}
+
+/// Ingests two f32 planes into a single ring slot and returns the interleaved ring.
+fn run_f32_ingest(channel_values: &[Vec<f32>], width: u32, height: u32, bias: f32) -> Vec<f32> {
+    let client = client();
+    let pixels = (width * height) as usize;
     let handles: Vec<_> = channel_values
         .iter()
         .map(|values| {
@@ -179,18 +219,13 @@ fn run_f32_ingest(width: u32, height: u32) {
         offset: 0,
         pixels: pixels as u32,
         channels: 2,
+        bias,
     };
 
     ingest(&client, &planes, SampleFormat::F32, &placeholder, target);
 
     let bytes = client.read_one(ring).expect("read ring");
-    let actual = f32::from_bytes(&bytes);
-
-    for pixel in 0..pixels {
-        for channel in 0..2 {
-            assert_eq!(actual[pixel * 2 + channel], channel_values[channel][pixel]);
-        }
-    }
+    f32::from_bytes(&bytes).to_vec()
 }
 
 /// An interleaved frame whose first pixels hit below zero, zero, one, above one and the top two codes.
@@ -273,6 +308,7 @@ fn run_egress(frame: &[f32], width: u32, height: u32, channels: u32, format: Sam
         frame: &frame_handle,
         pixels: pixels as u32,
         channels,
+        bias: 0.0,
     };
 
     egress(&client, source, &planes, format, &placeholder);
@@ -340,11 +376,45 @@ fn egress_f32_across_many_cubes_copies_samples() {
     assert_f32_egress_copies(300, 9, 2);
 }
 
+#[test]
+fn egress_f32_subtracts_the_bias_unclamped() {
+    let width = 4;
+    let height = 3;
+    let channels = 2;
+    let pixels = (width * height) as usize;
+    let mut frame: Vec<f32> = (0..pixels * channels as usize)
+        .map(|index| index as f32 * 0.05 - 0.2)
+        .collect();
+    frame[..6].copy_from_slice(&[-0.2, 0.5, 1.7, 0.5, 1.7, -0.2]);
+
+    let actual = run_f32_egress(&frame, width, height, channels, 0.5);
+
+    for (channel, values) in actual.iter().enumerate() {
+        for pixel in 0..pixels {
+            let expected = frame[pixel * channels as usize + channel] - 0.5;
+            assert_eq!(values[pixel], expected);
+        }
+    }
+}
+
 fn assert_f32_egress_copies(width: u32, height: u32, channels: u32) {
-    let client = client();
     let pixels = (width * height) as usize;
     let frame = egress_frame(pixels, channels, SampleFormat::F32);
-    let frame_bytes = f32::as_bytes(&frame);
+
+    let actual = run_f32_egress(&frame, width, height, channels, 0.0);
+
+    for (channel, values) in actual.iter().enumerate() {
+        for pixel in 0..pixels {
+            assert_eq!(values[pixel], frame[pixel * channels as usize + channel]);
+        }
+    }
+}
+
+/// Egresses an interleaved frame into f32 planes and returns each plane.
+fn run_f32_egress(frame: &[f32], width: u32, height: u32, channels: u32, bias: f32) -> Vec<Vec<f32>> {
+    let client = client();
+    let pixels = (width * height) as usize;
+    let frame_bytes = f32::as_bytes(frame);
     let frame_handle = client.create_from_slice(frame_bytes);
     let outputs: Vec<_> = (0..channels).map(|_| client.empty(pixels * 4)).collect();
     let planes: Vec<_> = outputs
@@ -356,15 +426,16 @@ fn assert_f32_egress_copies(width: u32, height: u32, channels: u32) {
         frame: &frame_handle,
         pixels: pixels as u32,
         channels,
+        bias,
     };
 
     egress(&client, source, &planes, SampleFormat::F32, &placeholder);
 
-    for (channel, handle) in outputs.into_iter().enumerate() {
-        let bytes = client.read_one(handle).expect("read plane");
-        let values = f32::from_bytes(&bytes);
-        for pixel in 0..pixels {
-            assert_eq!(values[pixel], frame[pixel * channels as usize + channel]);
-        }
-    }
+    outputs
+        .into_iter()
+        .map(|handle| {
+            let bytes = client.read_one(handle).expect("read plane");
+            f32::from_bytes(&bytes).to_vec()
+        })
+        .collect()
 }

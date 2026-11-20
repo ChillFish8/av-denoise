@@ -113,6 +113,7 @@ impl Benchmark for EgressBench {
                     BufferArg::from_raw_parts(args.frame.clone(), frame_len),
                     BufferArg::from_raw_parts(plane_0, plane_len),
                     BufferArg::from_raw_parts(plane_1, plane_len),
+                    0.5f32,
                     pixels,
                     self.channels,
                     total_threads,
