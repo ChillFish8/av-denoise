@@ -202,6 +202,7 @@ pub fn noise_colour_means(
     luma_means: &mut [f32],
     chroma_means: &mut [f32],
     eight_bit_scale: f32,
+    chroma_bias: f32,
     #[comptime] width: u32,
     #[comptime] height: u32,
     #[comptime] shift_x: u32,
@@ -311,8 +312,10 @@ pub fn noise_colour_means(
         let luma_pixels = f32::cast_from((luma_right - luma_left) * (luma_bottom - luma_top));
         let chroma_pixels = f32::cast_from((chroma_right - chroma_left) * (chroma_bottom - chroma_top));
         let mean_luma = luma_sums[0] / luma_pixels * eight_bit_scale;
-        let mean_cb = cb_sums[0] / chroma_pixels * eight_bit_scale - COLOUR_CHROMA_CENTRE;
-        let mean_cr = cr_sums[0] / chroma_pixels * eight_bit_scale - COLOUR_CHROMA_CENTRE;
+        let raw_cb = cb_sums[0] / chroma_pixels + chroma_bias;
+        let raw_cr = cr_sums[0] / chroma_pixels + chroma_bias;
+        let mean_cb = raw_cb * eight_bit_scale - COLOUR_CHROMA_CENTRE;
+        let mean_cr = raw_cr * eight_bit_scale - COLOUR_CHROMA_CENTRE;
         let base = (block_y * blocks_x + block_x) * COLOUR_MEAN_FIELDS;
 
         if in_luma_grid {
