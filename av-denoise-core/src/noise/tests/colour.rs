@@ -490,7 +490,11 @@ fn extreme_chroma_values_index_inside_the_table() {
 }
 
 /// Packs `codes` into the word layout of `format`.
-fn pack(codes: &[u32], format: SampleFormat) -> Vec<u8> {
+///
+/// A `centred` float plane holds chroma, which sits between -0.5 and 0.5.
+fn pack(codes: &[u32], format: SampleFormat, centred: bool) -> Vec<u8> {
+    let float_bias = if centred { 0.5 } else { 0.0 };
+
     match format {
         SampleFormat::U8 => codes.iter().map(|&code| code as u8).collect(),
         SampleFormat::U16 { .. } => codes
@@ -499,7 +503,7 @@ fn pack(codes: &[u32], format: SampleFormat) -> Vec<u8> {
             .collect(),
         SampleFormat::F32 => codes
             .iter()
-            .flat_map(|&code| (code as f32 / 255.0).to_le_bytes())
+            .flat_map(|&code| (code as f32 / 255.0 - float_bias).to_le_bytes())
             .collect(),
     }
 }
@@ -538,8 +542,10 @@ fn measured_means(client: &Client, geometry: Geometry, codes: &[Vec<u32>; 3]) ->
     let (chroma_width, chroma_height) = geometry.plane_dims(1);
     let handles: Vec<Handle> = codes
         .iter()
-        .map(|plane| {
-            let bytes = pack(plane, geometry.input);
+        .enumerate()
+        .map(|(plane_index, plane)| {
+            let is_chroma = plane_index > 0;
+            let bytes = pack(plane, geometry.input, is_chroma);
             client.create_from_slice(&bytes)
         })
         .collect();

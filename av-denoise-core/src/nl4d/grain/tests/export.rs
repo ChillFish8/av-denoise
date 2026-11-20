@@ -37,6 +37,7 @@ use crate::nl4d::grain::{FitOptions, GrainExport, GrainGeometry, GrainParts, Mea
 use crate::nl4d::snapshot::LastFields;
 use crate::nl4d::{Nl4dDenoiser, Nl4dOptions, Nl4dParams};
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
+use crate::nlmeans::tests::helpers::centre;
 use crate::nlmeans::tests::models::ModelFitter;
 use crate::nlmeans::{
     ChannelMode,
@@ -403,15 +404,17 @@ fn flat_luma_chroma_grain(count: usize) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
         let seed = 2 * frame_index as u64 + 900;
         let cb_grain = gaussian_field(chroma_width, chroma_height, seed);
         let cr_grain = gaussian_field(chroma_width, chroma_height, seed + 1);
-        let samples = cb_grain
+        let samples: Vec<f32> = cb_grain
             .iter()
             .zip(&cr_grain)
             .flat_map(|(&cb_sample, &cr_sample)| {
                 let cb = FLAT_LEVEL + SIGMA * cb_sample as f32;
                 let cr = FLAT_LEVEL + SIGMA * cr_sample as f32;
                 [cb, cr]
-            });
-        chroma.push(samples.collect());
+            })
+            .collect();
+        let centred = centre(&samples, 2);
+        chroma.push(centred);
     }
 
     (luma, chroma)
@@ -1035,7 +1038,9 @@ fn shared_motion_chunks(pan: u32) -> Vec<GrainChunk> {
         fitter.fit(luma_frame);
         luma.push_frame(luma_frame);
         luma.denoise().expect("luma denoise");
-        chroma.push_frame(chroma_frame);
+
+        let centred_chroma = centre(chroma_frame, 2);
+        chroma.push_frame(&centred_chroma);
         chroma.denoise().expect("chroma denoise");
     }
 

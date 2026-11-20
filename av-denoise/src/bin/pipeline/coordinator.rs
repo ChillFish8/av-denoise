@@ -39,7 +39,7 @@ pub fn run_coordinator<W: std::io::Write>(
     let framerate = info.details.frame_rate;
     let ratio = y4m::Ratio::new(*framerate.numer() as usize, *framerate.denom() as usize);
     let layout = info.layout;
-    let colorspace = subsampling_to_y4m(layout.subsampling, layout.depth, layout.chroma_siting);
+    let colorspace = subsampling_to_y4m(layout.subsampling, layout.depth, layout.chroma_siting)?;
 
     let mut builder =
         y4m::encode(layout.width as usize, layout.height as usize, ratio).with_colorspace(colorspace);

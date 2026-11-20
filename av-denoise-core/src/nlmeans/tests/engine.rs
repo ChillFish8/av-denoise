@@ -2,10 +2,12 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::helpers::{
+    centre,
     make_client,
     make_noisy_gaussian_frame,
     normalise_with_ingest,
     read_interleaved,
+    uncentre,
     upload_planes,
 };
 use crate::bench_api::HostIo;
@@ -82,6 +84,7 @@ fn frames(count: usize, channels: u32) -> Vec<Vec<f32>> {
         .collect()
 }
 
+/// Emits one frame and moves it back to between 0 and 1.
 fn emit(engine: &mut Nlmeans, client: &Client, channel_count: usize) -> Vec<f32> {
     let pixels = (WIDTH * HEIGHT) as usize;
     let outputs: Vec<Handle> = (0..channel_count).map(|_| client.empty(pixels * 4)).collect();
@@ -92,7 +95,10 @@ fn emit(engine: &mut Nlmeans, client: &Client, channel_count: usize) -> Vec<f32>
 
     engine.emit_into(&planes).expect("emit");
 
-    read_interleaved(client, &outputs)
+    let mut output = read_interleaved(client, &outputs);
+    uncentre(&mut output, channel_count);
+
+    output
 }
 
 /// Pushes `frames` in order until one is ready, leaving it unemitted, and returns the pushes made.
@@ -107,9 +113,10 @@ fn push_until_ready(engine: &mut Nlmeans, client: &Client, frames: &[Vec<f32>]) 
     panic!("no frame was ready after {} pushes", frames.len());
 }
 
-/// Pushes one frame and returns how many frames the engine reports ready.
+/// Centres and pushes one frame, returning how many frames the engine reports ready.
 fn push_frame(engine: &mut Nlmeans, client: &Client, frame: &[f32], channel_count: usize) -> usize {
-    let handles = upload_planes(client, frame, channel_count);
+    let centred = centre(frame, channel_count);
+    let handles = upload_planes(client, &centred, channel_count);
     let planes: Vec<_> = handles
         .iter()
         .map(|handle| DevicePlane::new(handle, WIDTH, HEIGHT))
@@ -180,19 +187,23 @@ fn run_oracle(radius: u32, channels: ChannelMode, frames: &[Vec<f32>]) -> Vec<Ve
     let algorithm = hq(radius);
     let params = resolve_params(&algorithm, channels);
     let mut denoiser = NlmDenoiser::new(&client, params, WIDTH, HEIGHT);
+    let channel_count = channels.count() as usize;
     let mut outputs = Vec::new();
 
     for frame in frames {
-        denoiser.push_frame(frame);
+        let centred = centre(frame, channel_count);
+        denoiser.push_frame(&centred);
 
         let output = denoiser.denoise().expect("denoise");
-        if let Some(samples) = output {
+        if let Some(mut samples) = output {
+            uncentre(&mut samples, channel_count);
             outputs.push(samples);
         }
     }
 
     let collect = |output: &[f32]| {
-        let samples = output.to_vec();
+        let mut samples = output.to_vec();
+        uncentre(&mut samples, channel_count);
         outputs.push(samples);
     };
     denoiser.flush(collect).expect("flush");

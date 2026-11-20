@@ -11,7 +11,14 @@ use crate::nl4d::grain::GrainChunk;
 use crate::nl4d::{Nl4d, Nl4dDenoiser, Nl4dOptions, resolve_params};
 use crate::nlmeans::ChannelMode;
 use crate::nlmeans::denoiser::LOOKAHEAD_FRAMES;
-use crate::nlmeans::tests::helpers::{make_client, normalise_with_ingest, read_interleaved, upload_planes};
+use crate::nlmeans::tests::helpers::{
+    centre,
+    make_client,
+    normalise_with_ingest,
+    read_interleaved,
+    uncentre,
+    upload_planes,
+};
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
@@ -53,12 +60,16 @@ fn emit(engine: &mut Nl4d, client: &Client, channel_count: usize) -> Vec<f32> {
 
     engine.emit_into(&planes).expect("emit");
 
-    read_interleaved(client, &outputs)
+    let mut output = read_interleaved(client, &outputs);
+    uncentre(&mut output, channel_count);
+
+    output
 }
 
-/// Pushes one frame and returns how many frames the engine reports ready.
+/// Centres and pushes one frame, returning how many frames the engine reports ready.
 fn push_frame(engine: &mut Nl4d, client: &Client, frame: &[f32], channel_count: usize) -> usize {
-    let handles = upload_planes(client, frame, channel_count);
+    let centred = centre(frame, channel_count);
+    let handles = upload_planes(client, &centred, channel_count);
     let planes: Vec<_> = handles
         .iter()
         .map(|handle| DevicePlane::new(handle, WIDTH, HEIGHT))
@@ -68,7 +79,8 @@ fn push_frame(engine: &mut Nl4d, client: &Client, frame: &[f32], channel_count: 
 }
 
 fn push_context_frame(engine: &mut Nl4d, client: &Client, frame: &[f32], channel_count: usize) {
-    let handles = upload_planes(client, frame, channel_count);
+    let centred = centre(frame, channel_count);
+    let handles = upload_planes(client, &centred, channel_count);
     let planes: Vec<_> = handles
         .iter()
         .map(|handle| DevicePlane::new(handle, WIDTH, HEIGHT))
@@ -194,6 +206,7 @@ fn run_oracle(options: Nl4dOptions, channels: ChannelMode, frames: &[Vec<f32>], 
     let client = make_client();
     let params = resolve_params(&options, channels).expect("resolve");
     let mut denoiser = Nl4dDenoiser::new(&client, params, WIDTH, HEIGHT).expect("build");
+    let channel_count = channels.count() as usize;
     let mut outputs = Vec::new();
 
     if context > 0 {
@@ -201,20 +214,23 @@ fn run_oracle(options: Nl4dOptions, channels: ChannelMode, frames: &[Vec<f32>], 
     }
 
     for (index, frame) in frames.iter().enumerate() {
-        denoiser.push_frame(frame);
+        let centred = centre(frame, channel_count);
+        denoiser.push_frame(&centred);
 
         if index < context {
             continue;
         }
 
         let output = denoiser.denoise().expect("denoise");
-        if let Some(samples) = output {
+        if let Some(mut samples) = output {
+            uncentre(&mut samples, channel_count);
             outputs.push(samples);
         }
     }
 
     let collect = |output: &[f32]| {
-        let samples = output.to_vec();
+        let mut samples = output.to_vec();
+        uncentre(&mut samples, channel_count);
         outputs.push(samples);
     };
     denoiser.flush(collect).expect("flush");
@@ -594,6 +610,131 @@ fn u8_input_matches_f32_input_from_the_ingest_kernel() {
     let f32_frames = drive_u8(&mut f32_engine, &client, &f32_inputs);
     assert_eq!(u8_frames.len(), 4);
     assert_eq!(u8_frames, f32_frames);
+}
+
+/// Pushes each frame of planes, then the tail, emitting every frame as interleaved f32 samples.
+fn drive_planes(
+    engine: &mut Nl4d,
+    client: &Client,
+    inputs: &[Vec<Handle>],
+    format: SampleFormat,
+) -> Vec<Vec<f32>> {
+    let mut outputs = Vec::new();
+
+    for handles in inputs {
+        let planes: Vec<_> = handles
+            .iter()
+            .map(|handle| DevicePlane::new(handle, WIDTH, HEIGHT))
+            .collect();
+        let ready = engine.push(&planes).expect("push");
+        emit_planes(engine, client, ready, format, &mut outputs);
+    }
+
+    let tail = engine.finish().expect("finish");
+    emit_planes(engine, client, tail, format, &mut outputs);
+
+    outputs
+}
+
+/// Emits `frame_count` two-channel frames into `outputs`, widening `u8` codes to f32 code values.
+fn emit_planes(
+    engine: &mut Nl4d,
+    client: &Client,
+    frame_count: usize,
+    format: SampleFormat,
+    outputs: &mut Vec<Vec<f32>>,
+) {
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let plane_bytes = format.plane_bytes(pixels as u64) as usize;
+
+    for _ in 0..frame_count {
+        let handles: Vec<Handle> = (0..2).map(|_| client.empty(plane_bytes)).collect();
+        let planes: Vec<_> = handles
+            .iter()
+            .map(|handle| DevicePlane::new(handle, WIDTH, HEIGHT))
+            .collect();
+        engine.emit_into(&planes).expect("emit");
+
+        let channels: Vec<Vec<f32>> = handles
+            .into_iter()
+            .map(|handle| {
+                let bytes = client.read_one(handle).expect("read plane");
+                match format {
+                    SampleFormat::F32 => f32::from_bytes(&bytes).to_vec(),
+                    _ => bytes[..pixels].iter().map(|&code| code as f32).collect(),
+                }
+            })
+            .collect();
+
+        let interleaved = channels[0]
+            .iter()
+            .zip(&channels[1])
+            .flat_map(|(&cb_sample, &cr_sample)| [cb_sample, cr_sample])
+            .collect();
+        outputs.push(interleaved);
+    }
+}
+
+#[test]
+fn f32_chroma_matches_u8_chroma_after_centring() {
+    let client = make_client();
+    let frames = noisy_frames(WIDTH, HEIGHT, 2, 6);
+    let pixels = (WIDTH * HEIGHT) as usize;
+    let bias = ChannelMode::Chroma.float_bias();
+
+    let mut u8_inputs = Vec::new();
+    let mut f32_inputs = Vec::new();
+    for frame in &frames {
+        let mut u8_planes = Vec::new();
+        let mut f32_planes = Vec::new();
+
+        for channel in 0..2 {
+            let codes: Vec<u8> = (0..pixels)
+                .map(|pixel| (frame[pixel * 2 + channel].clamp(0.0, 1.0) * 255.0) as u8)
+                .collect();
+            let centred: Vec<f32> = codes.iter().map(|&code| code as f32 / 255.0 - bias).collect();
+
+            let u8_handle = client.create_from_slice(&codes);
+            u8_planes.push(u8_handle);
+
+            let centred_bytes = f32::as_bytes(&centred);
+            let f32_handle = client.create_from_slice(centred_bytes);
+            f32_planes.push(f32_handle);
+        }
+
+        u8_inputs.push(u8_planes);
+        f32_inputs.push(f32_planes);
+    }
+
+    let u8_geometry = PassGeometry {
+        input: SampleFormat::U8,
+        output: SampleFormat::U8,
+        width: WIDTH,
+        height: HEIGHT,
+        channels: ChannelMode::Chroma,
+    };
+    let f32_geometry = PassGeometry {
+        input: SampleFormat::F32,
+        output: SampleFormat::F32,
+        ..u8_geometry
+    };
+    let u8_options = options(1, false);
+    let f32_options = options(1, false);
+    let mut u8_engine = Nl4d::new(&client, u8_options, u8_geometry).expect("build u8");
+    let mut f32_engine = Nl4d::new(&client, f32_options, f32_geometry).expect("build f32");
+
+    let u8_frames = drive_planes(&mut u8_engine, &client, &u8_inputs, SampleFormat::U8);
+    let f32_frames = drive_planes(&mut f32_engine, &client, &f32_inputs, SampleFormat::F32);
+    assert_eq!(u8_frames.len(), 6);
+    assert_eq!(f32_frames.len(), 6);
+
+    for (u8_frame, f32_frame) in u8_frames.iter().zip(&f32_frames) {
+        for (&code, &sample) in u8_frame.iter().zip(f32_frame) {
+            let expected = code / 255.0 - bias;
+            let difference = (sample - expected).abs();
+            assert!(difference <= 1.0 / 255.0, "got {sample}, expected {expected}");
+        }
+    }
 }
 
 #[test]

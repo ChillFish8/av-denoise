@@ -403,9 +403,9 @@ def rgb_input_is_rejected():
 
 
 @test
-def float_input_is_rejected():
-    src = core.std.BlankClip(width=160, height=120, length=8, format=vs.YUV420PS)
-    expect_error(lambda: core.avd.NL4D(src), "float")
+def half_float_input_is_rejected():
+    src = core.std.BlankClip(width=160, height=120, length=8, format=vs.YUV420PH)
+    expect_error(lambda: core.avd.NL4D(src), "32-bit float")
 
 
 @test

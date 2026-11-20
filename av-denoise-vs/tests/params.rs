@@ -36,13 +36,23 @@ fn test_format_rgb(bits_per_sample: u8) -> RawFormat {
     }
 }
 
-fn test_format_yuv_float() -> RawFormat {
+fn test_format_yuv_float(subsampling_w: u8, subsampling_h: u8, bits_per_sample: u8) -> RawFormat {
     RawFormat {
         sample_type: SampleType::Float,
-        bits_per_sample: 32,
+        bits_per_sample,
+        subsampling_w,
+        subsampling_h,
+        color_family: ColorFamily::YUV,
+    }
+}
+
+fn test_format_gray_float(bits_per_sample: u8) -> RawFormat {
+    RawFormat {
+        sample_type: SampleType::Float,
+        bits_per_sample,
         subsampling_w: 0,
         subsampling_h: 0,
-        color_family: ColorFamily::YUV,
+        color_family: ColorFamily::Gray,
     }
 }
 
@@ -112,11 +122,34 @@ fn rejects_rgb_with_a_clear_message() {
 }
 
 #[test]
-fn rejects_float_clips_with_a_clear_message() {
-    let format = test_format_yuv_float();
+fn accepts_32_bit_float_yuv() {
+    let cases = [
+        (test_format_yuv_float(0, 0, 32), Subsampling::Yuv444),
+        (test_format_yuv_float(1, 0, 32), Subsampling::Yuv422),
+        (test_format_yuv_float(1, 1, 32), Subsampling::Yuv420),
+    ];
+    for (format, expected) in cases {
+        let layout = layout_from_format(format, 160, 120).unwrap();
+
+        assert_eq!(layout.subsampling, expected);
+        assert_eq!(layout.depth, Depth::Float);
+    }
+}
+
+#[test]
+fn rejects_half_float_with_a_message_naming_32_bit() {
+    let format = test_format_yuv_float(1, 1, 16);
     let err = layout_from_format(format, 160, 120).unwrap_err().to_string();
 
-    assert!(err.to_lowercase().contains("float"), "got {err}");
+    assert!(err.contains("32-bit float"), "got {err}");
+}
+
+#[test]
+fn rejects_gray_float_with_the_gray_message() {
+    let format = test_format_gray_float(32);
+    let err = layout_from_format(format, 160, 120).unwrap_err().to_string();
+
+    assert!(err.to_lowercase().contains("gray"), "got {err}");
 }
 
 #[test]

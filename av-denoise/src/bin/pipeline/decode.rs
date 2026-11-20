@@ -7,6 +7,7 @@ use v_frame::frame::Frame;
 
 use super::convert::{DecodedFrame, SourcePixel};
 use super::source::{FrameReader, OpenedSource, SourceInfo};
+use crate::y4m_format::FLOAT_UNSUPPORTED;
 
 /// Frames the decode thread may run ahead of the scene splitter.
 pub const PREFETCH_FRAMES: usize = 4;
@@ -104,6 +105,7 @@ fn run_decode_thread<F>(
     let result = match info.layout.depth {
         Depth::Eight => pump_reader::<u8>(reader, &start),
         Depth::Ten | Depth::Twelve => pump_reader::<u16>(reader, &start),
+        Depth::Float => Err(anyhow::anyhow!(FLOAT_UNSUPPORTED)),
     };
 
     if let Err(err) = result {

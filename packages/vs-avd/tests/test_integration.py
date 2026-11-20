@@ -70,6 +70,35 @@ def test_nl4d_renders_and_preserves_clip_properties():
     _assert_shape_preserved(out, src)
 
 
+def _plane_mean(frame, plane):
+    samples = frame[plane]
+    height, width = samples.shape
+    total = 0.0
+    for y in range(height):
+        for x in range(width):
+            total += samples[y, x]
+    return total / (height * width)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("fmt", [vs.YUV420PS, vs.YUV444PS])
+def test_float_clips_render_and_keep_their_format(fmt):
+    src = synthetic_clip()
+    src_float = core.resize.Point(src, format=fmt)
+    source_frame = src_float.get_frame(3)
+
+    for denoiser in (Nlm, Nl4d):
+        out = denoiser(src_float)
+        _assert_shape_preserved(out, src_float)
+        out_frame = out.get_frame(3)
+
+        for plane in (1, 2):
+            source_mean = _plane_mean(source_frame, plane)
+            out_mean = _plane_mean(out_frame, plane)
+            assert -0.5 < out_mean < 0.5
+            assert abs(out_mean - source_mean) < 0.05, (plane, out_mean, source_mean)
+
+
 @pytest.mark.gpu
 def test_every_preset_literal_is_accepted():
     """_types.Preset duplicates strings the plugin owns. Prove they agree."""

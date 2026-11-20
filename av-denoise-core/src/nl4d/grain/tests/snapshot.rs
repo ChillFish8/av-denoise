@@ -22,7 +22,7 @@ use crate::nl4d::grain::snapshot::colour_frame_len;
 use crate::nl4d::tests::helpers::noisy_frames;
 use crate::nl4d::{Nl4d, Nl4dDenoiser, Nl4dOptions, resolve_params};
 use crate::nlmeans::ChannelMode;
-use crate::nlmeans::tests::helpers::{make_client, upload_planes};
+use crate::nlmeans::tests::helpers::{centre, make_client, upload_planes};
 use crate::noise::colour::{COLOUR_CELLS, COLOUR_FIT_PLANE_WORDS, ColourBlocks, ColourFit, ColourGrid};
 use crate::noise::{READING_WORDS, history_capacity};
 
@@ -90,7 +90,10 @@ pub(super) struct ColourRun {
 impl ColourRun {
     fn new(options: Nl4dOptions, channels: ChannelMode) -> Self {
         let luma_frames = noisy_frames(WIDTH, HEIGHT, 1, FRAMES);
-        let chroma_frames = noisy_frames(WIDTH / 2, HEIGHT / 2, 2, FRAMES);
+        let chroma_frames: Vec<Vec<f32>> = noisy_frames(WIDTH / 2, HEIGHT / 2, 2, FRAMES)
+            .iter()
+            .map(|frame| centre(frame, 2))
+            .collect();
 
         Self::with_frames(options, channels, &luma_frames, &chroma_frames)
     }

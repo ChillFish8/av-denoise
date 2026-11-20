@@ -88,9 +88,13 @@ impl FrameLayout {
 
 /// Builds a plane of `samples` copies of `value` in wire-byte form.
 pub fn fill_plane(samples: usize, value: u16, depth: Depth) -> Vec<u8> {
-    match depth.bytes_per_sample() {
-        1 => vec![value as u8; samples],
-        _ => {
+    match depth {
+        Depth::Eight => vec![value as u8; samples],
+        Depth::Float => {
+            let word = f32::from(value).to_le_bytes();
+            word.repeat(samples)
+        },
+        Depth::Ten | Depth::Twelve => {
             let word = value.to_le_bytes();
             let mut plane = Vec::with_capacity(samples * 2);
             for _ in 0..samples {

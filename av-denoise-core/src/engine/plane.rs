@@ -11,7 +11,7 @@ pub enum SampleFormat {
     U16 {
         depth: u8,
     },
-    /// Normalised samples between 0 and 1.
+    /// Samples with luma between 0 and 1 and chroma between -0.5 and 0.5.
     F32,
 }
 

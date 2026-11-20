@@ -37,6 +37,7 @@ pub use self::tune::{budget_request, tune_input};
 use self::worker::{WorkerJoin, WorkerSettings, spawn_workers};
 use crate::cli::{InputSource, RunOptions};
 use crate::progress::denoise_bar_visible;
+use crate::y4m_format::FLOAT_UNSUPPORTED;
 
 /// How a pipeline run uses the machine and what it writes beside the video.
 pub struct RunSettings {
@@ -182,6 +183,7 @@ where
     let dispatched = match layout.depth {
         Depth::Eight => dispatch::<u8>(feed, &info, &job_tx),
         Depth::Ten | Depth::Twelve => dispatch::<u16>(feed, &info, &job_tx),
+        Depth::Float => Err(anyhow::anyhow!(FLOAT_UNSUPPORTED)),
     };
 
     // Closing the queue tells the workers there are no more scenes, and dropping the frame

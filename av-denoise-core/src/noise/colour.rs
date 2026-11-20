@@ -258,6 +258,7 @@ impl ColourBlocks {
                 bind(luma_means, luma_len),
                 bind(chroma_means, chroma_len),
                 eight_bit_scale(format),
+                chroma_bias(format),
                 geometry.width,
                 geometry.height,
                 subsampling.shift_x,
@@ -354,6 +355,16 @@ fn eight_bit_scale(format: SampleFormat) -> f32 {
             1.0 / divisor
         },
         SampleFormat::F32 => 255.0,
+    }
+}
+
+/// The offset that brings a chroma sample in `format` back onto its unsigned code range.
+///
+/// Float chroma sits between -0.5 and 0.5, so it gains 0.5.
+fn chroma_bias(format: SampleFormat) -> f32 {
+    match format {
+        SampleFormat::F32 => 0.5,
+        SampleFormat::U8 | SampleFormat::U16 { .. } => 0.0,
     }
 }
 

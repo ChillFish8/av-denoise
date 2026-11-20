@@ -58,7 +58,7 @@ pub fn ingest_words(
     }
 }
 
-/// Copies f32 planes into one interleaved ring slot.
+/// Copies f32 planes into one interleaved ring slot, adding `bias` to every sample.
 ///
 /// A plane is only read when `channels` covers it, so an unused plane can be a placeholder.
 #[cube(launch_unchecked)]
@@ -67,6 +67,7 @@ pub fn ingest_f32(
     plane_1: &[f32],
     ring: &mut [f32],
     offset: u32,
+    bias: f32,
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
     #[comptime] total_threads: u32,
@@ -78,10 +79,10 @@ pub fn ingest_f32(
     let mut pixel = ABSOLUTE_POS_X;
     while pixel < pixels {
         let base = offset + pixel * channels;
-        ring[base as usize] = plane_0[pixel as usize];
+        ring[base as usize] = plane_0[pixel as usize] + bias;
 
         if channels > 1 {
-            ring[(base + 1) as usize] = plane_1[pixel as usize];
+            ring[(base + 1) as usize] = plane_1[pixel as usize] + bias;
         }
 
         pixel += total_threads;
@@ -151,14 +152,16 @@ pub fn egress_words(
     }
 }
 
-/// Copies an interleaved f32 frame into f32 planes.
+/// Copies an interleaved f32 frame into f32 planes, subtracting `bias` from every sample.
 ///
-/// A plane is only written when `channels` covers it, so an unused plane can be a placeholder.
+/// Samples are not clamped. A plane is only written when `channels` covers it, so an unused plane
+/// can be a placeholder.
 #[cube(launch_unchecked)]
 pub fn egress_f32(
     frame: &[f32],
     plane_0: &mut [f32],
     plane_1: &mut [f32],
+    bias: f32,
     #[comptime] pixels: u32,
     #[comptime] channels: u32,
     #[comptime] total_threads: u32,
@@ -170,10 +173,10 @@ pub fn egress_f32(
     let mut pixel = ABSOLUTE_POS_X;
     while pixel < pixels {
         let base = pixel * channels;
-        plane_0[pixel as usize] = frame[base as usize];
+        plane_0[pixel as usize] = frame[base as usize] - bias;
 
         if channels > 1 {
-            plane_1[pixel as usize] = frame[(base + 1) as usize];
+            plane_1[pixel as usize] = frame[(base + 1) as usize] - bias;
         }
 
         pixel += total_threads;

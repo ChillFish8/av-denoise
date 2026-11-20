@@ -22,11 +22,20 @@ pub fn siting_from_y4m(colorspace: y4m::Colorspace) -> ChromaSiting {
     }
 }
 
+/// Error text for a float depth, which y4m cannot carry.
+pub const FLOAT_UNSUPPORTED: &str = "y4m has no float format, the CLI supports 8, 10 and 12-bit sources";
+
 /// Maps a [Subsampling], [Depth] and [ChromaSiting] onto the matching [y4m::Colorspace].
 ///
 /// Only 8-bit 4:2:0 carries a siting, because ffmpeg ignores every siting tag on high bit depth y4m.
-pub fn subsampling_to_y4m(subsampling: Subsampling, depth: Depth, siting: ChromaSiting) -> y4m::Colorspace {
-    match (subsampling, depth) {
+/// A float depth has no y4m colourspace and is an error.
+pub fn subsampling_to_y4m(
+    subsampling: Subsampling,
+    depth: Depth,
+    siting: ChromaSiting,
+) -> Result<y4m::Colorspace, anyhow::Error> {
+    let colorspace = match (subsampling, depth) {
+        (_, Depth::Float) => anyhow::bail!(FLOAT_UNSUPPORTED),
         (Subsampling::Yuv420, Depth::Eight) => match siting {
             ChromaSiting::Left => y4m::Colorspace::C420mpeg2,
             ChromaSiting::Center => y4m::Colorspace::C420jpeg,
@@ -41,7 +50,9 @@ pub fn subsampling_to_y4m(subsampling: Subsampling, depth: Depth, siting: Chroma
         (Subsampling::Yuv444, Depth::Eight) => y4m::Colorspace::C444,
         (Subsampling::Yuv444, Depth::Ten) => y4m::Colorspace::C444p10,
         (Subsampling::Yuv444, Depth::Twelve) => y4m::Colorspace::C444p12,
-    }
+    };
+
+    Ok(colorspace)
 }
 
 /// Maps a [y4m::Colorspace] back onto a [Subsampling] and [Depth].
@@ -101,7 +112,7 @@ mod colorspace_tests {
         ];
 
         for (subsampling, depth) in combos {
-            let colorspace = subsampling_to_y4m(subsampling, depth, ChromaSiting::Unknown);
+            let colorspace = subsampling_to_y4m(subsampling, depth, ChromaSiting::Unknown).unwrap();
             let (mapped_subsampling, mapped_depth) =
                 subsampling_from_y4m(colorspace).expect("should map back");
 
@@ -114,8 +125,16 @@ mod colorspace_tests {
     }
 
     #[test]
+    fn float_depth_has_no_y4m_colorspace() {
+        let result = subsampling_to_y4m(Subsampling::Yuv420, Depth::Float, ChromaSiting::Unknown);
+        let err = result.expect_err("float should be rejected");
+
+        assert_eq!(err.to_string(), FLOAT_UNSUPPORTED);
+    }
+
+    #[test]
     fn ten_bit_420_maps_to_c420p10() {
-        let colorspace = subsampling_to_y4m(Subsampling::Yuv420, Depth::Ten, ChromaSiting::Unknown);
+        let colorspace = subsampling_to_y4m(Subsampling::Yuv420, Depth::Ten, ChromaSiting::Unknown).unwrap();
 
         // `y4m::Colorspace` does not derive `PartialEq`, so `assert_eq!` won't compile here.
         assert!(matches!(colorspace, y4m::Colorspace::C420p10));
@@ -152,9 +171,9 @@ mod colorspace_tests {
 
     #[test]
     fn eight_bit_420_maps_each_siting_to_its_y4m_tag() {
-        let left = subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, ChromaSiting::Left);
-        let center = subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, ChromaSiting::Center);
-        let top_left = subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, ChromaSiting::TopLeft);
+        let left = subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, ChromaSiting::Left).unwrap();
+        let center = subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, ChromaSiting::Center).unwrap();
+        let top_left = subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, ChromaSiting::TopLeft).unwrap();
 
         assert!(matches!(left, y4m::Colorspace::C420mpeg2));
         assert!(matches!(center, y4m::Colorspace::C420jpeg));
@@ -163,7 +182,8 @@ mod colorspace_tests {
 
     #[test]
     fn unknown_siting_keeps_plain_c420() {
-        let colorspace = subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, ChromaSiting::Unknown);
+        let colorspace =
+            subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, ChromaSiting::Unknown).unwrap();
 
         assert!(matches!(colorspace, y4m::Colorspace::C420));
     }
@@ -173,10 +193,10 @@ mod colorspace_tests {
         let sitings = [ChromaSiting::Left, ChromaSiting::Center, ChromaSiting::TopLeft];
 
         for siting in sitings {
-            let ten_bit = subsampling_to_y4m(Subsampling::Yuv420, Depth::Ten, siting);
-            let twelve_bit = subsampling_to_y4m(Subsampling::Yuv420, Depth::Twelve, siting);
-            let yuv422 = subsampling_to_y4m(Subsampling::Yuv422, Depth::Eight, siting);
-            let yuv444 = subsampling_to_y4m(Subsampling::Yuv444, Depth::Eight, siting);
+            let ten_bit = subsampling_to_y4m(Subsampling::Yuv420, Depth::Ten, siting).unwrap();
+            let twelve_bit = subsampling_to_y4m(Subsampling::Yuv420, Depth::Twelve, siting).unwrap();
+            let yuv422 = subsampling_to_y4m(Subsampling::Yuv422, Depth::Eight, siting).unwrap();
+            let yuv444 = subsampling_to_y4m(Subsampling::Yuv444, Depth::Eight, siting).unwrap();
 
             assert!(matches!(ten_bit, y4m::Colorspace::C420p10));
             assert!(matches!(twelve_bit, y4m::Colorspace::C420p12));
@@ -195,7 +215,7 @@ mod colorspace_tests {
         ];
 
         for siting in sitings {
-            let colorspace = subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, siting);
+            let colorspace = subsampling_to_y4m(Subsampling::Yuv420, Depth::Eight, siting).unwrap();
 
             assert_eq!(siting_from_y4m(colorspace), siting);
         }

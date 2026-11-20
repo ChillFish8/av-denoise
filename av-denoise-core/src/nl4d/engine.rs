@@ -203,6 +203,7 @@ impl Nl4d {
             frame,
             pixels,
             channels: channels.count(),
+            bias: channels.float_bias(),
         };
         let placeholder = self.inner.placeholder();
 

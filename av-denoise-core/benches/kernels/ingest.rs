@@ -100,6 +100,7 @@ impl Benchmark for IngestBench {
                     BufferArg::from_raw_parts(plane_1, pixels as usize),
                     BufferArg::from_raw_parts(args.ring.clone(), ring_len),
                     0u32,
+                    0.5f32,
                     pixels,
                     self.channels,
                     total_threads,
