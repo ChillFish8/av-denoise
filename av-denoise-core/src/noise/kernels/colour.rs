@@ -123,7 +123,7 @@ fn add_block(cells: &mut [Atomic<i32>], base: u32, log_grain: f32, luma: f32, cb
 /// Reads sample `index` of a plane as a code on its own scale.
 ///
 /// Word-packed planes hold `samples_per_word` codes per word. A float plane holds one normalised
-/// sample per word.
+/// sample per word, with chroma centred on 0.
 #[cube]
 fn read_sample(plane: &[u32], index: u32, #[comptime] samples_per_word: u32, #[comptime] float: bool) -> f32 {
     let bits = comptime!(32u32 / samples_per_word);
@@ -187,13 +187,14 @@ fn rectangle_sum(
 /// Both grids hold 16x16 blocks of their own plane, with ragged edges truncated. Cubes in the first
 /// `luma_blocks_y` rows take the luma grid and the rest take the chroma grid. A luma block averages
 /// the chroma pixels its area covers, and a chroma block the luma pixels its area covers. Means are
-/// on the 8-bit scale, codes times `eight_bit_scale`, with chroma centred on 0. Each block writes
+/// on the 8-bit scale, codes times `eight_bit_scale`, with chroma centred on 0. Float chroma is
+/// already centred, so `chroma_bias` lifts it back to the code scale first. Each block writes
 /// [COLOUR_MEAN_FIELDS](crate::noise::colour::COLOUR_MEAN_FIELDS) values. The sums reduce in a fixed
 /// order, so the means are the same on every run.
 #[cube(launch_unchecked)]
 #[expect(
     clippy::too_many_arguments,
-    reason = "every argument is a binding or a comptime shape"
+    reason = "every argument is a binding, a runtime scalar or a comptime shape"
 )]
 pub fn noise_colour_means(
     luma: &[u32],

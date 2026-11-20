@@ -54,7 +54,7 @@ impl Depth {
     pub fn neutral_chroma(self) -> u16 {
         match self {
             Depth::Float => 0,
-            _ => 1 << (self.bits() - 1),
+            Depth::Eight | Depth::Ten | Depth::Twelve => 1 << (self.bits() - 1),
         }
     }
 

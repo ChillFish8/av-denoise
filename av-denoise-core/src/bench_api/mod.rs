@@ -118,6 +118,9 @@ pub fn wait_read(read: ReadFuture) -> Vec<f32> {
 /// Pushes interleaved host frames and reads denoised frames back as interleaved f32.
 pub trait HostIo {
     /// Uploads one frame of `width * height * channels` values and pushes it.
+    ///
+    /// Frames follow the [SampleFormat::F32](crate::SampleFormat::F32) convention, so chroma is
+    /// centred going in and comes back centred.
     fn push_frame(&mut self, frame: &[f32]);
 
     /// Denoises the next frame, or returns `None` while the window is still filling.

@@ -85,15 +85,18 @@ def _plane_mean(frame, plane):
 def test_float_clips_render_and_keep_their_format(fmt):
     src = synthetic_clip()
     src_float = core.resize.Point(src, format=fmt)
-    source_mean = _plane_mean(src_float.get_frame(3), 1)
+    source_frame = src_float.get_frame(3)
 
     for denoiser in (Nlm, Nl4d):
         out = denoiser(src_float)
         _assert_shape_preserved(out, src_float)
+        out_frame = out.get_frame(3)
 
-        out_mean = _plane_mean(out.get_frame(3), 1)
-        assert -0.5 < out_mean < 0.5
-        assert abs(out_mean - source_mean) < 0.05, (out_mean, source_mean)
+        for plane in (1, 2):
+            source_mean = _plane_mean(source_frame, plane)
+            out_mean = _plane_mean(out_frame, plane)
+            assert -0.5 < out_mean < 0.5
+            assert abs(out_mean - source_mean) < 0.05, (plane, out_mean, source_mean)
 
 
 @pytest.mark.gpu

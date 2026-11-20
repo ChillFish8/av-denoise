@@ -127,8 +127,9 @@ mod colorspace_tests {
     #[test]
     fn float_depth_has_no_y4m_colorspace() {
         let result = subsampling_to_y4m(Subsampling::Yuv420, Depth::Float, ChromaSiting::Unknown);
+        let err = result.expect_err("float should be rejected");
 
-        assert!(result.is_err());
+        assert_eq!(err.to_string(), FLOAT_UNSUPPORTED);
     }
 
     #[test]
