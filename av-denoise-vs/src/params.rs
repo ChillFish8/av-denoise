@@ -43,10 +43,10 @@ pub struct RawFormat {
 
 /// Validates a clip's format and turns it into a [FrameLayout].
 ///
-/// Accepts integer YUV420, YUV422 and YUV444 sources at 8, 10 or 12 bits. RGB is rejected because
-/// the denoiser's channel distance weights are calibrated for YUV. GRAY is rejected because
-/// [Subsampling] has no "no chroma" variant, and representing it as YUV444 would push full-size
-/// neutral chroma every frame, four times the data volume of true 4:2:0 chroma.
+/// Accepts YUV420, YUV422 and YUV444 sources as 8, 10 or 12-bit integer or 32-bit float. RGB is
+/// rejected because the denoiser's channel distance weights are calibrated for YUV. GRAY is rejected
+/// because [Subsampling] has no "no chroma" variant, and representing it as YUV444 would push
+/// full-size neutral chroma every frame, four times the data volume of true 4:2:0 chroma.
 pub fn layout_from_format(format: RawFormat, width: u32, height: u32) -> Result<FrameLayout, anyhow::Error> {
     match format.color_family {
         ColorFamily::YUV => {},
@@ -62,13 +62,16 @@ pub fn layout_from_format(format: RawFormat, width: u32, height: u32) -> Result<
         },
     }
 
-    if format.sample_type == SampleType::Float {
-        anyhow::bail!(
-            "float sample types are not supported, av-denoise expects integer YUV samples. Convert to an integer format first, for example with `ffmpeg -pix_fmt yuv420p`"
-        );
-    }
-
-    let depth = Depth::from_bits(format.bits_per_sample as usize)?;
+    let depth = match format.sample_type {
+        SampleType::Float if format.bits_per_sample == 32 => Depth::Float,
+        SampleType::Float => {
+            let bits = format.bits_per_sample;
+            anyhow::bail!(
+                "{bits}-bit float clips are not supported, av-denoise-vs accepts 32-bit float or 8, 10 and 12-bit integer YUV"
+            );
+        },
+        SampleType::Integer => Depth::from_bits(format.bits_per_sample as usize)?,
+    };
 
     let subsampling = match (format.subsampling_w, format.subsampling_h) {
         (0, 0) => Subsampling::Yuv444,
