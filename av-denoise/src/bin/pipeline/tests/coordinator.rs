@@ -17,7 +17,8 @@ use crate::y4m_format::subsampling_to_y4m;
 fn encoder(buffer: &mut Vec<u8>) -> y4m::Encoder<&mut Vec<u8>> {
     let layout = tiny_layout();
     let frame_rate = y4m::Ratio::new(30, 1);
-    let colorspace = subsampling_to_y4m(layout.subsampling, layout.depth, ChromaSiting::Unknown);
+    let colorspace = subsampling_to_y4m(layout.subsampling, layout.depth, ChromaSiting::Unknown)
+        .expect("colorspace should map");
 
     y4m::encode(layout.width as usize, layout.height as usize, frame_rate)
         .with_colorspace(colorspace)

@@ -2,13 +2,15 @@ use av_denoise_core::SampleFormat;
 
 /// Bit depth of a source's samples.
 ///
-/// Normalisation divides by the largest code at this depth, so a value in normalised units means
-/// the same thing at every depth.
+/// Integer depths divide by the largest code at that depth, so a value in normalised units means
+/// the same thing at every depth. [Depth::Float] is VapourSynth float, with luma between 0 and 1
+/// and chroma between -0.5 and 0.5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
     Eight,
     Ten,
     Twelve,
+    Float,
 }
 
 /// Returned when a source declares a bit depth the denoiser does not handle.
@@ -33,22 +35,27 @@ impl Depth {
             Depth::Eight => 8,
             Depth::Ten => 10,
             Depth::Twelve => 12,
+            Depth::Float => 32,
         }
     }
 
     /// Bytes each sample takes up on the wire.
     ///
-    /// Depths above 8 use a little-endian 16-bit word.
+    /// Depths above 8 use a little-endian 16-bit word, and float uses a little-endian 32-bit word.
     pub fn bytes_per_sample(self) -> usize {
         match self {
             Depth::Eight => 1,
             Depth::Ten | Depth::Twelve => 2,
+            Depth::Float => 4,
         }
     }
 
     /// The sample value that means neutral chroma at this depth.
     pub fn neutral_chroma(self) -> u16 {
-        1 << (self.bits() - 1)
+        match self {
+            Depth::Float => 0,
+            _ => 1 << (self.bits() - 1),
+        }
     }
 
     /// The plane format an engine reads and writes at this depth.
@@ -57,6 +64,7 @@ impl Depth {
             Depth::Eight => SampleFormat::U8,
             Depth::Ten => SampleFormat::U16 { depth: 10 },
             Depth::Twelve => SampleFormat::U16 { depth: 12 },
+            Depth::Float => SampleFormat::F32,
         }
     }
 }
@@ -78,7 +86,7 @@ mod tests {
 
     #[test]
     fn from_bits_rejects_unsupported_depths() {
-        for bits in [0, 7, 9, 11, 16] {
+        for bits in [0, 7, 9, 11, 16, 32] {
             let result = Depth::from_bits(bits);
             assert!(result.is_err(), "{bits} bits should be rejected");
         }
@@ -93,6 +101,14 @@ mod tests {
         assert_eq!(Depth::Eight.neutral_chroma(), 128);
         assert_eq!(Depth::Ten.neutral_chroma(), 512);
         assert_eq!(Depth::Twelve.neutral_chroma(), 2048);
+    }
+
+    #[test]
+    fn float_depth_properties() {
+        assert_eq!(Depth::Float.bits(), 32);
+        assert_eq!(Depth::Float.bytes_per_sample(), 4);
+        assert_eq!(Depth::Float.sample_format(), SampleFormat::F32);
+        assert_eq!(Depth::Float.neutral_chroma(), 0);
     }
 
     #[test]

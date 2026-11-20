@@ -22,6 +22,14 @@ fn byte_lengths_scale_with_depth() {
 }
 
 #[test]
+fn float_neutral_chroma_plane_is_zero() {
+    let float = layout(Depth::Float);
+
+    assert_eq!(float.luma_bytes(), 64);
+    assert_eq!(float.neutral_chroma_plane(), vec![0u8; 16]);
+}
+
+#[test]
 fn neutral_chroma_fill_is_correct_at_each_depth() {
     let eight = layout(Depth::Eight).neutral_chroma_plane();
     assert_eq!(eight, vec![128u8; 4]);
