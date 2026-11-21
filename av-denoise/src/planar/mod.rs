@@ -94,7 +94,7 @@ pub fn fill_plane(samples: usize, value: u16, depth: Depth) -> Vec<u8> {
             let word = f32::from(value).to_le_bytes();
             word.repeat(samples)
         },
-        Depth::Ten | Depth::Twelve => {
+        Depth::Ten | Depth::Twelve | Depth::Sixteen => {
             let word = value.to_le_bytes();
             let mut plane = Vec::with_capacity(samples * 2);
             for _ in 0..samples {
@@ -405,7 +405,7 @@ impl PlanarDenoiser {
 
         let report = pass.run(config, request);
         pass.release();
-        
+
         report
     }
 

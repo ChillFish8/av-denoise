@@ -183,6 +183,7 @@ where
     let dispatched = match layout.depth {
         Depth::Eight => dispatch::<u8>(feed, &info, &job_tx),
         Depth::Ten | Depth::Twelve => dispatch::<u16>(feed, &info, &job_tx),
+        Depth::Sixteen => Err(anyhow::anyhow!(crate::y4m_format::SIXTEEN_UNSUPPORTED)),
         Depth::Float => Err(anyhow::anyhow!(FLOAT_UNSUPPORTED)),
     };
 

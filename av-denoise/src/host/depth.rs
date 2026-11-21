@@ -10,12 +10,13 @@ pub enum Depth {
     Eight,
     Ten,
     Twelve,
+    Sixteen,
     Float,
 }
 
 /// Returned when a source declares a bit depth the denoiser does not handle.
 #[derive(Debug, thiserror::Error)]
-#[error("unsupported bit depth {0}, av-denoise supports 8, 10, and 12-bit")]
+#[error("unsupported integer bit depth {0}, av-denoise supports 8, 10, 12, and 16-bit")]
 pub struct UnsupportedDepthError(pub usize);
 
 impl Depth {
@@ -25,6 +26,7 @@ impl Depth {
             8 => Ok(Depth::Eight),
             10 => Ok(Depth::Ten),
             12 => Ok(Depth::Twelve),
+            16 => Ok(Depth::Sixteen),
             other => Err(UnsupportedDepthError(other)),
         }
     }
@@ -35,6 +37,7 @@ impl Depth {
             Depth::Eight => 8,
             Depth::Ten => 10,
             Depth::Twelve => 12,
+            Depth::Sixteen => 16,
             Depth::Float => 32,
         }
     }
@@ -45,7 +48,7 @@ impl Depth {
     pub fn bytes_per_sample(self) -> usize {
         match self {
             Depth::Eight => 1,
-            Depth::Ten | Depth::Twelve => 2,
+            Depth::Ten | Depth::Twelve | Depth::Sixteen => 2,
             Depth::Float => 4,
         }
     }
@@ -54,7 +57,7 @@ impl Depth {
     pub fn neutral_chroma(self) -> u16 {
         match self {
             Depth::Float => 0,
-            Depth::Eight | Depth::Ten | Depth::Twelve => 1 << (self.bits() - 1),
+            Depth::Eight | Depth::Ten | Depth::Twelve | Depth::Sixteen => 1 << (self.bits() - 1),
         }
     }
 
@@ -64,6 +67,7 @@ impl Depth {
             Depth::Eight => SampleFormat::U8,
             Depth::Ten => SampleFormat::U16 { depth: 10 },
             Depth::Twelve => SampleFormat::U16 { depth: 12 },
+            Depth::Sixteen => SampleFormat::U16 { depth: 16 },
             Depth::Float => SampleFormat::F32,
         }
     }
@@ -86,10 +90,19 @@ mod tests {
 
     #[test]
     fn from_bits_rejects_unsupported_depths() {
-        for bits in [0, 7, 9, 11, 16, 32] {
+        for bits in [0, 7, 9, 11, 14, 17, 32] {
             let result = Depth::from_bits(bits);
             assert!(result.is_err(), "{bits} bits should be rejected");
         }
+    }
+
+    #[test]
+    fn sixteen_bit_depth_uses_full_precision_words() {
+        let depth = Depth::from_bits(16).unwrap();
+        assert_eq!(depth.bits(), 16);
+        assert_eq!(depth.bytes_per_sample(), 2);
+        assert_eq!(depth.neutral_chroma(), 32768);
+        assert_eq!(depth.sample_format(), SampleFormat::U16 { depth: 16 });
     }
 
     #[test]

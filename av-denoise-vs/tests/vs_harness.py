@@ -416,10 +416,17 @@ def gray_input_is_rejected():
 
 
 @test
-def sixteen_bit_input_is_rejected():
-    """av-denoise's Depth covers 8, 10 and 12 bit only."""
-    src = core.std.BlankClip(width=160, height=120, length=8, format=vs.YUV420P16)
-    expect_error(lambda: core.avd.NL4D(src), "depth")
+def sixteen_bit_input_preserves_full_range_and_bypassed_chroma():
+    src = core.std.BlankClip(
+        width=160, height=120, length=3, format=vs.YUV420P16, color=[49153, 32769, 65534]
+    )
+    out = core.avd.NL4D(src, channel_mode="luma", sigma=0.03, temporal_radius=1, tune="off")
+    frame = out.get_frame(1)
+
+    assert frame.format.id == vs.YUV420P16
+    assert np.max(np.abs(frame_to_array(frame, 0).astype(np.int32) - 49153)) <= 2
+    assert np.all(frame_to_array(frame, 1) == 32769)
+    assert np.all(frame_to_array(frame, 2) == 65534)
 
 
 @test

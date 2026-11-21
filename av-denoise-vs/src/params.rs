@@ -43,7 +43,7 @@ pub struct RawFormat {
 
 /// Validates a clip's format and turns it into a [FrameLayout].
 ///
-/// Accepts YUV420, YUV422 and YUV444 sources as 8, 10 or 12-bit integer or 32-bit float. RGB is
+/// Accepts YUV420, YUV422 and YUV444 sources as 8, 10, 12 or 16-bit integer or 32-bit float. RGB is
 /// rejected because the denoiser's channel distance weights are calibrated for YUV. GRAY is rejected
 /// because [Subsampling] has no "no chroma" variant, and representing it as YUV444 would push
 /// full-size neutral chroma every frame, four times the data volume of true 4:2:0 chroma.
@@ -67,7 +67,7 @@ pub fn layout_from_format(format: RawFormat, width: u32, height: u32) -> Result<
         SampleType::Float => {
             let bits = format.bits_per_sample;
             anyhow::bail!(
-                "{bits}-bit float clips are not supported, av-denoise-vs accepts 32-bit float or 8, 10 and 12-bit integer YUV"
+                "{bits}-bit float clips are not supported, av-denoise-vs accepts 32-bit float or 8, 10, 12 and 16-bit integer YUV"
             );
         },
         SampleType::Integer => Depth::from_bits(format.bits_per_sample as usize)?,
