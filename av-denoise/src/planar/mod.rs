@@ -402,8 +402,10 @@ impl PlanarDenoiser {
         };
 
         drop(self);
+
         let report = pass.run(config, request);
         pass.release();
+        
         report
     }
 
