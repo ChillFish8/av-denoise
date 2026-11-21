@@ -3,7 +3,7 @@ use av_denoise::{ChromaSiting, Depth, Subsampling};
 
 use super::{y4m_decoder, y4m_reader};
 use crate::pipeline::convert::SourcePixel;
-use crate::pipeline::source::{color_range_extension, open_y4m};
+use crate::pipeline::source::{color_range_extension, layout_from_details, open_y4m};
 
 fn y4m_bytes(colorspace: y4m::Colorspace, extension: Option<&str>, frames: usize) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -63,6 +63,16 @@ fn a_ten_bit_pipe_reports_its_layout() {
     assert_eq!(opened.info.layout.width, 4);
     assert_eq!(opened.info.layout.subsampling, Subsampling::Yuv422);
     assert_eq!(opened.info.layout.depth, Depth::Ten);
+}
+
+#[test]
+fn cli_rejects_sixteen_bit_before_writing_a_y4m_header() {
+    let bytes = y4m_bytes(y4m::Colorspace::C420, None, 0);
+    let mut details = open_y4m(y4m_reader(bytes)).unwrap().info.details;
+    details.bit_depth = 16;
+
+    let error = layout_from_details(&details).unwrap_err();
+    assert!(error.to_string().contains("CLI"));
 }
 
 #[test]
