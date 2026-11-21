@@ -8,7 +8,7 @@ use avtbx_bestsource::IndexCache;
 use super::bestsource::{BestSourceReader, open_bestsource};
 use super::convert::subsampling_from_av_decoders;
 use crate::cli::InputSource;
-use crate::y4m_format::{siting_from_y4m, subsampling_from_y4m, y4m_vendor_extensions};
+use crate::y4m_format::{SIXTEEN_UNSUPPORTED, siting_from_y4m, subsampling_from_y4m, y4m_vendor_extensions};
 
 /// What the rest of a run needs to know about its input.
 #[derive(Clone)]
@@ -140,6 +140,9 @@ pub fn open_y4m(reader: Box<dyn Read>) -> Result<OpenedSource, anyhow::Error> {
 
 pub fn layout_from_details(details: &VideoDetails) -> Result<FrameLayout, anyhow::Error> {
     let depth = Depth::from_bits(details.bit_depth)?;
+    if depth == Depth::Sixteen {
+        anyhow::bail!(SIXTEEN_UNSUPPORTED);
+    }
     let subsampling = subsampling_from_av_decoders(details.chroma_sampling)?;
 
     Ok(FrameLayout {

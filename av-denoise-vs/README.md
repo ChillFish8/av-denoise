@@ -222,6 +222,8 @@ clean = avd.NlmHQ(clip, preset="slow", accelerators=["cuda", "vulkan"])
 
 ## Shared conventions
 
+- Input must be fixed-format YUV420, YUV422, or YUV444 with 8-, 10-, 12-, or 16-bit integer samples or 32-bit float samples.
+
 - Every numeric script argument is optional, an unset one falls back to the algorithm's  own default, or to
   whatever `preset` resolves for that field.
 - `device` and `accelerators` are unset by default rather than pinned to a literal string.

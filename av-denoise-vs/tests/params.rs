@@ -110,6 +110,14 @@ fn accepts_the_three_supported_subsamplings_at_eight_bit() {
 }
 
 #[test]
+fn accepts_sixteen_bit_integer_yuv() {
+    let layout = layout_from_format(test_format_yuv(1, 1, 16), 160, 120).unwrap();
+    assert_eq!(layout.depth.bits(), 16);
+    assert_eq!(layout.luma_bytes(), 38400);
+    assert_eq!(layout.chroma_bytes(), 9600);
+}
+
+#[test]
 fn rejects_rgb_with_a_clear_message() {
     let format = test_format_rgb(8);
     let err = layout_from_format(format, 160, 120).unwrap_err().to_string();

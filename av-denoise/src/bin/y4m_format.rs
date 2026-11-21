@@ -24,11 +24,12 @@ pub fn siting_from_y4m(colorspace: y4m::Colorspace) -> ChromaSiting {
 
 /// Error text for a float depth, which y4m cannot carry.
 pub const FLOAT_UNSUPPORTED: &str = "y4m has no float format, the CLI supports 8, 10 and 12-bit sources";
+pub const SIXTEEN_UNSUPPORTED: &str = "the CLI supports only 8, 10 and 12-bit Y4M output, not 16-bit";
 
 /// Maps a [Subsampling], [Depth] and [ChromaSiting] onto the matching [y4m::Colorspace].
 ///
 /// Only 8-bit 4:2:0 carries a siting, because ffmpeg ignores every siting tag on high bit depth y4m.
-/// A float depth has no y4m colourspace and is an error.
+/// The CLI does not write float or 16-bit Y4M.
 pub fn subsampling_to_y4m(
     subsampling: Subsampling,
     depth: Depth,
@@ -36,6 +37,7 @@ pub fn subsampling_to_y4m(
 ) -> Result<y4m::Colorspace, anyhow::Error> {
     let colorspace = match (subsampling, depth) {
         (_, Depth::Float) => anyhow::bail!(FLOAT_UNSUPPORTED),
+        (_, Depth::Sixteen) => anyhow::bail!(SIXTEEN_UNSUPPORTED),
         (Subsampling::Yuv420, Depth::Eight) => match siting {
             ChromaSiting::Left => y4m::Colorspace::C420mpeg2,
             ChromaSiting::Center => y4m::Colorspace::C420jpeg,
