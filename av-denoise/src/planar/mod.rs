@@ -239,6 +239,21 @@ impl TuningPass {
 
         tune_frames(&self.device, &self.client, &specs, &self.frames, config, request)
     }
+
+    /// Frees the uploaded frames, then returns the pool pages the pass grew to the driver.
+    ///
+    /// The pass sizes its pages to its largest buffers and they stay reserved after the buffers are
+    /// gone, so without a cleanup the run that follows starts with the pass's whole peak still held.
+    /// On a 4K source that is about 3.7 GB, more than a 4 GB card can spare for the run.
+    fn release(self) {
+        let Self { client, frames, .. } = self;
+        drop(frames);
+
+        let cleaned = client.memory_cleanup();
+        if let Err(error) = cleaned {
+            tracing::warn!(?error, "the tuning pass's memory cleanup failed");
+        }
+    }
 }
 
 /// Wraps the `HostDenoiser` that cleans one planar YUV source.
@@ -387,7 +402,11 @@ impl PlanarDenoiser {
         };
 
         drop(self);
-        pass.run(config, request)
+
+        let report = pass.run(config, request);
+        pass.release();
+        
+        report
     }
 
     /// Uploads `frames` once for a tuning pass, or says why no pass runs.
