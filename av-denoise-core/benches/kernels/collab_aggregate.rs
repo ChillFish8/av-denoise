@@ -1,4 +1,8 @@
-use av_denoise_core::bench_api::collab::kernels::aggregate::{collab_normalise, collab_zero_accum};
+use av_denoise_core::bench_api::collab::kernels::aggregate::{
+    collab_normalise,
+    collab_zero_accum,
+    kaiser_window,
+};
 use cubecl::benchmark::{Benchmark, Instant, ProfileDuration};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -37,6 +41,8 @@ pub struct CollabNormaliseBench {
 pub struct CollabNormaliseInput {
     pub accum: Handle,
     pub wsum: Handle,
+    /// The aggregation window normalise spreads the patch-weight map through.
+    pub kaiser: Handle,
     pub output: Handle,
 }
 
@@ -99,8 +105,14 @@ impl Benchmark for CollabNormaliseBench {
         let wsum = self.client.create_from_slice(wsum_bytes);
         let wsum_source = self.client.create_from_slice(wsum_bytes);
         let output = self.client.empty(pixels * channels * size_of::<f32>());
+        let kaiser = self.client.create_from_slice(f32::as_bytes(&kaiser_window(2.0)));
 
-        let buffers = CollabNormaliseInput { accum, wsum, output };
+        let buffers = CollabNormaliseInput {
+            accum,
+            wsum,
+            kaiser,
+            output,
+        };
 
         CollabNormaliseSample {
             buffers,
@@ -138,6 +150,7 @@ impl Benchmark for CollabNormaliseBench {
         unsafe {
             let accum_arg = BufferArg::from_raw_parts(buffers.accum, pixels * channels);
             let wsum_arg = BufferArg::from_raw_parts(buffers.wsum, pixels);
+            let kaiser_arg = BufferArg::from_raw_parts(buffers.kaiser, 8);
             let output_arg = BufferArg::from_raw_parts(buffers.output, pixels * channels);
 
             collab_normalise::launch_unchecked(
@@ -147,6 +160,7 @@ impl Benchmark for CollabNormaliseBench {
                 channels,
                 accum_arg,
                 wsum_arg,
+                kaiser_arg,
                 output_arg,
                 // One frame's region, since this bench measures a single frame's normalisation.
                 0u32,
@@ -189,8 +203,14 @@ impl Benchmark for CollabZeroAccumBench {
         let accum = self.client.empty(pixels * channels * size_of::<i32>());
         let wsum = self.client.empty(pixels * size_of::<i32>());
         let output = self.client.empty(size_of::<f32>());
+        let kaiser = self.client.create_from_slice(f32::as_bytes(&kaiser_window(0.0)));
 
-        CollabNormaliseInput { accum, wsum, output }
+        CollabNormaliseInput {
+            accum,
+            wsum,
+            kaiser,
+            output,
+        }
     }
 
     fn execute(&self, args: Self::Input) -> Result<(), String> {

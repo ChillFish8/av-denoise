@@ -5,12 +5,17 @@ use super::grain::{GrainChunk, GrainExport, GrainGeometry, GrainParts, MeasuredP
 use super::params::Nl4dParams;
 use super::snapshot::{LastFields, MotionSnapshot, read_snapshot};
 use crate::collab::geometry::ref_count;
-use crate::collab::kernels::aggregate::{collab_normalise, cross_frame_accum_scale, kaiser_window};
+use crate::collab::kernels::aggregate::{
+    collab_normalise,
+    collab_zero_accum,
+    cross_frame_accum_scale,
+    kaiser_window,
+};
 use crate::collab::kernels::fused::MEMBER_WORDS;
 use crate::collab::kernels::transforms::{RECIPROCAL_FLOOR, dct_noise_profile};
 use crate::collab::{MAX_K, PATCH_SIZE, needs_warp_uniform_search, supports_f16_search};
 use crate::engine::timing::{DeviceTimed, DeviceTimer, timed};
-use crate::engine::{DevicePlane, EngineTiming, SampleFormat};
+use crate::engine::{DevicePlane, EngineTiming, MAX_GRID_1D, SampleFormat};
 use crate::motion::SharedMotion;
 use crate::nlmeans::denoiser::{BufferSize, front_buffer_sizes};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y, ChannelMode, NlmDenoiser, PrefilterMode, RingView};
@@ -792,6 +797,7 @@ impl Nl4dDenoiser {
             let accum_arg = BufferArg::from_raw_parts(accum, accum_ring_len);
             let wsum_arg = BufferArg::from_raw_parts(wsum, wsum_ring_len);
             let output_arg = BufferArg::from_raw_parts(output, frame_len);
+            let kaiser_arg = BufferArg::from_raw_parts(self.kaiser_buf.clone(), PATCH_SIZE as usize);
 
             collab_normalise::launch_unchecked(
                 &client,
@@ -800,11 +806,30 @@ impl Nl4dDenoiser {
                 channels as usize,
                 accum_arg,
                 wsum_arg,
+                kaiser_arg,
                 output_arg,
                 region_slot * pixels as u32,
                 self.width,
                 self.height,
                 channels,
+            );
+
+            // Normalise reads each weight-map entry from up to 64 pixels, so the map is zeroed in a
+            // second launch rather than by the pixel that read it last.
+            let zero_dim = 256u32;
+            let zero_workgroups = (frame_len as u32).div_ceil(zero_dim).min(MAX_GRID_1D);
+            let accum_arg = BufferArg::from_raw_parts(self.accum.clone(), accum_ring_len);
+            let wsum_arg = BufferArg::from_raw_parts(self.wsum.clone(), wsum_ring_len);
+            collab_zero_accum::launch_unchecked(
+                &client,
+                CubeCount::new_1d(zero_workgroups),
+                CubeDim::new_1d(zero_dim),
+                accum_arg,
+                wsum_arg,
+                region_slot * pixels as u32,
+                pixels as u32,
+                channels,
+                zero_workgroups * zero_dim,
             );
         }
 

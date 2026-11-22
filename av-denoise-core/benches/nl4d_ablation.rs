@@ -344,6 +344,7 @@ impl Rig {
                 geometry.channels as usize,
                 BufferArg::from_raw_parts(self.accum.clone(), frame_len * N_FRAMES as usize),
                 BufferArg::from_raw_parts(self.wsum.clone(), pixels * N_FRAMES as usize),
+                BufferArg::from_raw_parts(self.kaiser_off.clone(), 8),
                 BufferArg::from_raw_parts(self.output.clone(), frame_len),
                 0u32,
                 geometry.width,

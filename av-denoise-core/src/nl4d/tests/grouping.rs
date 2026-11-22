@@ -2,7 +2,12 @@ use cubecl::prelude::*;
 
 use super::helpers::{BLK_STEP, RingFixture, deterministic_texture, make_client, noisy_ring, planted_ring};
 use crate::collab::geometry::{fused_cubes_x, ref_count, refs_along};
-use crate::collab::kernels::aggregate::{cross_frame_accum_scale, kaiser_window, weight_scale};
+use crate::collab::kernels::aggregate::{
+    cross_frame_accum_scale,
+    expand_weight_map,
+    kaiser_window,
+    weight_scale,
+};
 use crate::collab::kernels::fused::{CollabVariant, Walk, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, STEP, grid_frames};
@@ -195,7 +200,12 @@ fn run_fused_over(fixture: &RingFixture, knobs: &Knobs) -> FusedRun {
         .expect("group_weight readback failed");
 
     FusedRun {
-        wsum: i32::from_bytes(&wsum_bytes)[..pixels * frames].to_vec(),
+        wsum: expand_weight_map(
+            &i32::from_bytes(&wsum_bytes)[..pixels * frames],
+            width,
+            height,
+            &kaiser,
+        ),
         group_weight: f32::from_bytes(&weight_bytes)[..refs].to_vec(),
         pixels,
     }
