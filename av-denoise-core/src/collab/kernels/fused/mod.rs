@@ -15,7 +15,7 @@ use cubecl::prelude::*;
 
 use self::centre::centre_search;
 use self::colour::{PatchColour, patch_colour, threshold_gains};
-use self::grid::{grid_fwd, grid_inv, grid_variance};
+use self::grid::{grid_fwd, grid_inv};
 use self::pooled::pooled_threshold;
 use self::shape::{SearchCursor, SearchShape};
 pub use self::split::{MEMBER_WORDS, collab_filter, collab_search};
@@ -41,7 +41,6 @@ use super::transforms::{
     haar_reg_fwd_level,
     haar_reg_inv_level,
     safe_reciprocal,
-    variance_reg_level,
 };
 use crate::collab::{MAX_K, MAX_TEMPORAL_RADIUS, PATCH_AREA, PATCH_SIZE, STEP};
 use crate::engine::kernels::read_line;
@@ -677,17 +676,8 @@ pub(crate) fn filter_group(
             }
         }
 
-        // The spatial profile is constant along the stack axis and the ladder only averages, so
-        // the profile multiplies in at the threshold instead.
-        if comptime!(grid_frames > 1) {
-            if use_grid {
-                grid_variance(member_variance.as_mut_slice(), grid_frames);
-            } else {
-                stack_variance_ladder(member_variance.as_mut_slice(), k_use);
-            }
-        } else {
-            stack_variance_ladder(member_variance.as_mut_slice(), k_use);
-        }
+        // Every member starts at the channel's variance and the ladders only average pairs, so each
+        // coefficient's variance is `base_sig2` exactly and the ladders are skipped.
 
         // Lane `sub` comes out holding coefficient `(u = i, v = sub)` at slot `i`.
         #[unroll]
@@ -822,7 +812,7 @@ pub(crate) fn filter_group(
                         member_x,
                         member_y,
                         r * PATCH_SIZE + sub,
-                        first_channel,
+                        first_channel && comptime!(r == 0u32),
                         c,
                         width,
                         channels,
@@ -848,20 +838,6 @@ fn member_frame_slot(position: u32, neighbour_slots: &[u32], centre_slot: u32) -
         slot = neighbour_slots[(neighbour_field - 1u32) as usize];
     }
     slot
-}
-
-/// The stack variance ladder for a single-frame group of `k_use` members.
-#[cube]
-fn stack_variance_ladder(v: &mut [f32], k_use: u32) {
-    if k_use >= 8u32 {
-        variance_reg_level(v, 8u32);
-    }
-    if k_use >= 4u32 {
-        variance_reg_level(v, 4u32);
-    }
-    if k_use >= 2u32 {
-        variance_reg_level(v, 2u32);
-    }
 }
 
 /// The stack Haar for a single-frame group of `k_use` members.

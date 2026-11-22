@@ -165,10 +165,11 @@ pub fn to_fixed_weight(weight: f32, scale: f32) -> i32 {
 /// `accum` and `wsum` hold one `frame_pixels` region per frame in ring-slot order, and
 /// `frame_slot` picks this member's region.
 ///
-/// `wsum` is a patch-weight map rather than a per-pixel sum: `write_weight` adds the patch's
-/// weight once, at its origin, from the thread owning pixel `(0, 0)`, and [collab_normalise] spreads
-/// it over the patch through the window. That is one weight atomic per patch instead of 64. Only the
-/// first channel's pass sets `write_weight`, because aggregation needs one weight per patch.
+/// `wsum` is a patch-weight map rather than a per-pixel sum: the column-0 thread adds the patch's
+/// weight once, at its origin, in the call where `write_weight` is set, and [collab_normalise] spreads
+/// it over the patch through the window. That is one weight atomic per patch instead of 64. The
+/// caller sets `write_weight` only for row 0 of the first channel's pass, as a comptime row test, so
+/// the other rows compile no weight atomic; aggregation needs one weight per patch.
 /// `accum_scale` is [ACCUM_SCALE] or a [cross_frame_accum_scale] result, and `wsum` counts at
 /// [WEIGHT_GAIN] times it.
 #[cube]
@@ -211,7 +212,7 @@ pub fn scatter_patch(
     // `wsum` is a patch-weight map: one entry per patch origin, which `collab_normalise` spreads
     // over the patch through the window. One lane adds the whole patch's weight, so a patch costs
     // one weight atomic instead of 64, and the window is applied once per pixel when reading.
-    if write_weight && tid == 0u32 {
+    if write_weight && col == 0u32 {
         let origin = frame_slot * frame_pixels + patch_y * width + patch_x;
         let weight_fixed = to_fixed_weight(patch_weight, accum_scale);
         Atomic::fetch_add(&wsum[origin as usize], weight_fixed);
