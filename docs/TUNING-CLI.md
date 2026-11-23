@@ -65,8 +65,9 @@ into an AV1 film grain table, which describes all of the source's grain on each 
 frame shows it. The table leaves nothing out for the grain the output keeps, since an encode
 removes most of it. `--planes luma` leaves chroma grain out, and so does a source that is not
 4:2:0 or a run that did not denoise chroma. Add the table to a finished AV1 encode with
-`regrain apply --static-grain`, which the table needs to hold static grain still. The decoder then
-adds matching grain back, so the encode stays clean while the picture keeps its grain. SVT-AV1's
+`regrain apply --static-grain`. Every table needs `--static-grain`, moving grain included, because
+it keeps the seed each entry carries and each entry's strength is fitted to that seed. The decoder
+then adds matching grain back, so the encode stays clean while the picture keeps its grain. SVT-AV1's
 `--fgs-table` and `grav1synth apply` apply only the table's first entry to every frame, so they
 suit a single-scene table only. The y4m output is the same with or without the flag. It is
 rejected with `--channel-mode chroma`, and a failed run leaves no file.

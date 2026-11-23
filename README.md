@@ -37,6 +37,8 @@ denoising tools.
     the output into VS separately.
 - **AV1 FGS generation** - Rebuild the grain removed during denoising using av-denoise's grain synthesizer producing
   more accurate, closer matching grain to the original source.
+  - Apply the table with `regrain apply --static-grain`, even when the source's grain is not static. Without the flag
+    regrain replaces each entry's seed and the grain comes out at the wrong strength.
 
 ---
 

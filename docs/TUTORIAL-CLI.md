@@ -244,9 +244,13 @@ can try different options without denoising again.
 ### `synthesize av1-fgs`
 
 Writes an AV1 film grain table for all of the source's grain, as one frame shows it. Add it to a
-finished AV1 encode with [regrain](https://github.com/Rabbit-Company/regrain) via `regrain apply --static-grain`, 
-it should be noted that `--static-grain` is still required even if your source has dynamic/moving grain, 
-the synthesize command already handles that and does not want `regrain` overwriting the behaviour it decides.
+finished AV1 encode with [regrain](https://github.com/Rabbit-Company/regrain) via `regrain apply --static-grain`.
+
+> [!IMPORTANT]
+> Always pass `--static-grain` to `regrain apply`, even when your source's grain moves from frame to frame.
+> The name is misleading here. The flag makes regrain keep the seed each table entry carries. Without it, regrain
+> picks its own seed for every frame after the first, and the grain comes out at the wrong strength because each
+> entry's strength is fitted to its own seed. The table already decides which grain moves and which is held still.
 
 > [!CAUTION]
 > SVT-AV1 `--fgs-table` and `grav1synth apply` apply only its first entry, so they will not apply correctly to your

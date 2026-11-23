@@ -38,9 +38,9 @@ pub struct SynthesizeArgs {
 pub enum SynthesizeKind {
     /// Write an AV1 film grain table.
     ///
-    /// Apply it with `regrain apply --static-grain`, which the table needs to hold static grain
-    /// still. SVT-AV1 and grav1synth apply only its first entry. Its timestamps suit constant
-    /// frame rate video.
+    /// Apply it with `regrain apply --static-grain`. Every table needs `--static-grain`, moving grain
+    /// included, because each entry's strength is fitted to the seed it carries. SVT-AV1 and
+    /// grav1synth apply only its first entry. Its timestamps suit constant frame rate video.
     Av1Fgs(Av1FgsArgs),
     /// Write the per-frame grain report as JSON lines.
     Report(ReportArgs),
