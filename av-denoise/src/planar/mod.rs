@@ -164,6 +164,16 @@ pub struct PlaneOptions {
     /// It wins over `algorithm`'s value, which itself falls back to a calibrated per-plane default
     /// when neither is set.
     pub chroma_lambda_ht: Option<f32>,
+    /// Luma override for the `sigma_scale` of nl4d and NLMeans HQ, which wins over `algorithm`'s
+    /// value.
+    pub luma_sigma_scale: Option<f32>,
+    /// Chroma override for the `sigma_scale` of nl4d and NLMeans HQ, which wins over `algorithm`'s
+    /// value.
+    pub chroma_sigma_scale: Option<f32>,
+    /// Luma override for nl4d's `lambda_ht_scale`, which wins over `algorithm`'s value.
+    pub luma_lambda_ht_scale: Option<f32>,
+    /// Chroma override for nl4d's `lambda_ht_scale`, which wins over `algorithm`'s value.
+    pub chroma_lambda_ht_scale: Option<f32>,
     /// Whether the planes run tuned kernels.
     ///
     /// With [TuningMode::Auto], [PlanarDenoiser::tune] runs a tuning pass and rebuilds them from its
@@ -195,6 +205,10 @@ impl PlaneOptions {
             .maybe_chroma_strength(self.chroma_strength)
             .maybe_luma_lambda_ht(self.luma_lambda_ht)
             .maybe_chroma_lambda_ht(self.chroma_lambda_ht)
+            .maybe_luma_sigma_scale(self.luma_sigma_scale)
+            .maybe_chroma_sigma_scale(self.chroma_sigma_scale)
+            .maybe_luma_lambda_ht_scale(self.luma_lambda_ht_scale)
+            .maybe_chroma_lambda_ht_scale(self.chroma_lambda_ht_scale)
             .depth(layout.depth)
             .chroma_siting(layout.chroma_siting)
             .tuning(self.tuning)

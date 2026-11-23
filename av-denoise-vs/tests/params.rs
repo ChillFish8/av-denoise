@@ -520,6 +520,114 @@ fn sigma_scale_is_rejected_for_nlmeans_fast() {
     );
 }
 
+// --- per-plane scales ---
+
+#[test]
+fn per_plane_scales_reach_nl4d_plane_options() {
+    let raw = RawParams {
+        sigma_scale: Some(1.1),
+        luma_sigma_scale: Some(1.3),
+        chroma_sigma_scale: Some(0.9),
+        luma_lambda_ht_scale: Some(1.2),
+        chroma_lambda_ht_scale: Some(0.8),
+        ..RawParams::default()
+    };
+    let opts = plane_options_from(&raw, AlgorithmKind::Nl4d).unwrap();
+
+    assert_eq!(opts.luma_sigma_scale, Some(1.3));
+    assert_eq!(opts.chroma_sigma_scale, Some(0.9));
+    assert_eq!(opts.luma_lambda_ht_scale, Some(1.2));
+    assert_eq!(opts.chroma_lambda_ht_scale, Some(0.8));
+    match opts.algorithm {
+        av_denoise::Algorithm::Nl4d(nl4d) => assert_eq!(nl4d.sigma_scale, 1.1),
+        other => panic!("expected Nl4d, got {other:?}"),
+    }
+}
+
+#[test]
+fn per_plane_sigma_scales_reach_hq_plane_options() {
+    let raw = RawParams {
+        variant: Some("hq".to_string()),
+        luma_sigma_scale: Some(1.3),
+        ..RawParams::default()
+    };
+    let opts = plane_options_from(&raw, AlgorithmKind::Nlmeans).unwrap();
+
+    assert_eq!(opts.luma_sigma_scale, Some(1.3));
+    assert_eq!(opts.chroma_sigma_scale, None);
+}
+
+#[test]
+fn per_plane_sigma_scales_are_rejected_for_nlmeans_fast() {
+    for (name, raw) in [
+        (
+            "luma_sigma_scale",
+            RawParams {
+                variant: Some("fast".to_string()),
+                luma_sigma_scale: Some(1.3),
+                ..RawParams::default()
+            },
+        ),
+        (
+            "chroma_sigma_scale",
+            RawParams {
+                variant: Some("fast".to_string()),
+                chroma_sigma_scale: Some(1.3),
+                ..RawParams::default()
+            },
+        ),
+    ] {
+        let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains(name), "got {err}");
+        assert!(err.contains("fast"), "error should name the variant, got {err}");
+    }
+}
+
+#[test]
+fn per_plane_lambda_ht_scales_are_rejected_for_nlmeans() {
+    let raw = RawParams {
+        variant: Some("hq".to_string()),
+        luma_lambda_ht_scale: Some(1.2),
+        ..RawParams::default()
+    };
+    let err = plane_options_from(&raw, AlgorithmKind::Nlmeans)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("luma_lambda_ht_scale"), "got {err}");
+    assert!(
+        err.contains("nlmeans"),
+        "error should name the algorithm, got {err}"
+    );
+}
+
+#[test]
+fn per_plane_scales_for_a_plane_that_is_not_denoised_are_rejected() {
+    let luma_only = RawParams {
+        channel_mode: Some("luma".to_string()),
+        chroma_lambda_ht_scale: Some(1.2),
+        ..RawParams::default()
+    };
+    let chroma_only = RawParams {
+        channel_mode: Some("chroma".to_string()),
+        luma_sigma_scale: Some(1.2),
+        ..RawParams::default()
+    };
+
+    let luma_err = plane_options_from(&luma_only, AlgorithmKind::Nl4d)
+        .unwrap_err()
+        .to_string();
+    let chroma_err = plane_options_from(&chroma_only, AlgorithmKind::Nl4d)
+        .unwrap_err()
+        .to_string();
+
+    assert!(luma_err.contains("chroma_lambda_ht_scale"), "got {luma_err}");
+    assert!(chroma_err.contains("luma_sigma_scale"), "got {chroma_err}");
+}
+
 // --- prefilter ---
 
 #[test]

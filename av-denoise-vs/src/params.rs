@@ -156,6 +156,10 @@ pub struct RawParams {
     /// `deterministic` keeps it bit identical.
     pub tune: Option<String>,
     pub deterministic: Option<bool>,
+    pub luma_sigma_scale: Option<f64>,
+    pub chroma_sigma_scale: Option<f64>,
+    pub luma_lambda_ht_scale: Option<f64>,
+    pub chroma_lambda_ht_scale: Option<f64>,
 }
 
 fn nonnegative(value: i64, field: &str) -> Result<u32, anyhow::Error> {
@@ -181,7 +185,7 @@ fn parse_channel_mode(raw: &str) -> Result<ChannelIntent, anyhow::Error> {
 /// A script parameter dictionary has no way to warn that a parameter silently does nothing, so this
 /// is an error instead. The strength, patch and search radius, variant, prefilter and motion
 /// parameters only feed the NLM weighting pass, which nl4d never runs. The `lambda_ht` family and the
-/// nl4d dials only feed nl4d. `sigma` and `sigma_scale` are rejected only on nlmeans
+/// nl4d dials only feed nl4d. `sigma` and the `sigma_scale` family are rejected only on nlmeans
 /// `variant="fast"`, which has no noise estimator to pin or nudge.
 ///
 /// `sigma_scale` alongside `sigma` is accepted even though the estimator it nudges never runs, to
@@ -207,6 +211,8 @@ fn reject_mismatched_params(
         ("chroma_lambda_ht", raw.chroma_lambda_ht.is_some()),
         ("lambda_ht", raw.lambda_ht.is_some()),
         ("lambda_ht_scale", raw.lambda_ht_scale.is_some()),
+        ("luma_lambda_ht_scale", raw.luma_lambda_ht_scale.is_some()),
+        ("chroma_lambda_ht_scale", raw.chroma_lambda_ht_scale.is_some()),
         ("spatial_radius", raw.spatial_radius.is_some()),
         ("refine", raw.refine.is_some()),
         ("noise_map", raw.noise_map.is_some()),
@@ -239,11 +245,17 @@ fn reject_mismatched_params(
                     );
                 }
 
-                if raw.sigma_scale.is_some() {
-                    anyhow::bail!(
-                        "sigma_scale has no effect on nlmeans variant=\"{}\", which has no noise measurement to nudge. Set variant=\"hq\" to use sigma_scale",
-                        variant_label
-                    );
+                let sigma_scales = [
+                    ("sigma_scale", raw.sigma_scale.is_some()),
+                    ("luma_sigma_scale", raw.luma_sigma_scale.is_some()),
+                    ("chroma_sigma_scale", raw.chroma_sigma_scale.is_some()),
+                ];
+                for (name, is_set) in sigma_scales {
+                    if is_set {
+                        anyhow::bail!(
+                            "{name} has no effect on nlmeans variant=\"{variant_label}\", which has no noise measurement to nudge. Set variant=\"hq\" to use {name}"
+                        );
+                    }
                 }
             }
         },
@@ -252,16 +264,29 @@ fn reject_mismatched_params(
     Ok(())
 }
 
-/// Rejects a per-plane strength for a plane group that is not denoised.
-fn reject_unused_plane_strength(raw: &RawParams, intent: ChannelIntent) -> Result<(), anyhow::Error> {
-    if intent == ChannelIntent::Chroma && raw.luma_strength.is_some() {
-        anyhow::bail!("luma_strength has no effect on channel_mode=\"chroma\", which does not denoise luma");
-    }
+/// Rejects a per-plane strength or scale for a plane group that is not denoised.
+fn reject_unused_plane_params(raw: &RawParams, intent: ChannelIntent) -> Result<(), anyhow::Error> {
+    let luma_params = [
+        ("luma_strength", raw.luma_strength.is_some()),
+        ("luma_sigma_scale", raw.luma_sigma_scale.is_some()),
+        ("luma_lambda_ht_scale", raw.luma_lambda_ht_scale.is_some()),
+    ];
+    let chroma_params = [
+        ("chroma_strength", raw.chroma_strength.is_some()),
+        ("chroma_sigma_scale", raw.chroma_sigma_scale.is_some()),
+        ("chroma_lambda_ht_scale", raw.chroma_lambda_ht_scale.is_some()),
+    ];
 
-    if intent == ChannelIntent::Luma && raw.chroma_strength.is_some() {
-        anyhow::bail!(
-            "chroma_strength has no effect on channel_mode=\"luma\", which does not denoise chroma"
-        );
+    let (unused_params, mode, plane) = match intent {
+        ChannelIntent::Chroma => (luma_params, "chroma", "luma"),
+        ChannelIntent::Luma => (chroma_params, "luma", "chroma"),
+        ChannelIntent::LumaChroma => return Ok(()),
+    };
+
+    for (name, is_set) in unused_params {
+        if is_set {
+            anyhow::bail!("{name} has no effect on channel_mode=\"{mode}\", which does not denoise {plane}");
+        }
     }
 
     Ok(())
@@ -320,7 +345,7 @@ pub fn plane_options_from(
     };
 
     reject_mismatched_params(raw, algorithm_kind, variant)?;
-    reject_unused_plane_strength(raw, intent)?;
+    reject_unused_plane_params(raw, intent)?;
 
     if let Some(radius) = raw.search_radius
         && radius > 4
@@ -483,6 +508,10 @@ pub fn plane_options_from(
         chroma_strength: raw.chroma_strength.map(|value| value as f32),
         luma_lambda_ht: raw.luma_lambda_ht.map(|value| value as f32),
         chroma_lambda_ht: raw.chroma_lambda_ht.map(|value| value as f32),
+        luma_sigma_scale: raw.luma_sigma_scale.map(|value| value as f32),
+        chroma_sigma_scale: raw.chroma_sigma_scale.map(|value| value as f32),
+        luma_lambda_ht_scale: raw.luma_lambda_ht_scale.map(|value| value as f32),
+        chroma_lambda_ht_scale: raw.chroma_lambda_ht_scale.map(|value| value as f32),
         tuning,
         deterministic,
     })

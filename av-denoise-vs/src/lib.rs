@@ -147,6 +147,10 @@ fn raw_params(
     pooled_threshold: Option<i64>,
     tune: Option<&[u8]>,
     deterministic: Option<i64>,
+    luma_sigma_scale: Option<f64>,
+    chroma_sigma_scale: Option<f64>,
+    luma_lambda_ht_scale: Option<f64>,
+    chroma_lambda_ht_scale: Option<f64>,
 ) -> Result<RawParams, Error> {
     Ok(RawParams {
         strength,
@@ -174,6 +178,10 @@ fn raw_params(
         pooled_threshold: opt_bool(pooled_threshold),
         tune: opt_string(tune, "tune")?,
         deterministic: opt_bool(deterministic),
+        luma_sigma_scale,
+        chroma_sigma_scale,
+        luma_lambda_ht_scale,
+        chroma_lambda_ht_scale,
     })
 }
 
@@ -205,6 +213,8 @@ make_filter_function! {
         motion_compensation: Option<i64>,
         tune: Option<&[u8]>,
         deterministic: Option<i64>,
+        luma_sigma_scale: Option<f64>,
+        chroma_sigma_scale: Option<f64>,
     ) -> Result<Option<Box<dyn Filter<'core> + 'core>>, Error> {
         let raw = raw_params(
             strength,
@@ -232,6 +242,10 @@ make_filter_function! {
             None,
             tune,
             deterministic,
+            luma_sigma_scale,
+            chroma_sigma_scale,
+            None,
+            None,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nlmeans, &raw)?;
         let boxed: Box<dyn Filter<'core> + 'core> = Box::new(filter);
@@ -275,6 +289,10 @@ make_filter_function! {
         pooled_threshold: Option<i64>,
         tune: Option<&[u8]>,
         deterministic: Option<i64>,
+        luma_sigma_scale: Option<f64>,
+        chroma_sigma_scale: Option<f64>,
+        luma_lambda_ht_scale: Option<f64>,
+        chroma_lambda_ht_scale: Option<f64>,
     ) -> Result<Option<Box<dyn Filter<'core> + 'core>>, Error> {
         let raw = raw_params(
             None,
@@ -302,6 +320,10 @@ make_filter_function! {
             pooled_threshold,
             tune,
             deterministic,
+            luma_sigma_scale,
+            chroma_sigma_scale,
+            luma_lambda_ht_scale,
+            chroma_lambda_ht_scale,
         )?;
         let filter = Denoise::create(api, core, clip, AlgorithmKind::Nl4d, &raw)?;
         let boxed: Box<dyn Filter<'core> + 'core> = Box::new(filter);

@@ -29,6 +29,10 @@ fn base_options(
         chroma_strength,
         luma_lambda_ht: None,
         chroma_lambda_ht: None,
+        luma_sigma_scale: None,
+        chroma_sigma_scale: None,
+        luma_lambda_ht_scale: None,
+        chroma_lambda_ht_scale: None,
         tuning: TuningMode::Off,
         deterministic: false,
     }
@@ -192,6 +196,10 @@ fn nl4d_options(luma_lambda_ht: Option<f32>, chroma_lambda_ht: Option<f32>) -> P
         chroma_strength: None,
         luma_lambda_ht,
         chroma_lambda_ht,
+        luma_sigma_scale: None,
+        chroma_sigma_scale: None,
+        luma_lambda_ht_scale: None,
+        chroma_lambda_ht_scale: None,
         tuning: TuningMode::Off,
         deterministic: false,
     }
@@ -253,4 +261,85 @@ fn unset_nl4d_overrides_stay_unresolved_for_both_planes() {
     // Neither plane has anything set, so both stay unresolved at this layer.
     assert_eq!(luma.lambda_ht, None);
     assert_eq!(chroma.lambda_ht, None);
+}
+
+#[test]
+fn unset_scale_overrides_keep_the_shared_nl4d_scales() {
+    let shared = Nl4dOptions {
+        sigma_scale: 1.2,
+        lambda_ht_scale: 0.9,
+        ..Nl4dOptions::default()
+    };
+    let plane_options = PlaneOptions {
+        algorithm: Algorithm::Nl4d(shared),
+        ..nl4d_options(None, None)
+    };
+
+    let (luma, chroma) = nl4d_planes(&plane_options);
+
+    for plane in [luma, chroma] {
+        assert_eq!(plane.sigma_scale, 1.2);
+        assert_eq!(plane.lambda_ht_scale, 0.9);
+    }
+}
+
+#[test]
+fn luma_scale_overrides_replace_only_the_luma_scales_for_nl4d() {
+    let shared = Nl4dOptions {
+        sigma_scale: 1.2,
+        lambda_ht_scale: 0.9,
+        ..Nl4dOptions::default()
+    };
+    let plane_options = PlaneOptions {
+        algorithm: Algorithm::Nl4d(shared),
+        luma_sigma_scale: Some(1.5),
+        luma_lambda_ht_scale: Some(1.1),
+        ..nl4d_options(None, None)
+    };
+
+    let (luma, chroma) = nl4d_planes(&plane_options);
+
+    assert_eq!(luma.sigma_scale, 1.5);
+    assert_eq!(luma.lambda_ht_scale, 1.1);
+    assert_eq!(chroma.sigma_scale, 1.2);
+    assert_eq!(chroma.lambda_ht_scale, 0.9);
+}
+
+#[test]
+fn chroma_scale_overrides_replace_only_the_chroma_scales_for_nl4d() {
+    let plane_options = PlaneOptions {
+        chroma_sigma_scale: Some(0.8),
+        chroma_lambda_ht_scale: Some(1.3),
+        ..nl4d_options(None, None)
+    };
+    let defaults = Nl4dOptions::default();
+
+    let (luma, chroma) = nl4d_planes(&plane_options);
+
+    assert_eq!(luma.sigma_scale, defaults.sigma_scale);
+    assert_eq!(luma.lambda_ht_scale, defaults.lambda_ht_scale);
+    assert_eq!(chroma.sigma_scale, 0.8);
+    assert_eq!(chroma.lambda_ht_scale, 1.3);
+}
+
+#[test]
+fn sigma_scale_overrides_set_each_plane_for_hq() {
+    let mut hq_options = NlmeansHqOptions::default();
+    hq_options.hq.sigma_scale = 1.2;
+    let algorithm = Algorithm::NlmeansHq(hq_options);
+    let plane_options = PlaneOptions {
+        luma_sigma_scale: Some(1.4),
+        ..base_options(DenoisingMode::Temporal { radius: 2 }, algorithm, None, None)
+    };
+
+    let (luma, chroma) = nlmeans_planes(&plane_options);
+    let NlmeansAlgorithm::Hq(luma_hq) = luma else {
+        panic!("expected HQ nlmeans for luma, got {luma:?}");
+    };
+    let NlmeansAlgorithm::Hq(chroma_hq) = chroma else {
+        panic!("expected HQ nlmeans for chroma, got {chroma:?}");
+    };
+
+    assert_eq!(luma_hq.hq.sigma_scale, 1.4);
+    assert_eq!(chroma_hq.hq.sigma_scale, 1.2);
 }

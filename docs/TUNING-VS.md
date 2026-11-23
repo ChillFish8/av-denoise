@@ -77,6 +77,15 @@ plane without touching the other, and `lambda_ht_scale` still applies on top of 
 clean = avd.Nl4d(clip, luma_lambda_ht=5.0, lambda_ht_scale=1.05)
 ```
 
+**The per-plane scales move one plane on its own.** `luma_lambda_ht_scale` and
+`chroma_lambda_ht_scale` replace `lambda_ht_scale` for one plane. `luma_sigma_scale` and
+`chroma_sigma_scale` replace `sigma_scale` in the same way. A plane without its own scale uses the
+shared one, so you can push one plane harder without working out its absolute threshold.
+
+```python
+clean = avd.Nl4d(clip, lambda_ht_scale=1.1, chroma_lambda_ht_scale=0.95)
+```
+
 **`spatial_radius` is the speed dial.** The centre-frame search covers `(2 * radius + 1)^2`
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates.
 
@@ -142,7 +151,8 @@ Work through these in order.
 1. **Nudge `sigma_scale` up** (try 1.1, then 1.2). This tells the denoiser the noise is a little
    stronger than it measured, and everything downstream (strength, patch matching, motion
    confidence) adapts together. Increase in steps of 0.1, judging by eye each time. It costs
-   nothing in throughput, which is why it comes first.
+   nothing in throughput, which is why it comes first. When only one plane looks noisy,
+   `luma_sigma_scale` or `chroma_sigma_scale` nudges that plane alone.
 2. **Set `motion_compensation=True`** on footage with fast movement, so the temporal window keeps
    finding usable matches instead of falling back to the current frame.
    * For **Anime** sources, you may not want to enable this option. Anime sources typically cope with

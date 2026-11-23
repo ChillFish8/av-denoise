@@ -4,6 +4,7 @@ use av_denoise_core::{
     DenoisingMode,
     EngineSpec,
     Geometry,
+    HqParams,
     Nl4dOptions,
     NlmTuning,
     NlmeansAlgorithm,
@@ -82,6 +83,16 @@ pub struct DenoiserOptions {
     /// When this and the algorithm's `lambda_ht` are both unset, the engine picks a calibrated chroma
     /// default.
     pub chroma_lambda_ht: Option<f32>,
+    /// Luma override for the `sigma_scale` of nl4d and NLMeans HQ, which wins over the algorithm's
+    /// value.
+    pub luma_sigma_scale: Option<f32>,
+    /// Chroma override for the `sigma_scale` of nl4d and NLMeans HQ, which wins over the
+    /// algorithm's value.
+    pub chroma_sigma_scale: Option<f32>,
+    /// Luma override for nl4d's `lambda_ht_scale`, which wins over the algorithm's value.
+    pub luma_lambda_ht_scale: Option<f32>,
+    /// Chroma override for nl4d's `lambda_ht_scale`, which wins over the algorithm's value.
+    pub chroma_lambda_ht_scale: Option<f32>,
     /// The bit depth of the wire bytes going in and coming out.
     #[builder(default = Depth::Eight)]
     pub depth: Depth,
@@ -110,7 +121,7 @@ impl DenoiserOptions {
     /// The engine to build for a `width` by `height` frame.
     ///
     /// `mode` is copied into each plane's options, so it wins over whatever `algorithm` holds. Each
-    /// plane group then takes its own strength or `lambda_ht` override.
+    /// plane group then takes its own strength, `lambda_ht` and scale overrides.
     pub(crate) fn engine_spec(&self, width: u32, height: u32) -> EngineSpec {
         let format = self.depth.sample_format();
         let geometry = Geometry {
@@ -184,21 +195,31 @@ impl DenoiserOptions {
 
     fn plane_hq(&self, hq: NlmeansHqOptions, group: PlaneGroup) -> NlmeansAlgorithm {
         let nlm = self.plane_nlm(hq.nlm, group);
-        let options = NlmeansHqOptions { nlm, ..hq };
+        let plane_sigma_scale = Self::per_plane(group, self.luma_sigma_scale, self.chroma_sigma_scale);
+        let hq_params = HqParams {
+            sigma_scale: plane_sigma_scale.unwrap_or(hq.hq.sigma_scale),
+            ..hq.hq
+        };
+        let options = NlmeansHqOptions { nlm, hq: hq_params };
 
         NlmeansAlgorithm::Hq(options)
     }
 
-    /// `nl4d` with this run's temporal radius and the `lambda_ht` override of `group`.
+    /// `nl4d` with this run's temporal radius and the `lambda_ht` and scale overrides of `group`.
     ///
     /// An unset `lambda_ht` stays `None`, so the engine resolves it to the plane's own default.
     /// The grain data reaches both plane groups.
     fn plane_nl4d(&self, nl4d: Nl4dOptions, group: PlaneGroup) -> Nl4dOptions {
         let plane_lambda_ht = Self::per_plane(group, self.luma_lambda_ht, self.chroma_lambda_ht);
+        let plane_sigma_scale = Self::per_plane(group, self.luma_sigma_scale, self.chroma_sigma_scale);
+        let plane_lambda_ht_scale =
+            Self::per_plane(group, self.luma_lambda_ht_scale, self.chroma_lambda_ht_scale);
 
         Nl4dOptions {
             temporal_radius: self.temporal_radius(),
             lambda_ht: plane_lambda_ht.or(nl4d.lambda_ht),
+            sigma_scale: plane_sigma_scale.unwrap_or(nl4d.sigma_scale),
+            lambda_ht_scale: plane_lambda_ht_scale.unwrap_or(nl4d.lambda_ht_scale),
             ..nl4d
         }
     }

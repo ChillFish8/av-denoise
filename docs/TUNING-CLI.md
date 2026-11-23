@@ -42,6 +42,15 @@ from different defaults and the scale keeps that separation.
 `--luma-lambda-ht` and `--chroma-lambda-ht` pin one plane without touching the other, and `--lambda-ht-scale` still
 applies on top of whatever is pinned.
 
+**The per-plane scales move one plane on its own.** `--luma-lambda-ht-scale` and
+`--chroma-lambda-ht-scale` replace `--lambda-ht-scale` for one plane. `--luma-sigma-scale` and
+`--chroma-sigma-scale` replace `--sigma-scale` in the same way. A plane without its own scale uses
+the shared one, so you can push one plane harder without working out its absolute threshold.
+
+```bash
+av-denoise nl4d --lambda-ht-scale 1.1 --chroma-lambda-ht-scale 0.95 --input noisy.mkv > clean.y4m
+```
+
 **`--spatial-radius` is the speed dial.** The centre-frame search covers `(2 * radius + 1)^2`
 positions, so it dominates the work. Dropping it from 9 to 6 roughly halves the candidates.
 
@@ -137,7 +146,8 @@ Work through these in order.
 1. **Nudge `--hq-sigma-scale` up** (try 1.1, then 1.2). This tells the denoiser the noise is a
    little stronger than it measured, and everything downstream (strength, patch matching, motion
    confidence) adapts together. Increase in steps of 0.1, judging by eye each time. It costs
-   nothing in throughput, which is why it comes first.
+   nothing in throughput, which is why it comes first. When only one plane looks noisy,
+   `--luma-hq-sigma-scale` or `--chroma-hq-sigma-scale` nudges that plane alone.
 2. **Enable `--motion-compensation`** on footage with fast movement, so the temporal window keeps
    finding usable matches instead of falling back to the current frame.
    * For **Anime** sources, you may not want to enable this option. Anime sources typically cope with

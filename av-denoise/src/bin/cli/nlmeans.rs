@@ -202,6 +202,26 @@ pub struct NlmeansArgs {
     #[arg(long)]
     pub hq_sigma_scale: Option<f32>,
 
+    /// `--hq-sigma-scale` override for the luma plane only.
+    ///
+    /// Replaces `--hq-sigma-scale` for luma rather than multiplying it.
+    /// Falls back to `--hq-sigma-scale` when not set.
+    ///
+    /// Ignored when luma is not being denoised, or when `--hq-sigma`
+    /// pins the noise level.
+    #[arg(long)]
+    pub luma_hq_sigma_scale: Option<f32>,
+
+    /// `--hq-sigma-scale` override for the colour planes only.
+    ///
+    /// Replaces `--hq-sigma-scale` for chroma rather than multiplying
+    /// it. Falls back to `--hq-sigma-scale` when not set.
+    ///
+    /// Ignored when chroma is not being denoised, or when `--hq-sigma`
+    /// pins the noise level.
+    #[arg(long)]
+    pub chroma_hq_sigma_scale: Option<f32>,
+
     /// Turn on motion compensation for temporal denoising.
     ///
     /// When the camera or content moves between frames, the
@@ -265,6 +285,8 @@ impl NlmeansArgs {
         nlm: NlmeansOptions,
     ) -> Result<av_denoise::Algorithm, anyhow::Error> {
         let sigma_scale_is_set = self.hq_sigma_scale.is_some_and(|scale| scale != 1.0);
+        let per_plane_sigma_scale_is_set =
+            self.luma_hq_sigma_scale.is_some() || self.chroma_hq_sigma_scale.is_some();
 
         match resolved.variant {
             Variant::Fast => {
@@ -274,6 +296,7 @@ impl NlmeansArgs {
                     || self.hq_no_temporal_confidence
                     || self.hq_thsad_scale.is_some()
                     || sigma_scale_is_set
+                    || per_plane_sigma_scale_is_set
                 {
                     tracing::warn!("--hq-* options are ignored unless --variant hq is selected");
                 }
@@ -294,6 +317,13 @@ impl NlmeansArgs {
 
                 if self.hq_sigma.is_some() && sigma_scale_is_set {
                     tracing::warn!("--hq-sigma-scale has no effect when --hq-sigma pins the noise level");
+                }
+
+                if self.hq_sigma.is_some() && per_plane_sigma_scale_is_set {
+                    tracing::warn!(
+                        "--luma-hq-sigma-scale and --chroma-hq-sigma-scale have no effect when \
+                         --hq-sigma pins the noise level"
+                    );
                 }
 
                 let hq = av_denoise::HqParams {
@@ -379,6 +409,10 @@ impl NlmeansArgs {
             // `nlmeans` has no grouping stage for a threshold to apply to.
             luma_lambda_ht: None,
             chroma_lambda_ht: None,
+            luma_sigma_scale: self.luma_hq_sigma_scale,
+            chroma_sigma_scale: self.chroma_hq_sigma_scale,
+            luma_lambda_ht_scale: None,
+            chroma_lambda_ht_scale: None,
             tuning: self.common.tuning_mode(),
             deterministic: self.common.deterministic,
         };
@@ -394,14 +428,25 @@ impl NlmeansArgs {
     }
 
     fn warn_on_dead_per_plane_flags(&self, intent: ChannelIntent) {
-        match intent {
-            ChannelIntent::Luma if self.chroma_strength.is_some() => {
-                tracing::warn!("--chroma-strength is ignored when chroma is not being denoised");
-            },
-            ChannelIntent::Chroma if self.luma_strength.is_some() => {
-                tracing::warn!("--luma-strength is ignored when luma is not being denoised");
-            },
-            _ => {},
+        let chroma_flags = [
+            ("--chroma-strength", self.chroma_strength.is_some()),
+            ("--chroma-hq-sigma-scale", self.chroma_hq_sigma_scale.is_some()),
+        ];
+        let luma_flags = [
+            ("--luma-strength", self.luma_strength.is_some()),
+            ("--luma-hq-sigma-scale", self.luma_hq_sigma_scale.is_some()),
+        ];
+
+        let (dead_flags, plane) = match intent {
+            ChannelIntent::Luma => (chroma_flags, "chroma"),
+            ChannelIntent::Chroma => (luma_flags, "luma"),
+            ChannelIntent::LumaChroma => return,
+        };
+
+        for (flag, is_set) in dead_flags {
+            if is_set {
+                tracing::warn!("{flag} is ignored when {plane} is not being denoised");
+            }
         }
     }
 
@@ -788,6 +833,26 @@ mod tests {
             av_denoise::Algorithm::NlmeansHq(opts) => assert_eq!(opts.hq.sigma_scale, 1.0),
             other => panic!("expected NlmeansHq, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn per_plane_hq_sigma_scales_flow_into_cli_options_independently() {
+        let (args, nlm) = parse(&[
+            "--variant",
+            "hq",
+            "--hq-sigma-scale",
+            "1.1",
+            "--luma-hq-sigma-scale",
+            "1.4",
+        ]);
+        let opts = nlm.build_options(&args).expect("build_options should succeed");
+
+        match opts.planes.algorithm {
+            av_denoise::Algorithm::NlmeansHq(hq) => assert_eq!(hq.hq.sigma_scale, 1.1),
+            other => panic!("expected NlmeansHq, got {other:?}"),
+        }
+        assert_eq!(opts.planes.luma_sigma_scale, Some(1.4));
+        assert_eq!(opts.planes.chroma_sigma_scale, None);
     }
 
     #[test]

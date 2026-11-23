@@ -117,6 +117,8 @@ def NlmHQ(
     channel_mode: ChannelMode | None = None,
     device: str | None = None,
     sigma_scale: float | None = None,
+    luma_sigma_scale: float | None = None,
+    chroma_sigma_scale: float | None = None,
     strength: float | None = None,
     luma_strength: float | None = None,
     chroma_strength: float | None = None,
@@ -142,6 +144,8 @@ def NlmHQ(
         sigma_scale: Multiplier nudging the measured noise level up or down.
             This is the right dial to reach for when leftover grain survives filtering,
             rather than raising `strength`.
+        luma_sigma_scale: Replaces `sigma_scale` for the luma plane only.
+        chroma_sigma_scale: Replaces `sigma_scale` for the chroma planes only.
         strength: Overall filter strength. Raising this to fight leftover grain is the wrong move, grain
             that survives usually means the noise level read low, correcting `sigma_scale` is the right
             move instead.
@@ -176,6 +180,8 @@ def NlmHQ(
         channel_mode=channel_mode,
         device=device,
         sigma_scale=sigma_scale,
+        luma_sigma_scale=luma_sigma_scale,
+        chroma_sigma_scale=chroma_sigma_scale,
         strength=strength,
         luma_strength=luma_strength,
         chroma_strength=chroma_strength,
@@ -194,8 +200,12 @@ def Nl4d(
     channel_mode: ChannelMode | None = None,
     device: str | None = None,
     lambda_ht_scale: float | None = None,
+    luma_lambda_ht_scale: float | None = None,
+    chroma_lambda_ht_scale: float | None = None,
     lambda_ht: float | None = None,
     sigma_scale: float | None = None,
+    luma_sigma_scale: float | None = None,
+    chroma_sigma_scale: float | None = None,
     spatial_radius: int | None = None,
     refine: int | None = None,
     noise_map: bool | None = None,
@@ -221,10 +231,14 @@ def Nl4d(
         lambda_ht_scale: Threshold multiplier a transform coefficient's estimated-noise standard deviations
             must clear to survive. This  is the main dial, raising it removes more noise and takes more
             fine detail with it. Try it in steps of about 0.05.
+        luma_lambda_ht_scale: Replaces `lambda_ht_scale` for the luma plane only.
+        chroma_lambda_ht_scale: Replaces `lambda_ht_scale` for the chroma planes only.
         lambda_ht: Pins luma and chroma's thresholds to the same absolute number instead of
             their separate defaults, losing that separation. Prefer `lambda_ht_scale` first.
         sigma_scale: Multiplier nudging the measured noise level up or down, keeping the per-scene
             measurement rather than pinning it.
+        luma_sigma_scale: Replaces `sigma_scale` for the luma plane only.
+        chroma_sigma_scale: Replaces `sigma_scale` for the chroma planes only.
         spatial_radius: The speed dial, 9 by default. The centre-frame search covers `(2 * radius + 1)^2`
             positions, so it dominates the work, lowering it is the fastest way to speed a run-up.
         refine: Half-width of the window searched around each neighbour frame's motion-predicted position.
@@ -261,8 +275,12 @@ def Nl4d(
         channel_mode=channel_mode,
         device=device,
         lambda_ht_scale=lambda_ht_scale,
+        luma_lambda_ht_scale=luma_lambda_ht_scale,
+        chroma_lambda_ht_scale=chroma_lambda_ht_scale,
         lambda_ht=lambda_ht,
         sigma_scale=sigma_scale,
+        luma_sigma_scale=luma_sigma_scale,
+        chroma_sigma_scale=chroma_sigma_scale,
         spatial_radius=spatial_radius,
         refine=refine,
         noise_map=noise_map,

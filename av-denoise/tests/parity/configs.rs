@@ -68,6 +68,10 @@ fn options(intent: ChannelIntent, mode: DenoisingMode, algorithm: Algorithm) -> 
         chroma_strength: None,
         luma_lambda_ht: None,
         chroma_lambda_ht: None,
+        luma_sigma_scale: None,
+        chroma_sigma_scale: None,
+        luma_lambda_ht_scale: None,
+        chroma_lambda_ht_scale: None,
         tuning: TuningMode::Off,
         deterministic: false,
     }

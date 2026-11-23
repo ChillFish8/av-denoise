@@ -85,6 +85,24 @@ pub struct Nl4dArgs {
     #[arg(long)]
     pub lambda_ht_scale: Option<f32>,
 
+    /// `--lambda-ht-scale` override for the luma plane only.
+    ///
+    /// Replaces `--lambda-ht-scale` for luma rather than multiplying it.
+    /// Falls back to `--lambda-ht-scale` when not set.
+    ///
+    /// Ignored when luma is not being denoised.
+    #[arg(long)]
+    pub luma_lambda_ht_scale: Option<f32>,
+
+    /// `--lambda-ht-scale` override for the colour planes only.
+    ///
+    /// Replaces `--lambda-ht-scale` for chroma rather than multiplying
+    /// it. Falls back to `--lambda-ht-scale` when not set.
+    ///
+    /// Ignored when chroma is not being denoised.
+    #[arg(long)]
+    pub chroma_lambda_ht_scale: Option<f32>,
+
     /// How noisy the source is. Leave it unset for almost all uses.
     ///
     /// The noise level is measured automatically per scene when this
@@ -109,6 +127,26 @@ pub struct Nl4dArgs {
     /// Has no effect when `--sigma` pins the noise level.
     #[arg(long)]
     pub sigma_scale: Option<f32>,
+
+    /// `--sigma-scale` override for the luma plane only.
+    ///
+    /// Replaces `--sigma-scale` for luma rather than multiplying it.
+    /// Falls back to `--sigma-scale` when not set.
+    ///
+    /// Ignored when luma is not being denoised, or when `--sigma` pins
+    /// the noise level.
+    #[arg(long)]
+    pub luma_sigma_scale: Option<f32>,
+
+    /// `--sigma-scale` override for the colour planes only.
+    ///
+    /// Replaces `--sigma-scale` for chroma rather than multiplying it.
+    /// Falls back to `--sigma-scale` when not set.
+    ///
+    /// Ignored when chroma is not being denoised, or when `--sigma` pins
+    /// the noise level.
+    #[arg(long)]
+    pub chroma_sigma_scale: Option<f32>,
 
     /// How badly a neighbour frame may match before its patches stop
     /// being trusted.
@@ -219,6 +257,14 @@ impl Nl4dArgs {
             tracing::warn!("--sigma-scale has no effect when --sigma pins the noise level");
         }
 
+        let per_plane_sigma_scale = self.luma_sigma_scale.is_some() || self.chroma_sigma_scale.is_some();
+        if self.sigma.is_some() && per_plane_sigma_scale {
+            tracing::warn!(
+                "--luma-sigma-scale and --chroma-sigma-scale have no effect when --sigma pins the \
+                 noise level"
+            );
+        }
+
         self.warn_on_dead_per_plane_flags(intent);
 
         let temporal_radius = self.temporal_radius(&defaults)?;
@@ -259,6 +305,10 @@ impl Nl4dArgs {
             chroma_strength: None,
             luma_lambda_ht: self.luma_lambda_ht,
             chroma_lambda_ht: self.chroma_lambda_ht,
+            luma_sigma_scale: self.luma_sigma_scale,
+            chroma_sigma_scale: self.chroma_sigma_scale,
+            luma_lambda_ht_scale: self.luma_lambda_ht_scale,
+            chroma_lambda_ht_scale: self.chroma_lambda_ht_scale,
             tuning: self.common.tuning_mode(),
             deterministic: self.common.deterministic,
         };
@@ -276,14 +326,27 @@ impl Nl4dArgs {
     /// Warns when a per-plane override was set but the resolved
     /// `--channel-mode` means it has no effect.
     fn warn_on_dead_per_plane_flags(&self, intent: ChannelIntent) {
-        match intent {
-            ChannelIntent::Luma if self.chroma_lambda_ht.is_some() => {
-                tracing::warn!("--chroma-lambda-ht is ignored when chroma is not being denoised");
-            },
-            ChannelIntent::Chroma if self.luma_lambda_ht.is_some() => {
-                tracing::warn!("--luma-lambda-ht is ignored when luma is not being denoised");
-            },
-            _ => {},
+        let chroma_flags = [
+            ("--chroma-lambda-ht", self.chroma_lambda_ht.is_some()),
+            ("--chroma-lambda-ht-scale", self.chroma_lambda_ht_scale.is_some()),
+            ("--chroma-sigma-scale", self.chroma_sigma_scale.is_some()),
+        ];
+        let luma_flags = [
+            ("--luma-lambda-ht", self.luma_lambda_ht.is_some()),
+            ("--luma-lambda-ht-scale", self.luma_lambda_ht_scale.is_some()),
+            ("--luma-sigma-scale", self.luma_sigma_scale.is_some()),
+        ];
+
+        let (dead_flags, plane) = match intent {
+            ChannelIntent::Luma => (chroma_flags, "chroma"),
+            ChannelIntent::Chroma => (luma_flags, "luma"),
+            ChannelIntent::LumaChroma => return,
+        };
+
+        for (flag, is_set) in dead_flags {
+            if is_set {
+                tracing::warn!("{flag} is ignored when {plane} is not being denoised");
+            }
         }
     }
 }
@@ -798,6 +861,33 @@ mod tests {
 
         assert_eq!(opts.planes.luma_lambda_ht, None);
         assert_eq!(opts.planes.chroma_lambda_ht, None);
+        assert_eq!(opts.planes.luma_sigma_scale, None);
+        assert_eq!(opts.planes.chroma_sigma_scale, None);
+        assert_eq!(opts.planes.luma_lambda_ht_scale, None);
+        assert_eq!(opts.planes.chroma_lambda_ht_scale, None);
+    }
+
+    #[test]
+    fn per_plane_scale_flags_flow_into_cli_options_independently() {
+        let (args, nl4d) = parse(&[
+            "--sigma-scale",
+            "1.1",
+            "--lambda-ht-scale",
+            "0.9",
+            "--luma-sigma-scale",
+            "1.3",
+            "--chroma-lambda-ht-scale",
+            "1.2",
+        ]);
+        let opts = nl4d.build_options(&args).expect("build_options should succeed");
+        let nl4d_options = expect_nl4d(&opts);
+
+        assert_eq!(nl4d_options.sigma_scale, 1.1);
+        assert_eq!(nl4d_options.lambda_ht_scale, 0.9);
+        assert_eq!(opts.planes.luma_sigma_scale, Some(1.3));
+        assert_eq!(opts.planes.chroma_sigma_scale, None);
+        assert_eq!(opts.planes.luma_lambda_ht_scale, None);
+        assert_eq!(opts.planes.chroma_lambda_ht_scale, Some(1.2));
     }
 
     #[test]

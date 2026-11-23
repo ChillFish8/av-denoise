@@ -58,6 +58,20 @@ def test_set_parameters_are_forwarded(fake, monkeypatch):
     assert kwargs == {"preset": "base", "lambda_ht_scale": 1.1}
 
 
+def test_nl4d_forwards_per_plane_scales(fake, monkeypatch):
+    monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
+    Nl4d("clip", luma_sigma_scale=1.2, chroma_lambda_ht_scale=0.9)
+    _, kwargs = fake.calls[0]
+    assert kwargs == {"luma_sigma_scale": 1.2, "chroma_lambda_ht_scale": 0.9}
+
+
+def test_nlmhq_forwards_per_plane_sigma_scales(fake, monkeypatch):
+    monkeypatch.setattr("vsavd._nlmeans_filter", lambda: fake)
+    NlmHQ("clip", luma_sigma_scale=1.2, chroma_sigma_scale=0.8)
+    _, kwargs = fake.calls[0]
+    assert kwargs == {"variant": "hq", "luma_sigma_scale": 1.2, "chroma_sigma_scale": 0.8}
+
+
 def test_nl4d_forwards_noise_map_as_a_bool(fake, monkeypatch):
     monkeypatch.setattr("vsavd._nl4d_filter", lambda: fake)
     Nl4d("clip", noise_map=False)
