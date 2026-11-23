@@ -166,7 +166,10 @@ pub struct AvdsMeta {
     pub frame_rate: (u64, u64),
     pub width: u32,
     pub height: u32,
-    pub bit_depth: u32,
+    /// The integer bit depth the measured video was stored at.
+    ///
+    /// `None` for a float source, which has no whole codes to round to.
+    pub bit_depth: Option<u32>,
     pub subsampling: ChromaLayout,
     pub chroma_siting: ChromaSiting,
     /// Rows in the file.

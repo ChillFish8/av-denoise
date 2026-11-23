@@ -91,6 +91,14 @@ pub struct Av1FgsArgs {
     )]
     pub strength: f64,
 
+    /// The bit depth the source was stored at, between 1 and 16, replacing the one in the file.
+    ///
+    /// The grain strength is read with the source's rounding to whole codes taken into account.
+    /// The file holds the depth for integer sources, and a float source writes none, so nothing is
+    /// rounded unless this is set.
+    #[arg(long, value_name = "BITS", value_parser = parse_bit_depth)]
+    pub bit_depth: Option<u32>,
+
     /// Treat the whole clip's grain as static, one pattern held on every frame.
     #[arg(
         long = "static",
@@ -169,7 +177,12 @@ impl Av1FgsArgs {
             .with_static_scenes(self.static_scenes.clone())
             .with_static_frames(self.static_frames.clone());
 
-        Ok(options)
+        let Some(bit_depth) = self.bit_depth else {
+            return Ok(options);
+        };
+
+        let depth_options = options.with_bit_depth(bit_depth);
+        Ok(depth_options)
     }
 }
 
@@ -269,6 +282,17 @@ fn parse_fine_noise_floor(text: &str) -> Result<f64, String> {
     }
 
     Ok(amount)
+}
+
+fn parse_bit_depth(text: &str) -> Result<u32, String> {
+    let bits: u32 = text
+        .parse()
+        .map_err(|_| format!("{text} is not a whole number"))?;
+    if !(1..=16).contains(&bits) {
+        return Err(format!("{bits} is not between 1 and 16"));
+    }
+
+    Ok(bits)
 }
 
 fn parse_strength(text: &str) -> Result<f64, String> {

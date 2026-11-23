@@ -298,12 +298,18 @@ fn avds_meta(info: &SourceInfo, planes: &PlaneOptions) -> AvdsMeta {
     };
     let writer = format!("av-denoise {}", env!("CARGO_PKG_VERSION"));
 
+    // A float source has no whole codes, so the grain fit has nothing to round to.
+    let bit_depth = match layout.depth {
+        Depth::Float => None,
+        integer => Some(integer.bits() as u32),
+    };
+
     AvdsMeta {
         writer,
         frame_rate,
         width: layout.width,
         height: layout.height,
-        bit_depth: layout.depth.bits() as u32,
+        bit_depth,
         subsampling: layout.subsampling.chroma_layout(),
         chroma_siting: layout.chroma_siting,
         frames: 0,

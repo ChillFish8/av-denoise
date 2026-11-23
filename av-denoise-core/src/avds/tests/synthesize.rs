@@ -91,8 +91,9 @@ fn grain_scene() -> SceneGrain {
 /// The options with the bit depth of `meta`, as [av1_table] fits.
 fn options_for(meta: &AvdsMeta, options: &FitOptions) -> FitOptions {
     let options = options.clone();
+    let bit_depth = meta.bit_depth.expect("the sample file has a bit depth");
 
-    options.with_bit_depth(meta.bit_depth)
+    options.with_bit_depth(bit_depth)
 }
 
 /// Each scaling point over two to its entry's scaling shift, for every entry and plane in turn.
@@ -248,13 +249,56 @@ fn a_bad_bit_depth_is_refused() {
 
     for depth in [0, 17] {
         let mut meta = sample_meta(rows.len() as u64);
-        meta.bit_depth = depth;
+        meta.bit_depth = Some(depth);
 
         let error = av1_table(&meta, rows.clone(), &options).expect_err("the depth is refused");
         let message = error.to_string();
 
         assert!(message.contains("not between 1 and 16"), "got {message}");
     }
+}
+
+#[test]
+fn a_bad_bit_depth_override_is_refused() {
+    let scenes = vec![grain_scene()];
+    let rows = rows_from_scenes(&scenes);
+    let meta = sample_meta(rows.len() as u64);
+    let options = FitOptions::default().with_bit_depth(32);
+
+    let error = av1_table(&meta, rows, &options).expect_err("the depth is refused");
+
+    assert!(error.to_string().contains("not between 1 and 16"), "got {error}");
+}
+
+#[test]
+fn a_file_without_a_bit_depth_rounds_nothing() {
+    let scenes = vec![grain_scene()];
+    let rows = rows_from_scenes(&scenes);
+    let mut meta = sample_meta(rows.len() as u64);
+    meta.bit_depth = None;
+    let options = FitOptions::default().with_chroma(true);
+
+    let table = av1_table(&meta, rows, &options).expect("the table builds");
+    let direct = build_table(&scenes, meta.frame_rate, &options).expect("the table builds");
+
+    assert_eq!(table, direct);
+}
+
+#[test]
+fn a_bit_depth_override_wins_over_the_file() {
+    let scenes = vec![grain_scene()];
+    let rows = rows_from_scenes(&scenes);
+    let mut eight_bit = sample_meta(rows.len() as u64);
+    eight_bit.bit_depth = Some(8);
+    let mut float_source = sample_meta(rows.len() as u64);
+    float_source.bit_depth = None;
+    let options = FitOptions::default().with_chroma(true);
+    let override_options = options.clone().with_bit_depth(8);
+
+    let eight_bit_table = av1_table(&eight_bit, rows.clone(), &options).expect("the table builds");
+    let overridden = av1_table(&float_source, rows, &override_options).expect("the table builds");
+
+    assert_eq!(overridden, eight_bit_table);
 }
 
 #[test]
@@ -319,9 +363,9 @@ fn av1_table_takes_rounding_from_the_bit_depth() {
     let scenes = vec![grain_scene()];
     let rows = rows_from_scenes(&scenes);
     let mut eight_bit = sample_meta(rows.len() as u64);
-    eight_bit.bit_depth = 8;
+    eight_bit.bit_depth = Some(8);
     let mut ten_bit = sample_meta(rows.len() as u64);
-    ten_bit.bit_depth = 10;
+    ten_bit.bit_depth = Some(10);
     let options = FitOptions::default().with_chroma(true);
 
     let eight_bit_table = av1_table(&eight_bit, rows.clone(), &options).expect("the table builds");

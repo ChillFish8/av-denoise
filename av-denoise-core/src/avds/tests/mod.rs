@@ -48,7 +48,7 @@ pub(super) fn sample_meta(frames: u64) -> AvdsMeta {
         frame_rate: (24000, 1001),
         width: 64,
         height: 48,
-        bit_depth: 10,
+        bit_depth: Some(10),
         subsampling: ChromaLayout::Yuv420,
         chroma_siting: ChromaSiting::Left,
         frames,

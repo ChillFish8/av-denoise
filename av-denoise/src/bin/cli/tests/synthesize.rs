@@ -130,7 +130,7 @@ fn write_avds_file(path: &Path, frames: u64, chroma: ChromaRows) {
         frame_rate: (24, 1),
         width: 64,
         height: 48,
-        bit_depth: 10,
+        bit_depth: Some(10),
         subsampling: ChromaLayout::Yuv420,
         chroma_siting: ChromaSiting::Left,
         frames,
@@ -187,6 +187,7 @@ fn av1_fgs(input: PathBuf, output: PathBuf, planes: Vec<GrainPlane>) -> Synthesi
         planes,
         fine_noise_floor: 0.0,
         strength: 1.0,
+        bit_depth: None,
         static_grain: false,
         no_static: false,
         static_scenes: Vec::new(),
@@ -408,6 +409,37 @@ fn strength_must_be_a_number() {
     let message = error.to_string();
 
     assert!(message.contains("is not a number"), "got {message}");
+}
+
+#[test]
+fn bit_depth_defaults_to_the_files() {
+    let av1_fgs = parsed_av1_fgs(&["av1-fgs", "--input", "a", "--output", "b"]);
+
+    let options = av1_fgs.fit_options().expect("luma is accepted");
+
+    assert_eq!(av1_fgs.bit_depth, None);
+    assert_eq!(options.bit_depth, None);
+}
+
+#[test]
+fn bit_depth_reaches_the_fit_options() {
+    let extra = ["av1-fgs", "--input", "a", "--output", "b", "--bit-depth", "8"];
+    let av1_fgs = parsed_av1_fgs(&extra);
+
+    let options = av1_fgs.fit_options().expect("luma is accepted");
+
+    assert_eq!(options.bit_depth, Some(8));
+}
+
+#[test]
+fn bit_depth_outside_one_to_sixteen_is_refused() {
+    for bits in ["0", "17", "32", "ten"] {
+        let extra = ["av1-fgs", "--input", "a", "--output", "b", "--bit-depth", bits];
+        let error = parse(&extra).expect_err("the depth is refused");
+        let message = error.to_string();
+
+        assert!(message.contains("--bit-depth"), "got {message}");
+    }
 }
 
 #[test]

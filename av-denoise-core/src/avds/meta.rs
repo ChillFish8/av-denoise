@@ -16,30 +16,36 @@ pub(super) const FRAMES_KEY: &str = "frames";
 pub(super) const PLANES_MEASURED_KEY: &str = "planes_measured";
 
 /// Every metadata pair except `frames`, which is only known once every row is written.
+///
+/// `bit_depth` is left out when the source has none.
 pub(super) fn metadata_pairs(meta: &AvdsMeta) -> Vec<KeyValue> {
     let (numerator, denominator) = meta.frame_rate;
     let frame_rate = format!("{numerator}/{denominator}");
     let width = meta.width.to_string();
     let height = meta.height.to_string();
-    let bit_depth = meta.bit_depth.to_string();
+    let bit_depth = meta.bit_depth.map(|depth| depth.to_string());
     let subsampling = subsampling_name(meta.subsampling);
     let chroma_siting = siting_name(meta.chroma_siting);
     let planes_measured = meta.planes_measured.name();
 
     let pairs = [
-        (VERSION_KEY, AVDS_VERSION),
-        (WRITER_KEY, meta.writer.as_str()),
-        (FRAME_RATE_KEY, frame_rate.as_str()),
-        (WIDTH_KEY, width.as_str()),
-        (HEIGHT_KEY, height.as_str()),
-        (BIT_DEPTH_KEY, bit_depth.as_str()),
-        (SUBSAMPLING_KEY, subsampling),
-        (CHROMA_SITING_KEY, chroma_siting),
-        (PLANES_MEASURED_KEY, planes_measured),
+        (VERSION_KEY, Some(AVDS_VERSION)),
+        (WRITER_KEY, Some(meta.writer.as_str())),
+        (FRAME_RATE_KEY, Some(frame_rate.as_str())),
+        (WIDTH_KEY, Some(width.as_str())),
+        (HEIGHT_KEY, Some(height.as_str())),
+        (BIT_DEPTH_KEY, bit_depth.as_deref()),
+        (SUBSAMPLING_KEY, Some(subsampling)),
+        (CHROMA_SITING_KEY, Some(chroma_siting)),
+        (PLANES_MEASURED_KEY, Some(planes_measured)),
     ];
 
     let mut key_values = Vec::with_capacity(pairs.len());
     for (key, value) in pairs {
+        let Some(value) = value else {
+            continue;
+        };
+
         let key = key.to_owned();
         let value = value.to_owned();
         let key_value = KeyValue::new(key, value);
@@ -61,7 +67,7 @@ pub(super) fn meta_from_pairs(pairs: &[KeyValue]) -> Result<AvdsMeta, anyhow::Er
     let frame_rate = frame_rate_of(pairs)?;
     let width = number_of(pairs, WIDTH_KEY)?;
     let height = number_of(pairs, HEIGHT_KEY)?;
-    let bit_depth = number_of(pairs, BIT_DEPTH_KEY)?;
+    let bit_depth = optional_number_of(pairs, BIT_DEPTH_KEY)?;
     let frames = number_of(pairs, FRAMES_KEY)?;
 
     let subsampling_text = value_of(pairs, SUBSAMPLING_KEY)?;
@@ -102,6 +108,20 @@ fn number_of<T: std::str::FromStr>(pairs: &[KeyValue], key: &str) -> Result<T, a
     let parsed = text.parse().ok();
 
     parsed.with_context(|| format!("the grain data file's {key} metadata is not a number: {text}"))
+}
+
+/// The number under `key`, or `None` when the file has no such pair.
+fn optional_number_of<T: std::str::FromStr>(
+    pairs: &[KeyValue],
+    key: &str,
+) -> Result<Option<T>, anyhow::Error> {
+    let has_key = pairs.iter().any(|pair| pair.key == key);
+    if !has_key {
+        return Ok(None);
+    }
+
+    let number = number_of(pairs, key)?;
+    Ok(Some(number))
 }
 
 fn frame_rate_of(pairs: &[KeyValue]) -> Result<(u64, u64), anyhow::Error> {

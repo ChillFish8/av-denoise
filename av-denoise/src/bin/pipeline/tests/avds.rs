@@ -208,7 +208,7 @@ fn a_run_with_export_avds_writes_one_row_per_frame() {
     assert_eq!(frames, in_order);
     assert_eq!(meta.frames, CLIP_FRAMES as u64);
     assert_eq!(meta.frame_rate, FRAME_RATE);
-    assert_eq!((meta.width, meta.height, meta.bit_depth), (192, 128, 8));
+    assert_eq!((meta.width, meta.height, meta.bit_depth), (192, 128, Some(8)));
     assert_eq!(meta.subsampling, ChromaLayout::Yuv420);
     assert_eq!(meta.planes_measured, PlanesMeasured::LumaChroma);
     assert!(meta.writer.starts_with("av-denoise "), "got {}", meta.writer);
@@ -269,6 +269,7 @@ fn synthesize_av1_fgs_matches_the_measured_table() {
         planes: vec![GrainPlane::Luma],
         fine_noise_floor: 0.0,
         strength: 1.0,
+        bit_depth: None,
         static_grain: false,
         no_static: false,
         static_scenes: Vec::new(),

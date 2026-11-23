@@ -265,17 +265,18 @@ denoised chroma. Otherwise, the command will log a warning and write luma grain 
 The table's timestamps count the run's output frames from 0 at the source frame rate. It fits
 constant frame rate sources and encodes of the run's output.
 
-| Flag                          | What it does                                                                                                                                                       | Default       |
-|-------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------|
-| `--input <PATH>`              | The grain data file written by `--export-avds`.                                                                                                                    | required      |
-| `--output <PATH>`             | Where to write the table.                                                                                                                                          | required      |
-| `--planes <PLANES>`           | Which planes get grain, `luma` or `luma,chroma`. Chroma alone is refused.                                                                                          | `luma,chroma` |
-| `--fine-noise-floor <AMOUNT>` | How much of the fine scan noise floor, the white part of the grain, is left out of the texture, between 0 and 1. Strength stays as measured. `0` leaves it all in. | `0.5`         |
-| `--strength <FACTOR>`         | A multiple of the source's grain, between 0 and 4. `1` matches the source. A lower value suits an encode that keeps some grain itself.                             | `1`           |
-| `--static`                    | Treat the whole clip's grain as static, one pattern held on every frame.                                                                                           | off           |
-| `--no-static`                 | Turn static grain detection off, so only declared scenes and frames are static.                                                                                    | off           |
-| `--static-scenes <SCENES>`    | Scenes whose grain is static, comma-separated. Each is a scene number or a `first:last` range, as `synthesize report` prints them.                                 | none          |
-| `--static-frames <FRAMES>`    | Frames whose grain is static, comma-separated. Each is a frame number or a `first:last` range, counting output frames from 0.                                      | none          |
+| Flag                          | What it does                                                                                                                                                                                                   | Default       |
+|-------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------|
+| `--input <PATH>`              | The grain data file written by `--export-avds`.                                                                                                                                                                | required      |
+| `--output <PATH>`             | Where to write the table.                                                                                                                                                                                      | required      |
+| `--planes <PLANES>`           | Which planes get grain, `luma` or `luma,chroma`. Chroma alone is refused.                                                                                                                                      | `luma,chroma` |
+| `--fine-noise-floor <AMOUNT>` | How much of the fine scan noise floor, the white part of the grain, is left out of the texture, between 0 and 1. Strength stays as measured. `0` leaves it all in.                                             | `0.5`         |
+| `--strength <FACTOR>`         | A multiple of the source's grain, between 0 and 4. `1` matches the source. A lower value suits an encode that keeps some grain itself.                                                                         | `1`           |
+| `--bit-depth <BITS>`          | The bit depth the source was stored at, between 1 and 16, so the strength reading allows for its rounding. Replaces the depth in the file. Float sources store none, so nothing is rounded unless this is set. | from the file |
+| `--static`                    | Treat the whole clip's grain as static, one pattern held on every frame.                                                                                                                                       | off           |
+| `--no-static`                 | Turn static grain detection off, so only declared scenes and frames are static.                                                                                                                                | off           |
+| `--static-scenes <SCENES>`    | Scenes whose grain is static, comma-separated. Each is a scene number or a `first:last` range, as `synthesize report` prints them.                                                                             | none          |
+| `--static-frames <FRAMES>`    | Frames whose grain is static, comma-separated. Each is a frame number or a `first:last` range, counting output frames from 0.                                                                                  | none          |
 
 
 _Example command producing a grain table with grain at about 80% strength from what the measurement read:_

@@ -9,7 +9,7 @@ use parquet::file::metadata::KeyValue;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 
 use super::{Measured, file_of, sample_meta, scenes_of, written_file};
-use crate::avds::meta::{FRAMES_KEY, VERSION_KEY, metadata_pairs};
+use crate::avds::meta::{BIT_DEPTH_KEY, FRAMES_KEY, VERSION_KEY, metadata_pairs};
 use crate::avds::schema::{arrow_schema, columns, writer_properties};
 use crate::avds::write::record_batch;
 use crate::avds::{AvdsFrame, AvdsGroup, read_avds, read_avds_groups, rows_from_scenes, scenes_from_rows};
@@ -105,6 +105,39 @@ fn frames_metadata_counts_the_rows_written() {
     let (read_meta, _) = read_avds(file).expect("the file reads");
 
     assert_eq!(read_meta.frames, 10);
+}
+
+#[test]
+fn a_missing_bit_depth_round_trips_as_none() {
+    let scenes = scenes_of(&[4], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let mut meta = sample_meta(rows.len() as u64);
+    meta.bit_depth = None;
+    let file = written_file(&meta, &rows);
+
+    let pairs = metadata_pairs(&meta);
+    let (read_meta, _) = read_avds(file).expect("the file reads");
+
+    assert!(pairs.iter().all(|pair| pair.key != BIT_DEPTH_KEY));
+    assert_eq!(read_meta.bit_depth, None);
+}
+
+#[test]
+fn a_bit_depth_that_is_not_a_number_is_refused() {
+    let scenes = scenes_of(&[4], Measured::ALL);
+    let rows = rows_from_scenes(&scenes);
+    let batch = sample_batch(&rows);
+    let mut pairs = pairs_with_frames(rows.len() as u64);
+    for pair in &mut pairs {
+        if pair.key == BIT_DEPTH_KEY {
+            pair.value = Some("float".to_owned());
+        }
+    }
+    let file = raw_file(&batch, pairs);
+
+    let error = read_avds(file).expect_err("the bit depth is refused");
+
+    assert!(error.to_string().contains(BIT_DEPTH_KEY), "got {error}");
 }
 
 #[test]

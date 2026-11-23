@@ -58,9 +58,10 @@ fn has_chroma_frame_counts(row: &AvdsFrame) -> bool {
 
 /// The AV1 film grain table the rows describe, with the grain mode of every frame.
 ///
-/// The fit reads each strength through curves rounded to the file's bit depth. Fails when the
-/// file's frame rate has a zero part, when the strength is not between 0 and 4, when its bit depth
-/// is not between 1 and 16, when the fine noise share is not between 0 and 1, when the rows hold
+/// The fit reads each strength through curves rounded to a bit depth. That is `options.bit_depth`
+/// when set, or else the file's. With neither, nothing is rounded. Fails when the file's frame rate
+/// has a zero part, when the strength is not between 0 and 4, when the bit depth in use is not
+/// between 1 and 16, when the fine noise share is not between 0 and 1, when the rows hold
 /// frames but none of them has the luma table measurements, when a static range is reversed or past
 /// the end, or when chroma grain is on and [chroma_unavailable] gives a reason.
 pub fn av1_table(
@@ -78,9 +79,11 @@ pub fn av1_table(
         anyhow::bail!("the grain strength {strength} is not between 0 and {MAX_STRENGTH}");
     }
 
-    let bit_depth = meta.bit_depth;
-    if !(1..=16).contains(&bit_depth) {
-        anyhow::bail!("the grain data file's bit depth {bit_depth} is not between 1 and 16");
+    let bit_depth = options.bit_depth.or(meta.bit_depth);
+    if let Some(depth) = bit_depth
+        && !(1..=16).contains(&depth)
+    {
+        anyhow::bail!("the bit depth {depth} is not between 1 and 16");
     }
 
     let fine_noise = options.fine_noise;
@@ -101,7 +104,10 @@ pub fn av1_table(
     }
 
     let scenes = scenes_from_rows(rows);
-    let depth_options = options.clone().with_bit_depth(meta.bit_depth);
+    let depth_options = FitOptions {
+        bit_depth,
+        ..options.clone()
+    };
 
     build_table(&scenes, meta.frame_rate, &depth_options)
 }
