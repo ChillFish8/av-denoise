@@ -64,17 +64,20 @@ pub struct Av1FgsArgs {
     #[arg(long, value_enum, value_delimiter = ',', default_value = "luma,chroma")]
     pub planes: Vec<GrainPlane>,
 
-    /// The share of the fine, fresh scan noise moved out of the grain's texture, between 0 and 1.
+    /// How much of the fine, fresh scan noise floor is left out of the grain's texture, between 0
+    /// and 1.
     ///
-    /// The grain keeps its measured strength. 0 leaves the texture as measured.
+    /// The floor is the white, uncorrelated part of the measured grain. A higher value keeps more of
+    /// it out of the modelled texture. The grain keeps its measured strength. 0 leaves the texture
+    /// as measured.
     #[arg(
         long,
         value_name = "AMOUNT",
         default_value_t = DEFAULT_FINE_NOISE,
-        value_parser = parse_fine_noise,
+        value_parser = parse_fine_noise_floor,
         allow_negative_numbers = true
     )]
-    pub fine_noise: f64,
+    pub fine_noise_floor: f64,
 
     /// How strong the grain is, as a multiple of the source's, between 0 and 4.
     ///
@@ -159,7 +162,7 @@ impl Av1FgsArgs {
         } else {
             StaticGrain::Detect
         };
-        let options = FitOptions::with_fine_noise(self.fine_noise)
+        let options = FitOptions::with_fine_noise(self.fine_noise_floor)
             .with_chroma(chroma)
             .with_strength(self.strength)
             .with_static_grain(static_grain)
@@ -259,7 +262,7 @@ pub(super) fn read_file(
         .with_context(|| format!("unable to read the grain data file at {shown_path}"))
 }
 
-fn parse_fine_noise(text: &str) -> Result<f64, String> {
+fn parse_fine_noise_floor(text: &str) -> Result<f64, String> {
     let amount: f64 = text.parse().map_err(|_| format!("{text} is not a number"))?;
     if !(0.0..=1.0).contains(&amount) {
         return Err(format!("{amount} is not between 0 and 1"));

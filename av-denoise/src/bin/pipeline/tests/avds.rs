@@ -263,7 +263,7 @@ fn synthesize_av1_fgs_matches_the_measured_table() {
         input: path,
         output: synthesized_path.clone(),
         planes: vec![GrainPlane::Luma],
-        fine_noise: 0.0,
+        fine_noise_floor: 0.0,
         strength: 1.0,
         static_grain: false,
         no_static: false,

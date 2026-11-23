@@ -185,7 +185,7 @@ fn av1_fgs(input: PathBuf, output: PathBuf, planes: Vec<GrainPlane>) -> Synthesi
         input,
         output,
         planes,
-        fine_noise: 0.0,
+        fine_noise_floor: 0.0,
         strength: 1.0,
         static_grain: false,
         no_static: false,
@@ -223,7 +223,7 @@ fn planes_default_to_luma_and_chroma() {
     assert_eq!(av1_fgs.input, PathBuf::from("run.avds"));
     assert_eq!(av1_fgs.output, PathBuf::from("grain.tbl"));
     assert_eq!(av1_fgs.planes, [GrainPlane::Luma, GrainPlane::Chroma]);
-    assert_eq!(av1_fgs.fine_noise, 0.5);
+    assert_eq!(av1_fgs.fine_noise_floor, 0.5);
 }
 
 #[test]
@@ -245,8 +245,16 @@ fn planes_reach_the_fit_options() {
 }
 
 #[test]
-fn fine_noise_reaches_the_fit_options() {
-    let extra = ["av1-fgs", "--input", "a", "--output", "b", "--fine-noise", "0.6"];
+fn fine_noise_floor_reaches_the_fit_options() {
+    let extra = [
+        "av1-fgs",
+        "--input",
+        "a",
+        "--output",
+        "b",
+        "--fine-noise-floor",
+        "0.6",
+    ];
     let av1_fgs = parsed_av1_fgs(&extra);
 
     let options = av1_fgs.fit_options().expect("luma is accepted");
@@ -255,7 +263,7 @@ fn fine_noise_reaches_the_fit_options() {
 }
 
 #[test]
-fn av1_fgs_parses_planes_and_fine_noise() {
+fn av1_fgs_parses_planes_and_fine_noise_floor() {
     let extra = [
         "av1-fgs",
         "--input",
@@ -264,13 +272,13 @@ fn av1_fgs_parses_planes_and_fine_noise() {
         "grain.tbl",
         "--planes",
         "luma,chroma",
-        "--fine-noise",
+        "--fine-noise-floor",
         "0.75",
     ];
     let av1_fgs = parsed_av1_fgs(&extra);
 
     assert_eq!(av1_fgs.planes, [GrainPlane::Luma, GrainPlane::Chroma]);
-    assert_eq!(av1_fgs.fine_noise, 0.75);
+    assert_eq!(av1_fgs.fine_noise_floor, 0.75);
 }
 
 #[test]
@@ -331,18 +339,34 @@ fn report_parses_its_paths() {
 }
 
 #[test]
-fn fine_noise_outside_zero_to_one_is_refused() {
+fn fine_noise_floor_outside_zero_to_one_is_refused() {
     for amount in ["-0.1", "1.5", "lots", "NaN"] {
-        let extra = ["av1-fgs", "--input", "a", "--output", "b", "--fine-noise", amount];
+        let extra = [
+            "av1-fgs",
+            "--input",
+            "a",
+            "--output",
+            "b",
+            "--fine-noise-floor",
+            amount,
+        ];
         let error = parse(&extra).expect_err("the amount is refused");
         let message = error.to_string();
 
-        assert!(message.contains("--fine-noise"), "got {message}");
+        assert!(message.contains("--fine-noise-floor"), "got {message}");
     }
 
     let edges = ["0", "1"];
     for amount in edges {
-        let extra = ["av1-fgs", "--input", "a", "--output", "b", "--fine-noise", amount];
+        let extra = [
+            "av1-fgs",
+            "--input",
+            "a",
+            "--output",
+            "b",
+            "--fine-noise-floor",
+            amount,
+        ];
         let parsed = parse(&extra);
 
         assert!(parsed.is_ok(), "{amount} is refused");
