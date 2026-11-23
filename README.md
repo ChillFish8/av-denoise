@@ -149,7 +149,10 @@ This primarily has the following impacts:
 Since both the CUDA and ROCm backends are very heavy in terms of dependencies, I recommend just using the `vulkan`
 backend for those devices. It should be more or less the same performance, without all the library headache.
 
-#### Compiled kernel cache
+#### Cache directory
+
+Everything av-denoise writes to disk lives in one cache directory. That is the compiled kernels, the kernel
+tuning results and, on CUDA builds, the bundled `libdevice.10.bc`.
 
 Compiling the kernels takes about ten seconds when you first start the denoising pipeline. 
 These compiled kernels get cached on disk, which makes that a cost paid once per machine rather than once per run.
@@ -160,13 +163,14 @@ back to `av-denoise` inside the temporary directory and warns.
 
 The cache directory holds one subdirectory per build of the kernels, named by a hash of their sources. A new build
 compiles its kernels once into its own subdirectory, and subdirectories left by other builds are removed after a week
-without use.
+without use. CUDA builds keep libdevice in its `cuda` subdirectory, unless `CUDA_PATH` already points at a toolkit.
 
-- `AV_DENOISE_COMPILATION_CACHE=/some/dir` puts the compiled-kernel and autotune caches somewhere else, which is
-  what CI runs use to keep the cache on a persistent volume. It overrides whatever is in `cubecl.toml`.
-- `AV_DENOISE_COMPILATION_CACHE=off` disables caching entirely. Use this when benchmarking, because a warm cache
-  hides the compilation cost a first run pays. Kernel tuning results live in the cache too, so with caching off
-  every run tunes from scratch and stores nothing.
+- `AV_DENOISE_CACHE=/some/dir` moves the whole cache directory somewhere else, which is what CI runs use to keep
+  the cache on a persistent volume. It overrides whatever is in `cubecl.toml`.
+- `AV_DENOISE_CACHE=off` disables kernel caching. Use this when benchmarking, because a warm cache hides the
+  compilation cost a first run pays. Kernel tuning results live in the cache too, so with caching off every run
+  tunes from scratch and stores nothing. CUDA builds still need libdevice on disk, so it stays in the default
+  directory.
 
 If the cache directory cannot be created, `av-denoise` logs a warning and carries on without a cache.
 

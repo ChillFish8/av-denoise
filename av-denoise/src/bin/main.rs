@@ -105,7 +105,7 @@ fn main() -> anyhow::Result<()> {
         Ok(Some(path)) => tracing::info!(?path, "caching compiled kernels"),
         Ok(None) => tracing::info!(
             "kernel caching is off, every run recompiles. Unset {} to turn it back on.",
-            av_denoise::COMPILATION_CACHE_ENV,
+            av_denoise::CACHE_ENV,
         ),
         Err(error) => {
             let error = anyhow::Error::new(error).context("unable to install the kernel cache");

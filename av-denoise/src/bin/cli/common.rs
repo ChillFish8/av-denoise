@@ -65,7 +65,7 @@ pub struct CommonArgs {
     /// `off` always runs the untuned kernels.
     ///
     /// Tuning carries over between runs only while the compilation cache is on. With
-    /// `AV_DENOISE_COMPILATION_CACHE=off`, every run tunes from scratch and stores nothing.
+    /// `AV_DENOISE_CACHE=off`, every run tunes from scratch and stores nothing.
     ///
     /// Some tuned kernels add in a different order, so output can differ from `off` by rounding, and
     /// `--deterministic` keeps it bit identical.

@@ -176,7 +176,7 @@ def test_auto_tuning_runs_in_the_first_frame_request(tmp_path):
     import sys
 
     env = {key: value for key, value in os.environ.items() if key != "AV_DENOISE_TUNE"}
-    env["AV_DENOISE_COMPILATION_CACHE"] = str(tmp_path)
+    env["AV_DENOISE_CACHE"] = str(tmp_path)
 
     result = subprocess.run(
         [sys.executable, "-c", _TUNE_SCRIPT],

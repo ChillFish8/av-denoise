@@ -2,7 +2,6 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use etcetera::BaseStrategy;
 
 #[cfg(windows)]
 const LIBDEVICE: &[u8] = include_bytes!(concat!(
@@ -23,9 +22,9 @@ fn temp_name() -> String {
     format!("{FILE_NAME}.{}.partial", std::process::id())
 }
 
-/// The directory the bundled libdevice is installed into, used as a `CUDA_PATH`.
-fn bundled_root(cache_dir: &Path) -> PathBuf {
-    cache_dir.join("av-denoise").join("cuda")
+/// The directory under the data root the bundled libdevice is installed into, used as a `CUDA_PATH`.
+fn bundled_root(data_root: &Path) -> PathBuf {
+    data_root.join("cuda")
 }
 
 /// Writes libdevice under `root/nvvm/libdevice`, unless a copy of the right size is there.
@@ -53,9 +52,10 @@ fn should_install(cuda_path: Option<&OsStr>) -> bool {
     cuda_path.is_none()
 }
 
-/// Installs the bundled libdevice into the cache and points `CUDA_PATH` at it.
+/// Installs the bundled libdevice into the data root and points `CUDA_PATH` at it.
 ///
-/// A `CUDA_PATH` that is already set is left alone.
+/// A `CUDA_PATH` that is already set is left alone. The data root is
+/// [cache_root](av_denoise::cache_root), so `AV_DENOISE_CACHE` moves libdevice too.
 ///
 /// # Safety
 ///
@@ -66,9 +66,8 @@ pub unsafe fn point_cuda_path_at_bundle() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let strategy = etcetera::choose_base_strategy().context("no cache directory")?;
-    let cache_dir = strategy.cache_dir();
-    let root = bundled_root(cache_dir.as_path());
+    let data_root = av_denoise::cache_root();
+    let root = bundled_root(&data_root);
     install_libdevice(&root, LIBDEVICE).context("cannot write libdevice")?;
 
     // SAFETY: forwarded from this function's own precondition.
@@ -82,8 +81,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_bundle_lives_under_av_denoise_cuda() {
-        let root = bundled_root(Path::new("/cache"));
+    fn the_bundle_lives_under_the_data_roots_cuda_directory() {
+        let root = bundled_root(Path::new("/cache/av-denoise"));
         assert_eq!(root, Path::new("/cache/av-denoise/cuda"));
     }
 

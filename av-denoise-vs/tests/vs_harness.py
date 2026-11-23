@@ -28,7 +28,7 @@ import vapoursynth as vs
 # run` subprocess it launches for the CLI side. Set unconditionally,
 # before `core.std.LoadPlugin` runs in `main`, since CubeCL locks its
 # global config the moment the first denoiser is created.
-os.environ["AV_DENOISE_COMPILATION_CACHE"] = "off"
+os.environ["AV_DENOISE_CACHE"] = "off"
 
 core = vs.core
 
@@ -454,7 +454,7 @@ PARITY_CLIP = pathlib.Path(__file__).parent / "parity-clip.y4m"
 
 def _render_cli_to(out_file, cli_args):
     """Runs the CLI over the parity clip, writing its y4m output to `out_file`."""
-    env = dict(os.environ, AV_DENOISE_COMPILATION_CACHE="off")
+    env = dict(os.environ, AV_DENOISE_CACHE="off")
     command = [
         "cargo", "run", "--release",
         "-p", "av-denoise", "--features", "binary", "--",

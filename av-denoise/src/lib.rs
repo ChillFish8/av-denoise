@@ -59,8 +59,9 @@ pub use av_denoise_core::{
 
 pub use self::backend::{Device, accelerate, device, enumerate, sniff};
 pub use self::cache::{
-    COMPILATION_CACHE_ENV,
+    CACHE_ENV,
     CacheError,
+    cache_root,
     compilation_cache_dir,
     default_cache_dir,
     install_compilation_cache,

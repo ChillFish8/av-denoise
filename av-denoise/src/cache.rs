@@ -1,10 +1,13 @@
-//! Where CubeCL keeps its compiled kernels
+//! Where av-denoise keeps the data it persists
+//!
+//! Everything av-denoise writes to disk lives under [cache_root], which is [default_cache_dir] or
+//! the directory named by the `AV_DENOISE_CACHE` environment variable. That covers the compiled
+//! kernels, the tuning results and the bundled CUDA libdevice.
 //!
 //! Compiling the kernels was measured at about ten seconds, and CubeCL caches nothing by default.
-//! [install_compilation_cache] points it at [default_cache_dir], or at the directory named by the
-//! `AV_DENOISE_COMPILATION_CACHE` environment variable, so that cost is paid once per machine rather
-//! than once per run. Setting that variable to `off` disables caching,
-//! which benchmarks want because a warm cache hides the compile cost a first run pays.
+//! [install_compilation_cache] points it at the cache root, so that cost is paid once per machine
+//! rather than once per run. Setting `AV_DENOISE_CACHE` to `off` disables kernel caching, which
+//! benchmarks want because a warm cache hides the compile cost a first run pays.
 //!
 //! Each build of the kernels gets its own subdirectory, and an install removes other builds'
 //! subdirectories once they have gone unused for a week.
@@ -35,11 +38,12 @@ use cubecl::config::cache::CacheConfig;
 use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 use etcetera::base_strategy::{BaseStrategy, choose_base_strategy};
 
-/// The environment variable that overrides where compiled kernels are cached, or turns caching off.
+/// The environment variable that overrides where av-denoise keeps its data, or turns kernel caching
+/// off.
 ///
-/// Tuning results are stored in the same directory. With caching off, every run tunes from scratch
-/// and stores nothing.
-pub const COMPILATION_CACHE_ENV: &str = "AV_DENOISE_COMPILATION_CACHE";
+/// Compiled kernels, tuning results and the bundled CUDA libdevice all live in that directory. With
+/// caching off, every run compiles and tunes from scratch, and libdevice goes to [default_cache_dir].
+pub const CACHE_ENV: &str = "AV_DENOISE_CACHE";
 
 /// Where compiled kernels are cached, once an install has settled it.
 static CACHE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -56,7 +60,7 @@ pub(crate) const KERNEL_HASH: &str = av_denoise_core::KERNEL_HASH;
 /// How long another build's subdirectory can go unused before an install removes it.
 const STALE_BUILD_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// The values of [COMPILATION_CACHE_ENV] that turn caching off, compared without regard to case.
+/// The values of [CACHE_ENV] that turn caching off, compared without regard to case.
 ///
 /// `off` is the documented spelling. The others stop a reasonable guess from silently creating a
 /// directory named `0`.
@@ -79,7 +83,7 @@ pub enum CacheError {
 
 /// Where compiled kernels go.
 ///
-/// [Disabled](CacheLocation::Disabled) is reachable only when [COMPILATION_CACHE_ENV] names one of
+/// [Disabled](CacheLocation::Disabled) is reachable only when [CACHE_ENV] names one of
 /// [DISABLE_WORDS]. Every platform has a default directory, so nothing else produces it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CacheLocation {
@@ -100,6 +104,26 @@ pub fn default_cache_dir() -> PathBuf {
 
 fn resolve_default_dir(platform_cache: Option<PathBuf>, temp_dir: PathBuf) -> PathBuf {
     platform_cache.unwrap_or(temp_dir).join(CACHE_DIR_NAME)
+}
+
+/// The directory av-denoise keeps all of its persisted data in.
+///
+/// This is the directory [CACHE_ENV] names, or [default_cache_dir] when it is unset. With caching
+/// off it is still [default_cache_dir], because the CUDA backend needs its bundled libdevice on
+/// disk to run at all.
+pub fn cache_root() -> PathBuf {
+    let env_override = std::env::var_os(CACHE_ENV);
+    let location = resolve_cache_location(env_override.as_deref(), default_cache_dir);
+
+    root_of(location)
+}
+
+/// The data directory for `location`, which is the default directory when caching is off.
+fn root_of(location: CacheLocation) -> PathBuf {
+    match location {
+        CacheLocation::Dir(root) => root,
+        CacheLocation::Disabled => default_cache_dir(),
+    }
 }
 
 /// Decides where compiled kernels go from a default and the environment override alone.
@@ -150,7 +174,7 @@ pub fn install_compilation_cache_at(dir: &Path) -> Result<(), CacheError> {
     Ok(())
 }
 
-/// Installs the cache at [default_cache_dir], or the directory [COMPILATION_CACHE_ENV] names.
+/// Installs the cache at [default_cache_dir], or the directory [CACHE_ENV] names.
 ///
 /// Returns this build's subdirectory of that root, or `Ok(None)` when the variable disables caching.
 ///
@@ -158,7 +182,7 @@ pub fn install_compilation_cache_at(dir: &Path) -> Result<(), CacheError> {
 /// works without a cache. A caller that wants that failure reported should use
 /// [install_compilation_cache_at].
 pub fn install_compilation_cache() -> Result<Option<PathBuf>, CacheError> {
-    let env_override = std::env::var_os(COMPILATION_CACHE_ENV);
+    let env_override = std::env::var_os(CACHE_ENV);
     let location = resolve_cache_location(env_override.as_deref(), default_cache_dir);
 
     let CacheLocation::Dir(root) = location else {
@@ -376,6 +400,22 @@ mod tests {
         let location = resolve_cache_location(Some(&env), || PathBuf::from("/home/u/.cache/av-denoise"));
 
         assert_eq!(location, CacheLocation::Dir(expected));
+    }
+
+    #[test]
+    fn the_data_root_is_the_override_when_one_is_set() {
+        let location = CacheLocation::Dir(PathBuf::from("/mnt/cache"));
+
+        let root = root_of(location);
+
+        assert_eq!(root, PathBuf::from("/mnt/cache"));
+    }
+
+    #[test]
+    fn the_data_root_falls_back_to_the_default_when_caching_is_off() {
+        let root = root_of(CacheLocation::Disabled);
+
+        assert_eq!(root, default_cache_dir());
     }
 
     #[test]
