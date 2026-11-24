@@ -7,7 +7,9 @@ use crate::collab::kernels::aggregate::{
     WEIGHT_GAIN,
     collab_normalise,
     collab_zero_accum,
+    expand_weight_map,
     kaiser_window,
+    spread_weight_map,
     weight_scale,
 };
 use crate::collab::kernels::fused::{CollabVariant, collab_fused};
@@ -17,17 +19,25 @@ use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 use crate::noise::tests::{CollabNoise, collab_noise_buffer};
 use crate::noise::{DERIVED_WORDS, NOISE_CURVE_BINS};
 
-/// Runs [collab_normalise] over hand-built accumulators.
-fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32) -> Vec<f32> {
+/// Runs [collab_normalise] over a hand-built accumulator and patch-weight map, through `kaiser`.
+fn run_normalise(
+    accum_host: &[i32],
+    map_host: &[i32],
+    width: u32,
+    height: u32,
+    kaiser: &[f32; 8],
+) -> Vec<f32> {
     let pixels = (width * height) as usize;
     assert_eq!(accum_host.len(), pixels);
-    assert_eq!(wsum_host.len(), pixels);
+    assert_eq!(map_host.len(), pixels);
 
     let client = make_client();
     let accum_bytes = i32::as_bytes(accum_host);
-    let wsum_bytes = i32::as_bytes(wsum_host);
+    let map_bytes = i32::as_bytes(map_host);
+    let kaiser_bytes = f32::as_bytes(kaiser);
     let accum = client.create_from_slice(accum_bytes);
-    let wsum = client.create_from_slice(wsum_bytes);
+    let map = client.create_from_slice(map_bytes);
+    let kaiser_buf = client.create_from_slice(kaiser_bytes);
     let output = client.empty(pixels * size_of::<f32>());
 
     let blocks_x = width.div_ceil(BLOCK_X);
@@ -42,7 +52,8 @@ fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32)
             dim,
             1usize,
             BufferArg::from_raw_parts(accum, pixels),
-            BufferArg::from_raw_parts(wsum, pixels),
+            BufferArg::from_raw_parts(map, pixels),
+            BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             BufferArg::from_raw_parts(output.clone(), pixels),
             0u32,
             width,
@@ -56,6 +67,25 @@ fn run_normalise(accum_host: &[i32], wsum_host: &[i32], width: u32, height: u32)
     f32::from_bytes(&output_bytes)[..pixels].to_vec()
 }
 
+/// A weight map with `weight(tile)` at the origin of every `PATCH_SIZE` tile, so with an all-ones
+/// window each pixel's weight sum is exactly its own tile's weight.
+fn tiled_map(width: u32, height: u32, weight: impl Fn(usize) -> i32) -> Vec<i32> {
+    let mut map = vec![0i32; (width * height) as usize];
+    let tiles_x = width.div_ceil(PATCH_SIZE) as usize;
+    for y in (0..height).step_by(PATCH_SIZE as usize) {
+        for x in (0..width).step_by(PATCH_SIZE as usize) {
+            let tile = (y / PATCH_SIZE) as usize * tiles_x + (x / PATCH_SIZE) as usize;
+            map[(y * width + x) as usize] = weight(tile);
+        }
+    }
+    map
+}
+
+fn tile_of(i: usize, width: u32) -> usize {
+    let (x, y) = ((i as u32) % width, (i as u32) / width);
+    (y / PATCH_SIZE) as usize * width.div_ceil(PATCH_SIZE) as usize + (x / PATCH_SIZE) as usize
+}
+
 #[test]
 fn normalise_divides_one_accumulator_by_the_other() {
     let (width, height) = (21u32, 16u32);
@@ -64,13 +94,14 @@ fn normalise_divides_one_accumulator_by_the_other() {
     // Varied fills, so a transposed index or a dropped pixel changes the answer rather than vanishing
     // into a fixed point.
     let accum: Vec<i32> = (0..pixels).map(|i| (i as i32 % 97) * 1000 - 4000).collect();
-    let wsum: Vec<i32> = (0..pixels).map(|i| (i as i32 % 13) + 1).collect();
+    let tile_weight = |tile: usize| (tile as i32 % 13) + 1;
+    let map = tiled_map(width, height, tile_weight);
 
-    let got = run_normalise(&accum, &wsum, width, height);
+    let got = run_normalise(&accum, &map, width, height, &kaiser_window(0.0));
 
     for i in 0..pixels {
-        // `wsum` counts at `WEIGHT_GAIN` times `accum`'s scale, the one factor that does not cancel.
-        let want = accum[i] as f32 * WEIGHT_GAIN / wsum[i] as f32;
+        // The weight counts at `WEIGHT_GAIN` times `accum`'s scale, the one factor that does not cancel.
+        let want = accum[i] as f32 * WEIGHT_GAIN / tile_weight(tile_of(i, width)) as f32;
         // Relative, because the ratios run into the thousands and a single-precision divide is only
         // good to about 1e-7 of the value.
         assert!(
@@ -91,12 +122,41 @@ fn normalise_cancels_the_fixed_point_scale() {
     let covering = 7;
 
     let accum = vec![((value * weight * ACCUM_SCALE) as i32) * covering; pixels];
-    let wsum = vec![((weight * ACCUM_SCALE * WEIGHT_GAIN) as i32) * covering; pixels];
+    let map = tiled_map(width, height, |_| {
+        ((weight * ACCUM_SCALE * WEIGHT_GAIN) as i32) * covering
+    });
 
-    let got = run_normalise(&accum, &wsum, width, height);
+    let got = run_normalise(&accum, &map, width, height, &kaiser_window(0.0));
 
     for (i, &pixel) in got.iter().enumerate() {
         assert!((pixel - value).abs() < 1e-4, "idx={i}: want {value} got {pixel}");
+    }
+}
+
+/// Every origin reaches the pixels up to 7 right and down of it, each through the window tap at its
+/// offset, which is what the old per-pixel weight scatter added.
+#[test]
+fn normalise_spreads_each_origin_through_the_window() {
+    let (width, height) = (37u32, 29u32);
+    let pixels = (width * height) as usize;
+    let kaiser = kaiser_window(2.0);
+
+    // Varied origin weights, compared with the unrounded host model.
+    let map: Vec<i32> = (0..pixels)
+        .map(|i| ((i * 7919) % 1000) as i32 * 1000 + 100_000)
+        .collect();
+    let accum = vec![1_000_000_000i32; pixels];
+
+    let got = run_normalise(&accum, &map, width, height, &kaiser);
+    let spread = spread_weight_map(&map, width, height, &kaiser);
+
+    for i in 0..pixels {
+        let want = accum[i] as f64 * WEIGHT_GAIN as f64 / spread[i];
+        assert!(
+            (got[i] as f64 - want).abs() <= want.abs() * 1e-5,
+            "idx={i}: want {want} got {}",
+            got[i]
+        );
     }
 }
 
@@ -106,9 +166,9 @@ fn a_zero_weight_sum_returns_the_accumulator_rather_than_a_nan() {
     let pixels = (width * height) as usize;
 
     let accum = vec![1234i32; pixels];
-    let wsum = vec![0i32; pixels];
+    let map = vec![0i32; pixels];
 
-    let got = run_normalise(&accum, &wsum, width, height);
+    let got = run_normalise(&accum, &map, width, height, &kaiser_window(0.0));
 
     for (i, &pixel) in got.iter().enumerate() {
         assert!(pixel.is_finite(), "idx={i}: expected a finite value, got {pixel}");
@@ -317,7 +377,7 @@ fn run_scatter_stage_windowed(
             BufferArg::from_raw_parts(zero_curve.clone(), 1),
             BufferArg::from_raw_parts(zero_curve, 1),
             BufferArg::from_raw_parts(profile_buf, 8),
-            BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
+            BufferArg::from_raw_parts(kaiser_buf.clone(), PATCH_SIZE as usize),
             BufferArg::from_raw_parts(accum.clone(), pixels),
             BufferArg::from_raw_parts(wsum.clone(), pixels),
             BufferArg::from_raw_parts(group_weight, refs),
@@ -349,15 +409,16 @@ fn run_scatter_stage_windowed(
         );
     }
 
-    // Normalise zeroes the region it reads, so the weight sum is read before it runs.
+    // The scatter leaves a patch-weight map, which is spread into per-pixel sums on the host.
     let wsum_handle = wsum.clone();
     let wsum_bytes = client.read_one(wsum_handle).expect("wsum readback failed");
-    let weight_sum = i32::from_bytes(&wsum_bytes)[..pixels].to_vec();
+    let weight_sum = expand_weight_map(&i32::from_bytes(&wsum_bytes)[..pixels], width, height, &kaiser);
     let output_launched = output.clone();
 
     unsafe {
         let accum_arg = BufferArg::from_raw_parts(accum, pixels);
         let wsum_arg = BufferArg::from_raw_parts(wsum, pixels);
+        let kaiser_arg = BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize);
         let output_arg = BufferArg::from_raw_parts(output_launched, pixels);
 
         collab_normalise::launch_unchecked(
@@ -367,6 +428,7 @@ fn run_scatter_stage_windowed(
             1usize,
             accum_arg,
             wsum_arg,
+            kaiser_arg,
             output_arg,
             0u32,
             width,

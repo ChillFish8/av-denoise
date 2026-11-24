@@ -13,7 +13,13 @@ use cubecl::server::Handle;
 
 use super::helpers::{make_client, make_unique_frame, noisy_flat_field};
 use crate::collab::geometry::{fused_cubes_x, ref_count, ref_pos, refs_along};
-use crate::collab::kernels::aggregate::{WEIGHT_GAIN, cross_frame_accum_scale, kaiser_window, weight_scale};
+use crate::collab::kernels::aggregate::{
+    WEIGHT_GAIN,
+    cross_frame_accum_scale,
+    expand_weight_map,
+    kaiser_window,
+    weight_scale,
+};
 use crate::collab::kernels::fused::{CollabVariant, collab_fused};
 use crate::collab::kernels::transforms::dct_noise_profile;
 use crate::collab::{PATCH_SIZE, grid_frames};
@@ -471,7 +477,12 @@ pub(super) fn read_back(handles: Buffers, setup: &Setup) -> Aggregated {
 
     Aggregated {
         accum: i32::from_bytes(&accum_bytes)[..handles.accum_len].to_vec(),
-        wsum: i32::from_bytes(&wsum_bytes)[..handles.wsum_len].to_vec(),
+        wsum: expand_weight_map(
+            &i32::from_bytes(&wsum_bytes)[..handles.wsum_len],
+            setup.width,
+            setup.height,
+            &kaiser_window(setup.kaiser_beta),
+        ),
         group_weight: f32::from_bytes(&weight_bytes)[..handles.refs].to_vec(),
         pixels: setup.pixels(),
     }

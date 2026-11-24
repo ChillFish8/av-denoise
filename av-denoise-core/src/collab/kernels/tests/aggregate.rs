@@ -1,12 +1,15 @@
 use cubecl::prelude::*;
 
-use crate::collab::kernels::aggregate::collab_normalise;
+use crate::collab::PATCH_SIZE;
+use crate::collab::kernels::aggregate::{collab_normalise, kaiser_window};
 use crate::nlmeans::{BLOCK_X, BLOCK_Y};
 use crate::tune::gpu::read_i32;
 use crate::tune::tests::runtime::test_client;
 
+/// The weight map is read by the pixels around each origin, so normalise must leave it for the caller's
+/// `collab_zero_accum` launch rather than clear it as it goes.
 #[test]
-fn normalise_leaves_the_region_it_read_zeroed() {
+fn normalise_zeroes_the_accumulator_region_and_leaves_the_weight_map() {
     let (width, height) = (21u32, 16u32);
     let pixels = (width * height) as usize;
     let channels = 2u32;
@@ -20,6 +23,8 @@ fn normalise_leaves_the_region_it_read_zeroed() {
     let wsum_bytes = i32::as_bytes(&wsum_host);
     let accum = client.create_from_slice(accum_bytes);
     let wsum = client.create_from_slice(wsum_bytes);
+    let kaiser = kaiser_window(0.0);
+    let kaiser_buf = client.create_from_slice(f32::as_bytes(&kaiser));
     let output = client.empty(region_len * size_of::<f32>());
 
     let blocks_x = width.div_ceil(BLOCK_X);
@@ -41,6 +46,7 @@ fn normalise_leaves_the_region_it_read_zeroed() {
             channels as usize,
             accum_arg,
             wsum_arg,
+            BufferArg::from_raw_parts(kaiser_buf, PATCH_SIZE as usize),
             output_arg,
             pixels as u32,
             width,
@@ -62,12 +68,7 @@ fn normalise_leaves_the_region_it_read_zeroed() {
         "every channel of the read region is zeroed"
     );
     assert_eq!(
-        &wsum_after[..pixels],
-        &wsum_host[..pixels],
-        "the other region is untouched"
-    );
-    assert!(
-        wsum_after[pixels..].iter().all(|&value| value == 0),
-        "the read region's weight sum is zeroed"
+        wsum_after, wsum_host,
+        "normalise leaves the whole weight map as it was"
     );
 }

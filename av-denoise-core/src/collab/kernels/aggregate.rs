@@ -165,9 +165,13 @@ pub fn to_fixed_weight(weight: f32, scale: f32) -> i32 {
 /// `accum` and `wsum` hold one `frame_pixels` region per frame in ring-slot order, and
 /// `frame_slot` picks this member's region.
 ///
-/// `write_weight` adds the weight to `wsum`, and only the first channel's pass sets it because
-/// aggregation needs one weight per patch. `accum_scale` is [ACCUM_SCALE] or a
-/// [cross_frame_accum_scale] result, and `wsum` counts at [WEIGHT_GAIN] times it.
+/// `wsum` is a patch-weight map rather than a per-pixel sum: the column-0 thread adds the patch's
+/// weight once, at its origin, in the call where `write_weight` is set, and [collab_normalise] spreads
+/// it over the patch through the window. That is one weight atomic per patch instead of 64. The
+/// caller sets `write_weight` only for row 0 of the first channel's pass, as a comptime row test, so
+/// the other rows compile no weight atomic; aggregation needs one weight per patch.
+/// `accum_scale` is [ACCUM_SCALE] or a [cross_frame_accum_scale] result, and `wsum` counts at
+/// [WEIGHT_GAIN] times it.
 #[cube]
 #[expect(
     clippy::too_many_arguments,
@@ -198,15 +202,20 @@ pub fn scatter_patch(
     // The window scales the value and the weight alike, so it cancels where coverage is uniform
     // and only reweights the blend where it is not.
     let window = kaiser[row as usize] * kaiser[col as usize];
+    let patch_weight = weight;
     let weight = weight * window;
     let accum_fixed = to_fixed(value * weight, accum_scale);
 
     let accum_index = pixel * channels + channel;
     Atomic::fetch_add(&accum[accum_index as usize], accum_fixed);
 
-    if write_weight {
-        let weight_fixed = to_fixed_weight(weight, accum_scale);
-        Atomic::fetch_add(&wsum[pixel as usize], weight_fixed);
+    // `wsum` is a patch-weight map: one entry per patch origin, which `collab_normalise` spreads
+    // over the patch through the window. One lane adds the whole patch's weight, so a patch costs
+    // one weight atomic instead of 64, and the window is applied once per pixel when reading.
+    if write_weight && col == 0u32 {
+        let origin = frame_slot * frame_pixels + patch_y * width + patch_x;
+        let weight_fixed = to_fixed_weight(patch_weight, accum_scale);
+        Atomic::fetch_add(&wsum[origin as usize], weight_fixed);
     }
 }
 
@@ -238,12 +247,17 @@ pub fn collab_zero_accum(
     }
 }
 
-/// Writes `accum / wsum` for one frame's region of the accumulators into `output`, then zeroes the
-/// region.
+/// Writes `accum / weight` for one frame's region of the accumulators into `output`, then zeroes the
+/// region's `accum`.
 ///
-/// Each pixel becomes the weighted mean of every filtered patch covering it. The fixed-point scale
-/// cancels, so only [WEIGHT_GAIN] is multiplied back. `frame_offset` (in pixels) picks the region,
-/// and `output` is one frame wide.
+/// Each pixel becomes the weighted mean of every filtered patch covering it. Its weight is gathered
+/// from the patch-weight map `wsum`: every patch origin within `PATCH_SIZE - 1` pixels up and left
+/// covers it, through the `kaiser` taps at its offset. The fixed-point scale cancels, so only
+/// [WEIGHT_GAIN] is multiplied back. `frame_offset` (in pixels) picks the region, and `output` is
+/// one frame wide.
+///
+/// Neighbouring pixels read the same map entries, so this leaves `wsum` as it is and the caller
+/// clears the region with [collab_zero_accum] once this launch has run.
 ///
 /// The weight sum is never zero, because the references cover every pixel between one and nine
 /// times and [WEIGHT_GAIN] keeps every group weight from rounding to nothing. A zero sum returns
@@ -251,7 +265,8 @@ pub fn collab_zero_accum(
 #[cube(launch_unchecked)]
 pub fn collab_normalise<N: Size>(
     accum: &mut [i32],
-    wsum: &mut [i32],
+    wsum: &[i32],
+    kaiser: &[f32],
     output: &mut [Vector<f32, N>],
     frame_offset: u32,
     #[comptime] width: u32,
@@ -266,27 +281,90 @@ pub fn collab_normalise<N: Size>(
 
     let local_pixel = y * width + x;
     let pixel = frame_offset + local_pixel;
-    let weight_total = wsum[pixel as usize];
+
+    // Every patch whose origin lies within 7 pixels up and left covers this pixel, at window tap
+    // (row, col) = (y - origin_y, x - origin_x).
+    let mut weight_total = 0.0f32;
+    #[unroll]
+    for row in 0..PATCH_SIZE {
+        if y >= row {
+            let line = frame_offset + (y - row) * width;
+            let tap_row = kaiser[row as usize];
+            #[unroll]
+            for col in 0..PATCH_SIZE {
+                if x >= col {
+                    let origin_weight = wsum[(line + x - col) as usize];
+                    weight_total += origin_weight as f32 * (tap_row * kaiser[col as usize]);
+                }
+            }
+        }
+    }
 
     let mut pixel_out = Vector::<f32, N>::empty();
     #[unroll]
     for channel in 0..channels {
         let accumulated = accum[(pixel * channels + channel) as usize] as f32;
         let mut value = accumulated;
-        if weight_total != 0i32 {
-            value = accumulated * WEIGHT_GAIN / (weight_total as f32);
+        if weight_total != 0.0f32 {
+            value = accumulated * WEIGHT_GAIN / weight_total;
         }
         pixel_out.insert(channel as usize, value);
     }
     output[local_pixel as usize] = pixel_out;
 
-    // A later frame reuses this region and expects it empty.
+    // A later frame reuses this region and expects it empty. The weight map is read by the pixels
+    // around each origin, so the caller zeroes it with `collab_zero_accum` once this has finished.
     #[unroll]
     for channel in 0..channels {
         accum[(pixel * channels + channel) as usize] = 0i32;
     }
+}
 
-    wsum[pixel as usize] = 0i32;
+/// Host model of how [collab_normalise] spreads the patch-weight map, for tests.
+///
+/// `map` holds one or more `width * height` regions of patch-origin weights. Each pixel takes every
+/// origin within `PATCH_SIZE - 1` pixels up and left, through the window tap at its offset.
+#[cfg(test)]
+pub(crate) fn spread_weight_map(
+    map: &[i32],
+    width: u32,
+    height: u32,
+    kaiser: &[f32; PATCH_SIZE as usize],
+) -> Vec<f64> {
+    let (width, height) = (width as usize, height as usize);
+    let pixels = width * height;
+    let patch = PATCH_SIZE as usize;
+    let mut spread = vec![0.0f64; map.len()];
+    for (out, origins) in spread.chunks_mut(pixels).zip(map.chunks(pixels)) {
+        for y in 0..height {
+            for x in 0..width {
+                let mut total = 0.0f64;
+                for row in 0..patch.min(y + 1) {
+                    for col in 0..patch.min(x + 1) {
+                        let tap = kaiser[row] as f64 * kaiser[col] as f64;
+                        total += origins[(y - row) * width + x - col] as f64 * tap;
+                    }
+                }
+                out[y * width + x] = total;
+            }
+        }
+    }
+    spread
+}
+
+/// [spread_weight_map] rounded to the integer per-pixel sums the old per-pixel scatter accumulated,
+/// which it matches exactly with an all-ones window (`kaiser_beta` 0).
+#[cfg(test)]
+pub(crate) fn expand_weight_map(
+    map: &[i32],
+    width: u32,
+    height: u32,
+    kaiser: &[f32; PATCH_SIZE as usize],
+) -> Vec<i32> {
+    spread_weight_map(map, width, height, kaiser)
+        .into_iter()
+        .map(|total| total.round() as i32)
+        .collect()
 }
 
 // Recheck ACCUM_SCALE's headroom if the patch area or group size moves, since both raise the
